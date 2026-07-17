@@ -1,0 +1,45 @@
+flowchart LR
+  User["User input and local files"]
+
+  subgraph RendererBoundary["Safe BrowserWindow sandbox"]
+    Renderer["Safe renderer and preload bridge"]
+  end
+
+  subgraph StandardUserBoundary["Monarch standard-user control plane"]
+    Main["Electron main process<br/>launch, lifecycle, native confirmation"]
+    IPC["Authenticated versioned Safe IPC<br/>typed actions and bounded chunks"]
+  end
+
+  subgraph RestrictedBoundary["Windows AppContainer or validated restricted-token boundary"]
+    Profile["Isolation profile<br/>no network, vault-root ACL"]
+    Helper["Signed native Safe helper<br/>keys, policy gate, vault engine"]
+    Job["Job and mitigation policy<br/>single process, kill on close"]
+  end
+
+  SafeRoot["Safe vault directory<br/>helper-profile ACL only"]
+  KeyStore["Non-exportable device key<br/>feasibility required"]
+  Denied["Denied by OS profile<br/>network, child processes, unrelated resources"]
+  Attestation["Runtime attestation<br/>profile, token, job, signature, protocol"]
+
+  User --> Renderer
+  Renderer -->|"Safe operations and bounded content"| IPC
+  Renderer -->|"native confirmation request"| Main
+  Main -->|"launch and action-bound capability"| Helper
+  IPC --> Helper
+  Profile -->|"constrains"| Helper
+  Job -->|"contains"| Helper
+  Helper -->|"encrypted vault I/O"| SafeRoot
+  KeyStore -->|"unseal inside helper"| Helper
+  Helper --> Attestation
+  Profile -->|"blocks"| Denied
+
+  classDef constrained fill:#fff7ed,stroke:#f97316,color:#111827
+  classDef privileged fill:#fee2e2,stroke:#dc2626,color:#111827
+  classDef control fill:#fef3c7,stroke:#d97706,color:#111827
+  classDef isolated fill:#dcfce7,stroke:#16a34a,color:#111827
+  classDef data fill:#f8fafc,stroke:#64748b,color:#111827
+  class Renderer constrained
+  class Main privileged
+  class IPC,Profile,Job,Attestation control
+  class Helper isolated
+  class SafeRoot,KeyStore,Denied data

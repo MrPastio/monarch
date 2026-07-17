@@ -1,0 +1,6 @@
+interface:
+  display_name: "Monarch Telegram Operator"
+  short_description: "Runs the local Telegram bridge safely"
+  default_prompt: "Use $monarch-telegram-operator to manage the local Telegram bridge."
+policy:
+  allow_implicit_invocation: true

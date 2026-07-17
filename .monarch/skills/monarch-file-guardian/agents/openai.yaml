@@ -1,0 +1,6 @@
+interface:
+  display_name: "Monarch File Guardian"
+  short_description: "Verifies local file actions and boundaries"
+  default_prompt: "Use $monarch-file-guardian to perform and verify this local file task."
+policy:
+  allow_implicit_invocation: true

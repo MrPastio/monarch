@@ -1,0 +1,1406 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Monarch Workspace</title>
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="/styles-v2.css">
+    <link rel="stylesheet" href="/sharing.css">
+    <link rel="stylesheet" href="/coder.css">
+    <link rel="stylesheet" href="/startup/monarch-startup.css">
+    <script>
+      const startupType = localStorage.getItem('monarch.startup.type') || 'original';
+      document.documentElement.dataset.startupType = startupType;
+    </script>
+  </head>
+  <body data-theme="dark">
+    <div class="startup-motion" id="startup-motion" aria-hidden="true">
+      <div class="startup-stage">
+        <div class="startup-mark" aria-hidden="true">
+          <span class="startup-crown"><img src="/assets/brand/monarch-icon.png" alt=""></span>
+          <span class="startup-shield"><img src="/assets/brand/monarch-icon.png" alt=""></span>
+          <span class="startup-shimmer"></span>
+        </div>
+        <span class="startup-wordmark">MONARCH</span>
+        <span class="startup-caption">local intelligence</span>
+      </div>
+    </div>
+    <div class="app-shell mascot-empty-home" id="app-shell">
+      
+      <!-- 1. Minimal Left Sidebar -->
+      <aside class="sidebar" aria-label="Навигация">
+        
+        <div class="sidebar-top">
+          <button class="sidebar-brand-mark" type="button" aria-label="Monarch" data-monarch-brand-cycle>
+            <strong class="monarch-brand-word" data-monarch-brand-label>Monarch</strong>
+          </button>
+          <div class="sidebar-chat-actions">
+            <button class="claude-new-chat-btn" type="button" id="new-task-button" title="Новый чат">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              <span>Новый чат</span>
+            </button>
+            <button class="sidebar-history-trigger" type="button" id="oscar-history-toggle" title="История чатов" aria-label="История чатов" aria-controls="oscar-history-panel" aria-expanded="false">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v6h6"></path><path d="M12 7v5l3 2"></path></svg>
+            </button>
+          </div>
+        </div>
+
+        <nav class="nav-stack">
+          <div class="nav-section-title">Разделы</div>
+          <button class="nav-item active" type="button" data-scroll-target="oscar-section" aria-label="Открыть диалог Oscar" title="Диалог Oscar" aria-current="page">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+            <span>Диалог</span>
+          </button>
+          <button class="nav-item" type="button" data-scroll-target="settings-section" data-settings-open="memory" aria-label="Открыть постоянную память" title="Память">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+            <span>Память</span>
+          </button>
+          <button class="nav-item" type="button" data-scroll-target="workspace-section" aria-label="Открыть проект" title="Проект">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>
+            <span>Проект</span>
+          </button>
+          <button class="nav-item" type="button" data-scroll-target="security-section" aria-label="Открыть защиту" title="Защита">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="M9.5 12.5 11 14l3.5-4"></path></svg>
+            <span>Защита</span>
+          </button>
+          <button class="nav-item" type="button" data-open-safe aria-label="Открыть изолированное хранилище Monarch Safe" title="Monarch Safe">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><rect x="8.5" y="10" width="7" height="6" rx="1"></rect><path d="M10 10V8.5a2 2 0 0 1 4 0V10"></path></svg>
+            <span>Safe</span>
+          </button>
+          <button class="nav-item optional-nav" type="button" data-scroll-target="models-section" aria-label="Открыть модели" title="Модели">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
+            <span>Модели</span>
+          </button>
+          <button class="nav-item optional-nav" type="button" data-scroll-target="sharing-section" aria-label="Открыть Monarch Sharing" title="Monarch Sharing">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2"></circle><circle cx="19" cy="5" r="2"></circle><circle cx="19" cy="19" r="2"></circle><path d="m7 11 10-5"></path><path d="m7 13 10 5"></path></svg>
+            <span>Sharing</span>
+          </button>
+          <button class="nav-item optional-nav" type="button" data-scroll-target="settings-section" aria-label="Открыть контроль" title="Контроль">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            <span>Контроль</span>
+          </button>
+          <button class="nav-item optional-nav" type="button" data-scroll-target="settings-section" data-settings-open="telegram" aria-label="Открыть настройки Telegram-бота" title="Telegram-бот">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13"></path><path d="m22 2-7 20-4-9-9-4Z"></path></svg>
+            <span>Тг бот</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <button class="claude-ghost-btn" type="button" id="toggle-inspector-btn" title="Показать помощника Oscar" aria-label="Показать помощника Oscar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"></path><line x1="15" y1="3" x2="15" y2="21"></line></svg>
+            <span>Помощник</span>
+          </button>
+        </div>
+      </aside>
+
+      <section class="sidebar-history" id="oscar-history-panel" aria-label="История чатов" hidden>
+        <div class="sidebar-history-header">
+          <div>
+            <strong>История</strong>
+            <span id="oscar-history-count">0 чатов</span>
+          </div>
+          <div class="sidebar-history-controls">
+            <button type="button" id="oscar-history-refresh" class="sidebar-icon-btn" aria-label="Обновить историю" title="Обновить историю">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.1 6.6"></path><path d="M3 12A9 9 0 0 1 18.1 5.4"></path><path d="M3 18v-5h5"></path><path d="M21 6v5h-5"></path></svg>
+            </button>
+            <button type="button" id="oscar-history-close" class="sidebar-icon-btn" aria-label="Закрыть историю" title="Закрыть историю">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+            </button>
+          </div>
+        </div>
+        <label class="sidebar-history-search" for="oscar-history-search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+          <input id="oscar-history-search" type="search" autocomplete="off" placeholder="Найти чат" aria-label="Поиск по истории чатов">
+        </label>
+        <div id="oscar-conversation-list" class="conversation-list"></div>
+      </section>
+
+      <!-- 2. Main Center Stage -->
+      <main class="main-canvas">
+        
+        <div id="top-status" aria-live="polite" class="global-status"></div>
+        <aside id="safe-launch-feedback" class="safe-launch-feedback" role="status" aria-live="polite" hidden>
+          <span class="safe-launch-feedback-mark" aria-hidden="true">M</span>
+          <span class="safe-launch-feedback-copy">
+            <strong id="safe-launch-feedback-title">Monarch Safe</strong>
+            <small id="safe-launch-feedback-detail"></small>
+          </span>
+          <button id="safe-launch-feedback-close" type="button" aria-label="Закрыть уведомление Monarch Safe">×</button>
+        </aside>
+
+        <!-- A. HOME / COMMAND CENTER -->
+        <section class="hidden" id="command-center" aria-hidden="true">
+          <div class="claude-chat-feed">
+            <div id="thread" class="claude-thread">
+              <!-- Initial Greeting, Claude-style -->
+              <div class="claude-greeting">
+                <h1 class="logo-serif">Monarch</h1>
+                <p>Добро пожаловать в локальную рабочую область ИИ</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="claude-bottom-composer">
+            <!-- Recent Activity (rendered subtly above composer) -->
+            <div id="recent-activity-list" class="claude-activity-drawer"></div>
+
+            <form id="composer" class="claude-composer" aria-busy="false">
+              <div class="composer-inner">
+                <div class="composer-input-row">
+                  <textarea
+                    id="intent-input"
+                    data-testid="intent-input"
+                    name="intent"
+                    rows="1"
+                    autocomplete="off"
+                    placeholder="Чем могу помочь?"
+                    aria-label="Команда"
+                  ></textarea>
+                  <button class="claude-voice-btn" id="intent-voice-input" type="button" aria-label="Голосовой ввод" aria-pressed="false" title="Голосовой ввод">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"></path><path d="M19 11a7 7 0 0 1-14 0"></path><path d="M12 18v3"></path><path d="M8 21h8"></path></svg>
+                  </button>
+                  <button class="claude-send-btn send-button" type="submit" aria-label="Отправить">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                  </button>
+                </div>
+                <div id="intent-voice-status" class="voice-input-status" role="status" aria-live="polite" hidden>
+                  <span class="voice-input-wave" aria-hidden="true"><i></i><i></i><i></i></span>
+                  <strong data-voice-title>Слушаю</strong>
+                  <span data-voice-preview></span>
+                  <button type="button" id="intent-voice-cancel" class="voice-input-cancel" aria-label="Отменить голосовой ввод" title="Отменить голосовой ввод">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+                  </button>
+                </div>
+              </div>
+              
+              <div class="composer-mode-chips">
+                <button class="mode-chip" type="button" data-mode="Plan">План</button>
+                <button class="mode-chip" type="button" data-mode="Run">Запуск</button>
+                <button class="mode-chip" type="button" data-mode="Inspect">Анализ</button>
+                <button class="mode-chip" type="button" data-mode="Search">Поиск</button>
+                <button class="mode-chip" type="button" data-mode="Safe edit">Без. правка</button>
+                <div class="custom-dropdown" id="model-dropdown-container">
+                  <button class="mode-chip dropdown-trigger" type="button" id="model-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="model-popover" aria-label="Выбрать модель: Авто" title="Выбрать модель: Авто">
+                    Модель: Авто
+                  </button>
+                  <div class="dropdown-popover hidden" id="model-popover" role="listbox" aria-labelledby="model-dropdown-btn" aria-hidden="true">
+                    <div class="dropdown-item active" data-value="auto" role="option" aria-selected="true" tabindex="0">
+                    <div class="item-title">Авто <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Monarch сам выберет модель</div>
+                    </div>
+                    <div class="dropdown-item" data-value="gemma4-fast" role="option" aria-selected="false" tabindex="-1">
+                      <div class="item-title">Fast <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Короткие повседневные ответы</div>
+                    </div>
+                    <div class="dropdown-item" data-value="gemma4-balanced" role="option" aria-selected="false" tabindex="-1">
+                      <div class="item-title">Medium <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Баланс скорости и качества</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="custom-dropdown" id="reasoning-dropdown-container">
+                  <button class="mode-chip dropdown-trigger" type="button" id="reasoning-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="reasoning-popover" aria-label="Выбрать Deep Thinking: выкл" title="Выбрать Deep Thinking: выкл">
+                    Deep Thinking: выкл
+                  </button>
+                  <div class="dropdown-popover hidden" id="reasoning-popover" role="listbox" aria-labelledby="reasoning-dropdown-btn" aria-hidden="true">
+                    <div class="dropdown-item active" data-value="none" role="option" aria-selected="true" tabindex="0">
+                      <div class="item-title">Выкл <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Обычный режим ответа</div>
+                    </div>
+                    <div class="dropdown-item" data-value="gemma4-deepthinking" role="option" aria-selected="false" tabindex="-1">
+                    <div class="item-title">Pro <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Сложный анализ и разработка</div>
+                    </div>
+                    <div class="dropdown-item" data-value="gemma4-31b" role="option" aria-selected="false" tabindex="-1">
+                    <div class="item-title">Extra <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Максимальная глубина для редких задач</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <div id="composer-status-bar" class="composer-status-bar"></div>
+            </form>
+            <p class="claude-disclaimer">Локальные ИИ могут ошибаться. Проверяйте важную информацию.</p>
+          </div>
+        </section>
+
+        <!-- B. OSCAR VIEW -->
+        <section class="claude-view" id="oscar-section">
+          <div class="claude-chat-feed">
+            <div class="oscar-topbar" aria-label="Oscar toolbar">
+              <div class="oscar-breadcrumb">
+                <span class="topbar-mark" aria-hidden="true">
+                  <img src="/assets/brand/monarch-mark.png" alt="" />
+                </span>
+                <span>Новый чат</span>
+              </div>
+              <div class="chat-mode-switch" role="tablist" aria-label="Режим Oscar">
+                <button id="chat-mode-standard" type="button" role="tab" aria-selected="true">Чат</button>
+                <button id="chat-mode-coder" type="button" role="tab" aria-selected="false">Код</button>
+              </div>
+              <div id="oscar-status-pills" class="status-pills"></div>
+              <details class="oscar-stats-panel" id="oscar-diagnostics" aria-label="Статус Oscar">
+                <summary id="oscar-diagnostics-toggle" aria-controls="oscar-diagnostics-content" aria-expanded="false" aria-label="Открыть статус Oscar" title="Открыть статус Oscar">
+                  <span>Локально ·</span>
+                  <span id="oscar-diagnostics-state">ожидание</span>
+                </summary>
+                <div class="oscar-stats-content" id="oscar-diagnostics-content" role="region" aria-labelledby="oscar-diagnostics-toggle">
+                  <section>
+                    <span id="oscar-backend-label" class="status-text pending">ожидание</span>
+                    <div id="oscar-backend"><div class="empty-state compact">Статус Oscar ещё не загружен.</div></div>
+                  </section>
+                  <section>
+                    <span id="oscar-context-label" class="status-text pending">ожидание</span>
+                    <div id="oscar-context"><div class="empty-state compact">Контекст появится после ответа Oscar.</div></div>
+                  </section>
+                </div>
+              </details>
+              <div class="topbar-actions" aria-label="Действия Oscar">
+                <button class="topbar-icon-button" id="oscar-refresh" type="button" aria-label="Обновить статус" title="Обновить статус">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.1 6.6"></path><path d="M3 12A9 9 0 0 1 18.1 5.4"></path><path d="M3 18v-5h5"></path><path d="M21 6v5h-5"></path></svg>
+                </button>
+                <button class="topbar-icon-button" id="oscar-history-open" type="button" aria-label="История" title="История" aria-controls="oscar-history-panel" aria-expanded="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v6h6"></path><path d="M12 7v5l3 2"></path></svg>
+                </button>
+                <button class="topbar-icon-button" id="oscar-safe-encrypt" type="button" aria-label="Зашифровать чат в Monarch Safe" title="Зашифровать чат в Monarch Safe" aria-pressed="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path><path d="M12 14v2"></path></svg>
+                </button>
+                <button class="topbar-icon-button" id="oscar-memory-manager" type="button" aria-label="Память" title="Память" aria-controls="oscar-memory-panel" aria-expanded="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="M9.5 12.5 11 14l3.5-4"></path></svg>
+                </button>
+                <button class="topbar-icon-button" id="oscar-incognito-toggle" type="button" aria-label="Начать инкогнито-чат" title="Начать инкогнито-чат" aria-pressed="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 6.5 6h11l2.5 4.5"></path><path d="M3 11.5h18"></path><path d="M7.5 14.5h.01M16.5 14.5h.01"></path><path d="M5.5 11.5v5.2A3.3 3.3 0 0 0 8.8 20h6.4a3.3 3.3 0 0 0 3.3-3.3v-5.2"></path></svg>
+                </button>
+                <button class="topbar-icon-button" id="oscar-clear" type="button" aria-label="Новый чат" title="Новый чат">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+                </button>
+              </div>
+            </div>
+
+            <section id="coder-mode-root" class="coder-mode-root" aria-label="Monarch Coder" hidden>
+              <header class="coder-workspace-bar">
+                <div class="coder-project-identity">
+                  <span class="coder-live-dot" aria-hidden="true"></span>
+                  <div>
+                    <strong id="coder-project-name">Проект не выбран</strong>
+                    <span id="coder-project-path">Workspace Coder</span>
+                  </div>
+                </div>
+                <div class="coder-workspace-actions">
+                  <select id="coder-project-select" aria-label="Активный Coder проект" title="Выбрать проект"></select>
+                  <button id="coder-project-new" type="button">Новый проект</button>
+                  <button id="coder-project-import" type="button">Открыть папку</button>
+                  <div class="coder-model-switch" aria-label="Модель кода">
+                    <button type="button" data-coder-model="qwen3-coder-30b-a3b-instruct" class="is-active" aria-pressed="true" title="Основная модель">Qwen</button>
+                    <button type="button" data-coder-model="deepseek-coder-v2-lite-instruct" aria-pressed="false" title="Более лёгкая модель">DeepSeek</button>
+                  </div>
+                  <select id="coder-safe-chat-select" aria-label="Зашифрованные Coder-чаты в Monarch Safe" hidden>
+                    <option value="">Safe-чаты</option>
+                  </select>
+                  <button id="coder-safe-encrypt" class="coder-safe-button" type="button" title="Зашифровать завершённую Coder-сессию в Monarch Safe" disabled>Safe</button>
+                  <button id="coder-fast-open" class="coder-fast-button" type="button" aria-controls="coder-fast-drawer" aria-expanded="false">Fast</button>
+                </div>
+              </header>
+
+              <nav class="coder-mobile-bar" aria-label="Панели Code Mode">
+                <button id="coder-mobile-project" type="button" aria-controls="coder-explorer" aria-expanded="false">Файлы проекта</button>
+                <button id="coder-mobile-history" type="button" aria-controls="coder-history-drawer" aria-expanded="false">История</button>
+                <button id="coder-mobile-result" type="button" aria-controls="coder-context-panel" aria-expanded="false">Результат</button>
+              </nav>
+
+              <div id="coder-onboarding" class="coder-onboarding">
+                <div class="coder-onboarding-card">
+                  <span class="coder-kicker">MONARCH CODER</span>
+                  <h2>Выбери, где будет работать Coder</h2>
+                  <p>Папка закрепляется за каждой сессией. Coder не переключится на другой проект во время работы.</p>
+                  <div class="coder-onboarding-actions coder-onboarding-options">
+                    <button id="coder-onboarding-create" type="button" class="coder-onboarding-option coder-primary">
+                      <strong>Новый проект</strong>
+                      <span>Создать чистую папку внутри Workspace Coder</span>
+                    </button>
+                    <button id="coder-onboarding-import" type="button" class="coder-onboarding-option">
+                      <strong>Открыть существующий</strong>
+                      <span>Подключить папку, не перемещая её</span>
+                    </button>
+                  </div>
+                  <p id="coder-onboarding-error" class="coder-onboarding-error" role="alert" hidden></p>
+                </div>
+              </div>
+
+              <div id="coder-workspace" class="coder-workspace" hidden>
+                <button id="coder-panel-backdrop" class="coder-panel-backdrop" type="button" aria-label="Закрыть панель Code Mode" hidden></button>
+                <aside id="coder-explorer" class="coder-panel coder-explorer" aria-label="Файлы проекта">
+                  <div class="coder-panel-title">
+                    <span>Файлы проекта</span>
+                    <div>
+                      <button id="coder-refresh" type="button" aria-label="Обновить проект" title="Обновить проект">↻</button>
+                      <button id="coder-explorer-close" class="coder-panel-close" type="button" aria-label="Закрыть файлы проекта">Закрыть</button>
+                    </div>
+                  </div>
+                  <div id="coder-git-summary" class="coder-git-summary">Git · проверка</div>
+                  <label class="coder-file-search">
+                    <span>Поиск по файлам</span>
+                    <input id="coder-file-search" type="search" autocomplete="off" placeholder="Найти файл…" aria-label="Найти файл в проекте">
+                  </label>
+                  <div id="coder-file-tree" class="coder-file-tree" role="tree"></div>
+                </aside>
+
+                <main class="coder-agent-stage">
+                  <div class="coder-agent-header">
+                    <div class="coder-run-heading">
+                      <span class="coder-kicker">АГЕНТСКАЯ СЕССИЯ</span>
+                      <strong id="coder-run-title">Готов к задаче</strong>
+                      <span id="coder-run-project-root" class="coder-run-project-root" hidden></span>
+                    </div>
+                    <div class="coder-session-controls">
+                      <button id="coder-history-open" class="coder-history-open" type="button" aria-controls="coder-history-drawer" aria-expanded="false">
+                        <span>История</span><b id="coder-history-count">0</b>
+                      </button>
+                      <button id="coder-session-new" type="button">Новая задача</button>
+                      <div id="coder-run-status" class="coder-run-status">idle</div>
+                    </div>
+                  </div>
+                  <section id="coder-run-summary" class="coder-run-summary" aria-live="polite" hidden>
+                    <div>
+                      <span id="coder-run-summary-kicker" class="coder-kicker">РЕЗУЛЬТАТ</span>
+                      <strong id="coder-run-summary-title"></strong>
+                      <p id="coder-run-summary-detail"></p>
+                    </div>
+                    <button id="coder-run-retry" type="button" hidden>Повторить задачу</button>
+                  </section>
+                  <div class="coder-activity-toolbar">
+                    <span>Ход работы</span>
+                    <span id="coder-event-count" class="coder-event-count"></span>
+                    <div role="group" aria-label="Подробность журнала">
+                      <button type="button" data-coder-event-filter="focus" aria-pressed="true">Основное</button>
+                      <button type="button" data-coder-event-filter="all" aria-pressed="false">Все события</button>
+                    </div>
+                  </div>
+                  <div id="coder-activity" class="coder-activity" role="log" aria-live="polite">
+                    <div class="coder-empty-activity"><strong>Опиши результат</strong><span>Coder сам изучит файлы, составит изменения, выполнит команды и сохранит проверенный контекст.</span></div>
+                  </div>
+                  <form id="coder-composer" class="coder-composer">
+                    <div id="coder-suggestions" class="coder-suggestions" aria-label="Примеры задач">
+                      <button type="button" data-coder-template="Проведи аудит проекта и перечисли приоритетные улучшения.">Аудит</button>
+                      <button type="button" data-coder-template="Найди причину проблемы, исправь её и запусти подходящие проверки.">Исправить</button>
+                      <button type="button" data-coder-template="Изучи проект и реализуй следующую функцию: ">Реализовать</button>
+                      <button type="button" data-coder-template="Запусти подходящие тесты, разберись с ошибками и исправь их.">Проверить</button>
+                    </div>
+                    <div class="coder-composer-row">
+                      <textarea id="coder-input" rows="1" placeholder="Опиши результат, который должен получить Coder…" aria-label="Задача Coder"></textarea>
+                      <button id="coder-run-submit" type="submit" class="coder-primary">Запустить</button>
+                      <button id="coder-run-cancel" type="button" hidden>Остановить</button>
+                    </div>
+                    <footer>
+                      <span id="coder-composer-context">Проект и модель не выбраны</span>
+                      <span>Ctrl + Enter — запустить</span>
+                    </footer>
+                  </form>
+                </main>
+
+                <aside id="coder-context-panel" class="coder-panel coder-context-panel" aria-label="Результат сессии">
+                  <div class="coder-panel-title">
+                    <span>Результат</span>
+                    <div><span id="coder-context-percent">0%</span><button id="coder-context-close" class="coder-panel-close" type="button" aria-label="Закрыть результат">Закрыть</button></div>
+                  </div>
+                  <div class="coder-context-meter"><i id="coder-context-fill"></i></div>
+                  <section><h3>Изменённые файлы</h3><div id="coder-context-files" class="coder-context-list">Пока нет</div></section>
+                  <section><h3>Проверки</h3><div id="coder-context-tests" class="coder-context-list">Пока нет</div></section>
+                  <section><h3>Следом</h3><div id="coder-context-pending" class="coder-context-list">Жду задачу</div></section>
+                  <section id="coder-file-preview-shell" class="coder-file-preview-shell" hidden>
+                    <header><h3 id="coder-file-preview-title">Файл</h3><button id="coder-file-preview-close" type="button">Закрыть</button></header>
+                    <pre id="coder-file-preview" class="coder-file-preview"></pre>
+                  </section>
+                  <details class="coder-context-technical">
+                    <summary>Технические данные</summary>
+                    <dl class="coder-context-stats">
+                      <div><dt>Контекст</dt><dd id="coder-context-budget">—</dd></div>
+                      <div><dt>Сжатий</dt><dd id="coder-context-compactions">0</dd></div>
+                      <div><dt>Событий</dt><dd id="coder-context-events">0</dd></div>
+                      <div><dt>За сессию</dt><dd id="coder-context-model-tokens">0</dd></div>
+                    </dl>
+                  </details>
+                </aside>
+              </div>
+
+              <dialog id="coder-project-dialog" class="coder-project-dialog">
+                <form method="dialog" id="coder-project-form">
+                  <header><div><span class="coder-kicker">НОВЫЙ ПРОЕКТ</span><h2>Создать рабочую папку</h2></div><button value="cancel" aria-label="Закрыть">×</button></header>
+                  <label>Название проекта<input id="coder-project-input" maxlength="80" placeholder="Например, personal-dashboard" required></label>
+                  <p>Путь создастся автоматически внутри <code>Workspace Coder</code>.</p>
+                  <p id="coder-project-form-error" class="coder-project-form-error" role="alert" hidden></p>
+                  <div><button value="cancel" type="button" id="coder-project-dialog-cancel">Отмена</button><button type="submit" class="coder-primary">Создать</button></div>
+                </form>
+              </dialog>
+
+              <aside id="coder-fast-drawer" class="coder-fast-drawer" hidden role="dialog" aria-modal="true" aria-label="Fast чат">
+                <header><div><span class="coder-kicker">GEMMA FAST</span><strong>Быстрый вопрос</strong></div><button id="coder-fast-close" type="button" aria-label="Закрыть">×</button></header>
+                <div id="coder-fast-messages" class="coder-fast-messages"><p>Быстрый локальный вопрос без чтения и изменения файлов проекта.</p></div>
+                <form id="coder-fast-form"><textarea id="coder-fast-input" rows="2" placeholder="Спроси Fast модель..." aria-label="Сообщение Fast модели"></textarea><button type="submit">Отправить</button></form>
+              </aside>
+
+              <button id="coder-history-backdrop" class="coder-history-backdrop" type="button" aria-label="Закрыть историю Code Mode" hidden></button>
+              <aside id="coder-history-drawer" class="coder-history-drawer" hidden role="dialog" aria-modal="true" aria-labelledby="coder-history-title">
+                <header class="coder-history-header">
+                  <div><span class="coder-kicker">CODE MODE</span><strong id="coder-history-title">Рабочие сессии</strong></div>
+                  <button id="coder-history-close" type="button">Закрыть</button>
+                </header>
+                <div class="coder-history-controls">
+                  <label class="coder-history-search">
+                    <span>Поиск по истории</span>
+                    <input id="coder-history-search" type="search" autocomplete="off" placeholder="Задача или проект…" aria-label="Поиск по истории Code Mode">
+                  </label>
+                  <div class="coder-history-filters">
+                    <select id="coder-history-project" aria-label="Фильтр истории по проекту"><option value="all">Все проекты</option></select>
+                    <div role="group" aria-label="Фильтр истории по состоянию">
+                      <button type="button" data-coder-history-status="all" aria-pressed="true">Все</button>
+                      <button type="button" data-coder-history-status="completed" aria-pressed="false">Готово</button>
+                      <button type="button" data-coder-history-status="failed" aria-pressed="false">Требуют внимания</button>
+                    </div>
+                  </div>
+                  <p id="coder-history-summary" class="coder-history-summary"></p>
+                  <p id="coder-history-error" class="coder-history-error" role="alert" hidden></p>
+                </div>
+                <div id="coder-history-list" class="coder-history-list" role="list"></div>
+                <footer class="coder-history-footer">Журналы хранятся локально и открываются вместе с закреплённым проектом.</footer>
+              </aside>
+            </section>
+
+            <section id="oscar-memory-panel" class="oscar-memory-panel" hidden>
+              <div class="memory-panel-header">
+                <div>
+                  <strong>Долговременная память</strong>
+                  <span>Oscar использует только включённые записи, когда они относятся к запросу.</span>
+                </div>
+                <button type="button" class="sidebar-icon-btn" id="oscar-memory-close" aria-label="Закрыть память" title="Закрыть память">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+                </button>
+              </div>
+              <form id="oscar-memory-form" class="memory-create-row">
+                <input id="oscar-memory-input" maxlength="4000" placeholder="Что Oscar должен помнить?" aria-label="Новая запись памяти">
+                <select id="oscar-memory-category" aria-label="Категория памяти">
+                  <option value="user_preference">Предпочтение</option>
+                  <option value="project_decision">Решение</option>
+                  <option value="architecture_note">Архитектура</option>
+                  <option value="active_bug">Активный баг</option>
+                  <option value="technical_debt">Техдолг</option>
+                  <option value="diagnostic_note">Диагностика</option>
+                  <option value="planning_note">Планирование</option>
+                </select>
+                <button type="submit" class="claude-primary-btn">Запомнить</button>
+              </form>
+              <div id="oscar-memory-items" class="memory-items"></div>
+            </section>
+
+            <div class="oscar-thread-shell">
+              <div id="oscar-thread" class="claude-thread is-empty" role="log" aria-live="polite" aria-relevant="additions text" aria-atomic="false">
+                <div class="oscar-empty-focus oscar-empty-boot">
+                  <div class="empty-mark" aria-hidden="true"><img src="/assets/brand/monarch-mark.png" alt="" /></div>
+                  <span class="empty-kicker">Oscar Workspace</span>
+                  <h1>Чем займёмся?</h1>
+                  <p>Спроси, создай или проверь что-нибудь в рабочем пространстве</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="claude-bottom-composer">
+            <form id="oscar-composer" class="claude-composer">
+              <div id="oscar-ram-warning" class="ram-pressure-warning" role="status" aria-live="polite" hidden>
+                <strong>Нужен запас RAM</strong>
+                <span></span>
+              </div>
+              <div class="composer-inner">
+                <div id="oscar-editing-banner" class="oscar-editing-banner" hidden>
+                  <span>Редактирование сообщения</span>
+                  <button type="button" id="oscar-editing-cancel" aria-label="Отменить редактирование" title="Отменить редактирование" aria-hidden="true" tabindex="-1" disabled>Отмена</button>
+                </div>
+                <input type="file" id="oscar-image-upload" accept="image/png, image/jpeg, image/webp" style="display: none;" multiple>
+                <div id="oscar-attachments-preview" class="attachments-preview hidden"></div>
+                <div class="composer-input-row">
+                  <button class="claude-attach-btn" type="button" aria-label="Прикрепить изображение" title="Прикрепить изображение" onclick="document.getElementById('oscar-image-upload').click()">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                  </button>
+                  <textarea
+                    id="oscar-input"
+                    data-testid="oscar-input"
+                    name="message"
+                    rows="1"
+                    autocomplete="off"
+                    placeholder="Сообщение Oscar..."
+                    aria-label="Сообщение Oscar"
+                  ></textarea>
+                  <button class="claude-voice-btn" id="oscar-voice-input" type="button" aria-label="Голосовой ввод" aria-pressed="false" title="Голосовой ввод">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"></path><path d="M19 11a7 7 0 0 1-14 0"></path><path d="M12 18v3"></path><path d="M8 21h8"></path></svg>
+                  </button>
+                  <button class="claude-voice-mode-btn" id="oscar-voice-mode" type="button" aria-label="Открыть голосовой режим" title="Голосовой режим">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"></circle><path d="M12 3v2M12 19v2M3 12h2M19 12h2"></path><path d="m5.64 5.64 1.42 1.42m9.88 9.88 1.42 1.42m0-12.72-1.42 1.42M7.06 16.94l-1.42 1.42"></path></svg>
+                  </button>
+                  <button class="claude-send-btn send-button" id="oscar-send" type="submit" aria-label="Отправить" title="Отправить" hidden>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                  </button>
+                  <button class="claude-stop-btn" id="oscar-stop" type="button" aria-label="Остановить генерацию" title="Остановить генерацию" hidden>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"></circle><rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor" stroke="none"></rect></svg>
+                  </button>
+                </div>
+                <div id="oscar-voice-status" class="voice-input-status" role="status" aria-live="polite" hidden>
+                  <span class="voice-input-wave" aria-hidden="true"><i></i><i></i><i></i></span>
+                  <strong data-voice-title>Слушаю</strong>
+                  <span data-voice-preview></span>
+                  <button type="button" id="oscar-voice-cancel" class="voice-input-cancel" aria-label="Отменить голосовой ввод" title="Отменить голосовой ввод">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+                  </button>
+                </div>
+                <div id="oscar-skill-radar" class="skill-radar hidden" aria-live="polite"></div>
+              </div>
+              <div class="composer-mode-chips">
+                <details class="composer-options">
+                  <summary aria-label="Параметры ответа" title="Параметры ответа">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10"></path><path d="M18 7h2"></path><circle cx="16" cy="7" r="2"></circle><path d="M4 17h2"></path><path d="M10 17h10"></path><circle cx="8" cy="17" r="2"></circle></svg>
+                  </summary>
+                  <div class="composer-options-popover">
+                    <div class="custom-dropdown" id="oscar-model-dropdown-container">
+                  <button class="mode-chip dropdown-trigger" type="button" id="oscar-model-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-model-popover" aria-label="Выбрать модель Oscar: Авто" title="Выбрать модель Oscar: Авто">
+                    Модель · Авто
+                  </button>
+                  <div class="dropdown-popover hidden" id="oscar-model-popover" role="listbox" aria-labelledby="oscar-model-dropdown-btn" aria-hidden="true">
+                    <div class="dropdown-item active" data-value="none" role="option" aria-selected="true" tabindex="0">
+                      <div class="item-title">Авто <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Умный выбор модели</div>
+                    </div>
+                    <div class="dropdown-item" data-value="gemma4-fast" role="option" aria-selected="false" tabindex="-1">
+                      <div class="item-title">Fast <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Быстрые повседневные ответы</div>
+                    </div>
+                    <div class="dropdown-item" data-value="gemma4-balanced" role="option" aria-selected="false" tabindex="-1">
+                      <div class="item-title">Medium <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Баланс скорости и качества</div>
+                    </div>
+                  </div>
+                    </div>
+
+                    <div class="custom-dropdown" id="oscar-reasoning-dropdown-container">
+                  <button class="mode-chip dropdown-trigger" type="button" id="oscar-reasoning-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-reasoning-popover" aria-label="Выбрать Deep Thinking Oscar: выкл" title="Выбрать Deep Thinking Oscar: выкл">
+                    Deep Thinking · выкл
+                  </button>
+                  <div class="dropdown-popover hidden" id="oscar-reasoning-popover" role="listbox" aria-labelledby="oscar-reasoning-dropdown-btn" aria-hidden="true">
+                    <div class="dropdown-item active" data-value="none" role="option" aria-selected="true" tabindex="0">
+                      <div class="item-title">Выкл <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Обычный режим ответа</div>
+                    </div>
+                    <div class="dropdown-item" data-value="gemma4-deepthinking" role="option" aria-selected="false" tabindex="-1">
+                      <div class="item-title">Pro <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Сложный анализ и разработка</div>
+                    </div>
+                    <div class="dropdown-item" data-value="gemma4-31b" role="option" aria-selected="false" tabindex="-1">
+                      <div class="item-title">Extra <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Максимальная глубина для редких задач</div>
+                    </div>
+                  </div>
+                    </div>
+
+                    <div class="custom-dropdown" id="oscar-research-dropdown-container">
+                  <button class="mode-chip dropdown-trigger" type="button" id="oscar-research-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-research-popover" aria-label="Выбрать исследование Oscar: Авто" title="Выбрать исследование Oscar: Авто">
+                    Исследование · Авто
+                  </button>
+                  <div class="dropdown-popover hidden" id="oscar-research-popover" role="listbox" aria-labelledby="oscar-research-dropdown-btn" aria-hidden="true">
+                    <div class="dropdown-item active" data-value="auto" role="option" aria-selected="true" tabindex="0">
+                      <div class="item-title">Авто <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Oscar сам распознаёт сложное исследование</div>
+                    </div>
+                    <div class="dropdown-item" data-value="off" role="option" aria-selected="false" tabindex="-1">
+                      <div class="item-title">Выкл <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Ответ без автоматического deep research</div>
+                    </div>
+                    <div class="dropdown-item" data-value="deep" role="option" aria-selected="false" tabindex="-1">
+                      <div class="item-title">Глубокое <span class="checkmark">✓</span></div>
+                      <div class="item-sub">План, несколько веток поиска и проверка</div>
+                    </div>
+                  </div>
+                    </div>
+                  </div>
+                </details>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <!-- C. SECURITY VIEW -->
+        <section class="claude-view view-hidden" id="security-section">
+          <div class="document-feed security-feed">
+            <div class="security-page-header">
+              <div class="security-title-block">
+                <p class="section-kicker">Monarch Security</p>
+                <h2 id="security-protection-title">Состояние защиты загружается</h2>
+                <p id="security-protection-copy">Проверяем фоновые датчики и локальные политики.</p>
+                <div id="security-status-pills" class="status-pills" aria-live="polite"></div>
+              </div>
+              <div class="security-protection-control">
+                <label class="security-level-control" for="security-level">
+                  <span>Строгость</span>
+                  <select id="security-level" aria-label="Уровень строгости Monarch Security">
+                    <option value="off">Отключён</option>
+                    <option value="minimal">Минимальный</option>
+                    <option value="balanced" selected>Средний</option>
+                    <option value="strict">Строгий</option>
+                    <option value="maximum">Максимальный</option>
+                  </select>
+                </label>
+                <button class="claude-primary-btn" id="security-start">Включить защиту</button>
+                <button class="claude-ghost-btn" id="security-stop" hidden>Приостановить защиту</button>
+              </div>
+            </div>
+
+            <section id="security-emergency-panel" class="security-emergency-panel" aria-live="assertive" hidden>
+              <div>
+                <span class="security-emergency-mark">!</span>
+                <span><strong id="security-emergency-title">Аварийный режим Security</strong><small id="security-emergency-copy"></small></span>
+              </div>
+              <div class="security-emergency-recovery">
+                <label><span>Security PIN</span><input id="security-emergency-pin" type="password" inputmode="numeric" maxlength="6" autocomplete="off"></label>
+                <button id="security-emergency-release" class="claude-ghost-btn" type="button">Я беру управление</button>
+                <button id="security-emergency-continue" class="claude-primary-btn" type="button">Продолжить защиту</button>
+              </div>
+              <small id="security-emergency-feedback" class="security-response-feedback"></small>
+            </section>
+
+            <div class="security-tabs" role="tablist" aria-label="Разделы Monarch Security">
+              <button type="button" role="tab" data-security-tab="overview" aria-selected="true">Обзор</button>
+              <button type="button" role="tab" data-security-tab="incidents" aria-selected="false">Инциденты <span id="security-incident-tab-count"></span></button>
+              <button type="button" role="tab" data-security-tab="network" aria-selected="false">Сеть</button>
+              <button type="button" role="tab" data-security-tab="quarantine" aria-selected="false">Карантин</button>
+              <button type="button" role="tab" data-security-tab="settings" aria-selected="false">Настройки</button>
+            </div>
+
+            <div class="doc-content security-page-content">
+              <div id="security-overview-panel" class="security-tab-panel" role="tabpanel">
+                <section class="security-scan-lab" id="security-file-drop" tabindex="0" aria-label="Перетащите файл для проверки">
+                  <div class="security-scan-lab-copy">
+                    <strong>Перетащите файл для проверки</strong>
+                    <span>Monarch проверит тип, содержимое, подпись и локальную репутацию.</span>
+                  </div>
+                  <button class="claude-primary-btn" type="button" id="security-file-choose">Выбрать файл</button>
+                  <small>Проверка локально. Отправка в интернет выключена.</small>
+                </section>
+
+                <div id="security-scan-feedback" aria-live="polite"></div>
+
+                <section class="security-overview-row">
+                  <div>
+                    <div class="security-section-heading">
+                      <strong>Недавние проверки</strong>
+                      <span id="security-recent-count">0</span>
+                    </div>
+                    <div id="security-recent-scans" class="security-simple-list"></div>
+                  </div>
+                  <button class="security-incident-summary" id="security-open-incidents" type="button">
+                    <span>
+                      <strong>Инциденты</strong>
+                      <small id="security-incident-summary-copy">Загружаем очередь решений</small>
+                    </span>
+                    <b id="security-incident-summary-count">0</b>
+                  </button>
+                </section>
+              </div>
+
+              <div id="security-incidents-panel" class="security-tab-panel" role="tabpanel" hidden>
+                <div class="security-incident-workspace">
+                  <section>
+                    <div class="security-section-heading">
+                      <strong>Инциденты</strong>
+                      <button class="claude-ghost-btn" id="security-incidents-refresh" type="button">Обновить</button>
+                    </div>
+                    <div id="security-incident-list" class="security-incident-list"></div>
+                  </section>
+                  <section id="security-incident-detail" class="security-incident-detail"></section>
+                </div>
+              </div>
+
+              <div id="security-network-panel" class="security-tab-panel" role="tabpanel" hidden>
+                <div class="security-network-center">
+                  <div class="security-section-heading">
+                    <span><strong>Network Center</strong><small>Локальные подключения, открытые порты и доверенные профили</small></span>
+                    <button class="claude-primary-btn" id="security-scan-network" type="button">Обновить</button>
+                  </div>
+                  <div id="security-network-result" class="security-network-result" aria-live="polite"></div>
+                  <div id="security-network-metrics" class="security-network-metrics"></div>
+                  <section class="security-network-section">
+                    <div class="security-section-heading"><span><strong>Сетевые профили</strong><small>Доверие меняет оценку риска, но не отключает наблюдение</small></span></div>
+                    <div id="security-network-profiles" class="security-network-list"></div>
+                  </section>
+                  <div class="security-network-columns">
+                    <section class="security-network-section">
+                      <div class="security-section-heading"><strong>Активные подключения</strong></div>
+                      <div id="security-network-connections" class="security-network-list"></div>
+                    </section>
+                    <section class="security-network-section">
+                      <div class="security-section-heading"><strong>Слушающие порты</strong></div>
+                      <div id="security-network-listeners" class="security-network-list"></div>
+                    </section>
+                  </div>
+                  <section class="security-network-section">
+                    <div class="security-section-heading"><span><strong>Активная реакция</strong><small id="security-response-service">Проверяем отдельный исполнитель</small></span></div>
+                    <div id="security-response-actions" class="security-network-list"></div>
+                  </section>
+                  <section class="security-network-section">
+                    <div class="security-section-heading"><span><strong>История наблюдений</strong><small>Подписана HMAC и хранится локально</small></span></div>
+                    <div id="security-network-history" class="security-network-list"></div>
+                  </section>
+                </div>
+              </div>
+
+              <div id="security-quarantine-panel" class="security-tab-panel" role="tabpanel" hidden>
+                <div class="security-coming-section">
+                  <div class="security-section-heading">
+                    <span><strong>Карантин</strong><small>Локальное хранилище с проверкой целостности</small></span>
+                    <button class="claude-ghost-btn" id="security-quarantine-refresh" type="button">Обновить</button>
+                  </div>
+                  <div id="security-quarantine-list" class="security-quarantine-list"></div>
+                </div>
+                <section class="security-pin-card">
+                  <div class="security-section-heading">
+                    <span><strong>Security PIN</strong><small id="security-pin-status">Проверяем настройку</small></span>
+                  </div>
+                  <p>Шестизначный локальный код для критических подтверждений. Это не пароль Windows и он не заменяет вход в систему.</p>
+                  <div class="security-pin-fields">
+                    <label id="security-pin-current-wrap" hidden>
+                      <span>Текущий PIN</span>
+                      <input id="security-pin-current" type="password" inputmode="numeric" maxlength="6" autocomplete="off">
+                    </label>
+                    <label>
+                      <span>Новый PIN</span>
+                      <input id="security-pin-new" type="password" inputmode="numeric" maxlength="6" autocomplete="off">
+                    </label>
+                    <label>
+                      <span>Повтори PIN</span>
+                      <input id="security-pin-confirm" type="password" inputmode="numeric" maxlength="6" autocomplete="off">
+                    </label>
+                    <button class="claude-primary-btn" id="security-pin-save" type="button">Настроить PIN</button>
+                  </div>
+                  <div class="security-pin-fields security-pin-recovery-fields">
+                    <label>
+                      <span>Забыл PIN · одноразовый recovery-код</span>
+                      <input id="security-pin-recovery-code" type="password" maxlength="64" autocomplete="off" spellcheck="false">
+                    </label>
+                    <button class="claude-ghost-btn" id="security-pin-recover" type="button">Восстановить PIN</button>
+                  </div>
+                  <div id="security-pin-recovery-codes" class="security-pin-recovery-codes" hidden></div>
+                  <button id="security-pin-recovery-clear" class="claude-ghost-btn" type="button" hidden>Я сохранил коды · скрыть</button>
+                  <small id="security-pin-feedback" class="security-pin-feedback" aria-live="polite"></small>
+                </section>
+              </div>
+
+              <div id="security-settings-panel" class="security-tab-panel" role="tabpanel" hidden>
+                <section class="security-settings-shell">
+                  <header class="security-settings-header">
+                    <div>
+                      <h3>Настройки защиты</h3>
+                      <p>Здесь собраны постоянное наблюдение, реакция на угрозы и обслуживание Security.</p>
+                    </div>
+                    <span id="security-settings-status" class="security-settings-status">Средний профиль</span>
+                  </header>
+
+                  <section class="security-settings-section">
+                    <div class="security-settings-heading">
+                      <span><strong>Уровень наблюдения</strong><small>Меняет частоту фоновых проверок и строгость реакции.</small></span>
+                    </div>
+                    <div class="security-level-grid" role="radiogroup" aria-label="Уровень наблюдения Security">
+                      <button type="button" data-security-level-choice="off"><strong>Отключён</strong><small>Фоновое наблюдение остановлено</small></button>
+                      <button type="button" data-security-level-choice="minimal"><strong>Минимальный</strong><small>Редкие спокойные проверки</small></button>
+                      <button type="button" data-security-level-choice="balanced"><strong>Средний</strong><small>Рекомендуемый баланс</small></button>
+                      <button type="button" data-security-level-choice="strict"><strong>Строгий</strong><small>Более частое наблюдение</small></button>
+                      <button type="button" data-security-level-choice="maximum"><strong>Максимальный</strong><small>Самая пристальная защита</small></button>
+                    </div>
+                  </section>
+
+                </section>
+              </div>
+
+              <details class="security-maintenance">
+                <summary>
+                  <span><strong>Датчики и обслуживание</strong><small>Состояние сенсоров, целостность, baseline и журнал</small></span>
+                </summary>
+                <div class="action-bar">
+                  <button class="claude-ghost-btn" id="security-refresh">Обновить статус</button>
+                  <button class="claude-ghost-btn" id="security-scan-system">Быстрая проверка</button>
+                  <button class="claude-ghost-btn" id="security-integrity">Проверка целостности</button>
+                  <button class="claude-ghost-btn" id="security-audit">Журнал аудита</button>
+                  <button class="claude-ghost-btn" id="security-baseline">Проверить baseline</button>
+                  <button class="claude-ghost-btn" id="security-replay">Replay lab</button>
+                  <button class="claude-ghost-btn" id="security-benchmark-start">Бенчмарк · 5 минут</button>
+                  <button class="claude-ghost-btn" id="security-benchmark-cancel" hidden>Остановить бенчмарк</button>
+                </div>
+                <div id="security-replay-metrics" class="security-replay-metrics"></div>
+                <div id="security-baseline-preview" class="security-baseline-preview"></div>
+                <div id="security-benchmark-status" class="security-benchmark-status"></div>
+                <div id="security-summary"></div>
+                <div id="security-findings"></div>
+                <span id="security-runtime-label" class="hidden"></span>
+                <div id="security-runtime"></div>
+                <span id="security-audit-label" class="hidden"></span>
+                <div id="security-audit-output"></div>
+              </details>
+            </div>
+          </div>
+        </section>
+
+        <!-- D. WORKSPACE VIEW -->
+        <section class="claude-view view-hidden" id="workspace-section">
+          <div class="document-feed">
+            <div class="view-header">
+              <h2>Monarch Workspace</h2>
+            </div>
+            <div class="doc-content">
+              <div id="workspace-summary" class="workspace-overview"></div>
+              <div class="file-tree-container">
+                <p class="section-subtitle">Ядро проекта</p>
+                <div id="workspace-module-list" class="file-tree-mock"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- E. MODELS VIEW -->
+        <section class="claude-view view-hidden" id="models-section">
+          <div class="document-feed models-document-feed">
+            <div class="view-header">
+              <div>
+                <h2>Модели Monarch</h2>
+                <p class="view-subtitle">Локальные роли, runtime и готовность.</p>
+              </div>
+            </div>
+            <div class="doc-content models-page-content" id="models-page-list"></div>
+          </div>
+        </section>
+
+        <!-- F. MONARCH SHARING -->
+        <section class="claude-view view-hidden" id="sharing-section">
+          <div class="document-feed sharing-document-feed">
+            <div class="view-header sharing-page-header">
+              <div>
+                <h2>Monarch Sharing</h2>
+                <p class="view-subtitle">Подключай локальные модели к приложениям через OpenAI-compatible API.</p>
+              </div>
+            </div>
+            <div id="sharing-page-root" class="sharing-page-root" aria-live="polite">
+              <div class="sharing-loading-state">Проверяю локальный API…</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- G. SETTINGS VIEW (Now contains Logs) -->
+        <section class="claude-view view-hidden" id="settings-section">
+          <div class="document-feed">
+            <div class="view-header">
+              <div>
+                <h2>Monarch Control</h2>
+                <p class="settings-intro">Личность, голос, постоянная память и локальные подключения.</p>
+              </div>
+            </div>
+            <div class="doc-content settings-content">
+              <div class="settings-tabs" role="tablist" aria-label="Настройки Monarch">
+                <button type="button" data-settings-tab="general" role="tab" aria-selected="true">Общие</button>
+                <button type="button" data-settings-tab="memory" role="tab" aria-selected="false">Память</button>
+                <button type="button" data-settings-tab="skills" role="tab" aria-selected="false">Навыки</button>
+                <button type="button" data-settings-tab="telegram" role="tab" aria-selected="false">Telegram</button>
+                <button type="button" data-settings-tab="system" role="tab" aria-selected="false">Система</button>
+              </div>
+
+              <section class="settings-group settings-feature" data-settings-panel="general" aria-labelledby="personality-settings-title">
+                <div class="settings-group-heading">
+                  <div>
+                    <p class="section-kicker">Личность</p>
+                    <h3 id="personality-settings-title">Как Monarch общается с тобой</h3>
+                  </div>
+                  <span class="settings-save-state" id="profile-save-state" aria-live="polite">Загрузка</span>
+                </div>
+                <form id="profile-settings-form" class="settings-form">
+                  <fieldset class="settings-fieldset">
+                    <legend>Стиль общения</legend>
+                    <div class="communication-presets" role="radiogroup" aria-label="Стиль общения">
+                      <button type="button" class="communication-preset" data-settings-preset="balanced" aria-pressed="false">
+                        <strong>Спокойный</strong><span>Живо и по делу</span>
+                      </button>
+                      <button type="button" class="communication-preset" data-settings-preset="concise" aria-pressed="false">
+                        <strong>Коротко</strong><span>Только главное</span>
+                      </button>
+                      <button type="button" class="communication-preset" data-settings-preset="warm" aria-pressed="false">
+                        <strong>Теплее</strong><span>Больше характера</span>
+                      </button>
+                      <button type="button" class="communication-preset" data-settings-preset="technical" aria-pressed="false">
+                        <strong>Технический</strong><span>Факты и проверка</span>
+                      </button>
+                    </div>
+                  </fieldset>
+                  <label class="settings-field">
+                    <span>Что Monarch должен знать о тебе</span>
+                    <textarea id="profile-adaptive-summary" rows="4" maxlength="1600" placeholder="Например: я предпочитаю практичные решения и работаю над Monarch один."></textarea>
+                  </label>
+                  <label class="settings-field">
+                    <span>Свои правила общения <small>по одному на строку</small></span>
+                    <textarea id="profile-style-rules" rows="5" maxlength="3000" placeholder="Обращайся на ты.&#10;Сначала показывай результат.&#10;Не растягивай очевидное."></textarea>
+                  </label>
+                  <div class="settings-actions">
+                    <button type="submit" class="claude-primary-btn">Сохранить характер</button>
+                  </div>
+                </form>
+              </section>
+
+              <section class="settings-group settings-feature oscar-voice-settings" data-settings-panel="general" aria-labelledby="oscar-voice-settings-title">
+                <div class="settings-group-heading">
+                  <div>
+                    <p class="section-kicker">Нейросетевой голос</p>
+                    <h3 id="oscar-voice-settings-title">Как звучит Оскар</h3>
+                  </div>
+                  <span class="settings-save-state" id="oscar-voice-save-state" aria-live="polite">Локально</span>
+                </div>
+                <p class="settings-section-copy">Три синтетических русских тембра работают локально. Манера и своя инструкция применяются к следующей озвучке.</p>
+                <form id="oscar-voice-settings-form" class="settings-form voice-settings-form">
+                  <div class="voice-studio">
+                    <div class="voice-portrait-panel" id="oscar-voice-visual" data-voice="oscar" aria-live="polite">
+                      <div class="voice-portrait" aria-hidden="true">
+                        <span class="voice-orbit voice-orbit-outer"></span>
+                        <span class="voice-orbit voice-orbit-inner"></span>
+                        <span class="voice-core"><b data-voice-monogram>O</b></span>
+                        <span class="voice-wave">
+                          <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+                        </span>
+                      </div>
+                      <div class="voice-portrait-copy">
+                        <strong data-voice-visual-name>Оскар · баритон</strong>
+                        <span data-voice-visual-description>Низкий, спокойный и уверенный</span>
+                      </div>
+                    </div>
+                    <div class="voice-preset-area">
+                      <span class="settings-label">Заготовленные голоса</span>
+                      <div class="voice-preset-grid" role="radiogroup" aria-label="Заготовленные голоса Оскара">
+                        <button type="button" class="voice-preset-card" data-voice-preset="oscar" aria-pressed="true">
+                          <span class="voice-preset-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+                          <strong>Баритон</strong><small>Низкий и уверенный</small>
+                        </button>
+                        <button type="button" class="voice-preset-card" data-voice-preset="oscar-clear" aria-pressed="false">
+                          <span class="voice-preset-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+                          <strong>Ясный</strong><small>Легче и отчётливее</small>
+                        </button>
+                        <button type="button" class="voice-preset-card" data-voice-preset="aurora" aria-pressed="false">
+                          <span class="voice-preset-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+                          <strong>Аврора</strong><small>Тёплый женский</small>
+                        </button>
+                      </div>
+                      <input id="oscar-voice-preset" type="hidden" value="oscar">
+                      <label class="settings-field voice-style-field">
+                        <span>Манера</span>
+                        <select id="oscar-voice-style">
+                          <option value="natural">Естественно</option>
+                          <option value="calm">Спокойно</option>
+                          <option value="warm">Теплее</option>
+                          <option value="focused">Собранно</option>
+                          <option value="energetic">Энергично</option>
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="voice-tuning">
+                    <div class="voice-tuning-heading">
+                      <div>
+                        <span class="settings-label">Ручная настройка</span>
+                        <p>Ползунки реально меняют генерацию и воспроизведение.</p>
+                      </div>
+                      <button type="button" class="claude-ghost-btn" id="oscar-voice-reset-tuning">Сбросить</button>
+                    </div>
+                    <div class="voice-slider-grid">
+                      <label class="voice-slider">
+                        <span><strong>Темп</strong><output id="oscar-voice-speed-value" for="oscar-voice-speed">100%</output></span>
+                        <input id="oscar-voice-speed" data-voice-slider="speed" type="range" min="80" max="120" step="1" value="100" aria-label="Темп голоса, процентов">
+                        <small>Медленнее · быстрее</small>
+                      </label>
+                      <label class="voice-slider">
+                        <span><strong>Высота</strong><output id="oscar-voice-pitch-value" for="oscar-voice-pitch">0</output></span>
+                        <input id="oscar-voice-pitch" data-voice-slider="pitch" type="range" min="-2" max="2" step="1" value="0" aria-label="Высота голоса">
+                        <small>Глубже · выше</small>
+                      </label>
+                      <label class="voice-slider">
+                        <span><strong>Выразительность</strong><output id="oscar-voice-expressiveness-value" for="oscar-voice-expressiveness">55%</output></span>
+                        <input id="oscar-voice-expressiveness" data-voice-slider="expressiveness" type="range" min="0" max="100" step="1" value="55" aria-label="Выразительность голоса, процентов">
+                        <small>Стабильно · эмоционально</small>
+                      </label>
+                      <label class="voice-slider">
+                        <span><strong>Паузы</strong><output id="oscar-voice-pause-value" for="oscar-voice-pause">80 мс</output></span>
+                        <input id="oscar-voice-pause" data-voice-slider="pauseMs" type="range" min="40" max="400" step="10" value="80" aria-label="Пауза между смысловыми частями, миллисекунд">
+                        <small>Между смысловыми частями</small>
+                      </label>
+                      <label class="voice-slider">
+                        <span><strong>Громкость</strong><output id="oscar-voice-volume-value" for="oscar-voice-volume">100%</output></span>
+                        <input id="oscar-voice-volume" data-voice-slider="volume" type="range" min="20" max="100" step="1" value="100" aria-label="Громкость голоса, процентов">
+                        <small>Тихо · полный уровень</small>
+                      </label>
+                    </div>
+                  </div>
+                  <label class="settings-field">
+                    <span>Своя подача <small>необязательно, до 300 символов</small></span>
+                    <textarea id="oscar-voice-instruction" rows="3" maxlength="300" placeholder="Например: объясняй мягко, с короткими паузами перед важными выводами."></textarea>
+                  </label>
+                  <div class="voice-settings-note" role="note">
+                    <span aria-hidden="true">●</span>
+                    <p>Выбранный тембр не меняет личность и содержание ответа — только звучание.</p>
+                  </div>
+                  <div class="settings-actions voice-settings-actions">
+                    <button type="button" class="claude-secondary-btn" id="oscar-voice-test">Проверить голос</button>
+                    <button type="submit" class="claude-primary-btn">Сохранить голос</button>
+                  </div>
+                </form>
+              </section>
+
+              <section class="settings-group settings-feature" data-settings-panel="memory" aria-labelledby="memory-settings-title">
+                <div class="settings-group-heading">
+                  <div>
+                    <p class="section-kicker">Постоянная память</p>
+                    <h3 id="memory-settings-title">Что стоит помнить всегда</h3>
+                  </div>
+                  <span class="settings-count" id="memory-count">0 записей</span>
+                </div>
+                <form id="memory-create-form" class="memory-create-form">
+                  <label class="settings-field memory-input-field">
+                    <span>Новая запись</span>
+                    <textarea id="memory-create-text" rows="3" maxlength="1200" required placeholder="Например: не удалять существующие изменения в рабочей ветке."></textarea>
+                  </label>
+                  <div class="memory-create-options">
+                    <label class="settings-field compact-field">
+                      <span>Категория</span>
+                      <select id="memory-create-category">
+                        <option value="preference">Предпочтение</option>
+                        <option value="project">Проект</option>
+                        <option value="fact">Факт</option>
+                        <option value="correction">Исправление</option>
+                        <option value="note">Заметка</option>
+                      </select>
+                    </label>
+                    <label class="toggle-control memory-pin-control"><input id="memory-create-pinned" type="checkbox" checked> Всегда учитывать</label>
+                    <button type="submit" class="claude-primary-btn">Запомнить</button>
+                  </div>
+                </form>
+                <p class="settings-feedback" id="memory-feedback" aria-live="polite"></p>
+                <div class="memory-settings-list" id="memory-settings-list">
+                  <div class="settings-loading">Загрузка памяти…</div>
+                </div>
+              </section>
+
+              <section class="settings-group settings-feature skills-settings" data-settings-panel="skills" aria-labelledby="skills-settings-title">
+                <div class="settings-group-heading">
+                  <div>
+                    <p class="section-kicker">Monarch Skills</p>
+                    <h3 id="skills-settings-title">Локальные навыки Oscar</h3>
+                  </div>
+                  <span class="settings-count" id="skills-count">Загрузка</span>
+                </div>
+                <p class="settings-section-copy">Astra видит только метаданные, а инструкции и ресурсы открывает при активации. Облако для этого не используется.</p>
+                <div class="skills-overview" aria-label="Сводка каталога навыков">
+                  <div><strong id="skills-workspace-count">0</strong><span>в проекте</span></div>
+                  <div><strong id="skills-user-count">0</strong><span>пользовательских</span></div>
+                  <div><strong id="skills-compatible-count">0</strong><span>доступно здесь</span></div>
+                </div>
+                <div class="skills-toolbar">
+                  <label class="settings-field">
+                    <span>Поиск по навыкам</span>
+                    <input id="skills-search" type="search" placeholder="Файлы, безопасность, документы…" autocomplete="off">
+                  </label>
+                  <button type="button" class="claude-ghost-btn" id="skills-refresh">Обновить</button>
+                </div>
+                <p class="settings-feedback" id="skills-feedback" aria-live="polite"></p>
+                <div class="skill-settings-list" id="skills-settings-list">
+                  <div class="settings-loading">Собираю локальный каталог…</div>
+                </div>
+              </section>
+
+              <section class="settings-group settings-feature telegram-settings" data-settings-panel="telegram" aria-labelledby="telegram-settings-title">
+                <div class="settings-group-heading">
+                  <div>
+                    <p class="section-kicker">Telegram</p>
+                    <h3 id="telegram-settings-title">Связать телефон с Monarch</h3>
+                  </div>
+                  <span class="integration-status" id="telegram-status-badge">Проверка</span>
+                </div>
+                <div class="telegram-pairing-panel">
+                  <div class="telegram-bot-copy">
+                    <span class="settings-label">Локальный бот</span>
+                    <strong id="telegram-bot-name">Загрузка…</strong>
+                    <span id="telegram-bot-detail">Проверяем подключение</span>
+                  </div>
+                  <div class="telegram-code-panel" id="telegram-code-panel">
+                    <span class="settings-label">Код привязки</span>
+                    <output id="telegram-pairing-code">••••••</output>
+                    <span id="telegram-code-expiry">Действует 15 минут</span>
+                  </div>
+                </div>
+                <div class="telegram-insight-row" id="telegram-insight-row" aria-label="Состояние Telegram-доступа">
+                  <span id="telegram-paired-summary">Привязок: 0</span>
+                  <span id="telegram-pending-summary">Подтверждений: 0</span>
+                  <span id="telegram-reminder-summary">Напоминаний: 0</span>
+                  <span id="telegram-mode-summary">Режим: проверка</span>
+                  <span id="telegram-security-summary">Безопасность: проверка</span>
+                  <span id="telegram-error-summary" hidden></span>
+                </div>
+                <div class="telegram-mode-grid" aria-label="Режимы Telegram-бота">
+                  <div>
+                    <span>Ответы</span>
+                    <strong>Локальная справка без LLM</strong>
+                    <small>Help, status, plugins и security отвечают даже если Oscar недоступен.</small>
+                  </div>
+                  <div>
+                    <span>Задачи</span>
+                    <strong id="telegram-task-mode">Проверка</strong>
+                    <small>Обычные сообщения идут через Monarch router и permission gate.</small>
+                  </div>
+                  <div>
+                    <span>Защита</span>
+                    <strong id="telegram-security-mode">Проверка</strong>
+                    <small>Write, network, execute и delete требуют одноразового подтверждения.</small>
+                  </div>
+                </div>
+                <div class="settings-actions telegram-actions" aria-label="Действия Telegram">
+                  <div class="telegram-action-cluster telegram-action-cluster-primary">
+                    <button type="button" class="claude-primary-btn" id="telegram-create-code">Создать новый код</button>
+                    <button type="button" class="claude-ghost-btn" id="telegram-copy-code">Скопировать код</button>
+                    <button type="button" class="claude-ghost-btn" id="telegram-refresh-status">Проверить привязку</button>
+                  </div>
+                  <div class="telegram-action-cluster telegram-action-cluster-admin">
+                    <button type="button" class="claude-ghost-btn" id="telegram-toggle-remote">Остановить удалённый доступ</button>
+                    <button type="button" class="claude-ghost-btn telegram-danger-button" id="telegram-revoke-all">Отозвать все привязки</button>
+                  </div>
+                </div>
+                <p class="settings-feedback" id="telegram-feedback" aria-live="polite"></p>
+                <p class="telegram-safety-note">Защитный режим блокирует новые привязки, задачи и подтверждения, но оставляет локальный Monarch доступным.</p>
+                <details class="settings-guide">
+                  <summary>Установка и настройка за несколько минут</summary>
+                  <ol>
+                    <li>Создай бота через <strong>@BotFather</strong> командой <code>/newbot</code>.</li>
+                    <li>Сохрани токен в <code id="telegram-token-path">secrets/telegram_bot_token.txt</code> и перезапусти Monarch.</li>
+                    <li>Открой своего бота, нажми кнопку выше и отправь ему <code>/pair КОД</code>.</li>
+                    <li>Вернись сюда и нажми «Проверить привязку».</li>
+                  </ol>
+                </details>
+              </section>
+
+              <details class="settings-group settings-system" data-settings-panel="system" open>
+                <summary>Интерфейс и доступ</summary>
+                <div class="settings-system-content">
+                  <div class="preference-grid">
+                    <div class="preference-card">
+                      <label for="density-select">Плотность</label>
+                      <select id="density-select">
+                        <option value="comfortable">Обычная</option>
+                        <option value="compact">Компактная</option>
+                      </select>
+                    </div>
+                    <div class="preference-card">
+                      <label for="inspector-default-select">Инспектор</label>
+                      <select id="inspector-default-select">
+                        <option value="open">Открыт</option>
+                        <option value="closed">Скрыт</option>
+                      </select>
+                    </div>
+                    <div class="preference-card">
+                      <label for="startup-animation-select">Запуск</label>
+                      <select id="startup-animation-select">
+                        <option value="original">Оригинальная</option>
+                        <option value="test">Тестовая</option>
+                        <option value="disabled">Отключена</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="setting-row">
+                    <label for="autonomy-mode-select">Автономность модели</label>
+                    <select id="autonomy-mode-select">
+                      <option value="guided">Под контролем</option>
+                      <option value="workspace-autonomous">Автономно в workspace</option>
+                      <option value="full-local">Полная локальная</option>
+                    </select>
+                  </div>
+                  <p class="setting-note" id="permission-profile-note">Локальные чтения свободны, обратимые изменения внутри workspace выполняются без лишних церемоний. Внешние и необратимые действия остаются под точным разрешением.</p>
+                  <div class="agency-control-panel">
+                    <section class="security-settings-section security-model-policy agency-model-policy">
+                      <div class="security-settings-heading">
+                        <span><strong>Предложения действий Oscar</strong><small>Внутренние typed-команды отделены от видимого ответа и получают один итоговый verdict.</small></span>
+                        <label class="security-switch">
+                          <input id="security-model-commands-enabled" type="checkbox" checked>
+                          <span aria-hidden="true"></span>
+                          <em>Разрешить предложения</em>
+                        </label>
+                      </div>
+                      <div class="security-policy-row">
+                        <label>
+                          <span>Когда спрашивать подтверждение</span>
+                          <select id="security-model-confirmation">
+                            <option value="adaptive">Адаптивно — только при риске</option>
+                            <option value="always">Всегда — перед каждым действием</option>
+                          </select>
+                        </label>
+                        <button id="security-model-policy-save" class="claude-primary-btn" type="button">Сохранить правила Oscar</button>
+                      </div>
+                      <div class="security-command-flow" aria-label="Как Monarch обрабатывает действия Oscar">
+                        <span><b>1</b>Oscar предлагает</span><i></i>
+                        <span><b>2</b>Policy Kernel решает</span><i></i>
+                        <span><b>3</b>Ты даёшь точный grant</span><i></i>
+                        <span><b>4</b>Monarch проверяет результат</span>
+                      </div>
+                      <p class="security-policy-note">Hard boundaries нельзя снять подтверждением. Разрешение задачи ограничено scope, бюджетом и сроком и отзывается здесь же.</p>
+                      <small id="security-model-policy-feedback" class="security-response-feedback" aria-live="polite"></small>
+                    </section>
+                    <div class="agency-control-heading">
+                      <div><strong>Активные разрешения</strong><span>Ограничены задачей, областью, бюджетом и сроком</span></div>
+                      <button type="button" class="claude-secondary-btn" id="revoke-all-leases">Стоп всем</button>
+                    </div>
+                    <div id="active-leases-list" class="agency-control-list"><span class="setting-note">Нет активных разрешений</span></div>
+                    <div class="agency-control-heading"><div><strong>Журнал действий</strong><span>Последние решения и результаты Policy Kernel</span></div></div>
+                    <div id="action-ledger-list" class="agency-control-list"><span class="setting-note">Действий пока нет</span></div>
+                  </div>
+                  <div class="setting-row">
+                    <label for="gemma-mode-setting">Режим Gemma (Vision)</label>
+                    <label class="toggle-control"><input id="gemma-mode-setting" type="checkbox"> Включить принудительно</label>
+                  </div>
+                </div>
+              </details>
+
+              <details class="settings-group settings-system" data-settings-panel="system">
+                <summary>Разработка и журнал</summary>
+                <div class="settings-system-content">
+                  <div class="system-endpoint-grid">
+                    <span><small>API</small><code>127.0.0.1:4317</code></span>
+                    <span><small>Режим</small><code>local-first</code></span>
+                  </div>
+                  <pre class="audit-output" id="logs-audit-output">Загрузка логов...</pre>
+                </div>
+              </details>
+            </div>
+          </div>
+        </section>
+
+        <!-- Keep hidden section to not break JS routing completely, but it is empty now -->
+        <section class="hidden" id="logs-section"></section>
+
+      </main>
+
+      <!-- 3. Artifact Panel (Inspector) - Slides in like Claude Artifacts -->
+      <aside class="inspector mascot-mode mascot-active" id="inspector" aria-label="Помощник Oscar и краткая диагностика">
+        <div class="mascot-view" id="mascot-view">
+          <img id="mascot-img" src="/assets/mascot/oscar-idle.png" alt="Oscar Mascot" />
+          <div class="mascot-caption">
+            <span id="mascot-meta" class="mascot-meta">Ожидание</span>
+            <strong id="mascot-title">Oscar</strong>
+            <span id="mascot-detail">Готов к локальной работе</span>
+          </div>
+          <button class="inspector-toggle-button mascot-panel-toggle" type="button" data-inspector-toggle aria-controls="inspector" aria-expanded="true" aria-label="Скрыть помощника Oscar" title="Скрыть помощника Oscar">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"></path><path d="M16 5v14"></path><path d="m11 9-3 3 3 3"></path></svg>
+          </button>
+          <div class="mascot-quick-actions" aria-label="Быстрые действия Oscar">
+            <button type="button" aria-label="Проверить диагностику Oscar" title="Проверить диагностику Oscar" data-mascot-prompt="Проверь локальное окружение Monarch/Oscar: workspace, backend, модели, CLI, RAM и доступы.">Проверка</button>
+            <button type="button" aria-label="Открыть рабочие файлы" title="Открыть рабочие файлы" data-mascot-target="workspace-section">Файлы</button>
+            <button type="button" aria-label="Открыть модели Monarch" title="Открыть модели Monarch" data-mascot-target="models-section">Модели</button>
+          </div>
+        </div>
+        <div class="inspector-header" id="inspector-header-default">
+          <div>
+            <h3>Помощник</h3>
+            <span>Быстрые действия</span>
+          </div>
+        </div>
+        <div class="inspector-content" id="inspector-content-default">
+          <section class="assistant-action-strip" aria-label="Готовые запросы помощника">
+            <button type="button" aria-label="Подготовить запрос на поиск источников" title="Подготовить поиск источников" data-mascot-prompt="Найди релевантные источники и покажи, что можно использовать в ответе.">Поиск</button>
+            <button type="button" aria-label="Подготовить проверку лимитов Oscar" title="Проверить лимиты Oscar" data-mascot-prompt="Проверь лимиты генерации, RAM/VRAM и текущий runtime Oscar.">Лимиты</button>
+          </section>
+
+          <section class="assistant-resource-stack" aria-label="Ресурсы Oscar">
+            <div class="assistant-resource-card" data-resource-state="unknown" aria-label="Режим: ожидание проверки" title="Режим: ожидание проверки"><span>Режим</span><strong id="assistant-gpu-resource">ожидание</strong></div>
+            <div class="assistant-resource-card" data-resource-state="unknown" aria-label="Видео: ожидание проверки" title="Видео: ожидание проверки"><span>Видео</span><strong id="assistant-vram-resource">ожидание</strong></div>
+            <div class="assistant-resource-card" data-resource-state="unknown" aria-label="Память: ожидание проверки" title="Память: ожидание проверки"><span>Память</span><strong id="assistant-ram-resource">ожидание</strong></div>
+            <div class="assistant-resource-card" data-resource-state="unknown" aria-label="Движок: ожидание проверки" title="Движок: ожидание проверки"><span>Движок</span><strong id="assistant-torch-resource">ожидание</strong></div>
+          </section>
+
+          <details class="artifact-card inspector-system" open>
+            <summary><h4>Система</h4></summary>
+            <div id="runtime-summary"></div>
+          </details>
+
+          <details class="artifact-card">
+            <summary><h4>Технические детали</h4></summary>
+            <div class="inspector-technical-stack">
+              <section>
+                <h5>Маршрут <span class="role-badge" id="route-pill">нет</span></h5>
+                <div id="route-summary"></div>
+                <div class="timeline-vertical" id="route-timeline"></div>
+              </section>
+              <section id="pipeline-section">
+                <h5>Конвейер</h5>
+                <div id="pipeline"></div>
+              </section>
+              <section>
+                <h5>Последнее событие</h5>
+                <div id="recent-event"></div>
+              </section>
+            </div>
+          </details>
+        </div>
+      </aside>
+
+    </div>
+
+    <section
+      id="oscar-voice-mode-surface"
+      class="oscar-voice-mode"
+      data-phase="closed"
+      data-visual-state="paused"
+      data-mic="live"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="oscar-voice-mode-title"
+      hidden
+    >
+      <div class="voice-mode-ambient" aria-hidden="true"><i></i><i></i><i></i></div>
+      <header class="voice-mode-header">
+        <div>
+          <span class="voice-mode-eyebrow"><i aria-hidden="true"></i> Локально · Oscar Voice</span>
+          <strong>Голосовой режим</strong>
+        </div>
+        <button id="oscar-voice-mode-close" class="voice-mode-icon-btn" type="button" aria-label="Закрыть голосовой режим" title="Закрыть">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+        </button>
+      </header>
+
+      <main class="voice-mode-stage">
+        <p id="oscar-voice-mode-kicker" class="voice-mode-kicker">Пробуждаюсь</p>
+        <h2 id="oscar-voice-mode-title">Oscar рядом</h2>
+        <p id="oscar-voice-mode-detail" class="voice-mode-detail">Подключаю локальный микрофон</p>
+
+        <form id="oscar-voice-mode-capture" class="voice-mode-capture" aria-busy="false">
+          <textarea id="oscar-voice-mode-input" class="voice-mode-hidden-input" tabindex="-1" aria-hidden="true"></textarea>
+          <button id="oscar-voice-mode-orb" class="voice-mode-orb" type="button" aria-label="Остановить запись и распознать" aria-pressed="false">
+            <canvas id="oscar-voice-mode-canvas" class="voice-orb-canvas" width="520" height="297" aria-hidden="true"></canvas>
+            <span class="voice-orb-core" aria-hidden="true"><i></i></span>
+          </button>
+        </form>
+
+        <p id="oscar-voice-mode-transcript" class="voice-mode-transcript" aria-live="polite">Говори свободно — закончу запись после паузы</p>
+        <p id="oscar-voice-mode-thinking" class="voice-mode-thinking" aria-live="polite" hidden></p>
+      </main>
+
+      <footer class="voice-mode-controls">
+        <button id="oscar-voice-mode-mute" class="voice-mode-control" type="button" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 5.5 1.66"></path><path d="M17.6 11a6 6 0 0 1-.2 1.55M5 11a7 7 0 0 0 11.1 5.68M12 18v3M8 21h8M4 4l16 16"></path></svg>
+          <span>Микрофон</span>
+        </button>
+        <span class="voice-mode-control-separator" aria-hidden="true"></span>
+        <button id="oscar-voice-mode-end" class="voice-mode-control voice-mode-end" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8a15.4 15.4 0 0 0 10.8 0"></path><path d="M5 8.5 3.5 12l3.4 2.2M19 8.5l1.5 3.5-3.4 2.2"></path></svg>
+          <span>Завершить</span>
+        </button>
+      </footer>
+      <div id="oscar-voice-mode-live" class="sr-only" role="status" aria-live="polite"></div>
+    </section>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

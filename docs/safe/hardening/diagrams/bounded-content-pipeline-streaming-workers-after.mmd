@@ -1,0 +1,44 @@
+flowchart LR
+  U["Untrusted imported file"]
+
+  subgraph R["Safe renderer boundary"]
+    UI["Safe renderer"]
+    DISPLAY["Bounded display products"]
+    POLICY["Network, popup, clipboard, and mutation denials"]
+  end
+
+  subgraph V["Safe runtime boundary"]
+    INGEST["Backpressured ingest channel"]
+    BROKER["Authenticated range broker"]
+    SNIFF["Bounded signature sniffing and allowlist"]
+    ARCHIVE["Streaming transactional archive codec"]
+    MUTATE["Separate capability-guarded mutation API"]
+  end
+
+  subgraph W["Read-only decoder worker or process boundary"]
+    DECODER["Allowlisted decoder"]
+    HANDLE["Expiring generation read capability"]
+    NOMUTATE["No mutation, network, clipboard, or path bridge"]
+  end
+
+  subgraph S["Encrypted storage boundary"]
+    GENERATION["Independently authenticated chunks in an immutable generation"]
+    MANIFEST["Authenticated manifest and chunk index"]
+  end
+
+  U -->|"bounded chunks"| INGEST
+  INGEST -->|"AEAD chunks and commit"| GENERATION
+  INGEST --> MANIFEST
+  GENERATION -->|"requested encrypted chunks"| BROKER
+  MANIFEST --> BROKER
+  BROKER -->|"bounded header sample"| SNIFF
+  SNIFF -->|"allowlisted format"| HANDLE
+  HANDLE --> DECODER
+  DECODER -->|"bounded range requests"| BROKER
+  BROKER -->|"authenticated plaintext ranges with backpressure"| DECODER
+  DECODER -->|"sanitized tiles, frames, text, or metadata"| DISPLAY
+  DISPLAY --> UI
+  POLICY --> UI
+  NOMUTATE --> DECODER
+  BROKER <--> ARCHIVE
+  UI -->|"separate authorized action"| MUTATE

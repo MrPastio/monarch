@@ -1,0 +1,6 @@
+interface:
+  display_name: "Monarch Security Guardian"
+  short_description: "Protects agent actions and the local system"
+  default_prompt: "Use $monarch-security-guardian to review this agent or system security task."
+policy:
+  allow_implicit_invocation: true

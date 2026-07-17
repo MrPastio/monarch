@@ -1,0 +1,53 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+const root = process.cwd();
+const read = (relativePath: string) =>
+  readFileSync(path.join(root, relativePath), 'utf8');
+
+describe('Windows installer and public snapshot boundary', () => {
+  it('bootstraps missing runtimes without embedding machine-specific paths', () => {
+    const bootstrap = read('installer/bootstrap.ps1');
+    expect(bootstrap).toContain('Python.Python.3.11');
+    expect(bootstrap).toContain('scripts\\ensure-node.ps1');
+    expect(bootstrap).toContain('npm.cmd');
+    expect(bootstrap).toContain('oscar\\scripts\\install.ps1');
+    expect(bootstrap).toContain('security\\scripts\\setup_runtime.ps1');
+    expect(bootstrap).not.toContain('C:\\Users\\anton');
+    expect(bootstrap).not.toContain('E:\\Monarch');
+  });
+
+  it('keeps private collaboration history outside the public snapshot', () => {
+    const exporter = read('scripts/export-public.ps1');
+    for (const privatePath of [
+      'AI_HANDOFF\\.md',
+      'agent_notes\\.md',
+      'ORIGINAL_REQUEST\\.md',
+      '^\\.agents/',
+      '^\\.codex/',
+    ]) {
+      expect(exporter).toContain(privatePath);
+    }
+    expect(exporter).toContain('PRIVATE KEY');
+    expect(exporter).toContain('github_pat_');
+  });
+
+  it('builds a modern Windows setup with optional large models', () => {
+    const definition = read('installer/Monarch.iss');
+    expect(definition).toContain('WizardStyle=modern');
+    expect(definition).toContain('PrivilegesRequired=lowest');
+    expect(definition).toContain('Name: "smallmodel"');
+    expect(definition).toContain('Name: "voicestt"');
+    expect(definition).toContain('Name: "voicetts"');
+    expect(definition).toContain('E:\\Programs\\Monarch');
+    expect(definition).toContain('D:\\Programs\\Monarch');
+  });
+
+  it('ships a portable Oscar environment template', () => {
+    const envExample = read('oscar/.env.example');
+    expect(envExample).not.toContain('E:\\Monarch');
+    expect(envExample).not.toContain('C:\\Users\\');
+    expect(envExample).toContain('OSCAR_PORT=7861');
+  });
+});

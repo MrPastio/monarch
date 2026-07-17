@@ -1,0 +1,35 @@
+[project]
+name = "monarch-security"
+version = "0.1.0"
+description = "Standalone security addon prototype for the future Monarch core."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+process = [
+  "psutil>=5.9",
+]
+tui = [
+  "rich>=13.7",
+]
+llm = [
+  "llama-cpp-python>=0.2.90",
+]
+hf = [
+  "transformers>=4.43",
+  "torch>=2.2",
+]
+dev = [
+  "pytest>=8",
+]
+
+[project.scripts]
+monarch-security = "monarch_security.cli:main"
+monarch_sec = "monarch_security.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,9 @@
+.venv/
+frontend/node_modules/
+frontend/dist/
+data/offload/
+data/*.log
+data/memory/*.sqlite3-wal
+data/memory/*.sqlite3-shm
+backend/**/__pycache__/
+*.pyc

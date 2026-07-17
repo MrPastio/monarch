@@ -1,0 +1,57 @@
+import { readFileSync } from 'node:fs';
+import { describe, expect, it } from 'vitest';
+
+const appSource = readFileSync('oscar/frontend/src/App.tsx', 'utf8');
+const styles = readFileSync('oscar/frontend/src/styles.css', 'utf8');
+
+describe('Oscar React preview invariants', () => {
+  it('keeps one authoritative dark token block', () => {
+    const rootBlocks = [...styles.matchAll(/:root\s*\{([\s\S]*?)\}/g)];
+
+    expect(rootBlocks).toHaveLength(1);
+    expect(rootBlocks[0]?.[1]).toContain('--bg-app: #08090a');
+    expect(rootBlocks[0]?.[1]).toContain('--text-base: #F7F7F5');
+    expect(styles).not.toContain('--bg-app: #ffffff');
+    expect(styles).not.toContain('--text-base: #10100f');
+  });
+
+  it('restores the compact sidebar before the mobile single-column breakpoint', () => {
+    const compactStart = styles.lastIndexOf('@media (max-width: 980px)');
+    const mobileStart = styles.lastIndexOf('@media (max-width: 620px)');
+    const compactRules = styles.slice(compactStart, mobileStart);
+    const mobileRules = styles.slice(mobileStart);
+
+    expect(compactStart).toBeGreaterThan(0);
+    expect(mobileStart).toBeGreaterThan(compactStart);
+    expect(compactRules).toContain('grid-template-columns: 72px minmax(0, 1fr)');
+    expect(compactRules).toMatch(/\.workspace > \.sidebar:not\(\.inspector\)\s*\{[^}]*display:\s*flex/);
+    expect(mobileRules).toMatch(/\.content-pane\s*\{[^}]*min-height:\s*100dvh;[^}]*height:\s*100dvh/);
+  });
+
+  it('owns cancellation from route preview through stream cleanup', () => {
+    const sendStart = appSource.indexOf('async function sendMessage()');
+    const stopStart = appSource.indexOf('function stopGeneration()');
+    const stopEnd = appSource.indexOf('function cycleDeepThinking()', stopStart);
+    const sendSource = appSource.slice(sendStart, stopStart);
+    const stopSource = appSource.slice(stopStart, stopEnd);
+
+    expect(sendSource.indexOf('const controller = new AbortController()')).toBeLessThan(
+      sendSource.indexOf('await previewChatRoute(payload, controller.signal)'),
+    );
+    expect(sendSource).toContain('if (abortRef.current === controller)');
+    expect(sendSource).toContain('await cancelRequestRef.current');
+    expect(stopSource).toContain('cancelGeneration()');
+    expect(stopSource).toContain('controller.abort()');
+    expect(stopSource).not.toContain('setBusy(false)');
+  });
+
+  it('does not expose session counters as inert navigation buttons', () => {
+    const navItemStart = appSource.indexOf('function NavItem(');
+    const navItemEnd = appSource.indexOf('function SourceList(', navItemStart);
+    const navItemSource = appSource.slice(navItemStart, navItemEnd);
+
+    expect(appSource).toContain('aria-label="Сводка сессии"');
+    expect(navItemSource).toContain('<div className={`nav-item');
+    expect(navItemSource).not.toContain('<button');
+  });
+});

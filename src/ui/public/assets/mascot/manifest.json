@@ -1,0 +1,46 @@
+{
+  "version": "redesign-v2-clay",
+  "basePath": "/assets/mascot/",
+  "states": {
+    "idle": {
+      "asset": "oscar-idle.png",
+      "alt": "Oscar idle"
+    },
+    "sleep": {
+      "asset": "oscar-idle.png",
+      "alt": "Oscar resting"
+    },
+    "read": {
+      "asset": "oscar-thinking.png",
+      "alt": "Oscar reading"
+    },
+    "play": {
+      "asset": "oscar-success.png",
+      "alt": "Oscar playing"
+    },
+    "listening": {
+      "asset": "oscar-listening.png",
+      "alt": "Oscar listening"
+    },
+    "thinking": {
+      "asset": "oscar-thinking.png",
+      "alt": "Oscar thinking"
+    },
+    "coding": {
+      "asset": "oscar-coding.png",
+      "alt": "Oscar coding"
+    },
+    "security": {
+      "asset": "oscar-security.png",
+      "alt": "Oscar security watch"
+    },
+    "success": {
+      "asset": "oscar-success.png",
+      "alt": "Oscar completed"
+    },
+    "error": {
+      "asset": "oscar-error.png",
+      "alt": "Oscar needs attention"
+    }
+  }
+}

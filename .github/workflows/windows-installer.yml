@@ -1,0 +1,30 @@
+name: Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build installer
+        shell: powershell
+        run: .\installer\build-installer.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Monarch-Setup
+          path: installer/out/Monarch-Setup.exe
+      - name: Attach installer to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/out/Monarch-Setup.exe

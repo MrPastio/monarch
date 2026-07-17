@@ -1,0 +1,125 @@
+# Dependencies
+node_modules/
+vendor/
+.tools/
+
+# Global binary and build ignores
+*.dll
+*.exe
+*.zip
+*.pdb
+*.ilk
+*.user
+dist/
+build/
+out/
+.cache/
+
+# Independent nested Sites repository
+/marketing-site/
+/monarch/
+/monarch-1/
+
+# Local agent, browser, and sandbox workspaces
+/.agents/
+/.codex/
+/.agents/*/
+!/.agents/orchestrator/
+!/.agents/orchestrator/**
+!/.agents/sentinel/
+!/.agents/sentinel/**
+/.oscar-trash/
+/.playwright-cli/
+/Workspace Coder/
+/output/
+/tmp/
+/test_files/
+
+# Local collaboration history (never part of a public source snapshot)
+/AI_HANDOFF.md
+/agent_notes.md
+/ORIGINAL_REQUEST.md
+/MARK_ALFA_FINDINGS.md
+/design-qa.md
+
+# Local runtime state
+runtime/*
+!runtime/.keep
+data/local/*
+!data/local/.keep
+logs/*
+!logs/.keep
+artifacts/generated/*
+!artifacts/generated/.keep
+
+# Secrets and environment
+.env
+.env.*
+!**/.env.example
+secrets/*
+!secrets/.keep
+
+# Local models and heavy runtimes
+/LLM models/
+/models/
+/local-models/
+runtime-models/
+llama-runtime/
+hf-runtime/
+voice-runtime/
+
+# Hidden models
+.mark-ascii-models/
+
+# Integrated Oscar runtime
+oscar/.venv/
+oscar/frontend/node_modules/
+oscar/frontend/dist/
+oscar/data/
+oscar/model/
+oscar/model-small/
+oscar/runtime/
+oscar/backend/data/
+oscar/desktop/webview2_pkg/
+oscar/Oscar.exe.WebView2/
+oscar/**/*.pyc
+oscar/**/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Global model ignores
+*.gguf
+gemma_models/
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.tflite
+*.bin
+*.npz
+*.npy
+
+# Integrated Monarch Security runtime
+security/.venv/
+security/data/
+security/logs/
+security/**/*.pyc
+security/**/__pycache__/
+security/*.gguf
+security/src/*.egg-info/
+*.egg-info/
+
+# Generated review and packaging artifacts
+*.tar.gz
+/monarch_detailed_review.pdf
+/monarch_safe_audit.pdf
+/installer/out/
+/.monarch-public-snapshot
+
+# OS / editor
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+*.lnk

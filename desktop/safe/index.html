@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src blob:; frame-src 'none'; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>Monarch Safe</title>
+    <link rel="stylesheet" href="./safe.css">
+    <script type="module" src="./safe.js"></script>
+  </head>
+  <body>
+    <main id="safe-app" aria-live="polite">
+      <section id="safe-transition" class="safe-transition" role="status" aria-live="polite" aria-atomic="true" data-mode="unlock" data-phase="verify" hidden>
+        <div class="transition-ambient" aria-hidden="true"><i></i><i></i></div>
+        <div class="transition-core">
+          <div class="transition-aperture" aria-hidden="true">
+            <span class="aperture-halo"></span>
+            <div class="aperture-glass">
+              <span class="aperture-shutter shutter-left"></span>
+              <span class="aperture-shutter shutter-right"></span>
+              <span class="aperture-scan"></span>
+              <span class="aperture-pin pin-top"></span>
+              <span class="aperture-pin pin-right"></span>
+              <span class="aperture-pin pin-bottom"></span>
+              <span class="aperture-pin pin-left"></span>
+              <span class="aperture-mark">M</span>
+              <span class="aperture-check">✓</span>
+            </div>
+          </div>
+          <p id="transition-kicker" class="transition-kicker">MONARCH SAFE · LOCAL VAULT</p>
+          <h2 id="transition-title">Проверяю локальный контур</h2>
+          <p id="transition-detail" class="transition-detail">Устройство и sealed-конфигурация подтверждаются внутри Safe</p>
+          <div class="transition-rail" aria-hidden="true">
+            <span data-transition-step="verify"><i></i><b>Контур</b></span>
+            <span data-transition-step="keys"><i></i><b>Ключи</b></span>
+            <span data-transition-step="decrypt"><i></i><b>Данные</b></span>
+            <span data-transition-step="open"><i></i><b>Готово</b></span>
+          </div>
+          <div class="transition-facts" aria-hidden="true">
+            <span>DEVICE SEALED</span><i></i><span>NETWORK OFF</span><i></i><span>MEMORY ONLY</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="auth-screen" id="auth-screen">
+        <div class="auth-core">
+          <div class="safe-mark" aria-hidden="true"><span>M</span></div>
+          <h1>Monarch Safe</h1>
+
+          <form id="setup-form" class="auth-form" hidden>
+            <p id="wiped-notice" class="destruction-warning" hidden>Прежние данные внутри Safe уничтожены. Сам модуль готов к чистой настройке: новый Safe получит новый PIN, новый набор ключей и отдельную криптографическую область.</p>
+            <h2>Создание изолированного хранилища</h2>
+            <p class="auth-note">Выбери длину PIN. Для реальной стойкости используй 12 цифр или одноразовый ключ восстановления.</p>
+            <div class="length-picker" role="group" aria-label="Длина PIN">
+              <button type="button" data-pin-length="4">4 цифры</button>
+              <button type="button" data-pin-length="6">6 цифр</button>
+              <button type="button" data-pin-length="12" class="active">12 цифр</button>
+            </div>
+            <label>Новый PIN</label>
+            <div class="pin-row" id="setup-pin" data-pin-input></div>
+            <label>Повтори PIN</label>
+            <div class="pin-row" id="setup-pin-confirm" data-pin-input></div>
+            <label for="emergency-word-count">Аварийная фраза: <b id="emergency-word-count-value">12 слов</b></label>
+            <input id="emergency-word-count" class="word-count-slider" type="range" min="9" max="24" value="12" step="1">
+            <p class="auth-note">Фраза показывается один раз. Она станет доступна только после двух разных чистых PIN-сессий и двух ошибок при следующем входе.</p>
+            <label class="danger-consent"><input id="destruction-consent" type="checkbox"> <span>Я понимаю: после третьей неверной попытки все данные внутри Safe будут уничтожены, а сам модуль вернётся к чистой настройке.</span></label>
+            <button class="primary-action" type="submit">Создать Safe</button>
+          </form>
+
+          <form id="unlock-form" class="auth-form" hidden>
+            <h2 id="auth-title">Введите PIN</h2>
+            <div class="pin-row" id="unlock-pin" data-pin-input></div>
+            <div class="recovery-row" id="recovery-input" hidden></div>
+            <textarea id="emergency-input" class="emergency-input" rows="4" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Введи аварийную фразу полностью" hidden></textarea>
+            <div class="auth-switch" role="tablist" aria-label="Способ доступа">
+              <button type="button" role="tab" aria-selected="true" data-auth-mode="pin">PIN</button>
+              <button type="button" role="tab" aria-selected="false" data-auth-mode="recovery">Ключ восстановления</button>
+              <button id="emergency-auth-tab" type="button" role="tab" aria-selected="false" data-auth-mode="emergency" hidden>Аварийная фраза</button>
+            </div>
+            <div class="attempt-status">
+              <span><b id="pin-attempts">3</b> попытки PIN</span>
+              <span><b id="key-attempts">1</b> попытка ключа</span>
+            </div>
+            <p id="emergency-offer-note" class="emergency-offer-note" hidden>Две прошлые PIN-сессии были чистыми. Доступна одна попытка аварийной фразы; ошибка не уничтожит данные, последняя PIN-попытка останется.</p>
+            <button class="primary-action" type="submit">Открыть Safe</button>
+            <p class="destruction-warning">После третьей ошибки все данные внутри Safe будут уничтожены; затем можно создать новый Safe</p>
+          </form>
+          <section id="blocked-state" class="auth-form destroyed-state" hidden>
+            <h2>Safe заблокирован</h2>
+            <p>Конфигурация хранилища повреждена или имеет неизвестную версию. Monarch ничего не удалял и не будет создавать новое хранилище поверх существующих данных.</p>
+          </section>
+          <section id="provisioning-state" class="auth-form" hidden>
+            <h2>Создание не завершено</h2>
+            <p>Окно закрылось до подтверждения recovery-ключей. Пользовательских файлов здесь ещё нет; начни создание заново, чтобы получить новый комплект ключей.</p>
+            <button id="restart-provisioning" class="primary-action" type="button">Начать создание заново</button>
+          </section>
+          <p id="auth-error" class="auth-error" role="alert"></p>
+        </div>
+      </section>
+
+      <section id="recovery-screen" class="recovery-screen" hidden>
+        <div class="recovery-sheet">
+          <div class="safe-mark small" aria-hidden="true"><span>M</span></div>
+          <h1>Ключи и аварийная фраза</h1>
+          <p>Они показываются только сейчас. Каждый ключ можно использовать один раз; аварийная фраза откроется лишь после двух чистых PIN-сессий.</p>
+          <h2>Три одноразовых ключа</h2>
+          <ol id="recovery-key-list"></ol>
+          <h2>Аварийная фраза · <span id="emergency-phrase-count"></span></h2>
+          <ol id="emergency-phrase-list" class="emergency-phrase-list"></ol>
+          <label class="danger-consent"><input id="recovery-saved" type="checkbox"> <span>Я записал все три ключа и аварийную фразу вне компьютера. Monarch не сможет показать их повторно.</span></label>
+          <button id="enter-vault" class="primary-action" type="button" disabled>Перейти в Safe</button>
+        </div>
+      </section>
+
+      <section id="vault-screen" class="vault-screen" hidden>
+        <aside class="safe-sidebar">
+          <header class="safe-brand"><div class="safe-mark tiny" aria-hidden="true"><span>M</span></div><strong>Monarch Safe</strong></header>
+          <button id="lock-now-top" class="lock-summary" type="button"><span>Хранилище разблокировано</span><b>Заблокировать сейчас</b></button>
+          <nav id="section-list" aria-label="Разделы Safe"></nav>
+          <button id="edit-section" class="ghost-action" type="button" hidden>✦ Настроить раздел</button>
+          <button id="new-section" class="ghost-action" type="button">＋ Новый раздел</button>
+          <div class="safe-capacity"><span>Зашифровано локально</span><div><i id="capacity-fill"></i></div><small id="capacity-label">0 Б</small></div>
+        </aside>
+
+        <div class="safe-workspace">
+          <header class="safe-toolbar">
+            <label class="search-control"><span class="sr-only">Поиск</span><input id="safe-search" type="search" placeholder="Поиск" autocomplete="off"></label>
+            <label><span class="sr-only">Тип</span><select id="type-filter"><option value="all">Все типы</option><option value="text">Текст и код</option><option value="image">Изображения</option><option value="media">Аудио и видео</option><option value="pdf">PDF</option><option value="archive">Архивы Safe</option><option value="binary">Другие файлы</option></select></label>
+            <label><span class="sr-only">Сортировка</span><select id="sort-order"><option value="updated-desc">Сначала новые</option><option value="name-asc">По имени</option><option value="size-desc">По размеру</option><option value="type-asc">По типу</option></select></label>
+            <span class="toolbar-spacer"></span>
+            <button id="new-folder" type="button">Новая папка</button>
+            <button id="new-file" type="button">Новый файл</button>
+            <button id="import-files" type="button">Импорт</button>
+            <button id="archive-files" type="button">Сжать</button>
+            <input id="file-input" type="file" multiple hidden>
+          </header>
+
+          <div class="safe-content">
+            <section class="file-region" id="file-drop-zone">
+              <div class="breadcrumb" id="breadcrumb">Все файлы</div>
+              <table class="file-table">
+                <thead><tr><th class="select-cell"><input id="select-all" type="checkbox" aria-label="Выбрать все файлы"></th><th>Имя</th><th>Тип</th><th>Изменён</th><th>Размер</th></tr></thead>
+                <tbody id="file-list"></tbody>
+              </table>
+              <div id="empty-state" class="empty-state" hidden><strong>Здесь пока пусто</strong><span>Создай файл или перетащи данные в окно. Safe сохранит зашифрованную копию; внешний исходник останется на месте.</span></div>
+              <div id="drop-overlay" class="drop-overlay" hidden>Отпусти файлы — Safe зашифрует их до записи</div>
+            </section>
+
+            <aside class="editor-region" id="editor-region">
+              <div id="editor-empty" class="editor-empty"><strong>Выбери файл</strong><span>Просмотр и редактирование работают внутри изолированного окна Safe.</span></div>
+              <div id="editor-active" hidden>
+                <header class="editor-header"><span id="editor-file-name">—</span><button id="delete-file" type="button" class="danger-button">Удалить</button></header>
+                <div class="editor-tabs" role="tablist"><button type="button" data-editor-tab="edit" aria-selected="true">Редактор</button><button type="button" data-editor-tab="preview" aria-selected="false">Просмотр</button><button id="extract-archive" type="button" hidden>Распаковать</button><button id="save-file" class="save-button" type="button">Сохранить</button></div>
+                <div id="edit-pane" class="edit-pane"><textarea id="text-editor" spellcheck="false"></textarea><textarea id="hex-editor" spellcheck="false" hidden></textarea><div id="binary-summary" class="binary-summary" hidden></div></div>
+                <div id="preview-pane" class="preview-pane" hidden></div>
+                <footer class="editor-meta" id="editor-meta"></footer>
+              </div>
+            </aside>
+          </div>
+
+          <footer class="isolation-bar"><span class="isolation-ok">● Локальный контур Safe открыт</span><span>Внешние открытия и сеть отключены для этого окна</span><button id="lock-now" type="button">Заблокировать</button></footer>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="item-dialog">
+      <form method="dialog" id="item-form">
+        <header><h2 id="item-dialog-title">Новый файл</h2><button id="item-close" type="button" value="cancel" aria-label="Закрыть">×</button></header>
+        <label>Название<input id="item-name" maxlength="160" required autocomplete="off"></label>
+        <label id="item-type-row">Тип<select id="item-type"></select><small id="item-type-hint" class="item-type-hint"></small></label>
+        <label id="item-color-row" hidden>Цвет<input id="item-color" type="color" value="#f59e0b"></label>
+        <menu><button value="cancel" type="button" id="item-cancel">Отмена</button><button id="item-submit" class="primary-action compact" type="submit">Создать</button></menu>
+      </form>
+    </dialog>
+    <dialog id="confirm-dialog">
+      <form method="dialog" id="confirm-form"><h2 id="confirm-title">Подтверждение</h2><p id="confirm-copy"></p><menu><button value="cancel">Отмена</button><button id="confirm-action" value="default" class="danger-button">Удалить</button></menu></form>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>

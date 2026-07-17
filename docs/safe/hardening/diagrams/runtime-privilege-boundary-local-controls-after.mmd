@@ -1,0 +1,36 @@
+flowchart LR
+  User["User input and local files"]
+
+  subgraph RendererBoundary["Safe BrowserWindow sandbox"]
+    Renderer["Safe renderer and preload bridge"]
+  end
+
+  subgraph StandardUserBoundary["Monarch processes under the standard-user boundary (inferred; verify)"]
+    Main["Electron main process<br/>launch, lifecycle, native confirmation"]
+    Protocol["Versioned Safe message schema<br/>typed actions and bounded payloads"]
+    Policy["Runtime policy gate<br/>action class, object ID, capability, state"]
+    Runtime["Node utilityProcess<br/>vault engine and serialized queue"]
+  end
+
+  SafeRoot["Safe vault directory"]
+  OtherResources["Other user files, registry, IPC, and network"]
+  Status["Truthful runtime status<br/>OS isolation: not attested"]
+
+  User --> Renderer
+  Renderer -->|"versioned MessagePort request"| Protocol
+  Protocol --> Policy
+  Renderer -->|"native confirmation request"| Main
+  Main -->|"action and resource bound capability"| Policy
+  Policy -->|"allowlisted operation"| Runtime
+  Runtime -->|"encrypted vault I/O"| SafeRoot
+  Runtime --> Status
+  Runtime -.->|"residual ambient account authority"| OtherResources
+
+  classDef constrained fill:#fff7ed,stroke:#f97316,color:#111827
+  classDef privileged fill:#fee2e2,stroke:#dc2626,color:#111827
+  classDef control fill:#fef3c7,stroke:#d97706,color:#111827
+  classDef data fill:#f8fafc,stroke:#64748b,color:#111827
+  class Renderer constrained
+  class Main,Runtime privileged
+  class Protocol,Policy,Status control
+  class SafeRoot,OtherResources data

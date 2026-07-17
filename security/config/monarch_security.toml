@@ -1,0 +1,99 @@
+[model]
+path = "../gemma_models/Gemma_12B/gemma-4-12B-it-Q4_K_M.gguf"
+n_ctx = 2048
+n_threads = 2
+max_tokens = 220
+temperature = 0.1
+unload_after_seconds = 120
+
+[router]
+llm_threshold = 65
+critical_threshold = 85
+allow_llm_under_load = false
+
+[resources]
+high_cpu_percent = 65.0
+high_memory_percent = 82.0
+min_process_poll_seconds = 3.0
+heavy_process_poll_seconds = 12.0
+
+[files]
+max_full_hash_bytes = 268435456
+entropy_sample_bytes = 1048576
+
+[file_watch]
+enabled = true
+paths = [
+  "%USERPROFILE%\\Downloads",
+  "%USERPROFILE%\\Desktop",
+]
+recursive = false
+poll_seconds = 20.0
+max_entries_per_tick = 500
+
+[network]
+enabled = true
+poll_seconds = 45.0
+max_neighbors = 256
+max_connections = 300
+max_listeners = 120
+active_probe_enabled = false
+
+[persistence]
+enabled = true
+poll_seconds = 180.0
+max_entries = 300
+
+[posture]
+enabled = true
+poll_seconds = 300.0
+
+[tui]
+tail_lines = 12
+
+[notifications]
+enabled = true
+min_score = 35
+cooldown_seconds = 60.0
+windows_toast = true
+console_bell = false
+balloon_seconds = 7.0
+
+[policy]
+default_action = "allow"
+destructive_actions_require_user = true
+# Runtime strictness is persisted with integrity in data/state.json.
+# Default: balanced (calm medium protection).
+
+[runtime]
+state_path = "data/state.json"
+audit_log_path = "logs/audit.jsonl"
+incident_log_path = "data/incidents.jsonl"
+quarantine_path = "data/quarantine"
+quarantine_manifest_path = "data/quarantine.jsonl"
+response_log_path = "data/response_proposals.jsonl"
+response_action_log_path = "data/response_actions.jsonl"
+response_service_heartbeat_path = "data/response_service_heartbeat.json"
+emergency_log_path = "data/emergency.jsonl"
+security_pin_path = "data/security_pin.json"
+network_history_path = "data/network_history.jsonl"
+pid_path = "data/protector.pid"
+control_path = "data/protector.stop"
+control_token_path = "data/protector.control.key"
+heartbeat_path = "data/protector_heartbeat.json"
+integrity_key_path = "data/integrity.key"
+max_audit_log_bytes = 10485760
+max_incident_log_bytes = 4194304
+max_incident_archives = 4
+max_live_incidents = 256
+stdout_events = false
+process_monitor_enabled = true
+device_monitor_enabled = true
+install_monitor_enabled = true
+self_protection_enabled = true
+device_poll_seconds = 60.0
+install_poll_seconds = 180.0
+self_protection_poll_seconds = 60.0
+emergency_auto_lock_enabled = true
+emergency_recovery_seconds = 600
+max_events_per_tick = 25

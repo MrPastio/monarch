@@ -1,0 +1,237 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "hardening_20260711_monarch_safe",
+  "sourceEvidence": {
+    "kind": "document_collection",
+    "label": "Monarch Safe current source, focused tests, and Electron QA",
+    "collectionSha256": "d1d935816722d9217c777a5b9139f5184371e1fc66ffd1e197c9f7075e3946c7",
+    "artifactCount": 9,
+    "targetRevision": "e4f7005754671207bce8b8d17b784929221a586e",
+    "sourceDrift": "present"
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "Two structural opportunities remain: remove ambient OS authority from the key-owning runtime and bound plaintext/decoder authority with a streaming content pipeline."
+  },
+  "constraints": {
+    "profile": "maximum_isolation_local_first",
+    "changeHorizons": ["incremental", "medium_term", "foundational"],
+    "nonNegotiables": [
+      "Vault content and keys remain outside the shared Monarch HTTP API, Oscar, and module kernel.",
+      "Normal content operations do not launch external Windows programs or require cloud services.",
+      "Physical erasure limitations on SSDs, backups, snapshots, and copied source files remain explicit."
+    ],
+    "assumptions": [
+      "Windows is the first supported platform.",
+      "No measured latency, memory, packaging, or compatibility budget was supplied.",
+      "The current file hashes identify the reviewed working tree because the base revision does not contain the Safe implementation."
+    ]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "runtime-privilege-boundary",
+      "title": "Remove ambient OS authority from the key-owning runtime",
+      "summary": "Move key and ciphertext operations from a same-user Electron utility process into a Windows-restricted helper with a narrow versioned protocol.",
+      "diagnosis": "The current dedicated process separates failures but still runs Node with the Windows user's ambient authority; renderer controls do not establish an OS privilege boundary.",
+      "evidence": [
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "SRC-01",
+          "path": "desktop/electron/main.mjs",
+          "claim": "The desktop main process forks the Safe runtime as an Electron utility process and passes device/capability keys over a private MessagePort."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "evidenceId": "SRC-02",
+          "path": "desktop/safe/runtime.mjs",
+          "claim": "The key-owning runtime is a Node process with a serialized message queue and no source-visible Windows restricted-token or AppContainer setup."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "experiment",
+          "evidenceId": "EXP-01",
+          "claim": "A temporary local Electron 42 utility probe observed Node 24.17.0 without process.permission; the unretained probe requires revalidation."
+        },
+        {
+          "claimType": "inferred",
+          "sourceKind": "coverage",
+          "evidenceId": "QA-01",
+          "path": "output/safe-qa/qa-report.json",
+          "claim": "Renderer network, popup, clipboard, write, and delete gates passed, but those checks do not constrain the utility process's OS token."
+        }
+      ],
+      "desiredInvariants": [
+        "The process that holds the master key cannot open arbitrary filesystem paths, create child processes, access the network, or use unrelated user credentials.",
+        "Every privileged operation is represented by a versioned, bounded message whose resource identity is validated inside the restricted helper.",
+        "Closing, locking, or crashing the Safe shell terminates the key-owning helper and clears its owned key material."
+      ],
+      "proposalPath": "proposals/runtime-privilege-boundary.md",
+      "options": [
+        {
+          "optionId": "dedicated-utility-local-controls",
+          "title": "Dedicated Electron utility with strengthened local controls",
+          "kind": "baseline",
+          "summary": "Retain the current process model, capability gates, allowlists, immutable storage generations, and regression coverage.",
+          "diagramPaths": {
+            "before": "diagrams/runtime-privilege-boundary-before.mmd",
+            "after": "diagrams/runtime-privilege-boundary-local-controls-after.mmd"
+          },
+          "evidenceCoverage": [
+            {"evidenceId": "SRC-01", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "The private channel and main-owned capabilities narrow dangerous operations but do not remove ambient OS authority."},
+            {"evidenceId": "SRC-02", "effect": "unaffected", "tacticalFixRequired": true, "rationale": "The same Node utility process retains the user's ambient token."},
+            {"evidenceId": "EXP-01", "effect": "unaffected", "tacticalFixRequired": false, "rationale": "This option does not add a permission mechanism unavailable in the observed runtime."},
+            {"evidenceId": "QA-01", "effect": "addresses", "tacticalFixRequired": true, "rationale": "The existing application-level gates remain directly testable."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Capability and resource gates reduce accidental or renderer-originated mutation, while same-user OS authority remains.", "validationPlan": "Keep IPC allowlist and signed-mutation QA, then inventory every Node/OS capability reachable from the utility process."},
+            {"dimension": "performance", "direction": "neutral", "confidence": "medium", "basis": "source-derived", "assessment": "No additional process hop or serialization format is introduced.", "validationPlan": "Retain current unlock and 1/64/256 MiB operation baselines."},
+            {"dimension": "memory", "direction": "neutral", "confidence": "medium", "basis": "source-derived", "assessment": "The existing utility and whole-buffer allocation profile is preserved.", "validationPlan": "Record utility and renderer peak RSS for representative content."},
+            {"dimension": "reliability", "direction": "improves", "confidence": "medium", "basis": "measured", "assessment": "Current tests show serialized auto-lock and immutable generation recovery, but OS authority is not part of that result.", "validationPlan": "Continue commit-point and forced-close tests on the production Electron path."},
+            {"dimension": "operability", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "Packaging remains unchanged and current logs/QA remain usable.", "validationPlan": "Confirm existing desktop build and support workflow remain unchanged."},
+            {"dimension": "migration", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "No storage or IPC migration is required.", "validationPlan": "Run full repository verification and Electron QA on every change."}
+          ],
+          "residualRisks": [
+            "A compromised same-user utility process retains ambient filesystem, process, and user-token authority.",
+            "Calling the dedicated utility an OS sandbox would remain inaccurate."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": ["desktop/electron/main.mjs", "desktop/safe/runtime.mjs", "desktop/safe/preload.cjs"],
+            "workPackages": ["Maintain local capability, resource, lifecycle, and regression controls."],
+            "acceptanceCriteria": ["Existing focused tests and Electron QA remain green."],
+            "migrationNotes": [],
+            "rollback": "Revert individual local controls only with equivalent coverage and an explicit boundary update."
+          }
+        },
+        {
+          "optionId": "windows-restricted-safe-helper",
+          "title": "Windows AppContainer or restricted-token Safe helper",
+          "kind": "isolation",
+          "summary": "Move master-key and ciphertext operations into a minimal native helper with no ambient network, process, or arbitrary filesystem authority.",
+          "diagramPaths": {
+            "before": "diagrams/runtime-privilege-boundary-before.mmd",
+            "after": "diagrams/runtime-privilege-boundary-appcontainer-helper-after.mmd"
+          },
+          "evidenceCoverage": [
+            {"evidenceId": "SRC-01", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Main becomes a broker to a restricted helper; main-owned user confirmation remains useful."},
+            {"evidenceId": "SRC-02", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Key ownership leaves the ambient Node utility process."},
+            {"evidenceId": "EXP-01", "effect": "mitigates", "tacticalFixRequired": false, "rationale": "The design no longer depends on Electron utility support for Node's permission model."},
+            {"evidenceId": "QA-01", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Existing renderer checks stay necessary and gain an OS-level containment layer."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "analogous", "assessment": "A correctly configured restricted token removes classes of ambient authority from the key owner; the broker and Windows kernel become explicit trusted components.", "validationPlan": "Capture the helper token/capability set and verify denied filesystem, process, registry, credential, and network operations on supported Windows builds."},
+            {"dimension": "performance", "direction": "regresses", "confidence": "medium", "basis": "hypothetical", "assessment": "A versioned broker protocol adds hops and copies unless shared-memory/range transfer is carefully bounded.", "validationPlan": "Compare unlock, 1 MiB random read, 64 MiB sequential read, and lock latency to the utility baseline."},
+            {"dimension": "memory", "direction": "regresses", "confidence": "medium", "basis": "hypothetical", "assessment": "A native helper adds a process and bounded IPC staging buffers, while potentially allowing the Node utility to disappear.", "validationPlan": "Measure combined private bytes and ensure backpressure limits in-flight buffers."},
+            {"dimension": "reliability", "direction": "improves", "confidence": "medium", "basis": "analogous", "assessment": "Parser/runtime failures can terminate a smaller component, but protocol versioning and restart recovery become new failure modes.", "validationPlan": "Force helper termination at every commit phase and verify the previous authenticated generation remains readable."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "high", "basis": "analogous", "assessment": "Signing, packaging, Windows policy diagnostics, crash collection, and version skew add support cost.", "validationPlan": "Prototype install, upgrade, repair, and diagnostics on the minimum and current Windows versions."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "The runtime protocol and ownership boundary change even if the encrypted storage format stays compatible.", "validationPlan": "Ship a dual-run read-only compatibility phase, compare results, then gate write ownership behind a rollback flag."}
+          ],
+          "residualRisks": [
+            "The main-process broker can still misuse any capability the helper accepts.",
+            "Administrator/kernel compromise and plaintext visible to an authorized viewer remain outside the helper boundary.",
+            "AppContainer/MSIX compatibility and safeStorage access require prototype evidence."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": ["desktop/electron/main.mjs", "desktop/safe/runtime.mjs", "desktop/safe/vault.mjs", "new Windows helper and versioned IPC schema"],
+            "workPackages": ["Prototype token/profile", "Define versioned bounded protocol", "Move key/storage ownership", "Add lifecycle and denial tests", "Stage compatibility rollout"],
+            "acceptanceCriteria": ["The key-owning helper has no arbitrary filesystem, child-process, credential, or network authority", "Crash-point tests preserve the last committed generation", "The desktop shell can revoke the helper on lock/suspend"],
+            "migrationNotes": ["Preserve the current encrypted format during the first boundary migration where possible."],
+            "rollback": "Keep the current utility runtime behind a release-only compatibility flag until the helper passes data and lifecycle gates."
+          }
+        }
+      ],
+      "recommendedOptionId": "windows-restricted-safe-helper",
+      "recommendation": "For the requested maximum isolation, use the restricted helper after a packaging/token prototype proves compatibility; otherwise retain the baseline without overstating it as an OS sandbox."
+    },
+    {
+      "opportunityId": "bounded-content-pipeline",
+      "title": "Bound plaintext lifetime and decoder authority",
+      "summary": "Replace whole-file transfers and same-renderer decoding with authenticated chunks, range IPC, backpressure, and decoder components that cannot mutate vault state.",
+      "diagnosis": "Current size caps and editor limits reduce exposure, but file reads/imports and archives still allocate whole buffers, synchronous compression blocks the runtime, and Chromium decoders share a renderer that owns the request bridge.",
+      "evidence": [
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "SRC-03", "path": "desktop/safe/vault.mjs", "claim": "The vault caps files at 256 MiB and uses authenticated immutable generations, but read/write and gzip/gunzip paths are whole-buffer and compression is synchronous."},
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "SRC-04", "path": "desktop/safe/safe.js", "claim": "The renderer receives complete files, bounds editable text/HEX, and uses Chromium image/media decoding plus a structural PDF summary."},
+        {"claimType": "observed", "sourceKind": "coverage", "evidenceId": "QA-01", "path": "output/safe-qa/qa-report.json", "claim": "Real Electron QA passed image/audio/video/PDF/HEX policy checks and mutation/network gates on small fixtures."},
+        {"claimType": "inferred", "sourceKind": "coverage", "evidenceId": "TEST-01", "path": "tests/desktop/safe-vault.test.ts", "claim": "Commit and integrity tests cover local correctness but do not establish large-file memory bounds, decoder containment, or range backpressure."}
+      ],
+      "desiredInvariants": [
+        "No file operation retains more than a configured number of authenticated chunks in each process.",
+        "A decoder receives only the ranges and metadata it needs and has no credential, mutation, filesystem, or network capability.",
+        "Lock or cancel invalidates operation handles, stops future range delivery, and clears owned staging buffers after the current bounded commit point.",
+        "Declared MIME never selects a privileged decoder without bounded signature and structural checks."
+      ],
+      "proposalPath": "proposals/bounded-content-pipeline.md",
+      "options": [
+        {
+          "optionId": "bounded-whole-buffer-baseline",
+          "title": "Retain whole-file operations with strict caps",
+          "kind": "baseline",
+          "summary": "Keep immutable generations, 256 MiB operations, bounded editors, strict archive validation, and current Chromium preview policy.",
+          "diagramPaths": {"before": "diagrams/bounded-content-pipeline-before.mmd", "after": "diagrams/bounded-content-pipeline-bounded-current-after.mmd"},
+          "evidenceCoverage": [
+            {"evidenceId": "SRC-03", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Strict bounds and immutable generations limit corruption but preserve whole-buffer allocation and synchronous compression."},
+            {"evidenceId": "SRC-04", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Editor caps avoid full HEX/text expansion, while full plaintext still crosses into the renderer."},
+            {"evidenceId": "QA-01", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Current supported preview and bridge policies remain directly covered."},
+            {"evidenceId": "TEST-01", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Existing tests protect commit correctness but need memory/latency benchmarks."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Current caps and mutation capabilities constrain known operations, but decoders and bridge remain co-resident.", "validationPlan": "Keep MIME mismatch, malformed input, bridge-surface, and exact-limit regression cases."},
+            {"dimension": "performance", "direction": "neutral", "confidence": "medium", "basis": "source-derived", "assessment": "Small-file paths remain simple; synchronous archive work can still stall the runtime.", "validationPlan": "Measure responsiveness and lock latency during representative archive creation/extraction."},
+            {"dimension": "memory", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Peak memory scales with complete plaintext/ciphertext copies up to the operation limit.", "validationPlan": "Record renderer/runtime peak RSS at 1, 64, and 256 MiB and set a release threshold."},
+            {"dimension": "reliability", "direction": "improves", "confidence": "high", "basis": "measured", "assessment": "Immutable generation and auto-lock serialization tests preserve the prior committed version on modeled failures.", "validationPlan": "Add disk-full and process-termination cases around every commit point."},
+            {"dimension": "operability", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "No new parser service or protocol is introduced.", "validationPlan": "Keep current QA artifacts and error-code observability."},
+            {"dimension": "migration", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "The current manifest/blob format and renderer contract remain unchanged.", "validationPlan": "Run the complete focused suite and Electron QA."
+            }
+          ],
+          "residualRisks": ["Whole-file plaintext copies remain in runtime and renderer memory", "Synchronous compression can delay lock handling", "A decoder compromise occurs in a renderer that can still invoke non-mutation vault actions"],
+          "implementationReadiness": {
+            "affectedComponents": ["desktop/safe/vault.mjs", "desktop/safe/safe.js"],
+            "workPackages": ["Maintain strict caps and expand malformed-input and resource benchmarks."],
+            "acceptanceCriteria": ["Exact-limit operations remain bounded and current QA passes."],
+            "migrationNotes": [],
+            "rollback": "Revert only focused cap or parser-policy changes with equivalent bounds."
+          }
+        },
+        {
+          "optionId": "chunked-range-decoder-workers",
+          "title": "Chunked AEAD, range IPC, and capability-free decoder workers",
+          "kind": "structural",
+          "summary": "Use authenticated chunks and operation handles with backpressure; place format parsers/decoders behind read-only range capabilities and no vault mutation bridge.",
+          "diagramPaths": {"before": "diagrams/bounded-content-pipeline-before.mmd", "after": "diagrams/bounded-content-pipeline-streaming-workers-after.mmd"},
+          "evidenceCoverage": [
+            {"evidenceId": "SRC-03", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Chunked storage and asynchronous archive streaming bound allocations and keep existing generation commits necessary."},
+            {"evidenceId": "SRC-04", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Range-only decoders no longer share mutation authority; UI editor caps remain useful."},
+            {"evidenceId": "QA-01", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Existing small-format QA becomes a compatibility baseline, not proof of streaming containment."},
+            {"evidenceId": "TEST-01", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Existing commit tests remain necessary while chunk reorder/truncation/backpressure coverage is added."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Plaintext lifetime and decoder authority are reduced; parser defects remain possible but have less authority and bounded input windows.", "validationPlan": "Verify worker/process tokens expose only read-range/cancel and run malformed corpus cases with network/filesystem/mutation denial checks."},
+            {"dimension": "performance", "direction": "unknown", "confidence": "medium", "basis": "hypothetical", "assessment": "Backpressure avoids large stalls but adds per-chunk AEAD and IPC overhead; sequential media may improve while tiny files may regress.", "validationPlan": "Benchmark candidate 256 KiB, 1 MiB, and 4 MiB chunks for throughput, first-render latency, and lock latency."},
+            {"dimension": "memory", "direction": "improves", "confidence": "high", "basis": "analogous", "assessment": "A fixed in-flight window changes peak allocation from file-sized to chunk-window-sized plus decoder state.", "validationPlan": "Require combined peak RSS to remain under the agreed threshold for 256 MiB sequential reads and archives."},
+            {"dimension": "reliability", "direction": "improves", "confidence": "medium", "basis": "analogous", "assessment": "Cancellation and parser failure can be contained, while chunk journals, backpressure, and worker restarts add state transitions.", "validationPlan": "Exercise cancel/lock/crash/disk-full at every chunk and manifest commit transition."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "medium", "basis": "hypothetical", "assessment": "Per-operation tracing, worker crash diagnostics, format capability reporting, and corpus maintenance are required.", "validationPlan": "Define stable error codes and a redacted operation trace before rollout."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "A new blob version and range protocol require dual-read compatibility and staged rewrite-on-update.", "validationPlan": "Keep current blobs read-only, write new chunks only after capability negotiation, and verify rollback with mixed-format vaults."}
+          ],
+          "residualRisks": ["Bundled decoders still contain native/parser code", "Plaintext needed for the visible range remains observable to a compromised authorized display path", "Arbitrary formats remain storage-only until a reviewed decoder is added"],
+          "implementationReadiness": {
+            "affectedComponents": ["desktop/safe/vault.mjs", "desktop/safe/runtime.mjs", "desktop/safe/preload.cjs", "desktop/safe/safe.js", "new decoder worker/process boundary"],
+            "workPackages": ["Specify chunk/blob v4", "Add import/read operation handles and backpressure", "Add bounded sniffing", "Separate read-only decoders", "Migrate archive path", "Stage dual-read rollout"],
+            "acceptanceCriteria": ["Peak plaintext allocation is bounded by the configured chunk window", "Decoder components cannot call vault mutation, filesystem, network, or credential APIs", "Lock/cancel stops future range delivery and current committed generations remain readable"],
+            "migrationNotes": ["Preserve v3 read support until all active vaults have completed a verified migration."],
+            "rollback": "Keep v3 read/write enabled behind a compatibility gate until v4 mixed-vault tests and resource thresholds pass."
+          }
+        }
+      ],
+      "recommendedOptionId": "chunked-range-decoder-workers",
+      "recommendation": "Adopt the streaming worker design incrementally after resource thresholds are set; retain the current caps as tactical protections throughout migration."
+    }
+  ],
+  "openQuestions": [
+    "Is MSIX/AppContainer packaging acceptable, or must the restricted helper support the current unpackaged desktop distribution?",
+    "What peak-RSS and lock-latency thresholds must hold for 1 MiB, 64 MiB, and 256 MiB workloads?",
+    "Should a failed recovery-key entry be limited per runtime, per launch, or for the vault lifetime?",
+    "Which additional formats justify a bundled offline decoder after the read-only range boundary exists?"
+  ]
+}

@@ -1,0 +1,32 @@
+flowchart LR
+  U["Untrusted imported file"]
+
+  subgraph R["Safe renderer boundary"]
+    UI["Safe renderer"]
+    ROUTE["Preview routing"]
+    BOUNDED["Bounded text, HEX, and PDF summary"]
+    CHROMIUM["Chromium image and media decoders"]
+  end
+
+  subgraph V["Safe runtime boundary"]
+    API["Vault content API"]
+    CAP["256 MiB file cap"]
+    ARCHIVE["Synchronous whole-buffer archive codec"]
+  end
+
+  subgraph S["Encrypted storage boundary"]
+    GENERATION["Authenticated immutable blob generation"]
+    MANIFEST["Authenticated manifest"]
+  end
+
+  U -->|"complete File bytes"| UI
+  UI -->|"whole-buffer import"| API
+  CAP --> API
+  API -->|"encrypt complete buffer"| GENERATION
+  API --> MANIFEST
+  GENERATION -->|"decrypt complete buffer"| API
+  API -->|"complete plaintext response"| UI
+  UI --> ROUTE
+  ROUTE --> BOUNDED
+  ROUTE -->|"complete object URL"| CHROMIUM
+  API <--> ARCHIVE

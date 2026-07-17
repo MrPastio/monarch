@@ -1,0 +1,13 @@
+flowchart LR
+  A["Unprivileged collectors"] --> B["Event bus"]
+  B --> C["Correlation + risk 0-800"]
+  C --> D["Incident store"]
+  D --> E["Monarch UI / notifications"]
+  D --> L["Advisory LLM"]
+  L --> P["Response proposal"]
+  E --> G["User approval / Security PIN"]
+  P --> H["Deterministic response broker"]
+  G --> H
+  H --> I["Privileged Windows service"]
+  I --> J["Quarantine / firewall / process containment"]
+  I --> K["Rollback + evidence vault"]

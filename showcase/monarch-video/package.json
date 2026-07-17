@@ -1,0 +1,51 @@
+{
+  "name": "monarch-video",
+  "version": "1.0.0",
+  "description": "Animated 2D presentation of the Monarch local AI ecosystem.",
+  "repository": {},
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@remotion/cli": "4.0.489",
+    "@remotion/media": "4.0.489",
+    "@remotion/transitions": "4.0.489",
+    "lucide-react": "^0.468.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.489"
+  },
+  "devDependencies": {
+    "@remotion/eslint-config-flat": "4.0.489",
+    "@types/react": "19.2.7",
+    "@types/web": "0.0.166",
+    "eslint": "9.19.0",
+    "prettier": "3.8.1",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "dev": "remotion studio",
+    "build": "remotion bundle",
+    "render": "remotion render MonarchProject out/monarch-project-presentation.mp4",
+    "render:tiktok": "remotion render MonarchTikTok out/monarch-tiktok-edit.mp4",
+    "render:phonk": "remotion render MonarchPhonkEdit out/monarch-phonk-edit.mp4",
+    "render:voice": "remotion render MonarchVoiceMode out/monarch-voice-mode-motion-reference.mp4",
+    "still": "remotion still MonarchProject out/preview.png --frame=810",
+    "still:tiktok": "remotion still MonarchTikTok out/tiktok-poster.png --frame=512",
+    "still:phonk:hook": "remotion still MonarchPhonkEdit out/phonk-hook.png --frame=28",
+    "still:phonk:modules": "remotion still MonarchPhonkEdit out/phonk-modules.png --frame=146",
+    "still:phonk:poster": "remotion still MonarchPhonkEdit out/phonk-poster.png --frame=420",
+    "stills:phonk": "npm run still:phonk:hook && npm run still:phonk:modules && npm run still:phonk:poster",
+    "still:voice:idle": "remotion still MonarchVoiceMode out/voice-state-01-idle.png --frame=42",
+    "still:voice:listening": "remotion still MonarchVoiceMode out/voice-state-02-listening.png --frame=126",
+    "still:voice:thinking": "remotion still MonarchVoiceMode out/voice-state-03-thinking.png --frame=210",
+    "still:voice:speaking": "remotion still MonarchVoiceMode out/voice-state-04-speaking.png --frame=294",
+    "still:voice:paused": "remotion still MonarchVoiceMode out/voice-state-05-paused.png --frame=378",
+    "stills:voice": "npm run still:voice:idle && npm run still:voice:listening && npm run still:voice:thinking && npm run still:voice:speaking && npm run still:voice:paused",
+    "audio:phonk": "python scripts/generate_phonk.py",
+    "upgrade": "remotion upgrade",
+    "lint": "eslint src && tsc"
+  },
+  "sideEffects": [
+    "*.css"
+  ]
+}

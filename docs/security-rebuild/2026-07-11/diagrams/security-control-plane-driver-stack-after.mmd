@@ -1,0 +1,8 @@
+flowchart LR
+  A["Minifilter / ETW / WFP collectors"] --> B["Protected local event channel"]
+  B --> C["Correlation + risk 0-800"]
+  C --> D["Incident store"]
+  D --> E["Unprivileged UI / advisory LLM"]
+  E --> F["Policy and approval broker"]
+  F --> G["Signed privileged service / driver actions"]
+  G --> H["Containment and rollback"]

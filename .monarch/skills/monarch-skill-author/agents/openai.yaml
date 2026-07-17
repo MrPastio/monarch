@@ -1,0 +1,6 @@
+interface:
+  display_name: "Monarch Skill Author"
+  short_description: "Builds safe local Agent Skills for Monarch"
+  default_prompt: "Use $monarch-skill-author to create or improve a local Monarch skill."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,8 @@
+flowchart LR
+  A["File / process / network / persistence sensors"] --> B["RuleEngine 0-100"]
+  B --> C["PolicyEngine"]
+  C --> D["Optional advisory LLM"]
+  C --> E["Audit JSONL"]
+  C --> F["One-way notification"]
+  G["Monarch UI"] --> H["CLI bridge"]
+  H --> A

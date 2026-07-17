@@ -1,0 +1,6 @@
+flowchart LR
+  A["Existing sensors"] --> B["RuleEngine + local correlation"]
+  B --> C["Incident JSON store"]
+  C --> D["UI prompts"]
+  D --> E["Existing CLI process"]
+  E --> F["Allowlisted reversible actions"]

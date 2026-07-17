@@ -1,0 +1,114 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "monarch-security-rebuild-20260711",
+  "sourceEvidence": {
+    "kind": "source_collection",
+    "label": "Current Monarch Security implementation",
+    "collectionSha256": "382d9429807092fca0726938e82257f07fa750a23040bde77219d23b3532c354",
+    "artifactCount": 14,
+    "sourceDrift": "present",
+    "targetRevision": "e4f7005754671207bce8b8d17b784929221a586e"
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "The current scanner and agent guard should evolve into an incident-centered control plane with a separate response broker and privileged Windows service."
+  },
+  "constraints": {
+    "profile": "balanced",
+    "changeHorizons": ["incremental", "medium_term", "foundational"],
+    "nonNegotiables": [
+      "Local-first by default",
+      "LLM output cannot independently authorize containment",
+      "Destructive actions require the user",
+      "Existing scans and Agent Guard remain available during migration"
+    ],
+    "assumptions": ["No measured latency, resource or false-positive budget was supplied."]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "security-control-plane",
+      "title": "Incident-centered protection control plane",
+      "summary": "Correlate sensor evidence into durable incidents and isolate privileged response authority behind a broker/service boundary.",
+      "diagnosis": "The current supervisor assesses independent events and ends in audit plus notification; it has no durable incident lifecycle, correlation graph or privileged reversible action boundary.",
+      "evidence": [
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E01", "path": "security/src/monarch_security/supervisor.py", "claim": "Events are independently assessed, audited and notified."},
+        {"claimType": "observed", "sourceKind": "source", "evidenceId": "E02", "path": "security/src/monarch_security/events.py", "claim": "RuleAssessment stores a single 0-100 score."},
+        {"claimType": "inferred", "sourceKind": "source", "evidenceId": "E08", "path": "src/modules/security/manifest.ts", "claim": "The capability surface has scans and controls but no incident lifecycle or response proposal API."},
+        {"claimType": "observed", "sourceKind": "experiment", "evidenceId": "E09", "path": "audit/security-ux-audit.md", "claim": "The live stopped-to-running flow reports PID and CLI status without protection coverage, warm-up state or incident workflow."}
+      ],
+      "desiredInvariants": [
+        "Every detection becomes a durable incident with evidence and state history.",
+        "Emergency risk requires deterministic corroboration and cannot be created by LLM output alone.",
+        "Every system-changing response is typed, scoped, audited and executed through a least-privilege broker/service boundary.",
+        "Destructive actions require explicit user confirmation and Security PIN.",
+        "The UI exposes a truthful protection state, coverage, degraded sensors and pending user decisions."
+      ],
+      "proposalPath": "proposals/security-control-plane.md",
+      "options": [
+        {
+          "optionId": "harden-monolith",
+          "title": "Harden the current monolith",
+          "kind": "incremental",
+          "summary": "Add incident state and limited actions to the existing Python runtime.",
+          "diagramPaths": {"before": "diagrams/security-control-plane-before.mmd", "after": "diagrams/security-control-plane-harden-monolith-after.mmd"},
+          "evidenceCoverage": [{"evidenceId": "E01", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Adds incident state but keeps authority concentrated."}],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "Incident handling improves, but the scanner process gains privileged authority.", "validationPlan": "Threat-model every action and run adversarial replay."},
+            {"dimension": "performance", "direction": "neutral", "confidence": "low", "basis": "hypothetical", "assessment": "No process hop is added; correlation cost is unknown.", "validationPlan": "Benchmark idle and burst CPU."},
+            {"dimension": "memory", "direction": "neutral", "confidence": "low", "basis": "hypothetical", "assessment": "Only incident state is added.", "validationPlan": "Measure RSS with retained incidents."},
+            {"dimension": "reliability", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "One process owns more failure-sensitive behavior.", "validationPlan": "Inject scanner and action failures."},
+            {"dimension": "operability", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "Deployment stays simple.", "validationPlan": "Exercise upgrade and rollback."},
+            {"dimension": "migration", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Maximum code reuse.", "validationPlan": "Run existing Security tests unchanged."}
+          ],
+          "residualRisks": ["Ambient authority remains in the long-lived scanner process."],
+          "implementationReadiness": {"affectedComponents": ["security/src/monarch_security"], "workPackages": ["Incident store", "Limited reversible actions"], "acceptanceCriteria": ["Incidents persist and actions roll back"], "migrationNotes": ["Use only for read-only Milestone 1"], "rollback": "Disable action capabilities."}
+        },
+        {
+          "optionId": "broker-service",
+          "title": "Local response broker plus privileged Windows service",
+          "kind": "isolation",
+          "summary": "Keep UI, collectors and LLM unprivileged; validate typed proposals before a narrow service executes reversible actions.",
+          "diagramPaths": {"before": "diagrams/security-control-plane-before.mmd", "after": "diagrams/security-control-plane-broker-service-after.mmd"},
+          "evidenceCoverage": [{"evidenceId": "E01", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Incident correlation and an owned action boundary replace the terminal notification path."}],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "Removes ambient administrator authority from UI/model paths.", "validationPlan": "Fuzz IPC and prove unknown/replayed proposals are rejected."},
+            {"dimension": "performance", "direction": "regresses", "confidence": "low", "basis": "hypothetical", "assessment": "Adds serialization and IPC on response actions, not passive collection.", "validationPlan": "Measure sensor-to-incident and approval-to-action latency."},
+            {"dimension": "memory", "direction": "regresses", "confidence": "medium", "basis": "hypothetical", "assessment": "Adds one service and bounded queues.", "validationPlan": "Measure combined idle and burst RSS."},
+            {"dimension": "reliability", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "Separates scanner/UI failures from privileged action execution and rollback.", "validationPlan": "Crash each component during active containment."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Requires service install, health telemetry and recovery tooling.", "validationPlan": "Test clean install, upgrade, disable and uninstall."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Requires new contracts and shadow-mode rollout.", "validationPlan": "Preserve old capabilities and compare shadow decisions."}
+          ],
+          "residualRisks": ["The broker and service become critical trusted components.", "User-mode collectors still miss some short-lived activity."],
+          "implementationReadiness": {"affectedComponents": ["security/src/monarch_security", "src/modules/security", "src/ui/public/modules/security-pane.js"], "workPackages": ["Incident core", "Broker", "Windows service", "UI lifecycle"], "acceptanceCriteria": ["LLM/UI cannot directly perform privileged actions", "Every action expires or rolls back"], "migrationNotes": ["Start in advisory shadow mode"], "rollback": "Disable enforcement, restore active controls, remove service."}
+        },
+        {
+          "optionId": "driver-stack",
+          "title": "Driver-assisted endpoint stack",
+          "kind": "foundational",
+          "summary": "Add minifilter, ETW and WFP visibility/enforcement around the same incident core.",
+          "diagramPaths": {"before": "diagrams/security-control-plane-before.mmd", "after": "diagrams/security-control-plane-driver-stack-after.mmd"},
+          "evidenceCoverage": [{"evidenceId": "E04", "effect": "addresses", "tacticalFixRequired": true, "rationale": "Closes snapshot visibility gaps but still needs user-mode policy and recovery."}],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "medium", "basis": "analogous", "assessment": "Best visibility and pre-execution enforcement.", "validationPlan": "Replay short-lived network and ransomware activity."},
+            {"dimension": "performance", "direction": "unknown", "confidence": "low", "basis": "hypothetical", "assessment": "Kernel callbacks affect hot paths.", "validationPlan": "Benchmark file, process and network workloads."},
+            {"dimension": "memory", "direction": "regresses", "confidence": "low", "basis": "hypothetical", "assessment": "Adds kernel buffers and service queues.", "validationPlan": "Measure nonpaged pool and service RSS."},
+            {"dimension": "reliability", "direction": "regresses", "confidence": "high", "basis": "analogous", "assessment": "Driver faults can affect the OS.", "validationPlan": "Driver Verifier and Windows-version stress matrix."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Requires signing, compatibility and crash-response programs.", "validationPlan": "Validate signed install/update/rollback."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "Largest architectural and deployment change.", "validationPlan": "Prototype one collector after Option 2 stabilizes."}
+          ],
+          "residualRisks": ["Kernel attack surface and workstation stability risk."],
+          "implementationReadiness": {"affectedComponents": ["new signed Windows drivers", "new privileged service"], "workPackages": ["Research prototype", "Signing and compatibility program"], "acceptanceCriteria": ["Measured visibility benefit justifies driver risk"], "migrationNotes": ["Do not start before user-mode baselines exist"], "rollback": "Disable and uninstall driver packages."}
+        }
+      ],
+      "recommendedOptionId": "broker-service",
+      "recommendation": "Use the broker/service architecture, with a read-only incident core as the first milestone and driver components only when measurements justify them."
+    }
+  ],
+  "openQuestions": [
+    "Required response latency",
+    "Per-process firewall versus WFP scope",
+    "Allowed emergency network blast radius",
+    "Security PIN recovery policy"
+  ]
+}

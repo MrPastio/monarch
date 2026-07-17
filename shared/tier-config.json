@@ -1,0 +1,79 @@
+{
+  "tiers": {
+    "reasoning": {
+      "keywords": [
+        "подумай пошагово",
+        "deep reasoning",
+        "сложная логика",
+        "математическое доказательство",
+        "докажи",
+        "solve rigorously",
+        "prove rigorously",
+        "step by step"
+      ],
+      "minLength": 0
+    },
+    "powerful": {
+      "keywords": [
+        "refactor",
+        "debug",
+        "typescript",
+        "javascript",
+        "python",
+        "api",
+        "json schema",
+        "архитектур",
+        "безопасност",
+        "security",
+        "router",
+        "runtime"
+      ],
+      "minLength": 300
+    },
+    "medium": {
+      "keywords": [
+        "объясни",
+        "почему",
+        "как",
+        "расскажи",
+        "опиши",
+        "напиши",
+        "what is",
+        "why",
+        "explain",
+        "how"
+      ],
+      "minLength": 100
+    },
+    "weak": {
+      "keywords": [],
+      "minLength": 0
+    }
+  },
+  "scoring": {
+    "thresholds": {
+      "medium": 0.3,
+      "powerful": 0.6
+    },
+    "weights": {
+      "lengthDivisor": 1200,
+      "lengthCap": 0.12,
+      "multipart": 0.12,
+      "context": 0.08,
+      "freshness": 0.12,
+      "structuredOutput": 0.08,
+      "metaBase": 0.02,
+      "metaDepth": 0.22,
+      "metaActionDepth": 0.08,
+      "metaDomainDepth": 0.06,
+      "metaKnowledgeDepth": 0.04,
+      "action": 0.1,
+      "domain": 0.15,
+      "knowledge": 0.06,
+      "depth": 0.26,
+      "highImpact": 0.18,
+      "socialDamping": -0.1
+    }
+  },
+  "tierPriority": ["reasoning", "powerful", "medium", "weak"]
+}
