@@ -584,6 +584,7 @@ internal static class Program
             ProcessStartInfo start = BuildTargetStartInfo(request);
             process = new Process { StartInfo = start };
             if (!process.Start()) throw new InvalidOperationException("Target process did not start.");
+            if (start.RedirectStandardInput) process.StandardInput.Close();
 
             BoundedOutputCollector stdoutCollector = new BoundedOutputCollector(request.maxOutputBytes);
             BoundedOutputCollector stderrCollector = new BoundedOutputCollector(request.maxOutputBytes);
@@ -659,6 +660,7 @@ internal static class Program
         start.WorkingDirectory = request.workingDirectory;
         start.UseShellExecute = false;
         start.CreateNoWindow = true;
+        start.RedirectStandardInput = String.Equals(Path.GetFileName(executable), "git.exe", StringComparison.OrdinalIgnoreCase);
         start.RedirectStandardOutput = true;
         start.RedirectStandardError = true;
         start.StandardOutputEncoding = Encoding.UTF8;
