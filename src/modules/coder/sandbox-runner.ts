@@ -45,6 +45,7 @@ export interface CoderSandboxRunnerOptions {
   monarchRoot: string;
   sourcePath?: string;
   binaryPath?: string;
+  runtimeRoot?: string;
 }
 
 export class CoderSandboxRunner {
@@ -62,7 +63,11 @@ export class CoderSandboxRunner {
     const developmentSource = path.join(process.cwd(), 'tools', 'coder-sandbox', 'MonarchCoderSandbox.cs');
     const sourceOwnerRoot = existsSync(rootedSource) ? this.monarchRoot : process.cwd();
     this.sourceOwnerRoot = path.resolve(sourceOwnerRoot);
-    this.runtimeRoot = path.resolve(path.parse(this.sourceOwnerRoot).root, 'MonarchCoderSandbox');
+    this.runtimeRoot = path.resolve(
+      options.runtimeRoot
+      || process.env.MONARCH_CODER_SANDBOX_ROOT
+      || path.resolve(path.parse(this.sourceOwnerRoot).root, 'MonarchCoderSandbox'),
+    );
     this.sourcePath = path.resolve(options.sourcePath || (existsSync(rootedSource) ? rootedSource : developmentSource));
     this.binaryPath = path.resolve(options.binaryPath || path.join(this.runtimeRoot, 'bin', 'monarch-coder-sandbox.exe'));
     this.jobsRoot = path.resolve(this.runtimeRoot, 'jobs');

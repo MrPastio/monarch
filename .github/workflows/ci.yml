@@ -24,6 +24,7 @@ jobs:
         shell: pwsh
         run: |
           $testTemp = 'C:\monarch-ci-temp'
+          $env:MONARCH_CODER_SANDBOX_ROOT = 'C:\monarch-ci-sandbox'
           New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
           $env:TEMP = $testTemp
           $env:TMP = $testTemp
