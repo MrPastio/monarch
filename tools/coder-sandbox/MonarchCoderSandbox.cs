@@ -180,7 +180,7 @@ internal static class Program
         File.WriteAllText(requestPath, Json.Serialize(request), new UTF8Encoding(false));
         if (!TryLaunchExperimental(request, self, commandLine, readOnlyPaths, out process, out experimentalError))
         {
-            if (experimentalError != 120 && experimentalError != 50)
+            if (experimentalError != 120 && experimentalError != 50 && experimentalError != 126)
                 throw new InvalidOperationException("AppContainer BFS launch failed with Win32 error " + experimentalError + ".");
             request.isolationKind = "windows-appcontainer-acl";
             File.WriteAllText(requestPath, Json.Serialize(request), new UTF8Encoding(false));
