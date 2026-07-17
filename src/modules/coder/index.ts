@@ -757,9 +757,11 @@ export class CoderModule implements MonarchModule {
   }
 
   private async runGitSandbox(project: CoderProject, args: string[], timeoutMs: number, allowNetwork = false): Promise<ProcessResult & { isolation?: unknown }> {
+    const hooksPath = path.join(this.sandbox.runtimeRoot, 'empty-git-hooks').replace(/\\/g, '/');
+    await mkdir(hooksPath, { recursive: true });
     return this.runProjectCommand(project, {
       executable: 'git',
-      args: ['-c', 'core.hooksPath=NUL', '-c', 'diff.external=', ...args],
+      args: ['-c', `core.hooksPath=${hooksPath}`, '-c', 'diff.external=', ...args],
       timeoutMs,
       allowNetwork,
     });

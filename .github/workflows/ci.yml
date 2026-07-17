@@ -29,5 +29,7 @@ jobs:
           $env:TEMP = $testTemp
           $env:TMP = $testTemp
           npm run test:raw -- tests/modules/coder.test.ts tests/app/coder-agent-controller.test.ts --maxWorkers=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run test:raw -- --exclude tests/modules/coder.test.ts --exclude tests/app/coder-agent-controller.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: npm run upload:dry-run
