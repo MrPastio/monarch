@@ -799,7 +799,9 @@ export class CoderModule implements MonarchModule {
   private async assertGitBranch(project: CoderProject, branch: string): Promise<void> {
     if (!branch || branch.length > 200 || branch.startsWith('-')) throw new Error('Git branch name is invalid.');
     const checked = await this.runGitSandbox(project, ['check-ref-format', '--branch', branch], 30_000);
-    if (checked.exitCode !== 0) throw new Error(`Git branch name is invalid: ${branch}`);
+    if (checked.exitCode !== 0) {
+      throw new Error(`Git branch name is invalid: ${branch} (${(checked.stderr || checked.stdout || `exit ${checked.exitCode}`).trim()})`);
+    }
   }
 
   private async gitHead(project: CoderProject): Promise<string | null> {

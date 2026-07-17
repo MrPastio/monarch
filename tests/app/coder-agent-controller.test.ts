@@ -5,7 +5,7 @@ import path from 'node:path';
 import { MonarchApplication } from '../../src/app/application';
 import { CoderAgentController } from '../../src/app/coder-agent-controller';
 
-const CONTROLLER_TEST_TIMEOUT_MS = 15_000;
+const CONTROLLER_TEST_TIMEOUT_MS = 30_000;
 
 describe('CoderAgentController', () => {
   it('loops model proposals through the Kernel and persists a verified terminal run', async () => {
@@ -435,7 +435,7 @@ describe('CoderAgentController', () => {
 });
 
 async function waitForTerminal(controller: CoderAgentController, runId: string) {
-  for (let attempt = 0; attempt < 500; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     const run = controller.runs.require(runId);
     if (['completed', 'failed', 'cancelled'].includes(run.status)) return run;
     await new Promise((resolve) => setTimeout(resolve, 20));

@@ -115,7 +115,7 @@ describe('Coder Mode', () => {
         executable: 'node',
         args: [path.join(project.root, 'hello.js')],
       });
-      expect(nodeAbsoluteFile.ok).toBe(true);
+      expect(nodeAbsoluteFile.ok, nodeAbsoluteFile.summary).toBe(true);
       expect((nodeAbsoluteFile.output as any).stdout.trim()).toBe('MONARCH_CODER_OK');
 
       const dangerous = await execute(module, 'coder.command.run', {
