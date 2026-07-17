@@ -44,6 +44,14 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(definition).toContain('D:\\Programs\\Monarch');
   });
 
+  it('refuses to package private development history', () => {
+    const builder = read('installer/build-installer.ps1');
+    expect(builder).toContain('Test-PrivateSource');
+    expect(builder).toContain('Refusing to package an unfiltered source tree');
+    expect(builder).toContain('scripts\\export-public.ps1');
+    expect(builder).toContain('.monarch-public-snapshot');
+  });
+
   it('ships a portable Oscar environment template', () => {
     const envExample = read('oscar/.env.example');
     expect(envExample).not.toContain('E:\\Monarch');

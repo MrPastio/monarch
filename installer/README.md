@@ -18,4 +18,6 @@ Build the distributable setup executable with Inno Setup 6:
 
 The setup defaults to `E:\Programs\Monarch`, then `D:\Programs\Monarch`, and
 uses the current user's local application directory only when neither data
-drive exists. Existing user configuration and runtime data are not overwritten.
+drive exists. When run from a development tree, the builder first creates a
+temporary validated public snapshot and refuses to package local agent history.
+Existing user configuration and runtime data are not overwritten.

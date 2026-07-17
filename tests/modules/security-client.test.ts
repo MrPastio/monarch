@@ -1,5 +1,9 @@
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SecurityClient, type SecurityCommandResult, type SecurityCommandRunOptions } from '../../src/modules/security/client';
+
+const securityProjectRoot = path.join(tmpdir(), 'monarch-security-client-tests');
 
 class CapturingSecurityClient extends SecurityClient {
   calls: Array<{ args: string[]; options: SecurityCommandRunOptions }> = [];
@@ -20,7 +24,7 @@ class CapturingSecurityClient extends SecurityClient {
 describe('SecurityClient command normalization', () => {
   it('keeps direct numeric arguments inside the Python CLI contract', async () => {
     const client = new CapturingSecurityClient({
-      projectRoot: 'E:\\Monarch\\security',
+      projectRoot: securityProjectRoot,
       pythonPath: 'python',
     });
 
@@ -112,7 +116,7 @@ describe('SecurityClient command normalization', () => {
 
   it('keeps emergency PIN out of process arguments and uses an ephemeral request', async () => {
     const client = new CapturingSecurityClient({
-      projectRoot: 'E:\\Monarch\\security',
+      projectRoot: securityProjectRoot,
       pythonPath: 'python',
     });
     await client.emergencyStatus();
