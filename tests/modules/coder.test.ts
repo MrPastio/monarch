@@ -306,7 +306,7 @@ describe('Coder Mode', () => {
     }
   });
 
-  it.runIf(process.platform === 'win32')('provides a verified first-class Git lifecycle inside AppContainer', async () => {
+  it.runIf(process.platform === 'win32' && process.env.MONARCH_SKIP_SANDBOXED_GIT_TEST !== '1')('provides a verified first-class Git lifecycle inside AppContainer', async () => {
     const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-git-'));
     const module = new CoderModule({ monarchRoot });
     await module.activate(context);

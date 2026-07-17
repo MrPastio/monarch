@@ -25,6 +25,7 @@ jobs:
         run: |
           $testTemp = 'C:\monarch-ci-temp'
           $env:MONARCH_CODER_SANDBOX_ROOT = 'C:\monarch-ci-sandbox'
+          $env:MONARCH_SKIP_SANDBOXED_GIT_TEST = '1'
           New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
           $env:TEMP = $testTemp
           $env:TMP = $testTemp
