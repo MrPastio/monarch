@@ -665,6 +665,22 @@ internal static class Program
         start.RedirectStandardError = true;
         start.StandardOutputEncoding = Encoding.UTF8;
         start.StandardErrorEncoding = Encoding.UTF8;
+        if (start.RedirectStandardInput)
+        {
+            foreach (string variable in new[]
+            {
+                "GIT_CONFIG_GLOBAL",
+                "GIT_CONFIG_SYSTEM",
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            }) start.EnvironmentVariables.Remove(variable);
+            start.EnvironmentVariables["HOME"] = request.jobDirectory;
+            start.EnvironmentVariables["GIT_CONFIG_NOSYSTEM"] = "1";
+            start.EnvironmentVariables["GIT_TERMINAL_PROMPT"] = "0";
+        }
         start.EnvironmentVariables["MONARCH_CODER_SANDBOX"] = String.IsNullOrWhiteSpace(request.isolationKind) ? "windows-appcontainer-acl" : request.isolationKind;
         start.EnvironmentVariables["MONARCH_CODER_PROJECT_ROOT"] = request.projectRoot;
         start.EnvironmentVariables["NODE_OPTIONS"] = "--preserve-symlinks --preserve-symlinks-main";
