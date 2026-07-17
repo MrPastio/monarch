@@ -89,7 +89,7 @@ describe('Coder Mode', () => {
         args: ['-e', 'process.stdout.write("coder-ok")'],
         timeoutMs: 10_000,
       });
-      expect(command.ok).toBe(true);
+      expect(command.ok, command.summary).toBe(true);
       expect((command.output as any).stdout).toBe('coder-ok');
       expect((command.output as any).isolation).toMatchObject({
         verified: true,
@@ -208,6 +208,7 @@ describe('Coder Mode', () => {
       });
       expect(attemptedEscape.ok).toBe(false);
       expect(existsSync(outside)).toBe(false);
+      expect(attemptedEscape.output, attemptedEscape.summary).toBeDefined();
       expect((attemptedEscape.output as any).stderr).toMatch(/EPERM|EACCES/);
       expect((attemptedEscape.output as any).isolation).toMatchObject({
         kind: 'windows-appcontainer-acl',
@@ -255,7 +256,7 @@ describe('Coder Mode', () => {
         timeoutMs: 5_000,
         allowNetwork: false,
       });
-      expect(command.ok).toBe(true);
+      expect(command.ok, command.summary).toBe(true);
       await new Promise((resolve) => setTimeout(resolve, 3_500));
       expect(existsSync(marker)).toBe(false);
     } finally {
@@ -312,7 +313,7 @@ describe('Coder Mode', () => {
     try {
       const project = (await execute(module, 'coder.projects.create', { name: 'Git Lifecycle' })).output as any;
       const initialized = await execute(module, 'coder.git.init', { projectId: project.id, initialBranch: 'main' });
-      expect(initialized.ok).toBe(true);
+      expect(initialized.ok, initialized.summary).toBe(true);
       expect(initialized.output).toMatchObject({ branch: 'main', verified: true });
 
       await execute(module, 'coder.files.write', { projectId: project.id, path: 'README.md', content: '# Coder Git\n' });
