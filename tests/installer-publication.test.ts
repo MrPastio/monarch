@@ -47,10 +47,11 @@ describe('Windows installer and public snapshot boundary', () => {
 
   it('builds a modern Windows setup with optional large models', () => {
     const definition = read('installer/Monarch.iss');
-    expect(definition).toContain('#define AppVersion "0.1.2"');
+    expect(definition).toContain('#define AppVersion "0.1.3"');
     expect(definition).toContain('WizardStyle=modern');
     expect(definition).toContain('PrivilegesRequired=lowest');
     expect(definition).toContain('ArchitecturesInstallIn64BitMode=x64compatible');
+    expect(definition).toContain('tmp\\*');
     expect(definition).toContain('Name: "smallmodel"');
     expect(definition).toContain('Name: "voicestt"');
     expect(definition).toContain('Name: "voicetts"');

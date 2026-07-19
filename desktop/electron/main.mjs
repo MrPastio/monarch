@@ -33,6 +33,7 @@ import { createSafeCapabilityToken } from '../safe/capability-token.mjs';
 import { isAllowedSafeResourceUrl } from './safe-window-policy.mjs';
 import { ownsSafeSessionResource } from './safe-session-policy.mjs';
 import { resolveSafeStorageRoot } from './safe-storage-path.mjs';
+import { waitForRuntimeReady } from './runtime-startup.mjs';
 import {
   createSpeechDiagnosticRecord,
   createSpeechWarmupCoordinator,
@@ -80,6 +81,7 @@ let safeCapabilityKey = null;
 let safeServiceSequence = 0;
 const safeServicePending = new Map();
 let serverProcess = null;
+let runtimeReady = false;
 let runtimeUrl = '';
 let tray = null;
 let quitRequested = false;
@@ -948,27 +950,55 @@ async function startRuntime() {
   const out = await import('node:fs').then((fs) => fs.createWriteStream(outPath, { flags: 'a' }));
   const err = await import('node:fs').then((fs) => fs.createWriteStream(errPath, { flags: 'a' }));
 
-  serverProcess = spawn(nodePath, [tsxCli, mainScript, 'serve', '--port', String(port)], {
+  runtimeReady = false;
+  let spawnError = null;
+  const launchedProcess = spawn(nodePath, [tsxCli, mainScript, 'serve', '--port', String(port)], {
     cwd: workspaceRoot,
     env,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  serverProcess.stdout.pipe(out);
-  serverProcess.stderr.pipe(err);
-  serverProcess.once('exit', (code, signal) => {
-    if (!shuttingDown && !smokeMode) {
+  serverProcess = launchedProcess;
+  launchedProcess.stdout.pipe(out);
+  launchedProcess.stderr.pipe(err);
+  launchedProcess.once('error', (error) => {
+    spawnError = error;
+  });
+  launchedProcess.once('exit', (code, signal) => {
+    if (!shuttingDown && !smokeMode && runtimeReady) {
       void showFatalError(new Error(`Monarch runtime exited (${code ?? signal ?? 'unknown'}).`));
       app.quit();
     }
   });
 
   const url = `http://127.0.0.1:${port}`;
-  await waitForSystemProfile(url, 15000);
-  return url;
+  try {
+    await waitForRuntimeReady({
+      fetchHealth: () => fetchJson(`${url}/api/health`),
+      getProcessExit: () => {
+        if (spawnError) return { error: spawnError };
+        if (launchedProcess.exitCode !== null || launchedProcess.signalCode !== null) {
+          return {
+            code: launchedProcess.exitCode,
+            signal: launchedProcess.signalCode,
+          };
+        }
+        return null;
+      },
+      readErrorLog: () => readRuntimeLogTail(errPath),
+      errorLogPath: errPath,
+      timeoutMs: 60_000,
+    });
+    runtimeReady = true;
+    return url;
+  } catch (error) {
+    if (serverProcess === launchedProcess) stopRuntime();
+    throw error;
+  }
 }
 
 function stopRuntime() {
+  runtimeReady = false;
   if (!serverProcess || serverProcess.killed) {
     return;
   }
@@ -1057,23 +1087,13 @@ function createApplicationMenu() {
   ]);
 }
 
-async function waitForSystemProfile(url, timeoutMs) {
-  const startedAt = Date.now();
-  let lastError = null;
-
-  while (Date.now() - startedAt < timeoutMs) {
-    try {
-      const health = await fetchJson(`${url}/api/health`);
-      if (health?.ok) {
-        return;
-      }
-    } catch (error) {
-      lastError = error;
-    }
-    await sleep(250);
+async function readRuntimeLogTail(filePath, maxCharacters = 6_000) {
+  try {
+    const content = await readFile(filePath, 'utf8');
+    return content.slice(-maxCharacters);
+  } catch {
+    return '';
   }
-
-  throw lastError || new Error('Timed out waiting for Monarch runtime.');
 }
 
 function fetchJson(url) {
