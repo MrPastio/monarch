@@ -131,15 +131,22 @@ export class MonarchKernel {
   async start(): Promise<void> {
     this.modules.validateDependencies();
     const context = this.createContext();
+    const traceStartup = /^(1|true|yes)$/i.test(process.env.MONARCH_STARTUP_TRACE || '');
 
     for (const module of this.modules.listModulesInDependencyOrder()) {
       try {
+        if (traceStartup) {
+          console.log(`[startup] Activating module ${module.manifest.id}...`);
+        }
         await module.activate(context);
         this.modules.setStatus(module.manifest.id, 'active');
         await context.emit('module.started', 'kernel', {
           moduleId: module.manifest.id,
           version: module.manifest.version,
         });
+        if (traceStartup) {
+          console.log(`[startup] Module ${module.manifest.id} ready.`);
+        }
       } catch (error) {
         const message = String(error instanceof Error ? error.message : error);
         this.modules.setStatus(module.manifest.id, 'failed', message);

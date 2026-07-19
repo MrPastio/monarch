@@ -37,6 +37,8 @@
     "security:scan-system": "powershell -ExecutionPolicy Bypass -File security/monarch_sec.ps1 scan-system --summary-only --no-llm",
     "security:verify-integrity": "powershell -ExecutionPolicy Bypass -File security/monarch_sec.ps1 verify-integrity",
     "security:test": "powershell -ExecutionPolicy Bypass -File security/scripts/test.ps1",
+    "build:runtime": "npm run node:exec -- npm run build:runtime:raw",
+    "build:runtime:raw": "node scripts/build-runtime-bundle.mjs",
     "build:launcher": "powershell -ExecutionPolicy Bypass -File scripts/build-launcher.ps1",
     "install:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File installer/bootstrap.ps1",
     "installer:build": "powershell -NoProfile -ExecutionPolicy Bypass -File installer/build-installer.ps1",
@@ -63,6 +65,7 @@
   "devDependencies": {
     "@types/node": "^25.6.0",
     "electron": "^42.0.0",
+    "esbuild": "^0.28.1",
     "playwright-core": "^1.59.1",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",

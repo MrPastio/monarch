@@ -6,7 +6,7 @@
 #endif
 
 #define AppName "Monarch"
-#define AppVersion "0.1.3"
+#define AppVersion "0.1.4"
 #define AppPublisher "MrPastio"
 #define AppExeName "Monarch.exe"
 
@@ -44,8 +44,9 @@ Name: "voicestt"; Description: "Установить Voice STT"; GroupDescriptio
 Name: "voicetts"; Description: "Установить NVIDIA Voice TTS"; GroupDescription: "Дополнительные локальные модели:"; Flags: unchecked
 
 [Files]
-Source: "{#SourceRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: ".git\*,.monarch-public-snapshot,.tools\*,node_modules\*,out\*,runtime\*,logs\*,secrets\*,tmp\*,data\local\*,artifacts\generated\*,oscar\.venv\*,oscar\frontend\node_modules\*,oscar\frontend\dist\*,oscar\data\*,security\.venv\*,security\data\*,security\logs\*,installer\out\*,*.gguf,*.safetensors,*.onnx,*.exe,*.dll,*.pyd,*.zip"
+Source: "{#SourceRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: ".git\*,.monarch-public-snapshot,.tools\*,node_modules\*,out\*,runtime\*,logs\*,secrets\*,tmp\*,data\local\*,artifacts\generated\*,oscar\.venv\*,oscar\frontend\node_modules\*,oscar\frontend\dist\*,oscar\data\*,security\.venv\*,security\data\*,security\logs\*,installer\out\*,*.gguf,*.safetensors,*.onnx,*.exe,*.dll,*.pyd,*.pyc,*.pyo,*.zip"
 Source: "{#SourceRoot}\Monarch.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceRoot}\dist\monarch-server.mjs"; DestDir: "{app}\dist"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"

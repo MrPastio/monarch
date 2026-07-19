@@ -70,9 +70,63 @@ function Find-Iscc {
   return $null
 }
 
+function Find-Node {
+  param([Parameter(Mandatory = $true)][string[]]$Roots)
+
+  $command = Get-Command node.exe -ErrorAction SilentlyContinue
+  if ($command) {
+    return $command.Source
+  }
+  foreach ($candidateRoot in $Roots | Select-Object -Unique) {
+    $toolsRoot = Join-Path $candidateRoot ".tools"
+    if (-not (Test-Path -LiteralPath $toolsRoot -PathType Container)) {
+      continue
+    }
+    $candidate = Get-ChildItem -LiteralPath $toolsRoot -Directory |
+      Where-Object { $_.Name -match '^node-v\d+\.\d+\.\d+-win-x64$' } |
+      Sort-Object Name -Descending |
+      ForEach-Object { Join-Path $_.FullName "node.exe" } |
+      Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+      Select-Object -First 1
+    if ($candidate) {
+      return $candidate
+    }
+  }
+  return $null
+}
+
 try {
   if (-not (Test-Path -LiteralPath (Join-Path $root "package.json") -PathType Leaf)) {
     throw "Invalid Monarch source root: $root"
+  }
+
+  $runtimeBuildRoot = if (
+    Test-Path -LiteralPath (Join-Path $root "node_modules\esbuild") -PathType Container
+  ) {
+    $root
+  } else {
+    $projectRoot
+  }
+  $node = Find-Node -Roots @($runtimeBuildRoot, $root, $projectRoot)
+  if (-not $node) {
+    throw "Node.js is required to build the packaged Monarch runtime. Run npm ci with Node 22 first."
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $runtimeBuildRoot "node_modules\esbuild") -PathType Container)) {
+    throw "esbuild is required to build the packaged Monarch runtime. Run npm ci first."
+  }
+  $runtimeBundle = Join-Path $root "dist\monarch-server.mjs"
+  $previousBundleOutput = $env:MONARCH_RUNTIME_BUNDLE_OUTPUT
+  try {
+    $env:MONARCH_RUNTIME_BUNDLE_OUTPUT = $runtimeBundle
+    & $node (Join-Path $runtimeBuildRoot "scripts\build-runtime-bundle.mjs")
+    if ($LASTEXITCODE -ne 0) {
+      throw "Monarch runtime bundle build failed."
+    }
+  } finally {
+    $env:MONARCH_RUNTIME_BUNDLE_OUTPUT = $previousBundleOutput
+  }
+  if (-not (Test-Path -LiteralPath $runtimeBundle -PathType Leaf)) {
+    throw "Monarch runtime bundle is missing: $runtimeBundle"
   }
 
   & (Join-Path $root "scripts\build-launcher.ps1")

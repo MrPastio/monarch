@@ -278,6 +278,14 @@ Assert-NativeSuccess "Monarch dependency installation"
 Install-ElectronRuntime -Node $node -Root $root
 Assert-ElectronRuntime -Root $root
 
+$runtimeBundle = Join-Path $root "dist\monarch-server.mjs"
+if (-not (Test-Path -LiteralPath $runtimeBundle -PathType Leaf)) {
+  throw "Packaged Monarch runtime is missing: $runtimeBundle"
+}
+& $node --check $runtimeBundle
+Assert-NativeSuccess "Packaged Monarch runtime validation"
+Write-Host "Packaged runtime ready: $runtimeBundle"
+
 $python = Resolve-Python311
 if (-not $python) {
   Install-Python311

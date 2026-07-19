@@ -24,6 +24,8 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(bootstrap).toContain('node_modules\\electron\\install.js');
     expect(bootstrap).toContain('Install-ElectronRuntime -Node $node -Root $root');
     expect(bootstrap).toContain('Electron ready:');
+    expect(bootstrap).toContain('dist\\monarch-server.mjs');
+    expect(bootstrap).toContain('Packaged Monarch runtime validation');
     expect(bootstrap).toContain('oscar\\scripts\\install.ps1');
     expect(bootstrap).toContain('security\\scripts\\setup_runtime.ps1');
     expect(bootstrap).not.toContain('C:\\Users\\anton');
@@ -47,11 +49,13 @@ describe('Windows installer and public snapshot boundary', () => {
 
   it('builds a modern Windows setup with optional large models', () => {
     const definition = read('installer/Monarch.iss');
-    expect(definition).toContain('#define AppVersion "0.1.3"');
+    expect(definition).toContain('#define AppVersion "0.1.4"');
     expect(definition).toContain('WizardStyle=modern');
     expect(definition).toContain('PrivilegesRequired=lowest');
     expect(definition).toContain('ArchitecturesInstallIn64BitMode=x64compatible');
     expect(definition).toContain('tmp\\*');
+    expect(definition).toContain('*.pyc');
+    expect(definition).toContain('Source: "{#SourceRoot}\\dist\\monarch-server.mjs"');
     expect(definition).toContain('Name: "smallmodel"');
     expect(definition).toContain('Name: "voicestt"');
     expect(definition).toContain('Name: "voicetts"');
@@ -73,6 +77,15 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(builder).toContain('Refusing to package an unfiltered source tree');
     expect(builder).toContain('scripts\\export-public.ps1');
     expect(builder).toContain('.monarch-public-snapshot');
+    expect(builder).toContain('scripts\\build-runtime-bundle.mjs');
+    expect(builder).toContain('dist\\monarch-server.mjs');
+  });
+
+  it('builds the installer runtime on GitHub before Inno Setup packages it', () => {
+    const workflow = read('.github/workflows/windows-installer.yml');
+    expect(workflow).toContain('actions/setup-node@v7');
+    expect(workflow).toContain('node-version-file: .node-version');
+    expect(workflow).toContain('npm ci --no-audit --no-fund');
   });
 
   it('ships a portable Oscar environment template', () => {
