@@ -33,6 +33,7 @@ import { createSafeCapabilityToken } from '../safe/capability-token.mjs';
 import { isAllowedSafeResourceUrl } from './safe-window-policy.mjs';
 import { ownsSafeSessionResource } from './safe-session-policy.mjs';
 import { resolveSafeStorageRoot } from './safe-storage-path.mjs';
+import { resolveRuntimeLaunch } from './runtime-entry.mjs';
 import { waitForRuntimeReady } from './runtime-startup.mjs';
 import {
   createSpeechDiagnosticRecord,
@@ -929,18 +930,14 @@ async function openExternalSafely(value) {
 
 async function startRuntime() {
   const nodePath = resolveNodeExecutable();
-  const tsxCli = path.join(workspaceRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
-  const mainScript = path.join(workspaceRoot, 'src', 'main.ts');
-
-  if (!existsSync(tsxCli) || !existsSync(mainScript)) {
-    throw new Error('Monarch runtime files are missing. Expected node_modules/tsx and src/main.ts.');
-  }
+  const runtimeLaunch = resolveRuntimeLaunch({ workspaceRoot });
 
   const port = await findFreePort(4317, 40);
   const env = {
     ...process.env,
     MONARCH_UI_PORT: String(port),
     MONARCH_STRICT_PORT: '1',
+    MONARCH_STARTUP_TRACE: '1',
   };
   // Voice Mode owns STT preparation after the shared Qwen warmup settles.
   // Do not let an inherited shell flag race Vosk/sherpa allocation with TTS.
@@ -949,10 +946,11 @@ async function startRuntime() {
   const errPath = path.join(workspaceRoot, 'runtime', `electron-server-${port}.err.log`);
   const out = await import('node:fs').then((fs) => fs.createWriteStream(outPath, { flags: 'a' }));
   const err = await import('node:fs').then((fs) => fs.createWriteStream(errPath, { flags: 'a' }));
+  out.write(`[desktop] Runtime entry: ${runtimeLaunch.kind} ${runtimeLaunch.entryPath}\n`);
 
   runtimeReady = false;
   let spawnError = null;
-  const launchedProcess = spawn(nodePath, [tsxCli, mainScript, 'serve', '--port', String(port)], {
+  const launchedProcess = spawn(nodePath, [...runtimeLaunch.args, 'serve', '--port', String(port)], {
     cwd: workspaceRoot,
     env,
     windowsHide: true,
@@ -987,6 +985,8 @@ async function startRuntime() {
       },
       readErrorLog: () => readRuntimeLogTail(errPath),
       errorLogPath: errPath,
+      readOutputLog: () => readRuntimeLogTail(outPath),
+      outputLogPath: outPath,
       timeoutMs: 60_000,
     });
     runtimeReady = true;

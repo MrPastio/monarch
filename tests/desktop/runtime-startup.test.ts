@@ -23,7 +23,7 @@ describe('Electron runtime startup', () => {
     expect(health).toEqual({ ok: true });
   });
 
-  it('fails immediately with the runtime stderr when the child exits', async () => {
+  it('fails immediately with both runtime logs when the child exits', async () => {
     let exited = false;
 
     await expect(waitForRuntimeReady({
@@ -34,9 +34,11 @@ describe('Electron runtime startup', () => {
       getProcessExit: () => exited ? { code: 1, signal: null } : null,
       readErrorLog: async () => 'Error: Cannot find package runtime-dependency',
       errorLogPath: 'E:\\Programs\\Monarch\\runtime\\electron-server-4317.err.log',
+      readOutputLog: async () => '[startup] Activating module security...',
+      outputLogPath: 'E:\\Programs\\Monarch\\runtime\\electron-server-4317.out.log',
       delay: async () => undefined,
     })).rejects.toThrow(
-      /runtime exited before startup \(1\)[\s\S]*electron-server-4317\.err\.log[\s\S]*Cannot find package/,
+      /runtime exited before startup \(1\)[\s\S]*err\.log[\s\S]*out\.log[\s\S]*Cannot find package[\s\S]*Activating module security/,
     );
   });
 

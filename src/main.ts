@@ -1,4 +1,3 @@
-import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { MonarchApplication } from './app/application';
 import { startMonarchHttpServer } from './app/http-server';
@@ -53,7 +52,7 @@ async function runServe(): Promise<void> {
   const app = new MonarchApplication({ workspaceRoot });
   const requestedPort = readNumberFlag('--port') || Number(process.env.MONARCH_UI_PORT || process.env.PORT || 4317);
   const host = readStringFlag('--host') || process.env.MONARCH_HOST || '127.0.0.1';
-  const publicDirectory = fileURLToPath(new URL('./ui/public', import.meta.url));
+  const publicDirectory = path.join(workspaceRoot, 'src', 'ui', 'public');
   const handle = await startServeWithPortFallback(app, publicDirectory, host, requestedPort);
 
   console.log(`Monarch listening at ${handle.url}`);

@@ -29,12 +29,17 @@ describe('Electron desktop lifecycle', () => {
     expect(runtimeBody).not.toMatch(/MONARCH_STT_PREWARM_ON_ACTIVATE:\s*['"]1['"]/);
   });
 
-  it('waits through slow Windows cold starts and surfaces the runtime stderr path', () => {
+  it('prefers the packaged runtime and surfaces both startup logs', () => {
     const source = readFileSync(path.resolve('desktop/electron/main.mjs'), 'utf8');
 
+    expect(source).toContain("import { resolveRuntimeLaunch } from './runtime-entry.mjs'");
+    expect(source).toContain('const runtimeLaunch = resolveRuntimeLaunch({ workspaceRoot })');
+    expect(source).toContain("[...runtimeLaunch.args, 'serve'");
+    expect(source).toContain("MONARCH_STARTUP_TRACE: '1'");
     expect(source).toContain("import { waitForRuntimeReady } from './runtime-startup.mjs'");
     expect(source).toContain('timeoutMs: 60_000');
     expect(source).toContain('readErrorLog: () => readRuntimeLogTail(errPath)');
+    expect(source).toContain('readOutputLog: () => readRuntimeLogTail(outPath)');
     expect(source).not.toContain('waitForSystemProfile(url, 15000)');
   });
 

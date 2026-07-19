@@ -12,15 +12,23 @@ async function createStartupError({
   summary,
   errorLogPath,
   readErrorLog,
+  outputLogPath,
+  readOutputLog,
   lastError,
 }) {
   const lines = [summary];
-  if (errorLogPath) lines.push(`Runtime log: ${errorLogPath}`);
+  if (errorLogPath) lines.push(`Runtime stderr log: ${errorLogPath}`);
+  if (outputLogPath) lines.push(`Runtime stdout log: ${outputLogPath}`);
 
-  const logTail = String(await readErrorLog().catch(() => '')).trim();
-  if (logTail) {
-    lines.push('Runtime stderr:', logTail);
-  } else if (lastError) {
+  const [errorLogTail, outputLogTail] = await Promise.all([
+    readErrorLog().catch(() => ''),
+    readOutputLog().catch(() => ''),
+  ]);
+  const stderr = String(errorLogTail).trim();
+  const stdout = String(outputLogTail).trim();
+  if (stderr) lines.push('Runtime stderr:', stderr);
+  if (stdout) lines.push('Runtime stdout:', stdout);
+  if (!stderr && !stdout && lastError) {
     lines.push(`Last connection error: ${errorMessage(lastError)}`);
   }
   return new Error(lines.join('\n'));
@@ -31,6 +39,8 @@ export async function waitForRuntimeReady({
   getProcessExit = () => null,
   readErrorLog = async () => '',
   errorLogPath = '',
+  readOutputLog = async () => '',
+  outputLogPath = '',
   timeoutMs = 60_000,
   pollIntervalMs = 250,
   now = () => Date.now(),
@@ -49,6 +59,8 @@ export async function waitForRuntimeReady({
         summary: `Monarch runtime exited before startup (${reason}).`,
         errorLogPath,
         readErrorLog,
+        outputLogPath,
+        readOutputLog,
         lastError,
       });
     }
@@ -69,6 +81,8 @@ export async function waitForRuntimeReady({
         summary: `Monarch runtime exited before startup (${reason}).`,
         errorLogPath,
         readErrorLog,
+        outputLogPath,
+        readOutputLog,
         lastError,
       });
     }
@@ -79,6 +93,8 @@ export async function waitForRuntimeReady({
     summary: `Monarch runtime did not become ready within ${Math.ceil(timeoutMs / 1000)} seconds.`,
     errorLogPath,
     readErrorLog,
+    outputLogPath,
+    readOutputLog,
     lastError,
   });
 }

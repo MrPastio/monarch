@@ -14,6 +14,12 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Install Node dependencies
+        run: npm ci --no-audit --no-fund
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Build installer
