@@ -9,9 +9,21 @@ const read = (relativePath: string) =>
 describe('Windows installer and public snapshot boundary', () => {
   it('bootstraps missing runtimes without embedding machine-specific paths', () => {
     const bootstrap = read('installer/bootstrap.ps1');
+    expect(bootstrap).toContain('Monarch requires Windows 10 or Windows 11 (64-bit).');
+    expect(bootstrap).toContain('CurrentMajorVersionNumber');
     expect(bootstrap).toContain('Python.Python.3.11');
+    expect(bootstrap).toContain('--source winget');
+    expect(bootstrap).toContain('Refresh-ProcessPath');
+    expect(bootstrap).toContain('Get-Python311RegistryCandidates');
+    expect(bootstrap).toContain('HKEY_CURRENT_USER\\Software\\Python\\PythonCore');
     expect(bootstrap).toContain('scripts\\ensure-node.ps1');
     expect(bootstrap).toContain('npm.cmd');
+    expect(bootstrap).toContain('--include=dev');
+    expect(bootstrap).toContain('--ignore-scripts=false');
+    expect(bootstrap).toContain('node_modules\\electron\\dist\\electron.exe');
+    expect(bootstrap).toContain('node_modules\\electron\\install.js');
+    expect(bootstrap).toContain('Install-ElectronRuntime -Node $node -Root $root');
+    expect(bootstrap).toContain('Electron ready:');
     expect(bootstrap).toContain('oscar\\scripts\\install.ps1');
     expect(bootstrap).toContain('security\\scripts\\setup_runtime.ps1');
     expect(bootstrap).not.toContain('C:\\Users\\anton');
@@ -35,13 +47,23 @@ describe('Windows installer and public snapshot boundary', () => {
 
   it('builds a modern Windows setup with optional large models', () => {
     const definition = read('installer/Monarch.iss');
+    expect(definition).toContain('#define AppVersion "0.1.2"');
     expect(definition).toContain('WizardStyle=modern');
     expect(definition).toContain('PrivilegesRequired=lowest');
+    expect(definition).toContain('ArchitecturesInstallIn64BitMode=x64compatible');
     expect(definition).toContain('Name: "smallmodel"');
     expect(definition).toContain('Name: "voicestt"');
     expect(definition).toContain('Name: "voicetts"');
     expect(definition).toContain('E:\\Programs\\Monarch');
     expect(definition).toContain('D:\\Programs\\Monarch');
+    expect(definition).toContain('Parameters: "{code:GetBootstrapParameters}"');
+    expect(definition).toContain("WizardIsTaskSelected('smallmodel')");
+    expect(definition).toContain("WizardIsTaskSelected('voicestt')");
+    expect(definition).toContain("WizardIsTaskSelected('voicetts')");
+    expect(definition).toContain("Result := Result + ' -InstallSmallModel'");
+    expect(definition).toContain("Result := Result + ' -InstallVoiceStt'");
+    expect(definition).toContain("Result := Result + ' -InstallVoiceTts'");
+    expect(definition.match(/Filename: "\{sys\}\\WindowsPowerShell/g)).toHaveLength(1);
   });
 
   it('refuses to package private development history', () => {

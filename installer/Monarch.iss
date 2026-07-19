@@ -6,7 +6,7 @@
 #endif
 
 #define AppName "Monarch"
-#define AppVersion "0.1.0"
+#define AppVersion "0.1.2"
 #define AppPublisher "MrPastio"
 #define AppExeName "Monarch.exe"
 
@@ -52,13 +52,25 @@ Name: "{group}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"
 Name: "{autodesktop}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\installer\bootstrap.ps1"" -InstallDirectory ""{app}"" -NonInteractive"; WorkingDir: "{app}"; StatusMsg: "Устанавливаются зависимости Monarch..."; Flags: waituntilterminated
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\oscar\scripts\download-small-model.ps1"""; WorkingDir: "{app}"; StatusMsg: "Загружается малая модель Oscar..."; Flags: waituntilterminated; Tasks: smallmodel
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup-sherpa-t-one-stt.ps1"""; WorkingDir: "{app}"; StatusMsg: "Загружается Voice STT..."; Flags: waituntilterminated; Tasks: voicestt
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup-neural-tts.ps1"""; WorkingDir: "{app}"; StatusMsg: "Устанавливается Voice TTS..."; Flags: waituntilterminated; Tasks: voicetts
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "{code:GetBootstrapParameters}"; WorkingDir: "{app}"; StatusMsg: "Устанавливаются зависимости и выбранные модели Monarch..."; Flags: waituntilterminated
 Filename: "{app}\{#AppExeName}"; Description: "Запустить Monarch"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+function GetBootstrapParameters(Param: String): String;
+begin
+  Result :=
+    '-NoProfile -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{app}\installer\bootstrap.ps1') +
+    '" -InstallDirectory "' + ExpandConstant('{app}') + '" -NonInteractive';
+
+  if WizardIsTaskSelected('smallmodel') then
+    Result := Result + ' -InstallSmallModel';
+  if WizardIsTaskSelected('voicestt') then
+    Result := Result + ' -InstallVoiceStt';
+  if WizardIsTaskSelected('voicetts') then
+    Result := Result + ' -InstallVoiceTts';
+end;
+
 function GetDefaultInstallPath(Param: String): String;
 begin
   if DirExists('E:\') then
