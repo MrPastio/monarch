@@ -1,8 +1,13 @@
 # Monarch Windows installer
 
-`Install-Monarch.cmd` bootstraps an extracted source tree in place. It installs
+`Install-Monarch.cmd` bootstraps an extracted source tree in place on 64-bit
+Windows 10 or Windows 11. It installs
 an isolated Node.js runtime under `.tools`, Python 3.11 when missing, npm
 dependencies, Oscar, Monarch Security, the frontend build, and the launcher.
+After a `winget` Python install it refreshes the process PATH and resolves
+Python through the Windows PEP 514 registry. npm installation explicitly
+includes the Electron package, then runs its packaged runtime installer and
+validates the local executable before setup continues.
 
 Optional model downloads are explicit because they are large:
 

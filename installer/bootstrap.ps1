@@ -26,6 +26,20 @@ if ($env:OS -ne "Windows_NT") {
 if (-not [Environment]::Is64BitOperatingSystem) {
   throw "Monarch requires 64-bit Windows."
 }
+$windowsVersionKey = Get-ItemProperty `
+  -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+$windowsMajorProperty = $windowsVersionKey.PSObject.Properties["CurrentMajorVersionNumber"]
+$windowsMajor = if ($windowsMajorProperty) {
+  [int]$windowsMajorProperty.Value
+} else {
+  [Environment]::OSVersion.Version.Major
+}
+if ($windowsMajor -lt 10) {
+  throw "Monarch requires Windows 10 or Windows 11 (64-bit)."
+}
+$windowsBuildProperty = $windowsVersionKey.PSObject.Properties["CurrentBuildNumber"]
+$windowsBuild = if ($windowsBuildProperty) { $windowsBuildProperty.Value } else { "unknown" }
+Write-Host "Windows 10/11 x64 ready (build $windowsBuild)"
 if (-not (Test-Path -LiteralPath (Join-Path $root "package.json") -PathType Leaf)) {
   throw "Monarch source root is invalid: $root"
 }
@@ -43,13 +57,83 @@ function Assert-NativeSuccess {
   }
 }
 
+function Refresh-ProcessPath {
+  param([string[]]$Prepend = @())
+
+  $segments = New-Object System.Collections.Generic.List[string]
+  $seen = New-Object System.Collections.Generic.HashSet[string](
+    [StringComparer]::OrdinalIgnoreCase
+  )
+  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+
+  foreach ($pathValue in @($Prepend) + @($env:PATH, $userPath, $machinePath)) {
+    if (-not $pathValue) {
+      continue
+    }
+    foreach ($segment in ([string]$pathValue -split ";")) {
+      $trimmed = $segment.Trim()
+      if ($trimmed -and $seen.Add($trimmed)) {
+        $segments.Add($trimmed)
+      }
+    }
+  }
+  $env:PATH = [string]::Join(";", $segments)
+}
+
+function Get-Python311RegistryCandidates {
+  $registryRoots = @(
+    "Registry::HKEY_CURRENT_USER\Software\Python\PythonCore",
+    "Registry::HKEY_LOCAL_MACHINE\Software\Python\PythonCore",
+    "Registry::HKEY_LOCAL_MACHINE\Software\WOW6432Node\Python\PythonCore"
+  )
+
+  foreach ($registryRoot in $registryRoots) {
+    if (-not (Test-Path -LiteralPath $registryRoot)) {
+      continue
+    }
+    foreach ($versionKey in @(Get-ChildItem -LiteralPath $registryRoot -ErrorAction SilentlyContinue)) {
+      if ($versionKey.PSChildName -notmatch '^3\.11(?:-|$)') {
+        continue
+      }
+      $installPathKey = "$($versionKey.PSPath)\InstallPath"
+      if (-not (Test-Path -LiteralPath $installPathKey)) {
+        continue
+      }
+      $installPath = Get-Item -LiteralPath $installPathKey
+      $properties = Get-ItemProperty -LiteralPath $installPathKey
+      $executableProperty = $properties.PSObject.Properties["ExecutablePath"]
+      if ($executableProperty -and $executableProperty.Value) {
+        $executableProperty.Value
+      }
+      $defaultPath = $installPath.GetValue("")
+      if ($defaultPath) {
+        Join-Path ([string]$defaultPath) "python.exe"
+      }
+    }
+  }
+}
+
 function Resolve-Python311 {
-  $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
-  if ($launcher) {
+  $launcherCandidates = @()
+  $pathLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
+  if ($pathLauncher) {
+    $launcherCandidates += $pathLauncher.Source
+  }
+  $launcherCandidates += @(
+    (Join-Path $env:LOCALAPPDATA "Programs\Python\Launcher\py.exe"),
+    (Join-Path $env:WINDIR "py.exe")
+  )
+
+  foreach ($launcher in $launcherCandidates | Select-Object -Unique) {
+    if (-not $launcher -or -not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+      continue
+    }
     try {
-      $resolved = & $launcher.Source -3.11 -c "import sys; print(sys.executable)" 2>$null |
-        Select-Object -First 1
-      if ($LASTEXITCODE -eq 0 -and $resolved -and
+      $resolvedOutput = @(& $launcher -3.11 -c "import sys; print(sys.executable)" 2>$null)
+      $resolveExitCode = $LASTEXITCODE
+      $resolved = $resolvedOutput | Select-Object -First 1
+      if ($resolveExitCode -eq 0 -and $resolved -and
           (Test-Path -LiteralPath $resolved -PathType Leaf)) {
         return [System.IO.Path]::GetFullPath($resolved)
       }
@@ -61,6 +145,7 @@ function Resolve-Python311 {
     (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
     (Join-Path $env:ProgramFiles "Python311\python.exe")
   )
+  $candidates += @(Get-Python311RegistryCandidates)
   $pathPython = Get-Command python.exe -ErrorAction SilentlyContinue
   if ($pathPython) {
     $candidates += $pathPython.Source
@@ -71,9 +156,10 @@ function Resolve-Python311 {
       continue
     }
     try {
-      $version = & $candidate -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null |
-        Select-Object -First 1
-      if ($LASTEXITCODE -eq 0 -and $version -eq "3.11") {
+      $versionOutput = @(& $candidate -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null)
+      $versionExitCode = $LASTEXITCODE
+      $version = $versionOutput | Select-Object -First 1
+      if ($versionExitCode -eq 0 -and $version -eq "3.11") {
         return [System.IO.Path]::GetFullPath($candidate)
       }
     } catch {
@@ -88,9 +174,62 @@ function Install-Python311 {
     throw "Python 3.11 is missing and winget is unavailable. Install Python 3.11, then rerun the installer."
   }
   Write-Step "Installing Python 3.11 for the current user"
-  & $winget.Source install --id Python.Python.3.11 --exact --silent --scope user `
+  & $winget.Source install --id Python.Python.3.11 --exact --source winget --silent --scope user `
     --accept-package-agreements --accept-source-agreements --disable-interactivity
   Assert-NativeSuccess "Python 3.11 installation"
+}
+
+function Assert-ElectronRuntime {
+  param([Parameter(Mandatory = $true)][string]$Root)
+
+  $electron = Join-Path $Root "node_modules\electron\dist\electron.exe"
+  if (-not (Test-Path -LiteralPath $electron -PathType Leaf)) {
+    throw "Electron installation is incomplete: $electron is missing. Check npm proxy or download settings and rerun the installer."
+  }
+  $electronProcess = Start-Process -FilePath $electron -ArgumentList "--version" `
+    -Wait -PassThru -NoNewWindow
+  if ($electronProcess.ExitCode -ne 0) {
+    throw "Electron runtime validation failed with exit code $($electronProcess.ExitCode)."
+  }
+  $electronVersionFile = Join-Path $Root "node_modules\electron\dist\version"
+  $electronVersion = if (Test-Path -LiteralPath $electronVersionFile -PathType Leaf) {
+    (Get-Content -LiteralPath $electronVersionFile -Raw).Trim()
+  } else {
+    $null
+  }
+  if (-not $electronVersion) {
+    throw "Electron runtime validation returned no version."
+  }
+  Write-Host "Electron ready: $electronVersion"
+}
+
+function Install-ElectronRuntime {
+  param(
+    [Parameter(Mandatory = $true)][string]$Node,
+    [Parameter(Mandatory = $true)][string]$Root
+  )
+
+  $electron = Join-Path $Root "node_modules\electron\dist\electron.exe"
+  if (Test-Path -LiteralPath $electron -PathType Leaf) {
+    return
+  }
+  $electronInstaller = Join-Path $Root "node_modules\electron\install.js"
+  if (-not (Test-Path -LiteralPath $electronInstaller -PathType Leaf)) {
+    throw "Electron package installer is missing: $electronInstaller"
+  }
+
+  Write-Step "Installing Electron desktop runtime"
+  $previousPlatform = $env:ELECTRON_INSTALL_PLATFORM
+  $previousArchitecture = $env:ELECTRON_INSTALL_ARCH
+  try {
+    $env:ELECTRON_INSTALL_PLATFORM = "win32"
+    $env:ELECTRON_INSTALL_ARCH = "x64"
+    & $Node $electronInstaller
+    Assert-NativeSuccess "Electron runtime installation"
+  } finally {
+    $env:ELECTRON_INSTALL_PLATFORM = $previousPlatform
+    $env:ELECTRON_INSTALL_ARCH = $previousArchitecture
+  }
 }
 
 function Ensure-Venv {
@@ -125,20 +264,30 @@ Assert-NativeSuccess "Node.js runtime setup"
 
 $nodeVersion = (Get-Content -LiteralPath (Join-Path $root ".node-version") -Raw).Trim()
 $nodeDirectory = Join-Path $root ".tools\node-v$nodeVersion-win-x64"
+$node = Join-Path $nodeDirectory "node.exe"
 $npm = Join-Path $nodeDirectory "npm.cmd"
-if (-not (Test-Path -LiteralPath $npm -PathType Leaf)) {
-  throw "Project npm runtime is missing: $npm"
+if (-not (Test-Path -LiteralPath $node -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $npm -PathType Leaf)) {
+  throw "Project Node.js runtime is incomplete: $nodeDirectory"
 }
 $env:PATH = "$nodeDirectory;$env:PATH"
 
 Write-Step "Installing Monarch application dependencies"
-& $npm ci --no-audit --no-fund
+& $npm ci --no-audit --no-fund --include=dev --ignore-scripts=false --platform=win32 --arch=x64
 Assert-NativeSuccess "Monarch dependency installation"
+Install-ElectronRuntime -Node $node -Root $root
+Assert-ElectronRuntime -Root $root
 
 $python = Resolve-Python311
 if (-not $python) {
   Install-Python311
-  $python = Resolve-Python311
+  Refresh-ProcessPath -Prepend @($nodeDirectory)
+  for ($attempt = 0; $attempt -lt 10 -and -not $python; $attempt += 1) {
+    if ($attempt -gt 0) {
+      Start-Sleep -Milliseconds 500
+    }
+    $python = Resolve-Python311
+  }
 }
 if (-not $python) {
   throw "Python 3.11 installation completed, but the interpreter could not be located."
@@ -160,7 +309,8 @@ if (-not $SkipOscar) {
   Assert-NativeSuccess "Oscar runtime installation"
 
   Write-Step "Building Oscar frontend"
-  & $npm --prefix (Join-Path $root "oscar\frontend") ci --no-audit --no-fund
+  & $npm --prefix (Join-Path $root "oscar\frontend") ci --no-audit --no-fund `
+    --include=dev --ignore-scripts=false --platform=win32 --arch=x64
   Assert-NativeSuccess "Oscar frontend dependency installation"
   & $npm --prefix (Join-Path $root "oscar\frontend") run build
   Assert-NativeSuccess "Oscar frontend build"
