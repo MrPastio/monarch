@@ -29,6 +29,15 @@ describe('Electron desktop lifecycle', () => {
     expect(runtimeBody).not.toMatch(/MONARCH_STT_PREWARM_ON_ACTIVATE:\s*['"]1['"]/);
   });
 
+  it('waits through slow Windows cold starts and surfaces the runtime stderr path', () => {
+    const source = readFileSync(path.resolve('desktop/electron/main.mjs'), 'utf8');
+
+    expect(source).toContain("import { waitForRuntimeReady } from './runtime-startup.mjs'");
+    expect(source).toContain('timeoutMs: 60_000');
+    expect(source).toContain('readErrorLog: () => readRuntimeLogTail(errPath)');
+    expect(source).not.toContain('waitForSystemProfile(url, 15000)');
+  });
+
   it('starts one shared Qwen warmup before the local runtime and exposes trusted diagnostics IPC', () => {
     const source = readFileSync(path.resolve('desktop/electron/main.mjs'), 'utf8');
     const preload = readFileSync(path.resolve('desktop/electron/preload.mjs'), 'utf8');
