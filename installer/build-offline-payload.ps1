@@ -233,7 +233,8 @@ function Remove-GeneratedPythonInstallNoise {
     }
     $launcherDirectory = Join-Path $target "bin"
     if (Test-Path -LiteralPath $launcherDirectory -PathType Container) {
-      Remove-Item -LiteralPath $launcherDirectory -Recurse -Force
+      Get-ChildItem -LiteralPath $launcherDirectory -Force -File -Filter "*.exe" |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
     }
   }
 
@@ -428,6 +429,15 @@ try {
     -Arguments @("--only-binary=:all:", "psutil==7.2.2") `
     -Operation "Monarch Security runtime installation"
 
+  Remove-GeneratedPythonInstallNoise `
+    -EnvironmentRoot $environmentOutput `
+    -PythonTargets @(
+      $commonSitePackages,
+      $cpuSitePackages,
+      $cudaSitePackages,
+      $securitySitePackages
+    )
+
   $previousPythonPath = $env:PYTHONPATH
   $previousPath = $env:PATH
   $previousDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
@@ -453,14 +463,6 @@ try {
 
   Remove-PythonBytecode -Path $runtimeOutput
   Remove-PythonBytecode -Path $environmentOutput
-  Remove-GeneratedPythonInstallNoise `
-    -EnvironmentRoot $environmentOutput `
-    -PythonTargets @(
-      $commonSitePackages,
-      $cpuSitePackages,
-      $cudaSitePackages,
-      $securitySitePackages
-    )
 
   Write-Host "[offline] Hashing exact payload trees"
   $launcherPath = Join-Path $root "Monarch.exe"
