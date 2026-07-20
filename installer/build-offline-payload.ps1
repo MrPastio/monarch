@@ -3,7 +3,7 @@ param(
   [string]$BuildRuntimeRoot = "",
   [string]$OutputDirectory = "",
   [string]$AppVersion = "0.1.5",
-  [string]$RuntimeVersion = "2026.07.5",
+  [string]$RuntimeVersion = "2026.07.6",
   [string]$BackendEnvironment = "backend-0.1.5-offline4",
   [switch]$Force
 )
@@ -25,6 +25,18 @@ $output = if ($OutputDirectory) {
 }
 $markerName = ".monarch-offline-payload"
 $markerPath = Join-Path $output $markerName
+$payloadVersionContractPath = Join-Path $PSScriptRoot "payload-version-contract.json"
+if (-not (Test-Path -LiteralPath $payloadVersionContractPath -PathType Leaf)) {
+  throw "Offline payload version contract is missing: $payloadVersionContractPath"
+}
+$payloadVersionContract = Get-Content -LiteralPath $payloadVersionContractPath -Raw |
+  ConvertFrom-Json
+if ([string]$payloadVersionContract.runtime.version -ne $RuntimeVersion) {
+  throw "Runtime version $RuntimeVersion is not registered in the offline payload contract."
+}
+if ([string]$payloadVersionContract.environment.version -ne $BackendEnvironment) {
+  throw "Backend environment $BackendEnvironment is not registered in the offline payload contract."
+}
 
 function Assert-NativeSuccess {
   param([Parameter(Mandatory = $true)][string]$Operation)
@@ -539,6 +551,20 @@ try {
       fileName = "Monarch.exe"
       size = $launcherFile.Length
       sha256 = Get-Sha256Hex -Path $launcherPath
+    }
+  }
+  foreach ($componentName in @("runtime", "environment")) {
+    $expectedComponent = $payloadVersionContract.$componentName
+    $actualComponent = $manifest.components.$componentName
+    if ([string]$actualComponent.sha256 -ne [string]$expectedComponent.sha256 -or
+        [long]$actualComponent.size -ne [long]$expectedComponent.size -or
+        [int]$actualComponent.files -ne [int]$expectedComponent.files) {
+      throw (
+        "Immutable $componentName payload changed without a version bump. " +
+        "Registered=$($expectedComponent.version) " +
+        "expected=$($expectedComponent.sha256)/$($expectedComponent.files)/$($expectedComponent.size) " +
+        "actual=$($actualComponent.sha256)/$($actualComponent.files)/$($actualComponent.size)"
+      )
     }
   }
   [System.IO.File]::WriteAllText(

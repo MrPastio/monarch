@@ -20,8 +20,27 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(builder).toContain('PYTHONDONTWRITEBYTECODE');
     expect(builder).toContain('Offline Monarch Security runtime validation');
     expect(builder).toContain('payload-manifest.json');
+    expect(builder).toContain('payload-version-contract.json');
+    expect(builder).toContain(
+      'Immutable $componentName payload changed without a version bump',
+    );
     expect(builder).not.toContain('C:\\Users\\anton');
     expect(builder).not.toContain('E:\\Monarch');
+
+    const payloadContract = JSON.parse(
+      read('installer/payload-version-contract.json'),
+    ) as {
+      schemaVersion: number;
+      runtime: { version: string; sha256: string };
+      environment: { version: string; sha256: string };
+    };
+    expect(payloadContract.schemaVersion).toBe(1);
+    expect(payloadContract.runtime.version).toBe('2026.07.6');
+    expect(payloadContract.runtime.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(payloadContract.environment.version).toBe(
+      'backend-0.1.5-offline4',
+    );
+    expect(payloadContract.environment.sha256).toMatch(/^[a-f0-9]{64}$/);
 
     const requirements = read('oscar/requirements-runtime.txt');
     expect(requirements).toContain('fastapi==');
@@ -79,6 +98,7 @@ describe('Windows installer and public snapshot boundary', () => {
   it('builds a modern self-contained Windows setup without model downloads', () => {
     const definition = read('installer/Monarch.iss');
     expect(definition).toContain('#define AppVersion "0.1.5"');
+    expect(definition).toContain('#define RuntimeVersion "2026.07.6"');
     expect(definition).toContain('WizardStyle=modern');
     expect(definition).toContain('PrivilegesRequired=lowest');
     expect(definition).toContain('ArchitecturesInstallIn64BitMode=x64compatible');

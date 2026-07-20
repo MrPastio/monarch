@@ -2,7 +2,7 @@ param(
   [string]$SourceRoot = "",
   [string]$OutputDirectory = "",
   [string]$AppVersion = "0.1.5",
-  [string]$RuntimeVersion = "2026.07.5",
+  [string]$RuntimeVersion = "2026.07.6",
   [string]$BackendEnvironment = "backend-0.1.5-offline4",
   [int]$DataSchemaVersion = 1,
   [int]$MinimumReadableDataSchema = 1,

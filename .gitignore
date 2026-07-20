@@ -119,6 +119,7 @@ security/src/*.egg-info/
 /installer/.offline-build-cache/
 /installer/out-*/
 /.monarch-public-snapshot
+/.tmp/
 
 # OS / editor
 .vscode/
