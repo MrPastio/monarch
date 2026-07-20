@@ -376,16 +376,23 @@ try {
     -Operation "Monarch Security runtime installation"
 
   $previousPythonPath = $env:PYTHONPATH
+  $previousPath = $env:PATH
   try {
     $env:PYTHONPATH = "$commonSitePackages;$cpuSitePackages;$(Join-Path $root 'oscar\backend')"
     & $stagedPython -c "import fastapi, uvicorn, pydantic, httpx, llama_cpp, oscar_agent; print('oscar-offline-runtime-ok')"
     Assert-NativeSuccess "Offline Oscar CPU runtime validation"
+
+    $env:PYTHONPATH = "$commonSitePackages;$cudaSitePackages;$(Join-Path $root 'oscar\backend')"
+    $env:PATH = "$cudaSitePackages\nvidia\cublas\bin;$cudaSitePackages\nvidia\cuda_runtime\bin;$cudaSitePackages\nvidia\nvjitlink\bin;$previousPath"
+    & $stagedPython -c "import llama_cpp; print('oscar-offline-cuda-runtime-ok')"
+    Assert-NativeSuccess "Offline Oscar CUDA runtime validation"
 
     $env:PYTHONPATH = "$securitySitePackages;$(Join-Path $root 'security\src')"
     & $stagedPython -c "import psutil, monarch_security; print('security-offline-runtime-ok')"
     Assert-NativeSuccess "Offline Monarch Security runtime validation"
   } finally {
     $env:PYTHONPATH = $previousPythonPath
+    $env:PATH = $previousPath
   }
 
   Write-Host "[offline] Hashing exact payload trees"

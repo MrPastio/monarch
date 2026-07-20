@@ -15,6 +15,7 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(builder).toContain('profiles\\cuda');
     expect(builder).toContain('Portable Python runtime validation');
     expect(builder).toContain('Offline Oscar CPU runtime validation');
+    expect(builder).toContain('Offline Oscar CUDA runtime validation');
     expect(builder).toContain('Offline Monarch Security runtime validation');
     expect(builder).toContain('payload-manifest.json');
     expect(builder).not.toContain('C:\\Users\\anton');
@@ -91,10 +92,13 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(definition).not.toContain('InstallVoiceStt');
     expect(definition).not.toContain('InstallVoiceTts');
     expect(definition.match(/Filename: "\{sys\}\\WindowsPowerShell/g)).toBeNull();
-    expect(definition).toContain('procedure RunCriticalStep');
-    expect(definition).toContain('procedure CurInstallProgressChanged');
-    expect(definition).toContain('if ResultCode <> 0 then');
-    expect(definition).toContain('RaiseException');
+    expect(definition).toContain('function RunCriticalStep');
+    expect(definition).toContain('procedure FinalizeOfflinePayload');
+    expect(definition).toContain('procedure CurStepChanged');
+    expect(definition).toContain('function GetCustomSetupExitCode');
+    expect(definition).toContain('CriticalExitCode := 20');
+    expect(definition).toContain('CriticalExitCode := 21');
+    expect(definition).toContain('AfterInstall: FinalizeOfflinePayload');
     expect(definition).toContain('Monarch.next.exe');
     expect(definition).toContain('GetLauncherSwapParameters');
     expect(definition).toContain('versions\\{#AppVersion}');

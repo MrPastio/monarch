@@ -291,15 +291,21 @@ try {
   & $electron --version
   Assert-NativeSuccess "Offline Electron runtime validation"
   $previousPythonPath = $env:PYTHONPATH
+  $previousPath = $env:PATH
   try {
     $env:PYTHONPATH = "$($environmentRoot)\oscar\common;$($environmentRoot)\oscar\profiles\cpu;$versionRoot\oscar\backend"
     & $python -c "import fastapi, uvicorn, llama_cpp, oscar_agent; print('installed-oscar-ok')"
     Assert-NativeSuccess "Installed Oscar runtime validation"
+    $env:PYTHONPATH = "$($environmentRoot)\oscar\common;$($environmentRoot)\oscar\profiles\cuda;$versionRoot\oscar\backend"
+    $env:PATH = "$($environmentRoot)\oscar\profiles\cuda\nvidia\cublas\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\cuda_runtime\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\nvjitlink\bin;$previousPath"
+    & $python -c "import llama_cpp; print('installed-oscar-cuda-ok')"
+    Assert-NativeSuccess "Installed Oscar CUDA runtime validation"
     $env:PYTHONPATH = "$($environmentRoot)\security\site-packages;$versionRoot\security\src"
     & $python -c "import psutil, monarch_security; print('installed-security-ok')"
     Assert-NativeSuccess "Installed Monarch Security runtime validation"
   } finally {
     $env:PYTHONPATH = $previousPythonPath
+    $env:PATH = $previousPath
   }
 
   Write-MonarchVersionDescriptor `

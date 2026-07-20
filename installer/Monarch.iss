@@ -70,14 +70,14 @@ Source: "{#SourceRoot}\installer\offline-payload\app\*"; DestDir: "{app}\.stagin
 Source: "{#SourceRoot}\installer\offline-payload\runtime\*"; DestDir: "{app}\.staging\{#AppVersion}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceRoot}\installer\offline-payload\environment\*"; DestDir: "{app}\.staging\{#AppVersion}\environment"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceRoot}\installer\offline-payload\payload-manifest.json"; DestDir: "{app}\.staging\{#AppVersion}"; Flags: ignoreversion
-Source: "{#SourceRoot}\installer\offline-payload\Monarch.exe"; DestDir: "{app}"; DestName: "Monarch.next.exe"; Flags: ignoreversion
+Source: "{#SourceRoot}\installer\offline-payload\Monarch.exe"; DestDir: "{app}"; DestName: "Monarch.next.exe"; Flags: ignoreversion; AfterInstall: FinalizeOfflinePayload
 
 [Icons]
 Name: "{group}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"
 Name: "{autodesktop}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "Запустить Monarch"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Description: "Запустить Monarch"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Check: CriticalInstallSucceeded
 
 [Code]
 function GetLauncherSwapParameters(Param: String): String;
@@ -116,15 +116,16 @@ begin
     Result := ExpandConstant('{localappdata}\Programs\Monarch');
 end;
 
-procedure RunCriticalStep(
+function RunCriticalStep(
   const Description: String;
   const Parameters: String;
   const WorkingDirectory: String
-);
+): Boolean;
 var
   ResultCode: Integer;
 begin
   WizardForm.StatusLabel.Caption := Description;
+  ResultCode := -1;
   if not Exec(
     ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     Parameters,
@@ -132,29 +133,54 @@ begin
     SW_HIDE,
     ewWaitUntilTerminated,
     ResultCode
-  ) then
-    RaiseException(Description + ' Windows не смогла запустить процесс.');
-  if ResultCode <> 0 then
-    RaiseException(Description + ' Код ошибки: ' + IntToStr(ResultCode) + '.');
+  ) then begin
+    Log(Description + ' Windows не смогла запустить процесс.');
+    Result := False;
+    Exit;
+  end;
+  Result := ResultCode = 0;
+  if not Result then
+    Log(Description + ' Код ошибки: ' + IntToStr(ResultCode) + '.');
 end;
 
 var
-  CriticalStepsCompleted: Boolean;
+  CriticalExitCode: Integer;
+  CriticalFinalizerCompleted: Boolean;
 
-procedure CurInstallProgressChanged(CurProgress, MaxProgress: Integer);
+procedure FinalizeOfflinePayload;
 begin
-  if CriticalStepsCompleted or (CurProgress <> MaxProgress) then
-    Exit;
-
-  RunCriticalStep(
+  CriticalFinalizerCompleted := RunCriticalStep(
     'Проверяется и устанавливается автономный Monarch...',
     GetFinalizeParameters(''),
     ExpandConstant('{app}')
   );
-  RunCriticalStep(
+  if not CriticalFinalizerCompleted then
+    CriticalExitCode := 20;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep <> ssPostInstall then
+    Exit;
+  if not CriticalFinalizerCompleted then begin
+    if CriticalExitCode = 0 then
+      CriticalExitCode := 22;
+    Exit;
+  end;
+  if not RunCriticalStep(
     'Обновляется безопасный загрузчик Monarch...',
     GetLauncherSwapParameters(''),
     ExpandConstant('{app}\versions\{#AppVersion}')
-  );
-  CriticalStepsCompleted := True;
+  ) then
+    CriticalExitCode := 21;
+end;
+
+function CriticalInstallSucceeded: Boolean;
+begin
+  Result := CriticalFinalizerCompleted and (CriticalExitCode = 0);
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  Result := CriticalExitCode;
 end;
