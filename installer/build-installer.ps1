@@ -145,15 +145,28 @@ try {
   if ($LASTEXITCODE -ne 0) {
     throw "Oscar frontend build failed."
   }
-  $frontendDist = Join-Path $root "oscar\frontend\dist"
-  if (Test-Path -LiteralPath $frontendDist) {
-    Remove-Item -LiteralPath $frontendDist -Recurse -Force
+  $builtFrontendDist = [System.IO.Path]::GetFullPath(
+    (Join-Path $runtimeBuildRoot "oscar\frontend\dist")
+  ).TrimEnd("\")
+  $frontendDist = [System.IO.Path]::GetFullPath(
+    (Join-Path $root "oscar\frontend\dist")
+  ).TrimEnd("\")
+  if (-not (Test-Path -LiteralPath $builtFrontendDist -PathType Container)) {
+    throw "Oscar frontend output is missing: $builtFrontendDist"
   }
-  Copy-Item `
-    -LiteralPath (Join-Path $runtimeBuildRoot "oscar\frontend\dist") `
-    -Destination $frontendDist `
-    -Recurse `
-    -Force
+  if (-not $builtFrontendDist.Equals(
+    $frontendDist,
+    [StringComparison]::OrdinalIgnoreCase
+  )) {
+    if (Test-Path -LiteralPath $frontendDist) {
+      Remove-Item -LiteralPath $frontendDist -Recurse -Force
+    }
+    Copy-Item `
+      -LiteralPath $builtFrontendDist `
+      -Destination $frontendDist `
+      -Recurse `
+      -Force
+  }
 
   & (Join-Path $root "scripts\build-launcher.ps1")
   if ($LASTEXITCODE -ne 0) {
