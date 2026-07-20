@@ -20,6 +20,7 @@ $blockedDirectoryPatterns = @(
   '^vendor($|/)',
   '^runtime($|/)',
   '^installer/out($|[-/])',
+  '^installer/\.offline-build-cache($|/)',
   '^installer/offline-payload($|/)',
   '^logs($|/)',
   '^secrets($|/)',
