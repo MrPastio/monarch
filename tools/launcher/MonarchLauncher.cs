@@ -254,6 +254,7 @@ namespace MonarchLauncher
             startInfo.EnvironmentVariables["MONARCH_SECURITY_ROOT"] = Path.Combine(versionRoot, "security");
             startInfo.EnvironmentVariables["MONARCH_SECURITY_SITE_PACKAGES"] =
                 Path.Combine(environmentRoot, "security", "site-packages");
+            startInfo.EnvironmentVariables["PYTHONDONTWRITEBYTECODE"] = "1";
             startInfo.EnvironmentVariables["MONARCH_TRANSACTION_ROOT"] = RequireString(layout, "transactionsRoot");
             startInfo.EnvironmentVariables["MONARCH_CONFIG_ROOT"] = RequireString(layout, "configRoot");
             startInfo.EnvironmentVariables["MONARCH_DATA_ROOT"] = RequireString(layout, "dataRoot");

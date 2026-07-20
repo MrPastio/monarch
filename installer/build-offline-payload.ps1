@@ -4,7 +4,7 @@ param(
   [string]$OutputDirectory = "",
   [string]$AppVersion = "0.1.5",
   [string]$RuntimeVersion = "2026.07.3",
-  [string]$BackendEnvironment = "backend-0.1.5-offline2",
+  [string]$BackendEnvironment = "backend-0.1.5-offline3",
   [switch]$Force
 )
 
@@ -187,6 +187,26 @@ function Install-PythonTarget {
     --target $Target `
     @Arguments
   Assert-NativeSuccess $Operation
+}
+
+function Remove-PythonBytecode {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $target = [System.IO.Path]::GetFullPath($Path).TrimEnd("\")
+  $environmentBoundary = [System.IO.Path]::GetFullPath($environmentOutput).TrimEnd("\") + "\"
+  if (-not ($target + "\").StartsWith(
+    $environmentBoundary,
+    [StringComparison]::OrdinalIgnoreCase
+  )) {
+    throw "Refusing to clean Python bytecode outside the generated environment."
+  }
+  Get-ChildItem -LiteralPath $target -Recurse -Force -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -in @(".pyc", ".pyo") } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+  Get-ChildItem -LiteralPath $target -Recurse -Force -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -eq "__pycache__" } |
+    Sort-Object { $_.FullName.Length } -Descending |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $root "package.json") -PathType Leaf)) {
@@ -377,7 +397,9 @@ try {
 
   $previousPythonPath = $env:PYTHONPATH
   $previousPath = $env:PATH
+  $previousDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
   try {
+    $env:PYTHONDONTWRITEBYTECODE = "1"
     $env:PYTHONPATH = "$commonSitePackages;$cpuSitePackages;$(Join-Path $root 'oscar\backend')"
     & $stagedPython -c "import fastapi, uvicorn, pydantic, httpx, llama_cpp, oscar_agent; print('oscar-offline-runtime-ok')"
     Assert-NativeSuccess "Offline Oscar CPU runtime validation"
@@ -393,7 +415,10 @@ try {
   } finally {
     $env:PYTHONPATH = $previousPythonPath
     $env:PATH = $previousPath
+    $env:PYTHONDONTWRITEBYTECODE = $previousDontWriteBytecode
   }
+
+  Remove-PythonBytecode -Path $environmentOutput
 
   Write-Host "[offline] Hashing exact payload trees"
   $launcherPath = Join-Path $root "Monarch.exe"

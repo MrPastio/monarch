@@ -16,6 +16,8 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(builder).toContain('Portable Python runtime validation');
     expect(builder).toContain('Offline Oscar CPU runtime validation');
     expect(builder).toContain('Offline Oscar CUDA runtime validation');
+    expect(builder).toContain('Remove-PythonBytecode');
+    expect(builder).toContain('PYTHONDONTWRITEBYTECODE');
     expect(builder).toContain('Offline Monarch Security runtime validation');
     expect(builder).toContain('payload-manifest.json');
     expect(builder).not.toContain('C:\\Users\\anton');
@@ -33,6 +35,7 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(finalizer).toContain('internetRequired = $false');
     expect(finalizer).toContain('Assert-TreeRecord');
     expect(finalizer).toContain('Publish-ImmutableComponent');
+    expect(finalizer).toContain('PYTHONDONTWRITEBYTECODE');
     expect(finalizer).not.toContain('winget.exe');
     expect(finalizer).not.toContain('npm.cmd');
     expect(finalizer).not.toMatch(/-m\s+pip\s+install/i);

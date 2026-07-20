@@ -3,7 +3,7 @@ param(
   [Parameter(Mandatory = $true)][string]$InstallRoot,
   [string]$AppVersion = "0.1.5",
   [string]$RuntimeVersion = "2026.07.3",
-  [string]$BackendEnvironment = "backend-0.1.5-offline2",
+  [string]$BackendEnvironment = "backend-0.1.5-offline3",
   [int]$DataSchemaVersion = 1,
   [int]$MinimumReadableDataSchema = 1,
   [int]$MaximumReadableDataSchema = 1,
@@ -292,7 +292,9 @@ try {
   Assert-NativeSuccess "Offline Electron runtime validation"
   $previousPythonPath = $env:PYTHONPATH
   $previousPath = $env:PATH
+  $previousDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
   try {
+    $env:PYTHONDONTWRITEBYTECODE = "1"
     $env:PYTHONPATH = "$($environmentRoot)\oscar\common;$($environmentRoot)\oscar\profiles\cpu;$versionRoot\oscar\backend"
     & $python -c "import fastapi, uvicorn, llama_cpp, oscar_agent; print('installed-oscar-ok')"
     Assert-NativeSuccess "Installed Oscar runtime validation"
@@ -306,6 +308,7 @@ try {
   } finally {
     $env:PYTHONPATH = $previousPythonPath
     $env:PATH = $previousPath
+    $env:PYTHONDONTWRITEBYTECODE = $previousDontWriteBytecode
   }
 
   Write-MonarchVersionDescriptor `
