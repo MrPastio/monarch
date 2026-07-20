@@ -30,6 +30,38 @@ function Assert-NativeSuccess {
   }
 }
 
+function Assert-CudaPayloadComplete {
+  param([Parameter(Mandatory = $true)][string]$CudaRoot)
+
+  foreach ($relativePath in @(
+    "bin\ggml-cuda.dll",
+    "llama_cpp\lib\llama.dll",
+    "nvidia\cublas\bin\cublas64_12.dll",
+    "nvidia\cublas\bin\cublasLt64_12.dll",
+    "nvidia\cuda_runtime\bin\cudart64_12.dll",
+    "nvidia\nvjitlink\bin\nvJitLink_120_0.dll"
+  )) {
+    $candidate = Join-Path $CudaRoot $relativePath
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf) -or
+        (Get-Item -LiteralPath $candidate).Length -le 0) {
+      throw "CUDA payload is incomplete: $candidate"
+    }
+  }
+}
+
+function Test-NvidiaRuntimeAvailable {
+  foreach ($candidate in @(
+    (Join-Path $env:SystemRoot "System32\nvcuda.dll"),
+    (Join-Path $env:SystemRoot "System32\nvidia-smi.exe"),
+    (Join-Path $env:ProgramW6432 "NVIDIA Corporation\NVSMI\nvidia-smi.exe")
+  )) {
+    if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+      return $true
+    }
+  }
+  return $false
+}
+
 function Get-Sha256Hex {
   param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -286,6 +318,8 @@ try {
       throw "Installed runtime is incomplete: $required"
     }
   }
+  $cudaRoot = Join-Path $environmentRoot "oscar\profiles\cuda"
+  Assert-CudaPayloadComplete -CudaRoot $cudaRoot
   & $node --version
   Assert-NativeSuccess "Offline Node runtime validation"
   & $electron --version
@@ -300,8 +334,12 @@ try {
     Assert-NativeSuccess "Installed Oscar runtime validation"
     $env:PYTHONPATH = "$($environmentRoot)\oscar\common;$($environmentRoot)\oscar\profiles\cuda;$versionRoot\oscar\backend"
     $env:PATH = "$($environmentRoot)\oscar\profiles\cuda\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\cublas\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\cuda_runtime\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\nvjitlink\bin;$previousPath"
-    & $python -B -c "import llama_cpp; print('installed-oscar-cuda-ok')"
-    Assert-NativeSuccess "Installed Oscar CUDA runtime validation"
+    if (Test-NvidiaRuntimeAvailable) {
+      & $python -B -c "import llama_cpp; print('installed-oscar-cuda-ok')"
+      Assert-NativeSuccess "Installed Oscar CUDA runtime validation"
+    } else {
+      Write-Host "installed-oscar-cuda-payload-ok (dynamic import skipped: NVIDIA driver unavailable)"
+    }
     $env:PYTHONPATH = "$($environmentRoot)\security\site-packages;$versionRoot\security\src"
     & $python -B -c "import psutil, monarch_security; print('installed-security-ok')"
     Assert-NativeSuccess "Installed Monarch Security runtime validation"

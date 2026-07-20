@@ -33,6 +33,38 @@ function Assert-NativeSuccess {
   }
 }
 
+function Assert-CudaPayloadComplete {
+  param([Parameter(Mandatory = $true)][string]$CudaRoot)
+
+  foreach ($relativePath in @(
+    "bin\ggml-cuda.dll",
+    "llama_cpp\lib\llama.dll",
+    "nvidia\cublas\bin\cublas64_12.dll",
+    "nvidia\cublas\bin\cublasLt64_12.dll",
+    "nvidia\cuda_runtime\bin\cudart64_12.dll",
+    "nvidia\nvjitlink\bin\nvJitLink_120_0.dll"
+  )) {
+    $candidate = Join-Path $CudaRoot $relativePath
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf) -or
+        (Get-Item -LiteralPath $candidate).Length -le 0) {
+      throw "CUDA payload is incomplete: $candidate"
+    }
+  }
+}
+
+function Test-NvidiaRuntimeAvailable {
+  foreach ($candidate in @(
+    (Join-Path $env:SystemRoot "System32\nvcuda.dll"),
+    (Join-Path $env:SystemRoot "System32\nvidia-smi.exe"),
+    (Join-Path $env:ProgramW6432 "NVIDIA Corporation\NVSMI\nvidia-smi.exe")
+  )) {
+    if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+      return $true
+    }
+  }
+  return $false
+}
+
 function Get-Sha256Hex {
   param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -450,6 +482,7 @@ try {
       $cudaSitePackages,
       $securitySitePackages
     )
+  Assert-CudaPayloadComplete -CudaRoot $cudaSitePackages
 
   $previousPythonPath = $env:PYTHONPATH
   $previousPath = $env:PATH
@@ -462,8 +495,12 @@ try {
 
     $env:PYTHONPATH = "$commonSitePackages;$cudaSitePackages;$(Join-Path $root 'oscar\backend')"
     $env:PATH = "$cudaSitePackages\bin;$cudaSitePackages\nvidia\cublas\bin;$cudaSitePackages\nvidia\cuda_runtime\bin;$cudaSitePackages\nvidia\nvjitlink\bin;$previousPath"
-    & $stagedPython -B -c "import llama_cpp; print('oscar-offline-cuda-runtime-ok')"
-    Assert-NativeSuccess "Offline Oscar CUDA runtime validation"
+    if (Test-NvidiaRuntimeAvailable) {
+      & $stagedPython -B -c "import llama_cpp; print('oscar-offline-cuda-runtime-ok')"
+      Assert-NativeSuccess "Offline Oscar CUDA runtime validation"
+    } else {
+      Write-Host "oscar-offline-cuda-payload-ok (dynamic import skipped: NVIDIA driver unavailable)"
+    }
 
     $env:PYTHONPATH = "$securitySitePackages;$(Join-Path $root 'security\src')"
     & $stagedPython -B -c "import psutil, monarch_security; print('security-offline-runtime-ok')"

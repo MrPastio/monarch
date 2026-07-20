@@ -1119,6 +1119,7 @@ function hasNvidiaRuntime(): boolean {
     return false;
   }
   return [
+    path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'nvcuda.dll'),
     path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'nvidia-smi.exe'),
     path.join(
       process.env.ProgramW6432 || process.env.ProgramFiles || 'C:\\Program Files',
