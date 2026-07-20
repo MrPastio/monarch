@@ -299,7 +299,7 @@ try {
     & $python -B -c "import fastapi, uvicorn, llama_cpp, oscar_agent; print('installed-oscar-ok')"
     Assert-NativeSuccess "Installed Oscar runtime validation"
     $env:PYTHONPATH = "$($environmentRoot)\oscar\common;$($environmentRoot)\oscar\profiles\cuda;$versionRoot\oscar\backend"
-    $env:PATH = "$($environmentRoot)\oscar\profiles\cuda\nvidia\cublas\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\cuda_runtime\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\nvjitlink\bin;$previousPath"
+    $env:PATH = "$($environmentRoot)\oscar\profiles\cuda\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\cublas\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\cuda_runtime\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\nvjitlink\bin;$previousPath"
     & $python -B -c "import llama_cpp; print('installed-oscar-cuda-ok')"
     Assert-NativeSuccess "Installed Oscar CUDA runtime validation"
     $env:PYTHONPATH = "$($environmentRoot)\security\site-packages;$versionRoot\security\src"

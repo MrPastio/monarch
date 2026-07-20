@@ -461,7 +461,7 @@ try {
     Assert-NativeSuccess "Offline Oscar CPU runtime validation"
 
     $env:PYTHONPATH = "$commonSitePackages;$cudaSitePackages;$(Join-Path $root 'oscar\backend')"
-    $env:PATH = "$cudaSitePackages\nvidia\cublas\bin;$cudaSitePackages\nvidia\cuda_runtime\bin;$cudaSitePackages\nvidia\nvjitlink\bin;$previousPath"
+    $env:PATH = "$cudaSitePackages\bin;$cudaSitePackages\nvidia\cublas\bin;$cudaSitePackages\nvidia\cuda_runtime\bin;$cudaSitePackages\nvidia\nvjitlink\bin;$previousPath"
     & $stagedPython -B -c "import llama_cpp; print('oscar-offline-cuda-runtime-ok')"
     Assert-NativeSuccess "Offline Oscar CUDA runtime validation"
 

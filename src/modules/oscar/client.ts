@@ -1100,6 +1100,7 @@ function resolvePackagedOscarEnvironment(projectRoot: string): NodeJS.ProcessEnv
   const inheritedPath = process.env.PATH || process.env.Path || '';
   const cudaBins = profile === 'cuda'
     ? [
+      path.join(profileRoot, 'bin'),
       path.join(profileRoot, 'nvidia', 'cublas', 'bin'),
       path.join(profileRoot, 'nvidia', 'cuda_runtime', 'bin'),
       path.join(profileRoot, 'nvidia', 'nvjitlink', 'bin'),
