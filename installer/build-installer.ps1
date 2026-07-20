@@ -122,6 +122,28 @@ try {
   if (-not (Test-Path -LiteralPath (Join-Path $runtimeBuildRoot "node_modules\esbuild") -PathType Container)) {
     throw "esbuild is required to build the packaged Monarch runtime. Run npm ci first."
   }
+  $electronExecutable = Join-Path $runtimeBuildRoot "node_modules\electron\dist\electron.exe"
+  if (-not (Test-Path -LiteralPath $electronExecutable -PathType Leaf)) {
+    $electronInstaller = Join-Path $runtimeBuildRoot "node_modules\electron\install.js"
+    if (-not (Test-Path -LiteralPath $electronInstaller -PathType Leaf)) {
+      throw "Electron package is missing. Run npm ci first."
+    }
+    $electronCache = Join-Path (Split-Path -Parent $runtimeBuildRoot) ".monarch-electron-cache"
+    New-Item -ItemType Directory -Path $electronCache -Force | Out-Null
+    $previousElectronCache = $env:ELECTRON_CACHE
+    try {
+      $env:ELECTRON_CACHE = $electronCache
+      & $node $electronInstaller
+      if ($LASTEXITCODE -ne 0) {
+        throw "Electron runtime download failed with exit code $LASTEXITCODE."
+      }
+    } finally {
+      $env:ELECTRON_CACHE = $previousElectronCache
+    }
+    if (-not (Test-Path -LiteralPath $electronExecutable -PathType Leaf)) {
+      throw "Electron runtime is still missing after package installation: $electronExecutable"
+    }
+  }
   $runtimeBundle = Join-Path $root "dist\monarch-server.mjs"
   $previousBundleOutput = $env:MONARCH_RUNTIME_BUNDLE_OUTPUT
   try {
