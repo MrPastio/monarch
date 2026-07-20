@@ -4,7 +4,7 @@ param(
   [string]$OutputDirectory = "",
   [string]$AppVersion = "0.1.5",
   [string]$RuntimeVersion = "2026.07.5",
-  [string]$BackendEnvironment = "backend-0.1.5-offline3",
+  [string]$BackendEnvironment = "backend-0.1.5-offline4",
   [switch]$Force
 )
 
@@ -214,6 +214,32 @@ function Remove-PythonBytecode {
     Where-Object { $_.Name -eq "__pycache__" } |
     Sort-Object { $_.FullName.Length } -Descending |
     ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+}
+
+function Remove-GeneratedPythonInstallNoise {
+  param(
+    [Parameter(Mandatory = $true)][string]$EnvironmentRoot,
+    [Parameter(Mandatory = $true)][string[]]$PythonTargets
+  )
+
+  $environmentBoundary = [System.IO.Path]::GetFullPath($EnvironmentRoot).TrimEnd("\") + "\"
+  foreach ($pythonTarget in $PythonTargets) {
+    $target = [System.IO.Path]::GetFullPath($pythonTarget).TrimEnd("\")
+    if (-not ($target + "\").StartsWith(
+      $environmentBoundary,
+      [StringComparison]::OrdinalIgnoreCase
+    )) {
+      throw "Refusing to normalize Python target outside the generated environment."
+    }
+    $launcherDirectory = Join-Path $target "bin"
+    if (Test-Path -LiteralPath $launcherDirectory -PathType Container) {
+      Remove-Item -LiteralPath $launcherDirectory -Recurse -Force
+    }
+  }
+
+  Get-ChildItem -LiteralPath $EnvironmentRoot -Recurse -Force -File -Filter "RECORD" |
+    Where-Object { $_.Directory.Name -like "*.dist-info" } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $root "package.json") -PathType Leaf)) {
@@ -427,6 +453,14 @@ try {
 
   Remove-PythonBytecode -Path $runtimeOutput
   Remove-PythonBytecode -Path $environmentOutput
+  Remove-GeneratedPythonInstallNoise `
+    -EnvironmentRoot $environmentOutput `
+    -PythonTargets @(
+      $commonSitePackages,
+      $cpuSitePackages,
+      $cudaSitePackages,
+      $securitySitePackages
+    )
 
   Write-Host "[offline] Hashing exact payload trees"
   $launcherPath = Join-Path $root "Monarch.exe"
