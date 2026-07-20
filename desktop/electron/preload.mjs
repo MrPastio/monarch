@@ -25,6 +25,22 @@ contextBridge.exposeInMainWorld('monarchDesktop', {
   writeSafeChat: (record) => ipcRenderer.invoke('monarch:safe-chat-upsert', { record }),
   deleteSafeChat: (id, kind = 'oscar') => ipcRenderer.invoke('monarch:safe-chat-delete', { id, kind }),
   lockSafeChats: () => ipcRenderer.invoke('monarch:safe-chat-lock'),
+  updates: Object.freeze({
+    check: () => ipcRenderer.invoke('monarch:update-intent', 'check'),
+    download: () => ipcRenderer.invoke('monarch:update-intent', 'download'),
+    install: () => ipcRenderer.invoke('monarch:update-intent', 'install'),
+    pause: () => ipcRenderer.invoke('monarch:update-intent', 'pause'),
+    resume: () => ipcRenderer.invoke('monarch:update-intent', 'resume'),
+    cancel: () => ipcRenderer.invoke('monarch:update-intent', 'cancel'),
+    discard: () => ipcRenderer.invoke('monarch:update-intent', 'discard'),
+    getState: () => ipcRenderer.invoke('monarch:update-state'),
+    onStateChanged: (listener) => {
+      if (typeof listener !== 'function') return () => {};
+      const handler = (_event, value) => listener(value);
+      ipcRenderer.on('monarch:update-state-changed', handler);
+      return () => ipcRenderer.removeListener('monarch:update-state-changed', handler);
+    },
+  }),
   onSafeChatStatus: (listener) => {
     if (typeof listener !== 'function') return () => {};
     const handler = (_event, value) => listener(value);

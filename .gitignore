@@ -115,7 +115,11 @@ security/src/*.egg-info/
 /monarch_detailed_review.pdf
 /monarch_safe_audit.pdf
 /installer/out/
+/installer/offline-payload/
+/installer/.offline-build-cache/
+/installer/out-*/
 /.monarch-public-snapshot
+/.tmp/
 
 # OS / editor
 .vscode/

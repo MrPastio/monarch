@@ -2969,3 +2969,151 @@ select option:checked { color: var(--text); background: #242628; }
 @media (max-width: 760px) {
   .coder-run-project-root { max-width: 62vw; }
 }
+
+.monarch-update-panel {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255, 174, 66, .2);
+  background:
+    radial-gradient(circle at 88% 4%, rgba(255, 173, 51, .16), transparent 32%),
+    linear-gradient(145deg, rgba(255, 255, 255, .055), rgba(255, 255, 255, .018));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 18px 55px rgba(0, 0, 0, .22);
+  backdrop-filter: blur(20px);
+}
+.monarch-update-panel::after {
+  content: "";
+  position: absolute;
+  inset: auto -12% -72% 34%;
+  height: 180px;
+  border-radius: 50%;
+  background: rgba(255, 148, 26, .11);
+  filter: blur(48px);
+  pointer-events: none;
+}
+.monarch-update-heading,
+.monarch-update-release,
+.monarch-update-progress,
+.monarch-update-actions {
+  position: relative;
+  z-index: 1;
+}
+.monarch-update-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+.monarch-update-heading h3 {
+  margin: 3px 0 6px;
+  color: #fff;
+}
+.monarch-update-heading p:last-child,
+.monarch-update-message {
+  max-width: 720px;
+  margin: 0;
+  color: rgba(255, 255, 255, .58);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.monarch-update-status {
+  flex: 0 0 auto;
+  padding: 7px 11px;
+  border: 1px solid rgba(255, 187, 77, .25);
+  border-radius: 999px;
+  color: #ffd391;
+  background: rgba(255, 148, 26, .08);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: .04em;
+}
+.monarch-update-status[data-state="failed"] {
+  color: #ffb0a9;
+  border-color: rgba(255, 107, 97, .24);
+  background: rgba(255, 107, 97, .07);
+}
+.monarch-update-status[data-state="up-to-date"],
+.monarch-update-status[data-state="completed"] {
+  color: #cbffd9;
+  border-color: rgba(86, 222, 131, .24);
+  background: rgba(86, 222, 131, .07);
+}
+.monarch-update-release {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 22px 0 16px;
+}
+.monarch-update-release > div {
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, .16);
+}
+.monarch-update-release span {
+  display: block;
+  margin-bottom: 4px;
+  color: rgba(255, 255, 255, .42);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.monarch-update-release strong {
+  color: rgba(255, 255, 255, .88);
+  font-size: 13px;
+}
+.monarch-update-progress {
+  margin: 14px 0;
+}
+.monarch-update-progress > div {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 7px;
+  color: rgba(255, 255, 255, .65);
+  font-size: 10px;
+}
+.monarch-update-progress progress {
+  display: block;
+  width: 100%;
+  height: 6px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .08);
+}
+.monarch-update-progress progress::-webkit-progress-bar {
+  background: rgba(255, 255, 255, .08);
+}
+.monarch-update-progress progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: linear-gradient(90deg, #ff8a1c, #ffd66e);
+  box-shadow: 0 0 16px rgba(255, 157, 36, .34);
+}
+.monarch-update-message {
+  position: relative;
+  z-index: 1;
+  min-height: 20px;
+}
+.monarch-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 17px;
+}
+.monarch-update-notes {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+@media (max-width: 700px) {
+  .monarch-update-panel { backdrop-filter: blur(10px); }
+  .monarch-update-heading { display: block; }
+  .monarch-update-status { display: inline-flex; margin-top: 12px; }
+  .monarch-update-release { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .monarch-update-panel,
+  .monarch-update-progress progress::-webkit-progress-value {
+    transition: none;
+  }
+}

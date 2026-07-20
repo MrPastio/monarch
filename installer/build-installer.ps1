@@ -1,6 +1,14 @@
 param(
   [string]$SourceRoot = "",
   [string]$OutputDirectory = "",
+  [string]$AppVersion = "0.1.5",
+  [string]$RuntimeVersion = "2026.07.6",
+  [string]$BackendEnvironment = "backend-0.1.5-offline4",
+  [int]$DataSchemaVersion = 1,
+  [int]$MinimumReadableDataSchema = 1,
+  [int]$MaximumReadableDataSchema = 1,
+  [int]$MinimumModelCatalogSchema = 1,
+  [int]$MaximumModelCatalogSchema = 1,
   [switch]$InstallCompiler
 )
 
@@ -73,10 +81,6 @@ function Find-Iscc {
 function Find-Node {
   param([Parameter(Mandatory = $true)][string[]]$Roots)
 
-  $command = Get-Command node.exe -ErrorAction SilentlyContinue
-  if ($command) {
-    return $command.Source
-  }
   foreach ($candidateRoot in $Roots | Select-Object -Unique) {
     $toolsRoot = Join-Path $candidateRoot ".tools"
     if (-not (Test-Path -LiteralPath $toolsRoot -PathType Container)) {
@@ -91,6 +95,10 @@ function Find-Node {
     if ($candidate) {
       return $candidate
     }
+  }
+  $command = Get-Command node.exe -ErrorAction SilentlyContinue
+  if ($command) {
+    return $command.Source
   }
   return $null
 }
@@ -114,6 +122,28 @@ try {
   if (-not (Test-Path -LiteralPath (Join-Path $runtimeBuildRoot "node_modules\esbuild") -PathType Container)) {
     throw "esbuild is required to build the packaged Monarch runtime. Run npm ci first."
   }
+  $electronExecutable = Join-Path $runtimeBuildRoot "node_modules\electron\dist\electron.exe"
+  if (-not (Test-Path -LiteralPath $electronExecutable -PathType Leaf)) {
+    $electronInstaller = Join-Path $runtimeBuildRoot "node_modules\electron\install.js"
+    if (-not (Test-Path -LiteralPath $electronInstaller -PathType Leaf)) {
+      throw "Electron package is missing. Run npm ci first."
+    }
+    $electronCache = Join-Path (Split-Path -Parent $runtimeBuildRoot) ".monarch-electron-cache"
+    New-Item -ItemType Directory -Path $electronCache -Force | Out-Null
+    $previousElectronCache = $env:ELECTRON_CACHE
+    try {
+      $env:ELECTRON_CACHE = $electronCache
+      & $node $electronInstaller
+      if ($LASTEXITCODE -ne 0) {
+        throw "Electron runtime download failed with exit code $LASTEXITCODE."
+      }
+    } finally {
+      $env:ELECTRON_CACHE = $previousElectronCache
+    }
+    if (-not (Test-Path -LiteralPath $electronExecutable -PathType Leaf)) {
+      throw "Electron runtime is still missing after package installation: $electronExecutable"
+    }
+  }
   $runtimeBundle = Join-Path $root "dist\monarch-server.mjs"
   $previousBundleOutput = $env:MONARCH_RUNTIME_BUNDLE_OUTPUT
   try {
@@ -127,6 +157,37 @@ try {
   }
   if (-not (Test-Path -LiteralPath $runtimeBundle -PathType Leaf)) {
     throw "Monarch runtime bundle is missing: $runtimeBundle"
+  }
+
+  $npmCli = Join-Path (Split-Path -Parent $node) "node_modules\npm\bin\npm-cli.js"
+  if (-not (Test-Path -LiteralPath $npmCli -PathType Leaf)) {
+    throw "The pinned Node.js runtime does not include npm-cli.js: $npmCli"
+  }
+  & $node $npmCli --prefix (Join-Path $runtimeBuildRoot "oscar\frontend") run build
+  if ($LASTEXITCODE -ne 0) {
+    throw "Oscar frontend build failed."
+  }
+  $builtFrontendDist = [System.IO.Path]::GetFullPath(
+    (Join-Path $runtimeBuildRoot "oscar\frontend\dist")
+  ).TrimEnd("\")
+  $frontendDist = [System.IO.Path]::GetFullPath(
+    (Join-Path $root "oscar\frontend\dist")
+  ).TrimEnd("\")
+  if (-not (Test-Path -LiteralPath $builtFrontendDist -PathType Container)) {
+    throw "Oscar frontend output is missing: $builtFrontendDist"
+  }
+  if (-not $builtFrontendDist.Equals(
+    $frontendDist,
+    [StringComparison]::OrdinalIgnoreCase
+  )) {
+    if (Test-Path -LiteralPath $frontendDist) {
+      Remove-Item -LiteralPath $frontendDist -Recurse -Force
+    }
+    Copy-Item `
+      -LiteralPath $builtFrontendDist `
+      -Destination $frontendDist `
+      -Recurse `
+      -Force
   }
 
   & (Join-Path $root "scripts\build-launcher.ps1")
@@ -151,9 +212,32 @@ try {
     throw "Inno Setup 6 is required. Rerun with -InstallCompiler."
   }
 
+  & (Join-Path $root "installer\build-offline-payload.ps1") `
+    -SourceRoot $root `
+    -BuildRuntimeRoot $runtimeBuildRoot `
+    -OutputDirectory (Join-Path $root "installer\offline-payload") `
+    -AppVersion $AppVersion `
+    -RuntimeVersion $RuntimeVersion `
+    -BackendEnvironment $BackendEnvironment `
+    -Force
+  if ($LASTEXITCODE -ne 0) {
+    throw "Monarch offline payload build failed."
+  }
+
   New-Item -ItemType Directory -Path $output -Force | Out-Null
   $definition = Join-Path $root "installer\Monarch.iss"
-  & $iscc "/DSourceRoot=$root" "/DOutputDir=$output" $definition
+  & $iscc `
+    "/DSourceRoot=$root" `
+    "/DOutputDir=$output" `
+    "/DAppVersion=$AppVersion" `
+    "/DRuntimeVersion=$RuntimeVersion" `
+    "/DBackendEnvironment=$BackendEnvironment" `
+    "/DDataSchemaVersion=$DataSchemaVersion" `
+    "/DMinimumReadableDataSchema=$MinimumReadableDataSchema" `
+    "/DMaximumReadableDataSchema=$MaximumReadableDataSchema" `
+    "/DMinimumModelCatalogSchema=$MinimumModelCatalogSchema" `
+    "/DMaximumModelCatalogSchema=$MaximumModelCatalogSchema" `
+    $definition
   if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed."
   }
@@ -162,7 +246,14 @@ try {
   if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
     throw "Installer output is missing: $setup"
   }
-  $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  $stream = [System.IO.File]::OpenRead($setup)
+  try {
+    $hash = ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "")
+  } finally {
+    $stream.Dispose()
+    $sha256.Dispose()
+  }
   Write-Host "Built: $setup"
   Write-Host "SHA256: $hash"
 } finally {

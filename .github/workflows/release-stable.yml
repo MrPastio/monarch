@@ -1,0 +1,266 @@
+name: Stable release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer without the leading v; must match installer and release spec
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monarch-stable-release
+  cancel-in-progress: false
+
+jobs:
+  gates-and-installer:
+    runs-on: windows-latest
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      MONARCH_CODER_SANDBOX_ROOT: C:\monarch-release-sandbox
+      MONARCH_SKIP_SANDBOXED_GIT_TEST: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Validate release input and installer version
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_VERSION -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$') {
+            throw 'version must be SemVer without a leading v'
+          }
+          $definition = Get-Content -LiteralPath installer\Monarch.iss -Raw
+          if ($definition -notmatch '#define AppVersion "([^"]+)"') {
+            throw 'Could not read AppVersion from installer\Monarch.iss'
+          }
+          if ($Matches[1] -ne $env:RELEASE_VERSION) {
+            throw "Installer AppVersion $($Matches[1]) does not match requested $env:RELEASE_VERSION"
+          }
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install Oscar frontend dependencies
+        run: npm --prefix oscar/frontend ci --no-audit --no-fund
+      - name: Typecheck
+        run: npm run typecheck:raw
+      - name: Run release tooling tests
+        run: npm run release:test
+      - name: Run source tests
+        shell: pwsh
+        run: |
+          $testTemp = 'C:\monarch-release-temp'
+          New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
+          $env:TEMP = $testTemp
+          $env:TMP = $testTemp
+          npm run test:raw -- tests/modules/coder.test.ts tests/app/coder-agent-controller.test.ts --maxWorkers=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:raw -- --exclude tests/modules/coder.test.ts --exclude tests/app/coder-agent-controller.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify public snapshot boundary
+        run: npm run upload:dry-run
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build installer from clean public snapshot
+        shell: pwsh
+        run: .\installer\build-installer.ps1
+      - name: Version installer artifact
+        shell: pwsh
+        run: |
+          $target = "installer\out\Monarch-Setup-$env:RELEASE_VERSION.exe"
+          Move-Item -LiteralPath installer\out\Monarch-Setup.exe -Destination $target
+      - uses: actions/upload-artifact@v7
+        with:
+          name: monarch-stable-installer
+          path: installer/out/Monarch-Setup-${{ inputs.version }}.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: gates-and-installer
+    runs-on: ubuntu-latest
+    environment: stable-release
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      DISTRIBUTION_REPOSITORY: MrPastio/monarch-releases
+    steps:
+      - name: Check out verified source revision
+        uses: actions/checkout@v7
+        with:
+          path: source
+          persist-credentials: false
+      - name: Check out distribution repository
+        uses: actions/checkout@v7
+        with:
+          repository: MrPastio/monarch-releases
+          token: ${{ secrets.MONARCH_RELEASES_TOKEN }}
+          path: distribution
+          fetch-depth: 0
+      - uses: actions/download-artifact@v7
+        with:
+          name: monarch-stable-installer
+          path: release-assets
+      - name: Provision signing material
+        shell: bash
+        env:
+          RELEASE_PRIVATE_KEY_B64: ${{ secrets.MONARCH_RELEASE_PRIVATE_KEY_B64 }}
+          RELEASE_PUBLIC_KEY_B64: ${{ vars.MONARCH_RELEASE_PUBLIC_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_PRIVATE_KEY_B64"
+          test -n "$RELEASE_PUBLIC_KEY_B64"
+          printf '%s' "$RELEASE_PRIVATE_KEY_B64" | base64 --decode > "$RUNNER_TEMP/release-private.pem"
+          printf '%s' "$RELEASE_PUBLIC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/release-public.pem"
+          chmod 600 "$RUNNER_TEMP/release-private.pem" "$RUNNER_TEMP/release-public.pem"
+      - name: Verify current channel and reserve next sequence
+        id: channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="distribution/channels/stable/manifest.json"
+          signature="distribution/channels/stable/manifest.sig"
+          if [[ -e "$manifest" || -e "$signature" ]]; then
+            test -f "$manifest" && test -f "$signature"
+            node source/scripts/release-manifest.mjs verify \
+              --manifest "$manifest" \
+              --signature "$signature" \
+              --public-key "$RUNNER_TEMP/release-public.pem" \
+              --expected-key-id monarch-release-2026-01
+            current="$(node source/scripts/release-manifest.mjs field --manifest "$manifest" --name sequence)"
+          else
+            current=0
+          fi
+          echo "sequence=$((current + 1))" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(git -C distribution rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Prepare and sign exact manifest bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer="release-assets/Monarch-Setup-$RELEASE_VERSION.exe"
+          published_at="$(git -C source show -s --format=%cI HEAD)"
+          node source/scripts/release-manifest.mjs prepare \
+            --spec source/release/stable-release-spec.json \
+            --installer "$installer" \
+            --output release-assets/manifest.json \
+            --sequence "${{ steps.channel.outputs.sequence }}" \
+            --published-at "$published_at"
+          actual_version="$(node source/scripts/release-manifest.mjs field \
+            --manifest release-assets/manifest.json --name version)"
+          test "$actual_version" = "$RELEASE_VERSION"
+          node source/scripts/release-manifest.mjs sign \
+            --manifest release-assets/manifest.json \
+            --private-key "$RUNNER_TEMP/release-private.pem" \
+            --signature release-assets/manifest.sig \
+            --expected-key-id monarch-release-2026-01
+          node source/scripts/release-manifest.mjs verify-assets \
+            --manifest release-assets/manifest.json \
+            --signature release-assets/manifest.sig \
+            --public-key "$RUNNER_TEMP/release-public.pem" \
+            --installer "$installer" \
+            --expected-key-id monarch-release-2026-01
+      - name: Create draft release
+        id: draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.MONARCH_RELEASES_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="v$RELEASE_VERSION"
+          if gh release view "$tag" --repo "$DISTRIBUTION_REPOSITORY" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$tag" --repo "$DISTRIBUTION_REPOSITORY" --json isDraft --jq .isDraft)"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            echo "is_draft=$is_draft" >> "$GITHUB_OUTPUT"
+          else
+            gh release create "$tag" \
+              --repo "$DISTRIBUTION_REPOSITORY" \
+              --target main \
+              --title "Monarch $tag" \
+              --notes-file "source/release/notes/$tag.md" \
+              --draft
+            echo "created=true" >> "$GITHUB_OUTPUT"
+            echo "is_draft=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload immutable draft assets
+        if: steps.draft.outputs.created == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.MONARCH_RELEASES_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "v$RELEASE_VERSION" \
+            "release-assets/Monarch-Setup-$RELEASE_VERSION.exe" \
+            release-assets/manifest.json \
+            release-assets/manifest.sig \
+            --repo "$DISTRIBUTION_REPOSITORY"
+      - name: Download draft assets from GitHub
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.MONARCH_RELEASES_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir remote-assets
+          gh release download "v$RELEASE_VERSION" \
+            --repo "$DISTRIBUTION_REPOSITORY" \
+            --dir remote-assets \
+            --pattern "Monarch-Setup-$RELEASE_VERSION.exe" \
+            --pattern manifest.json \
+            --pattern manifest.sig
+      - name: Verify downloaded release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in "Monarch-Setup-$RELEASE_VERSION.exe" manifest.json manifest.sig; do
+            node source/scripts/release-manifest.mjs compare-files \
+              --expected "release-assets/$name" \
+              --actual "remote-assets/$name"
+          done
+          node source/scripts/release-manifest.mjs verify-assets \
+            --manifest remote-assets/manifest.json \
+            --signature remote-assets/manifest.sig \
+            --public-key "$RUNNER_TEMP/release-public.pem" \
+            --installer "remote-assets/Monarch-Setup-$RELEASE_VERSION.exe" \
+            --expected-key-id monarch-release-2026-01
+      - name: Publish verified release
+        id: publish
+        if: steps.draft.outputs.is_draft == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.MONARCH_RELEASES_TOKEN }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh release view "v$RELEASE_VERSION" \
+            --repo "$DISTRIBUTION_REPOSITORY" --json databaseId --jq .databaseId)"
+          gh api --method PATCH \
+            "repos/$DISTRIBUTION_REPOSITORY/releases/$release_id" \
+            -F draft=false >/dev/null
+          echo "published=true" >> "$GITHUB_OUTPUT"
+      - name: Fast-forward stable channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C distribution fetch origin main
+          test "$(git -C distribution rev-parse origin/main)" = "${{ steps.channel.outputs.base_sha }}"
+          mkdir -p distribution/channels/stable
+          cp release-assets/manifest.json distribution/channels/stable/manifest.json
+          cp release-assets/manifest.sig distribution/channels/stable/manifest.sig
+          git -C distribution config user.name "Monarch Release Bot"
+          git -C distribution config user.email "release-bot@users.noreply.github.com"
+          git -C distribution add channels/stable/manifest.json channels/stable/manifest.sig
+          git -C distribution commit -m "release: advance stable to v$RELEASE_VERSION"
+          git -C distribution push origin HEAD:main
+      - name: Remove incomplete draft after failure
+        if: failure() && steps.draft.outputs.created == 'true' && steps.publish.outputs.published != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.MONARCH_RELEASES_TOKEN }}
+        run: |
+          gh release delete "v$RELEASE_VERSION" \
+            --repo "$DISTRIBUTION_REPOSITORY" \
+            --cleanup-tag \
+            --yes
