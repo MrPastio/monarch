@@ -20,6 +20,8 @@ jobs:
           python-version: "3.11"
       - name: Install Node dependencies
         run: npm ci --no-audit --no-fund
+      - name: Install Oscar frontend dependencies
+        run: npm --prefix oscar/frontend ci --no-audit --no-fund
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Build installer
