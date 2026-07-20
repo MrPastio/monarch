@@ -2,7 +2,7 @@ param(
   [Parameter(Mandatory = $true)][string]$StagingRoot,
   [Parameter(Mandatory = $true)][string]$InstallRoot,
   [string]$AppVersion = "0.1.5",
-  [string]$RuntimeVersion = "2026.07.4",
+  [string]$RuntimeVersion = "2026.07.5",
   [string]$BackendEnvironment = "backend-0.1.5-offline3",
   [int]$DataSchemaVersion = 1,
   [int]$MinimumReadableDataSchema = 1,
@@ -296,14 +296,14 @@ try {
   try {
     $env:PYTHONDONTWRITEBYTECODE = "1"
     $env:PYTHONPATH = "$($environmentRoot)\oscar\common;$($environmentRoot)\oscar\profiles\cpu;$versionRoot\oscar\backend"
-    & $python -c "import fastapi, uvicorn, llama_cpp, oscar_agent; print('installed-oscar-ok')"
+    & $python -B -c "import fastapi, uvicorn, llama_cpp, oscar_agent; print('installed-oscar-ok')"
     Assert-NativeSuccess "Installed Oscar runtime validation"
     $env:PYTHONPATH = "$($environmentRoot)\oscar\common;$($environmentRoot)\oscar\profiles\cuda;$versionRoot\oscar\backend"
     $env:PATH = "$($environmentRoot)\oscar\profiles\cuda\nvidia\cublas\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\cuda_runtime\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\nvjitlink\bin;$previousPath"
-    & $python -c "import llama_cpp; print('installed-oscar-cuda-ok')"
+    & $python -B -c "import llama_cpp; print('installed-oscar-cuda-ok')"
     Assert-NativeSuccess "Installed Oscar CUDA runtime validation"
     $env:PYTHONPATH = "$($environmentRoot)\security\site-packages;$versionRoot\security\src"
-    & $python -c "import psutil, monarch_security; print('installed-security-ok')"
+    & $python -B -c "import psutil, monarch_security; print('installed-security-ok')"
     Assert-NativeSuccess "Installed Monarch Security runtime validation"
   } finally {
     $env:PYTHONPATH = $previousPythonPath
