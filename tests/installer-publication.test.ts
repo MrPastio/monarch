@@ -92,6 +92,7 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(definition).not.toContain('InstallVoiceTts');
     expect(definition.match(/Filename: "\{sys\}\\WindowsPowerShell/g)).toBeNull();
     expect(definition).toContain('procedure RunCriticalStep');
+    expect(definition).toContain('procedure CurInstallProgressChanged');
     expect(definition).toContain('if ResultCode <> 0 then');
     expect(definition).toContain('RaiseException');
     expect(definition).toContain('Monarch.next.exe');
@@ -111,7 +112,8 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(builder).toContain('build-offline-payload.ps1');
 
     const dryRun = read('scripts/upload-dry-run.ps1');
-    expect(dryRun).toContain('^installer/out($|/)');
+    expect(dryRun).toContain('^installer/out($|[-/])');
+    expect(dryRun).toContain('^installer/offline-payload($|/)');
   });
 
   it('builds the installer runtime on GitHub before Inno Setup packages it', () => {

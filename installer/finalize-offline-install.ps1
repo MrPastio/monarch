@@ -2,8 +2,8 @@ param(
   [Parameter(Mandatory = $true)][string]$StagingRoot,
   [Parameter(Mandatory = $true)][string]$InstallRoot,
   [string]$AppVersion = "0.1.5",
-  [string]$RuntimeVersion = "2026.07.2",
-  [string]$BackendEnvironment = "backend-0.1.5-offline1",
+  [string]$RuntimeVersion = "2026.07.3",
+  [string]$BackendEnvironment = "backend-0.1.5-offline2",
   [int]$DataSchemaVersion = 1,
   [int]$MinimumReadableDataSchema = 1,
   [int]$MaximumReadableDataSchema = 1,
@@ -27,6 +27,19 @@ function Assert-NativeSuccess {
   param([Parameter(Mandatory = $true)][string]$Operation)
   if ($LASTEXITCODE -ne 0) {
     throw "$Operation failed with exit code $LASTEXITCODE."
+  }
+}
+
+function Get-Sha256Hex {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    return ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $stream.Dispose()
+    $sha.Dispose()
   }
 }
 
@@ -66,7 +79,7 @@ function Get-TreeRecord {
   )
   foreach ($file in $files) {
     $relative = $file.FullName.Substring($resolved.Length).TrimStart("\").Replace("\", "/")
-    $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = Get-Sha256Hex -Path $file.FullName
     $records.Add("$relative`0$($file.Length)`0$hash`n")
     $totalBytes += $file.Length
   }

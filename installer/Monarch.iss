@@ -10,10 +10,10 @@
   #define AppVersion "0.1.5"
 #endif
 #ifndef RuntimeVersion
-  #define RuntimeVersion "2026.07.2"
+  #define RuntimeVersion "2026.07.3"
 #endif
 #ifndef BackendEnvironment
-  #define BackendEnvironment "backend-0.1.5-offline1"
+  #define BackendEnvironment "backend-0.1.5-offline2"
 #endif
 #ifndef DataSchemaVersion
   #define DataSchemaVersion "1"
@@ -138,9 +138,12 @@ begin
     RaiseException(Description + ' Код ошибки: ' + IntToStr(ResultCode) + '.');
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
+var
+  CriticalStepsCompleted: Boolean;
+
+procedure CurInstallProgressChanged(CurProgress, MaxProgress: Integer);
 begin
-  if CurStep <> ssPostInstall then
+  if CriticalStepsCompleted or (CurProgress <> MaxProgress) then
     Exit;
 
   RunCriticalStep(
@@ -153,4 +156,5 @@ begin
     GetLauncherSwapParameters(''),
     ExpandConstant('{app}\versions\{#AppVersion}')
   );
+  CriticalStepsCompleted := True;
 end;

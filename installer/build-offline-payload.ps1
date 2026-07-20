@@ -3,8 +3,8 @@ param(
   [string]$BuildRuntimeRoot = "",
   [string]$OutputDirectory = "",
   [string]$AppVersion = "0.1.5",
-  [string]$RuntimeVersion = "2026.07.2",
-  [string]$BackendEnvironment = "backend-0.1.5-offline1",
+  [string]$RuntimeVersion = "2026.07.3",
+  [string]$BackendEnvironment = "backend-0.1.5-offline2",
   [switch]$Force
 )
 
@@ -30,6 +30,19 @@ function Assert-NativeSuccess {
   param([Parameter(Mandatory = $true)][string]$Operation)
   if ($LASTEXITCODE -ne 0) {
     throw "$Operation failed with exit code $LASTEXITCODE."
+  }
+}
+
+function Get-Sha256Hex {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    return ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $stream.Dispose()
+    $sha.Dispose()
   }
 }
 
@@ -137,7 +150,7 @@ function Get-TreeRecord {
   $files = @(Get-ChildItem -LiteralPath $resolved -Recurse -Force -File)
   foreach ($file in $files) {
     $relative = $file.FullName.Substring($resolved.Length).TrimStart("\").Replace("\", "/")
-    $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = Get-Sha256Hex -Path $file.FullName
     $records.Add("$relative`0$($file.Length)`0$hash`n")
     $totalBytes += $file.Length
   }
@@ -399,7 +412,7 @@ try {
     launcher = [ordered]@{
       fileName = "Monarch.exe"
       size = $launcherFile.Length
-      sha256 = (Get-FileHash -LiteralPath $launcherPath -Algorithm SHA256).Hash.ToLowerInvariant()
+      sha256 = Get-Sha256Hex -Path $launcherPath
     }
   }
   [System.IO.File]::WriteAllText(
