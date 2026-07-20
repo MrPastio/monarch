@@ -2,8 +2,8 @@ param(
   [string]$SourceRoot = "",
   [string]$OutputDirectory = "",
   [string]$AppVersion = "0.1.5",
-  [string]$RuntimeVersion = "2026.07.1",
-  [string]$BackendEnvironment = "backend-0.1.5",
+  [string]$RuntimeVersion = "2026.07.2",
+  [string]$BackendEnvironment = "backend-0.1.5-offline1",
   [int]$DataSchemaVersion = 1,
   [int]$MinimumReadableDataSchema = 1,
   [int]$MaximumReadableDataSchema = 1,
@@ -81,10 +81,6 @@ function Find-Iscc {
 function Find-Node {
   param([Parameter(Mandatory = $true)][string[]]$Roots)
 
-  $command = Get-Command node.exe -ErrorAction SilentlyContinue
-  if ($command) {
-    return $command.Source
-  }
   foreach ($candidateRoot in $Roots | Select-Object -Unique) {
     $toolsRoot = Join-Path $candidateRoot ".tools"
     if (-not (Test-Path -LiteralPath $toolsRoot -PathType Container)) {
@@ -99,6 +95,10 @@ function Find-Node {
     if ($candidate) {
       return $candidate
     }
+  }
+  $command = Get-Command node.exe -ErrorAction SilentlyContinue
+  if ($command) {
+    return $command.Source
   }
   return $null
 }
@@ -137,6 +137,24 @@ try {
     throw "Monarch runtime bundle is missing: $runtimeBundle"
   }
 
+  $npmCli = Join-Path (Split-Path -Parent $node) "node_modules\npm\bin\npm-cli.js"
+  if (-not (Test-Path -LiteralPath $npmCli -PathType Leaf)) {
+    throw "The pinned Node.js runtime does not include npm-cli.js: $npmCli"
+  }
+  & $node $npmCli --prefix (Join-Path $runtimeBuildRoot "oscar\frontend") run build
+  if ($LASTEXITCODE -ne 0) {
+    throw "Oscar frontend build failed."
+  }
+  $frontendDist = Join-Path $root "oscar\frontend\dist"
+  if (Test-Path -LiteralPath $frontendDist) {
+    Remove-Item -LiteralPath $frontendDist -Recurse -Force
+  }
+  Copy-Item `
+    -LiteralPath (Join-Path $runtimeBuildRoot "oscar\frontend\dist") `
+    -Destination $frontendDist `
+    -Recurse `
+    -Force
+
   & (Join-Path $root "scripts\build-launcher.ps1")
   if ($LASTEXITCODE -ne 0) {
     throw "Monarch launcher build failed."
@@ -157,6 +175,18 @@ try {
   }
   if (-not $iscc) {
     throw "Inno Setup 6 is required. Rerun with -InstallCompiler."
+  }
+
+  & (Join-Path $root "installer\build-offline-payload.ps1") `
+    -SourceRoot $root `
+    -BuildRuntimeRoot $runtimeBuildRoot `
+    -OutputDirectory (Join-Path $root "installer\offline-payload") `
+    -AppVersion $AppVersion `
+    -RuntimeVersion $RuntimeVersion `
+    -BackendEnvironment $BackendEnvironment `
+    -Force
+  if ($LASTEXITCODE -ne 0) {
+    throw "Monarch offline payload build failed."
   }
 
   New-Item -ItemType Directory -Path $output -Force | Out-Null

@@ -1009,6 +1009,7 @@ async function doStartManagedOscarBackend(config: OscarBridgeConfig): Promise<vo
 
   const runtimeDir = path.join(projectRoot, 'runtime');
   await mkdir(runtimeDir, { recursive: true });
+  const packagedEnvironment = resolvePackagedOscarEnvironment(projectRoot);
 
   const port = readApiPort(config.apiBase);
   const out = openSync(path.join(runtimeDir, 'monarch-managed-backend.out.log'), 'a');
@@ -1021,7 +1022,7 @@ async function doStartManagedOscarBackend(config: OscarBridgeConfig): Promise<vo
       cwd: projectRoot,
       env: {
         ...process.env,
-        PYTHONPATH: path.join(projectRoot, 'backend'),
+        ...packagedEnvironment,
         PYTORCH_CUDA_ALLOC_CONF: process.env.PYTORCH_CUDA_ALLOC_CONF || 'expandable_segments:True,max_split_size_mb:128',
         TOKENIZERS_PARALLELISM: process.env.TOKENIZERS_PARALLELISM || 'false',
         OSCAR_API_TOKEN: config.apiToken,
@@ -1074,6 +1075,57 @@ function killProcessTree(pid: number | undefined): void {
 function resolveOscarPython(projectRoot: string): string {
   return process.env.OSCAR_PYTHON
     || path.join(projectRoot, '.venv', 'Scripts', 'python.exe');
+}
+
+function resolvePackagedOscarEnvironment(projectRoot: string): NodeJS.ProcessEnv {
+  const environmentRoot = String(process.env.MONARCH_BACKEND_ENVIRONMENT_ROOT || '').trim();
+  if (!environmentRoot) {
+    return {
+      PYTHONPATH: path.join(projectRoot, 'backend'),
+    };
+  }
+
+  const explicitProfile = String(process.env.MONARCH_OSCAR_PROFILE || '').trim().toLowerCase();
+  const profile = explicitProfile === 'cpu' || explicitProfile === 'cuda'
+    ? explicitProfile
+    : hasNvidiaRuntime()
+      ? 'cuda'
+      : 'cpu';
+  const profileRoot = path.join(environmentRoot, 'oscar', 'profiles', profile);
+  const pythonPath = [
+    path.join(environmentRoot, 'oscar', 'common'),
+    profileRoot,
+    path.join(projectRoot, 'backend'),
+  ].join(path.delimiter);
+  const inheritedPath = process.env.PATH || process.env.Path || '';
+  const cudaBins = profile === 'cuda'
+    ? [
+      path.join(profileRoot, 'nvidia', 'cublas', 'bin'),
+      path.join(profileRoot, 'nvidia', 'cuda_runtime', 'bin'),
+      path.join(profileRoot, 'nvidia', 'nvjitlink', 'bin'),
+    ].filter((entry) => existsSync(entry))
+    : [];
+
+  return {
+    MONARCH_OSCAR_PROFILE: profile,
+    PYTHONPATH: pythonPath,
+    PATH: [...cudaBins, inheritedPath].filter(Boolean).join(path.delimiter),
+  };
+}
+
+function hasNvidiaRuntime(): boolean {
+  if (process.platform !== 'win32') {
+    return false;
+  }
+  return [
+    path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'nvidia-smi.exe'),
+    path.join(
+      process.env.ProgramW6432 || process.env.ProgramFiles || 'C:\\Program Files',
+      'NVIDIA Corporation',
+      'NVSMI',
+      'nvidia-smi.exe'
+    ),
+  ].some((candidate) => existsSync(candidate));
 }
 
 function readApiPort(apiBase: string): number {

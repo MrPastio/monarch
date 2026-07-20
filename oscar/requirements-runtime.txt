@@ -1,0 +1,17 @@
+# Offline Monarch base runtime. Keep heavyweight Transformers/Torch/Triton
+# lanes outside the signed base installer; Monarch's default inference path is
+# GGUF through llama.cpp.
+fastapi==0.139.2
+uvicorn[standard]==0.51.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
+httpx==0.28.1
+beautifulsoup4==4.15.0
+trafilatura==2.1.0
+ddgs==9.14.4
+psutil==7.2.2
+python-dotenv==1.2.2
+numpy==2.4.4
+diskcache==5.6.3
+Jinja2==3.1.6
+typing_extensions==4.15.0

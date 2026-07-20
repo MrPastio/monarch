@@ -18,7 +18,6 @@ await build({
   platform: 'node',
   format: 'esm',
   target: 'node22',
-  packages: 'external',
   legalComments: 'none',
   sourcemap: false,
   logLevel: 'warning',

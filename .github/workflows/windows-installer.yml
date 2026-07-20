@@ -15,6 +15,9 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
       - name: Install Node dependencies
         run: npm ci --no-audit --no-fund
       - name: Install Inno Setup

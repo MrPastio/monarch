@@ -10,10 +10,10 @@
   #define AppVersion "0.1.5"
 #endif
 #ifndef RuntimeVersion
-  #define RuntimeVersion "2026.07.1"
+  #define RuntimeVersion "2026.07.2"
 #endif
 #ifndef BackendEnvironment
-  #define BackendEnvironment "backend-0.1.5"
+  #define BackendEnvironment "backend-0.1.5-offline1"
 #endif
 #ifndef DataSchemaVersion
   #define DataSchemaVersion "1"
@@ -64,22 +64,19 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; GroupDescription: "Ярлыки:"; Flags: unchecked
-Name: "smallmodel"; Description: "Установить малую модель Oscar"; GroupDescription: "Дополнительные локальные модели:"; Flags: unchecked
-Name: "voicestt"; Description: "Установить Voice STT"; GroupDescription: "Дополнительные локальные модели:"; Flags: unchecked
-Name: "voicetts"; Description: "Установить NVIDIA Voice TTS"; GroupDescription: "Дополнительные локальные модели:"; Flags: unchecked
 
 [Files]
-Source: "{#SourceRoot}\*"; DestDir: "{app}\versions\{#AppVersion}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: ".git\*,.monarch-public-snapshot,.tools\*,node_modules\*,out\*,runtime\*,logs\*,secrets\*,tmp\*,data\local\*,artifacts\generated\*,oscar\.venv\*,oscar\frontend\node_modules\*,oscar\frontend\dist\*,oscar\data\*,security\.venv\*,security\data\*,security\logs\*,installer\out\*,Monarch.exe,*.gguf,*.safetensors,*.onnx,*.exe,*.dll,*.pyd,*.pyc,*.pyo,*.zip"
-Source: "{#SourceRoot}\Monarch.exe"; DestDir: "{app}"; DestName: "Monarch.next.exe"; Flags: ignoreversion
-Source: "{#SourceRoot}\dist\monarch-server.mjs"; DestDir: "{app}\versions\{#AppVersion}\dist"; Flags: ignoreversion
+Source: "{#SourceRoot}\installer\offline-payload\app\*"; DestDir: "{app}\.staging\{#AppVersion}\app"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceRoot}\installer\offline-payload\runtime\*"; DestDir: "{app}\.staging\{#AppVersion}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceRoot}\installer\offline-payload\environment\*"; DestDir: "{app}\.staging\{#AppVersion}\environment"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceRoot}\installer\offline-payload\payload-manifest.json"; DestDir: "{app}\.staging\{#AppVersion}"; Flags: ignoreversion
+Source: "{#SourceRoot}\installer\offline-payload\Monarch.exe"; DestDir: "{app}"; DestName: "Monarch.next.exe"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"
 Name: "{autodesktop}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "{code:GetLauncherSwapParameters}"; WorkingDir: "{app}\versions\{#AppVersion}"; StatusMsg: "Обновляется безопасный загрузчик Monarch..."; Flags: waituntilterminated
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "{code:GetBootstrapParameters}"; WorkingDir: "{app}\versions\{#AppVersion}"; StatusMsg: "Устанавливаются зависимости и выбранные модели Monarch..."; Flags: waituntilterminated
 Filename: "{app}\{#AppExeName}"; Description: "Запустить Monarch"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
 
 [Code]
@@ -92,12 +89,12 @@ begin
     '" -LauncherVersion "1.0.0"';
 end;
 
-function GetBootstrapParameters(Param: String): String;
+function GetFinalizeParameters(Param: String): String;
 begin
   Result :=
     '-NoProfile -ExecutionPolicy Bypass -File "' +
-    ExpandConstant('{app}\versions\{#AppVersion}\installer\bootstrap.ps1') +
-    '" -InstallDirectory "' + ExpandConstant('{app}\versions\{#AppVersion}') +
+    ExpandConstant('{app}\.staging\{#AppVersion}\app\installer\finalize-offline-install.ps1') +
+    '" -StagingRoot "' + ExpandConstant('{app}\.staging\{#AppVersion}') +
     '" -InstallRoot "' + ExpandConstant('{app}') +
     '" -AppVersion "{#AppVersion}"' +
     ' -RuntimeVersion "{#RuntimeVersion}"' +
@@ -106,15 +103,7 @@ begin
     ' -MinimumReadableDataSchema "{#MinimumReadableDataSchema}"' +
     ' -MaximumReadableDataSchema "{#MaximumReadableDataSchema}"' +
     ' -MinimumModelCatalogSchema "{#MinimumModelCatalogSchema}"' +
-    ' -MaximumModelCatalogSchema "{#MaximumModelCatalogSchema}"' +
-    ' -NonInteractive';
-
-  if WizardIsTaskSelected('smallmodel') then
-    Result := Result + ' -InstallSmallModel';
-  if WizardIsTaskSelected('voicestt') then
-    Result := Result + ' -InstallVoiceStt';
-  if WizardIsTaskSelected('voicetts') then
-    Result := Result + ' -InstallVoiceTts';
+    ' -MaximumModelCatalogSchema "{#MaximumModelCatalogSchema}"';
 end;
 
 function GetDefaultInstallPath(Param: String): String;
@@ -125,4 +114,43 @@ begin
     Result := 'D:\Programs\Monarch'
   else
     Result := ExpandConstant('{localappdata}\Programs\Monarch');
+end;
+
+procedure RunCriticalStep(
+  const Description: String;
+  const Parameters: String;
+  const WorkingDirectory: String
+);
+var
+  ResultCode: Integer;
+begin
+  WizardForm.StatusLabel.Caption := Description;
+  if not Exec(
+    ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    Parameters,
+    WorkingDirectory,
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  ) then
+    RaiseException(Description + ' Windows не смогла запустить процесс.');
+  if ResultCode <> 0 then
+    RaiseException(Description + ' Код ошибки: ' + IntToStr(ResultCode) + '.');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep <> ssPostInstall then
+    Exit;
+
+  RunCriticalStep(
+    'Проверяется и устанавливается автономный Monarch...',
+    GetFinalizeParameters(''),
+    ExpandConstant('{app}')
+  );
+  RunCriticalStep(
+    'Обновляется безопасный загрузчик Monarch...',
+    GetLauncherSwapParameters(''),
+    ExpandConstant('{app}\versions\{#AppVersion}')
+  );
 end;

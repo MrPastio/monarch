@@ -196,7 +196,7 @@ namespace MonarchLauncher
                 throw new InvalidDataException("This Monarch version requires a newer bootstrap launcher.");
             }
 
-            ValidatePayloadComponent(
+            var runtimeRoot = ValidatePayloadComponent(
                 RequireString(layout, "payloadRoot"),
                 Path.Combine(
                     RequireString(layout, "payloadRoot"),
@@ -204,7 +204,7 @@ namespace MonarchLauncher
                     "runtime-" + RequireSafeIdentifier(descriptor, "runtimeVersion")
                 )
             );
-            ValidatePayloadComponent(
+            var environmentRoot = ValidatePayloadComponent(
                 RequireString(layout, "payloadRoot"),
                 Path.Combine(
                     RequireString(layout, "payloadRoot"),
@@ -214,11 +214,21 @@ namespace MonarchLauncher
             );
             ValidateReadableDataSchema(installRoot, descriptor);
 
-            var electronExe = Path.Combine(versionRoot, "node_modules", "electron", "dist", "electron.exe");
+            var electronExe = Path.Combine(runtimeRoot, "electron", "electron.exe");
+            var nodeExe = Path.Combine(runtimeRoot, "node", "node.exe");
+            var pythonExe = Path.Combine(runtimeRoot, "python", "python.exe");
             var electronMain = Path.Combine(versionRoot, "desktop", "electron", "main.mjs");
             if (!File.Exists(electronExe))
             {
                 throw new FileNotFoundException("Electron runtime is missing.", electronExe);
+            }
+            if (!File.Exists(nodeExe))
+            {
+                throw new FileNotFoundException("Node.js runtime is missing.", nodeExe);
+            }
+            if (!File.Exists(pythonExe))
+            {
+                throw new FileNotFoundException("Python runtime is missing.", pythonExe);
             }
             if (!File.Exists(electronMain))
             {
@@ -235,6 +245,15 @@ namespace MonarchLauncher
             startInfo.EnvironmentVariables["MONARCH_INSTALL_ROOT"] = installRoot;
             startInfo.EnvironmentVariables["MONARCH_VERSION_ROOT"] = versionRoot;
             startInfo.EnvironmentVariables["MONARCH_PAYLOAD_ROOT"] = RequireString(layout, "payloadRoot");
+            startInfo.EnvironmentVariables["MONARCH_RUNTIME_ROOT"] = runtimeRoot;
+            startInfo.EnvironmentVariables["MONARCH_BACKEND_ENVIRONMENT_ROOT"] = environmentRoot;
+            startInfo.EnvironmentVariables["MONARCH_NODE_PATH"] = nodeExe;
+            startInfo.EnvironmentVariables["OSCAR_PYTHON"] = pythonExe;
+            startInfo.EnvironmentVariables["OSCAR_PROJECT_ROOT"] = Path.Combine(versionRoot, "oscar");
+            startInfo.EnvironmentVariables["MONARCH_SECURITY_PYTHON"] = pythonExe;
+            startInfo.EnvironmentVariables["MONARCH_SECURITY_ROOT"] = Path.Combine(versionRoot, "security");
+            startInfo.EnvironmentVariables["MONARCH_SECURITY_SITE_PACKAGES"] =
+                Path.Combine(environmentRoot, "security", "site-packages");
             startInfo.EnvironmentVariables["MONARCH_TRANSACTION_ROOT"] = RequireString(layout, "transactionsRoot");
             startInfo.EnvironmentVariables["MONARCH_CONFIG_ROOT"] = RequireString(layout, "configRoot");
             startInfo.EnvironmentVariables["MONARCH_DATA_ROOT"] = RequireString(layout, "dataRoot");
@@ -326,13 +345,14 @@ namespace MonarchLauncher
             }
         }
 
-        private static void ValidatePayloadComponent(string payloadRoot, string componentPath)
+        private static string ValidatePayloadComponent(string payloadRoot, string componentPath)
         {
             var canonical = RequireCanonicalDirectory(componentPath, payloadRoot);
             if (!Directory.Exists(canonical))
             {
                 throw new DirectoryNotFoundException("A versioned Monarch runtime component is missing.");
             }
+            return canonical;
         }
 
         private static void ValidateReadableDataSchema(

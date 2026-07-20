@@ -422,7 +422,7 @@ export class SecurityClient {
       cwd: this.config.projectRoot,
       env: {
         ...process.env,
-        PYTHONPATH: path.join(this.config.projectRoot, 'src'),
+        PYTHONPATH: securityPythonPath(this.config.projectRoot),
         PYTHONUTF8: '1',
       },
       windowsHide: true,
@@ -546,7 +546,7 @@ export class SecurityClient {
         cwd: this.config.projectRoot,
         env: {
           ...process.env,
-          PYTHONPATH: path.join(this.config.projectRoot, 'src'),
+          PYTHONPATH: securityPythonPath(this.config.projectRoot),
           PYTHONUTF8: '1',
         },
         windowsHide: true,
@@ -701,6 +701,14 @@ function resolvePythonPath(projectRoot: string, configured: string | undefined):
 
   const venvPython = path.join(projectRoot, '.venv', 'Scripts', 'python.exe');
   return existsSync(venvPython) ? venvPython : 'python';
+}
+
+function securityPythonPath(projectRoot: string): string {
+  const entries = [
+    String(process.env.MONARCH_SECURITY_SITE_PACKAGES || '').trim(),
+    path.join(projectRoot, 'src'),
+  ].filter(Boolean);
+  return entries.join(path.delimiter);
 }
 
 function normalizeExecutablePath(value: string): string {

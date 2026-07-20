@@ -7,33 +7,34 @@ const read = (relativePath: string) =>
   readFileSync(path.join(root, relativePath), 'utf8');
 
 describe('Windows installer and public snapshot boundary', () => {
-  it('bootstraps missing runtimes without embedding machine-specific paths', () => {
-    const bootstrap = read('installer/bootstrap.ps1');
-    expect(bootstrap).toContain('Monarch requires Windows 10 or Windows 11 (64-bit).');
-    expect(bootstrap).toContain('CurrentMajorVersionNumber');
-    expect(bootstrap).toContain('Python.Python.3.11');
-    expect(bootstrap).toContain('--source winget');
-    expect(bootstrap).toContain('Refresh-ProcessPath');
-    expect(bootstrap).toContain('Get-Python311RegistryCandidates');
-    expect(bootstrap).toContain('HKEY_CURRENT_USER\\Software\\Python\\PythonCore');
-    expect(bootstrap).toContain('scripts\\ensure-node.ps1');
-    expect(bootstrap).toContain('npm.cmd');
-    expect(bootstrap).toContain('--include=dev');
-    expect(bootstrap).toContain('--ignore-scripts=false');
-    expect(bootstrap).toContain('node_modules\\electron\\dist\\electron.exe');
-    expect(bootstrap).toContain('node_modules\\electron\\install.js');
-    expect(bootstrap).toContain('Install-ElectronRuntime -Node $node -Root $root');
-    expect(bootstrap).toContain('Electron ready:');
-    expect(bootstrap).toContain('dist\\monarch-server.mjs');
-    expect(bootstrap).toContain('Packaged Monarch runtime validation');
-    expect(bootstrap).toContain('oscar\\scripts\\install.ps1');
-    expect(bootstrap).toContain('security\\scripts\\setup_runtime.ps1');
-    expect(bootstrap).toContain('installer-logs');
-    expect(bootstrap).toContain('Start-Transcript');
-    expect(bootstrap).toContain('MONARCH_CONFIG_ROOT');
-    expect(bootstrap).toContain('config\\oscar');
-    expect(bootstrap).not.toContain('C:\\Users\\anton');
-    expect(bootstrap).not.toContain('E:\\Monarch');
+  it('assembles a versioned offline runtime on the build machine', () => {
+    const builder = read('installer/build-offline-payload.ps1');
+    expect(builder).toContain('requirements-runtime.txt');
+    expect(builder).toContain('node_modules\\electron\\dist');
+    expect(builder).toContain('profiles\\cpu');
+    expect(builder).toContain('profiles\\cuda');
+    expect(builder).toContain('Portable Python runtime validation');
+    expect(builder).toContain('Offline Oscar CPU runtime validation');
+    expect(builder).toContain('Offline Monarch Security runtime validation');
+    expect(builder).toContain('payload-manifest.json');
+    expect(builder).not.toContain('C:\\Users\\anton');
+    expect(builder).not.toContain('E:\\Monarch');
+
+    const requirements = read('oscar/requirements-runtime.txt');
+    expect(requirements).toContain('fastapi==');
+    expect(requirements).toContain('uvicorn[standard]==');
+    expect(requirements).not.toContain('torch');
+    expect(requirements).not.toContain('transformers');
+    expect(requirements).not.toContain('triton');
+
+    const finalizer = read('installer/finalize-offline-install.ps1');
+    expect(finalizer).toContain('installationMode = "offline"');
+    expect(finalizer).toContain('internetRequired = $false');
+    expect(finalizer).toContain('Assert-TreeRecord');
+    expect(finalizer).toContain('Publish-ImmutableComponent');
+    expect(finalizer).not.toContain('winget.exe');
+    expect(finalizer).not.toContain('npm.cmd');
+    expect(finalizer).not.toMatch(/-m\s+pip\s+install/i);
   });
 
   it('installs llama.cpp from a published Windows wheel instead of compiling it locally', () => {
@@ -71,28 +72,28 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(exporter).toContain('github_pat_');
   });
 
-  it('builds a modern Windows setup with optional large models', () => {
+  it('builds a modern self-contained Windows setup without model downloads', () => {
     const definition = read('installer/Monarch.iss');
     expect(definition).toContain('#define AppVersion "0.1.5"');
     expect(definition).toContain('WizardStyle=modern');
     expect(definition).toContain('PrivilegesRequired=lowest');
     expect(definition).toContain('ArchitecturesInstallIn64BitMode=x64compatible');
-    expect(definition).toContain('tmp\\*');
-    expect(definition).toContain('*.pyc');
-    expect(definition).toContain('Source: "{#SourceRoot}\\dist\\monarch-server.mjs"');
-    expect(definition).toContain('Name: "smallmodel"');
-    expect(definition).toContain('Name: "voicestt"');
-    expect(definition).toContain('Name: "voicetts"');
+    expect(definition).toContain('installer\\offline-payload\\app\\*');
+    expect(definition).toContain('installer\\offline-payload\\runtime\\*');
+    expect(definition).toContain('installer\\offline-payload\\environment\\*');
+    expect(definition).toContain('payload-manifest.json');
     expect(definition).toContain('E:\\Programs\\Monarch');
     expect(definition).toContain('D:\\Programs\\Monarch');
-    expect(definition).toContain('Parameters: "{code:GetBootstrapParameters}"');
-    expect(definition).toContain("WizardIsTaskSelected('smallmodel')");
-    expect(definition).toContain("WizardIsTaskSelected('voicestt')");
-    expect(definition).toContain("WizardIsTaskSelected('voicetts')");
-    expect(definition).toContain("Result := Result + ' -InstallSmallModel'");
-    expect(definition).toContain("Result := Result + ' -InstallVoiceStt'");
-    expect(definition).toContain("Result := Result + ' -InstallVoiceTts'");
-    expect(definition.match(/Filename: "\{sys\}\\WindowsPowerShell/g)).toHaveLength(2);
+    expect(definition).toContain("GetFinalizeParameters('')");
+    expect(definition).not.toContain('GetBootstrapParameters');
+    expect(definition).not.toContain('WizardIsTaskSelected');
+    expect(definition).not.toContain('InstallSmallModel');
+    expect(definition).not.toContain('InstallVoiceStt');
+    expect(definition).not.toContain('InstallVoiceTts');
+    expect(definition.match(/Filename: "\{sys\}\\WindowsPowerShell/g)).toBeNull();
+    expect(definition).toContain('procedure RunCriticalStep');
+    expect(definition).toContain('if ResultCode <> 0 then');
+    expect(definition).toContain('RaiseException');
     expect(definition).toContain('Monarch.next.exe');
     expect(definition).toContain('GetLauncherSwapParameters');
     expect(definition).toContain('versions\\{#AppVersion}');
@@ -107,6 +108,7 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(builder).toContain('.monarch-public-snapshot');
     expect(builder).toContain('scripts\\build-runtime-bundle.mjs');
     expect(builder).toContain('dist\\monarch-server.mjs');
+    expect(builder).toContain('build-offline-payload.ps1');
 
     const dryRun = read('scripts/upload-dry-run.ps1');
     expect(dryRun).toContain('^installer/out($|/)');

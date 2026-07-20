@@ -28,6 +28,9 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
       - name: Validate release input and installer version
         shell: pwsh
         run: |
