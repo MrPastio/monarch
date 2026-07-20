@@ -334,6 +334,7 @@ try {
     ) `
     -ExcludedPatterns @(
       '(^|/)(__pycache__|\.pytest_cache)(/|$)',
+      '(^|/)installer/out-[^/]+(/|$)',
       '\.(pyc|pyo|pdb|ilk|user)$'
     )
   Copy-FilteredTree `
