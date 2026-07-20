@@ -116,6 +116,7 @@ security/src/*.egg-info/
 /monarch_safe_audit.pdf
 /installer/out/
 /installer/offline-payload/
+/installer/.offline-build-cache/
 /installer/out-*/
 /.monarch-public-snapshot
 

@@ -282,6 +282,17 @@ New-Item -ItemType Directory -Path $output -Force | Out-Null
   (New-Object System.Text.UTF8Encoding($false))
 )
 
+$buildCacheRoot = Join-Path (Split-Path -Parent $output) ".offline-build-cache"
+$buildTempRoot = Join-Path $buildCacheRoot "temp"
+$pipCacheRoot = Join-Path $buildCacheRoot "pip"
+New-Item -ItemType Directory -Path $buildTempRoot,$pipCacheRoot -Force | Out-Null
+$previousTemp = $env:TEMP
+$previousTmp = $env:TMP
+$previousPipCache = $env:PIP_CACHE_DIR
+$env:TEMP = $buildTempRoot
+$env:TMP = $buildTempRoot
+$env:PIP_CACHE_DIR = $pipCacheRoot
+
 try {
   Write-Host "[offline] Copying runtime application files"
   Copy-FilteredTree `
@@ -296,6 +307,7 @@ try {
       "tests",
       "docs",
       "showcase",
+      "installer\.offline-build-cache",
       "installer\offline-payload",
       "installer\out",
       "runtime",
@@ -507,4 +519,8 @@ try {
 } catch {
   Write-Error $_
   throw
+} finally {
+  $env:TEMP = $previousTemp
+  $env:TMP = $previousTmp
+  $env:PIP_CACHE_DIR = $previousPipCache
 }
