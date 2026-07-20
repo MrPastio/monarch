@@ -193,12 +193,19 @@ function Remove-PythonBytecode {
   param([Parameter(Mandatory = $true)][string]$Path)
 
   $target = [System.IO.Path]::GetFullPath($Path).TrimEnd("\")
-  $environmentBoundary = [System.IO.Path]::GetFullPath($environmentOutput).TrimEnd("\") + "\"
-  if (-not ($target + "\").StartsWith(
-    $environmentBoundary,
-    [StringComparison]::OrdinalIgnoreCase
-  )) {
-    throw "Refusing to clean Python bytecode outside the generated environment."
+  $insideGeneratedComponent = $false
+  foreach ($generatedRoot in @($runtimeOutput, $environmentOutput)) {
+    $boundary = [System.IO.Path]::GetFullPath($generatedRoot).TrimEnd("\") + "\"
+    if (($target + "\").StartsWith(
+      $boundary,
+      [StringComparison]::OrdinalIgnoreCase
+    )) {
+      $insideGeneratedComponent = $true
+      break
+    }
+  }
+  if (-not $insideGeneratedComponent) {
+    throw "Refusing to clean Python bytecode outside the generated runtime or environment."
   }
   Get-ChildItem -LiteralPath $target -Recurse -Force -File -ErrorAction SilentlyContinue |
     Where-Object { $_.Extension -in @(".pyc", ".pyo") } |
