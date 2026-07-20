@@ -19,6 +19,7 @@ $blockedDirectoryPatterns = @(
   '^output($|/)',
   '^vendor($|/)',
   '^runtime($|/)',
+  '^installer/out($|/)',
   '^logs($|/)',
   '^secrets($|/)',
   '^marketing-site($|/)',

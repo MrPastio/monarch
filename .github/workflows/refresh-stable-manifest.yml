@@ -1,0 +1,119 @@
+name: Refresh stable manifest
+
+on:
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: monarch-stable-release
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    environment: stable-release
+    steps:
+      - name: Check out release tooling
+        uses: actions/checkout@v7
+        with:
+          path: source
+          persist-credentials: false
+      - name: Check out distribution repository
+        uses: actions/checkout@v7
+        with:
+          repository: MrPastio/monarch-releases
+          token: ${{ secrets.MONARCH_RELEASES_TOKEN }}
+          path: distribution
+          fetch-depth: 0
+      - name: Inspect expiry
+        id: status
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="distribution/channels/stable/manifest.json"
+          signature="distribution/channels/stable/manifest.sig"
+          if [[ ! -e "$manifest" && ! -e "$signature" ]]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "refreshDue=false" >> "$GITHUB_OUTPUT"
+            echo "urgent=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test -f "$manifest" && test -f "$signature"
+          status="$(node source/scripts/release-manifest.mjs expiry-status --manifest "$manifest")"
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+          echo "refreshDue=$(node -e 'console.log(JSON.parse(process.argv[1]).refreshDue)' "$status")" >> "$GITHUB_OUTPUT"
+          echo "urgent=$(node -e 'console.log(JSON.parse(process.argv[1]).urgent)' "$status")" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(git -C distribution rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Provision signing material
+        if: steps.status.outputs.exists == 'true' && steps.status.outputs.refreshDue == 'true'
+        shell: bash
+        env:
+          RELEASE_PRIVATE_KEY_B64: ${{ secrets.MONARCH_RELEASE_PRIVATE_KEY_B64 }}
+          RELEASE_PUBLIC_KEY_B64: ${{ vars.MONARCH_RELEASE_PUBLIC_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_PRIVATE_KEY_B64"
+          test -n "$RELEASE_PUBLIC_KEY_B64"
+          printf '%s' "$RELEASE_PRIVATE_KEY_B64" | base64 --decode > "$RUNNER_TEMP/release-private.pem"
+          printf '%s' "$RELEASE_PUBLIC_KEY_B64" | base64 --decode > "$RUNNER_TEMP/release-public.pem"
+          chmod 600 "$RUNNER_TEMP/release-private.pem" "$RUNNER_TEMP/release-public.pem"
+      - name: Verify current signature
+        if: steps.status.outputs.exists == 'true' && steps.status.outputs.refreshDue == 'true'
+        shell: bash
+        run: |
+          node source/scripts/release-manifest.mjs verify \
+            --manifest distribution/channels/stable/manifest.json \
+            --signature distribution/channels/stable/manifest.sig \
+            --public-key "$RUNNER_TEMP/release-public.pem" \
+            --expected-key-id monarch-release-2026-01
+      - name: Refresh signed metadata
+        if: steps.status.outputs.exists == 'true' && steps.status.outputs.refreshDue == 'true'
+        shell: bash
+        run: |
+          node source/scripts/release-manifest.mjs refresh \
+            --manifest distribution/channels/stable/manifest.json \
+            --signature distribution/channels/stable/manifest.sig \
+            --public-key "$RUNNER_TEMP/release-public.pem" \
+            --private-key "$RUNNER_TEMP/release-private.pem" \
+            --output-manifest "$RUNNER_TEMP/manifest.json" \
+            --output-signature "$RUNNER_TEMP/manifest.sig"
+          node source/scripts/release-manifest.mjs verify \
+            --manifest "$RUNNER_TEMP/manifest.json" \
+            --signature "$RUNNER_TEMP/manifest.sig" \
+            --public-key "$RUNNER_TEMP/release-public.pem" \
+            --expected-key-id monarch-release-2026-01
+      - name: Fast-forward refreshed metadata
+        if: steps.status.outputs.exists == 'true' && steps.status.outputs.refreshDue == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.MONARCH_RELEASES_TOKEN }}
+        run: |
+          set -euo pipefail
+          git -C distribution fetch origin main
+          test "$(git -C distribution rev-parse origin/main)" = "${{ steps.status.outputs.base_sha }}"
+          cp "$RUNNER_TEMP/manifest.json" distribution/channels/stable/manifest.json
+          cp "$RUNNER_TEMP/manifest.sig" distribution/channels/stable/manifest.sig
+          git -C distribution config user.name "Monarch Release Bot"
+          git -C distribution config user.email "release-bot@users.noreply.github.com"
+          git -C distribution add channels/stable/manifest.json channels/stable/manifest.sig
+          git -C distribution commit -m "release: refresh stable manifest expiry"
+          git -C distribution push origin HEAD:main
+      - name: Create urgent expiry issue
+        if: failure() && steps.status.outputs.urgent == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="[P0] Stable manifest signing or refresh failed"
+          existing="$(gh issue list --state open --search "$title in:title" --json number --jq 'length')"
+          if [[ "$existing" = "0" ]]; then
+            gh issue create \
+              --title "$title" \
+              --body "The stable manifest has 14 days or less remaining and the signed refresh workflow failed. Inspect run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Do not bypass signature verification or reuse a sequence."
+          fi

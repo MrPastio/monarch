@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -6,6 +7,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MONARCH_CONFIG_ROOT = os.getenv("MONARCH_CONFIG_ROOT", "").strip()
+SETTINGS_ENV_FILE = (
+    Path(MONARCH_CONFIG_ROOT) / "config" / "oscar" / ".env"
+    if MONARCH_CONFIG_ROOT
+    else PROJECT_ROOT / ".env"
+)
 DEFAULT_CORS_ORIGINS = [
     "http://localhost:4317",
     "http://127.0.0.1:4317",
@@ -35,7 +42,7 @@ def default_api_token() -> str | None:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="OSCAR_", env_file=PROJECT_ROOT / ".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="OSCAR_", env_file=SETTINGS_ENV_FILE, extra="ignore")
 
     app_name: str = "Oscar Local Agent"
     model_path: Path = Field(default_factory=default_model_path)

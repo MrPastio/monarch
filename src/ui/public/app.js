@@ -10,6 +10,7 @@ import { renderModelManager } from './modules/model-manager.js';
 import { initSharingPane, renderSharingPane } from './modules/sharing-pane.js';
 import { syncMascotFromRuntime } from './modules/mascot-controller.js';
 import { initSettingsPane } from './modules/settings-pane.js';
+import { initUpdatePane } from './modules/update-pane.js';
 import { initVoiceInput } from './modules/voice-input.js';
 import { initOscarVoiceMode } from './modules/oscar-voice-mode.js';
 import { installOscarSnakeEasterEgg } from './modules/oscar-snake-game.js';
@@ -540,6 +541,7 @@ function init() {
   initSecurityPane(render);
   initSharingPane();
   initSettingsPane();
+  initUpdatePane();
   initVoiceInput();
   initOscarVoiceMode();
   installOscarSnakeEasterEgg({

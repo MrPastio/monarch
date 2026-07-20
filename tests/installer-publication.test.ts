@@ -28,8 +28,32 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(bootstrap).toContain('Packaged Monarch runtime validation');
     expect(bootstrap).toContain('oscar\\scripts\\install.ps1');
     expect(bootstrap).toContain('security\\scripts\\setup_runtime.ps1');
+    expect(bootstrap).toContain('installer-logs');
+    expect(bootstrap).toContain('Start-Transcript');
+    expect(bootstrap).toContain('MONARCH_CONFIG_ROOT');
+    expect(bootstrap).toContain('config\\oscar');
     expect(bootstrap).not.toContain('C:\\Users\\anton');
     expect(bootstrap).not.toContain('E:\\Monarch');
+  });
+
+  it('installs llama.cpp from a published Windows wheel instead of compiling it locally', () => {
+    const oscarInstaller = read('oscar/scripts/install.ps1');
+    expect(oscarInstaller).toContain('.requirements-installer.tmp');
+    expect(oscarInstaller).toContain(
+      'https://abetlen.github.io/llama-cpp-python/whl/cpu',
+    );
+    expect(oscarInstaller).toContain(
+      'https://abetlen.github.io/llama-cpp-python/whl/cu125',
+    );
+    expect(oscarInstaller).toContain('--only-binary llama-cpp-python');
+    expect(oscarInstaller).not.toContain(
+      '& $VenvPython -m pip install -r requirements.txt',
+    );
+    expect(oscarInstaller).toContain('MONARCH_CONFIG_ROOT');
+
+    const oscarConfig = read('oscar/backend/oscar_agent/config.py');
+    expect(oscarConfig).toContain('SETTINGS_ENV_FILE');
+    expect(oscarConfig).toContain('MONARCH_CONFIG_ROOT');
   });
 
   it('keeps private collaboration history outside the public snapshot', () => {
@@ -49,7 +73,7 @@ describe('Windows installer and public snapshot boundary', () => {
 
   it('builds a modern Windows setup with optional large models', () => {
     const definition = read('installer/Monarch.iss');
-    expect(definition).toContain('#define AppVersion "0.1.4"');
+    expect(definition).toContain('#define AppVersion "0.1.5"');
     expect(definition).toContain('WizardStyle=modern');
     expect(definition).toContain('PrivilegesRequired=lowest');
     expect(definition).toContain('ArchitecturesInstallIn64BitMode=x64compatible');
@@ -68,7 +92,11 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(definition).toContain("Result := Result + ' -InstallSmallModel'");
     expect(definition).toContain("Result := Result + ' -InstallVoiceStt'");
     expect(definition).toContain("Result := Result + ' -InstallVoiceTts'");
-    expect(definition.match(/Filename: "\{sys\}\\WindowsPowerShell/g)).toHaveLength(1);
+    expect(definition.match(/Filename: "\{sys\}\\WindowsPowerShell/g)).toHaveLength(2);
+    expect(definition).toContain('Monarch.next.exe');
+    expect(definition).toContain('GetLauncherSwapParameters');
+    expect(definition).toContain('versions\\{#AppVersion}');
+    expect(definition).toContain('CloseApplications=no');
   });
 
   it('refuses to package private development history', () => {
@@ -79,6 +107,9 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(builder).toContain('.monarch-public-snapshot');
     expect(builder).toContain('scripts\\build-runtime-bundle.mjs');
     expect(builder).toContain('dist\\monarch-server.mjs');
+
+    const dryRun = read('scripts/upload-dry-run.ps1');
+    expect(dryRun).toContain('^installer/out($|/)');
   });
 
   it('builds the installer runtime on GitHub before Inno Setup packages it', () => {

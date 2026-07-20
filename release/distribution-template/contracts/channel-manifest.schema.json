@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MrPastio/monarch-releases/contracts/channel-manifest.schema.json",
+  "title": "Monarch signed channel manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "sequence",
+    "channel",
+    "version",
+    "publishedAt",
+    "expiresAt",
+    "minimumUpdaterVersion",
+    "minimumLauncherVersion",
+    "available",
+    "withdrawnReason",
+    "revokedVersions",
+    "releaseNotesUrl",
+    "compatibility",
+    "asset",
+    "keyId"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "channel": { "const": "stable" },
+    "version": { "$ref": "#/$defs/semver" },
+    "publishedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "minimumUpdaterVersion": { "$ref": "#/$defs/semver" },
+    "minimumLauncherVersion": { "$ref": "#/$defs/semver" },
+    "available": { "type": "boolean" },
+    "withdrawnReason": { "type": ["string", "null"], "maxLength": 512 },
+    "revokedVersions": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/semver" }
+    },
+    "releaseNotesUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtimeVersion",
+        "backendEnvironment",
+        "dataSchemaVersion",
+        "minimumReadableDataSchema",
+        "maximumReadableDataSchema",
+        "minimumModelCatalogSchema",
+        "maximumModelCatalogSchema"
+      ],
+      "properties": {
+        "runtimeVersion": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "backendEnvironment": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "dataSchemaVersion": { "type": "integer", "minimum": 1 },
+        "minimumReadableDataSchema": { "type": "integer", "minimum": 1 },
+        "maximumReadableDataSchema": { "type": "integer", "minimum": 1 },
+        "minimumModelCatalogSchema": { "type": "integer", "minimum": 1 },
+        "maximumModelCatalogSchema": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "asset": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "mirrors", "size", "sha256", "fileName"],
+          "properties": {
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://github\\.com/MrPastio/monarch-releases/releases/download/"
+            },
+            "mirrors": {
+              "type": "array",
+              "maxItems": 4,
+              "uniqueItems": true,
+              "items": { "type": "string", "format": "uri", "pattern": "^https://" }
+            },
+            "size": { "type": "integer", "minimum": 1, "maximum": 2147483648 },
+            "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "fileName": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 180,
+              "pattern": "^Monarch-Setup-[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?\\.exe$"
+            }
+          }
+        }
+      ]
+    },
+    "keyId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,63}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "available": { "const": true } },
+        "required": ["available"]
+      },
+      "then": {
+        "properties": {
+          "asset": { "type": "object" },
+          "withdrawnReason": { "type": "null" }
+        }
+      },
+      "else": {
+        "properties": {
+          "asset": { "type": "null" },
+          "withdrawnReason": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    }
+  }
+}

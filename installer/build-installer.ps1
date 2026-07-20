@@ -1,6 +1,14 @@
 param(
   [string]$SourceRoot = "",
   [string]$OutputDirectory = "",
+  [string]$AppVersion = "0.1.5",
+  [string]$RuntimeVersion = "2026.07.1",
+  [string]$BackendEnvironment = "backend-0.1.5",
+  [int]$DataSchemaVersion = 1,
+  [int]$MinimumReadableDataSchema = 1,
+  [int]$MaximumReadableDataSchema = 1,
+  [int]$MinimumModelCatalogSchema = 1,
+  [int]$MaximumModelCatalogSchema = 1,
   [switch]$InstallCompiler
 )
 
@@ -153,7 +161,18 @@ try {
 
   New-Item -ItemType Directory -Path $output -Force | Out-Null
   $definition = Join-Path $root "installer\Monarch.iss"
-  & $iscc "/DSourceRoot=$root" "/DOutputDir=$output" $definition
+  & $iscc `
+    "/DSourceRoot=$root" `
+    "/DOutputDir=$output" `
+    "/DAppVersion=$AppVersion" `
+    "/DRuntimeVersion=$RuntimeVersion" `
+    "/DBackendEnvironment=$BackendEnvironment" `
+    "/DDataSchemaVersion=$DataSchemaVersion" `
+    "/DMinimumReadableDataSchema=$MinimumReadableDataSchema" `
+    "/DMaximumReadableDataSchema=$MaximumReadableDataSchema" `
+    "/DMinimumModelCatalogSchema=$MinimumModelCatalogSchema" `
+    "/DMaximumModelCatalogSchema=$MaximumModelCatalogSchema" `
+    $definition
   if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed."
   }
@@ -162,7 +181,14 @@ try {
   if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
     throw "Installer output is missing: $setup"
   }
-  $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  $stream = [System.IO.File]::OpenRead($setup)
+  try {
+    $hash = ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "")
+  } finally {
+    $stream.Dispose()
+    $sha256.Dispose()
+  }
   Write-Host "Built: $setup"
   Write-Host "SHA256: $hash"
 } finally {

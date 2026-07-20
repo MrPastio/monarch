@@ -1184,6 +1184,42 @@
                 </details>
               </section>
 
+              <section class="settings-group monarch-update-panel" data-settings-panel="system" aria-labelledby="monarch-update-title">
+                <div class="monarch-update-heading">
+                  <div>
+                    <p class="section-kicker">Обновления</p>
+                    <h3 id="monarch-update-title">Monarch остаётся целым</h3>
+                    <p id="monarch-update-description">Проверка подписанного stable-канала. Модели, память, чаты и Safe не входят в установщик.</p>
+                  </div>
+                  <span class="monarch-update-status" id="monarch-update-status" data-state="idle" aria-live="polite">Готово к проверке</span>
+                </div>
+                <div class="monarch-update-release">
+                  <div>
+                    <span>Установлено</span>
+                    <strong id="monarch-current-version">—</strong>
+                  </div>
+                  <div>
+                    <span>Доступно</span>
+                    <strong id="monarch-available-version">Проверить</strong>
+                  </div>
+                  <div>
+                    <span>Размер</span>
+                    <strong id="monarch-update-size">—</strong>
+                  </div>
+                </div>
+                <div class="monarch-update-progress" id="monarch-update-progress" hidden>
+                  <div><span id="monarch-update-progress-label">Загрузка</span><strong id="monarch-update-progress-value">0%</strong></div>
+                  <progress id="monarch-update-progress-bar" max="100" value="0">0%</progress>
+                </div>
+                <p class="monarch-update-message" id="monarch-update-message">UpdateService не отправляет идентификаторы, историю, запросы или hardware inventory.</p>
+                <div class="monarch-update-actions">
+                  <button class="claude-primary-btn" type="button" id="monarch-update-primary">Проверить обновления</button>
+                  <button class="claude-secondary-btn" type="button" id="monarch-update-cancel" hidden>Отменить</button>
+                  <button class="claude-ghost-btn" type="button" id="monarch-update-discard" hidden>Удалить загрузку</button>
+                  <a class="claude-ghost-btn monarch-update-notes" id="monarch-update-notes" href="#" target="_blank" rel="noreferrer" hidden>Что изменилось</a>
+                </div>
+              </section>
+
               <details class="settings-group settings-system" data-settings-panel="system" open>
                 <summary>Интерфейс и доступ</summary>
                 <div class="settings-system-content">

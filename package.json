@@ -1,6 +1,6 @@
 {
   "name": "monarch",
-  "version": "0.1.0",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "description": "Local-first AI ecosystem architecture kernel.",
@@ -42,6 +42,9 @@
     "build:launcher": "powershell -ExecutionPolicy Bypass -File scripts/build-launcher.ps1",
     "install:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File installer/bootstrap.ps1",
     "installer:build": "powershell -NoProfile -ExecutionPolicy Bypass -File installer/build-installer.ps1",
+    "release:manifest": "node scripts/release-manifest.mjs",
+    "release:test": "vitest run tests/release/channel-manifest.test.ts tests/release/release-workflows.test.ts",
+    "release:probe": "node scripts/probe-release-origin.mjs",
     "export:public": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/export-public.ps1",
     "upload:dry-run": "powershell -ExecutionPolicy Bypass -File scripts/upload-dry-run.ps1",
     "audit:root": "npm audit --omit=optional --audit-level=moderate",

@@ -15,7 +15,7 @@ import {
 } from 'electron';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
@@ -40,19 +40,53 @@ import {
   createSpeechWarmupCoordinator,
   createWindowsSpeechOutput,
 } from './speech-output.mjs';
+import { MONARCH_RELEASE_PUBLIC_KEYS, createMonarchUpdateEndpoints } from './update-config.mjs';
+import { MonarchUpdateService } from './update-service.mjs';
+import { createTransactionalInstallerCoordinator } from './installer-coordinator.mjs';
+import {
+  preparePostUpdateTrial,
+  prepareRollback,
+  writeHealthAcknowledgement,
+} from './update-transaction.mjs';
+import { migrateLegacySecretsForCurrentUser } from './protected-storage-migration.mjs';
+import { cleanupRetainedUpdateComponents } from './retention-cleanup.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(__dirname, '..', '..');
+const configuredInstallRoot = process.env.MONARCH_INSTALL_ROOT && path.isAbsolute(process.env.MONARCH_INSTALL_ROOT)
+  ? path.resolve(process.env.MONARCH_INSTALL_ROOT)
+  : null;
+const installedDescriptor = readJsonFileIfPresent(path.join(workspaceRoot, 'version.json'));
+const installedLayout = configuredInstallRoot
+  ? readJsonFileIfPresent(path.join(configuredInstallRoot, 'install-layout.json'))
+  : null;
+const installedLauncher = configuredInstallRoot
+  ? readJsonFileIfPresent(path.join(configuredInstallRoot, 'launcher-version.json'))
+  : null;
+const currentAppVersion = /^\d+\.\d+\.\d+$/.test(String(installedDescriptor?.appVersion || ''))
+  ? installedDescriptor.appVersion
+  : app.getVersion();
+const currentLauncherVersion = /^\d+\.\d+\.\d+$/.test(String(installedLauncher?.version || ''))
+  ? installedLauncher.version
+  : '1.0.0';
+const configuredPayloadRoot = process.env.MONARCH_PAYLOAD_ROOT && path.isAbsolute(process.env.MONARCH_PAYLOAD_ROOT)
+  ? path.resolve(process.env.MONARCH_PAYLOAD_ROOT)
+  : null;
+const updateRoot = configuredPayloadRoot
+  ? path.join(configuredPayloadRoot, 'updates')
+  : path.join(workspaceRoot, 'runtime', 'updates');
 const preloadPath = path.join(__dirname, 'preload.mjs');
 const safeEntryQaMode = process.argv.includes('--safe-entry-qa');
 const safeEntryQaProfile = safeEntryQaMode
   ? mkdtempSync(path.join(os.tmpdir(), 'monarch-safe-entry-qa-'))
   : null;
 if (safeEntryQaProfile) app.setPath('userData', safeEntryQaProfile);
-const safeRoot = resolveSafeStorageRoot({
-  workspaceRoot,
-  qaUserDataRoot: safeEntryQaProfile ? app.getPath('userData') : null,
-});
+const safeRoot = installedLayout?.configRoot && path.isAbsolute(installedLayout.configRoot)
+  ? path.join(path.resolve(installedLayout.configRoot), 'Safe', 'safe-v1')
+  : resolveSafeStorageRoot({
+    workspaceRoot,
+    qaUserDataRoot: safeEntryQaProfile ? app.getPath('userData') : null,
+  });
 const safeUiRoot = path.join(workspaceRoot, 'desktop', 'safe');
 const safePreloadPath = path.join(safeUiRoot, 'preload.cjs');
 const safeRuntimePath = path.join(safeUiRoot, 'runtime.mjs');
@@ -60,6 +94,30 @@ const safeIndexPath = path.join(safeUiRoot, 'index.html');
 const smokeMode = process.argv.includes('--smoke');
 const appName = 'Monarch';
 let mainWindow = null;
+let installerCoordinator = null;
+let postUpdateTrial = null;
+const updateService = new MonarchUpdateService({
+  currentVersion: currentAppVersion,
+  updaterVersion: currentAppVersion,
+  launcherVersion: currentLauncherVersion,
+  endpoints: createMonarchUpdateEndpoints({
+    sitesOrigin: process.env.MONARCH_UPDATE_SITES_ORIGIN || '',
+  }),
+  publicKeys: MONARCH_RELEASE_PUBLIC_KEYS,
+  updateRoot,
+  launchInstaller: async (context) => {
+    if (!installerCoordinator) {
+      const error = new Error('Transactional installer coordination is unavailable outside an installed Monarch layout.');
+      error.code = 'installer-coordinator-unavailable';
+      throw error;
+    }
+    return installerCoordinator(context);
+  },
+});
+updateService.on('state', (snapshot) => {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  mainWindow.webContents.send('monarch:update-state-changed', snapshot);
+});
 const speechDiagnosticsPath = path.join(workspaceRoot, 'runtime', 'electron-speech.log');
 let speechLogQueue = Promise.resolve();
 const speechOutput = createWindowsSpeechOutput({
@@ -92,6 +150,20 @@ let shutdownComplete = false;
 let shutdownPromise = null;
 const configuredSafeSessions = new WeakSet();
 const safeEntryQaEvents = [];
+
+if (configuredInstallRoot && configuredPayloadRoot) {
+  installerCoordinator = createTransactionalInstallerCoordinator({
+    installRoot: configuredInstallRoot,
+    updateRoot,
+    runtimeUrl: () => runtimeUrl,
+    shutdown: shutdownDesktop,
+    requestQuit: () => {
+      quitRequested = true;
+      shutdownComplete = true;
+      app.quit();
+    },
+  });
+}
 
 if (!safeEntryQaMode && !app.requestSingleInstanceLock()) {
   app.quit();
@@ -140,10 +212,30 @@ app.on('activate', () => {
 ipcMain.handle('monarch:get-runtime-url', () => runtimeUrl);
 ipcMain.handle('monarch:get-app-info', () => ({
   name: appName,
-  version: app.getVersion(),
+  version: currentAppVersion,
   workspaceRoot,
   runtimeUrl,
 }));
+ipcMain.handle('monarch:update-state', (event) => {
+  assertTrustedMainRenderer(event);
+  return updateService.snapshot();
+});
+ipcMain.handle('monarch:update-intent', async (event, intent) => {
+  assertTrustedMainRenderer(event);
+  switch (intent) {
+    case 'check': return updateService.check();
+    case 'download': return updateService.download();
+    case 'install': return updateService.install();
+    case 'pause': return updateService.pause();
+    case 'resume': return updateService.resume();
+    case 'cancel': return updateService.cancel();
+    case 'discard': return updateService.discard();
+    default: return {
+      ...updateService.snapshot(),
+      intentError: { code: 'unknown-update-intent' },
+    };
+  }
+});
 ipcMain.handle('monarch:copy-text', (_event, value) => {
   clipboard.writeText(String(value ?? ''));
   return true;
@@ -318,6 +410,30 @@ ipcMain.on('monarch-safe:sealed', (event) => {
 });
 
 async function startDesktopApp() {
+  postUpdateTrial = await preparePostUpdateTrial().catch((error) => {
+    if (process.argv.some((value) => value.startsWith('--post-update='))) throw error;
+    return null;
+  });
+  await prepareRollback().catch((error) => {
+    if (process.argv.some((value) => value.startsWith('--rollback-update='))) throw error;
+  });
+  if (
+    configuredInstallRoot
+    && configuredPayloadRoot
+    && !process.argv.some((value) => value.startsWith('--post-update=') || value.startsWith('--rollback-update='))
+  ) {
+    await cleanupRetainedUpdateComponents({
+      installRoot: configuredInstallRoot,
+      payloadRoot: configuredPayloadRoot,
+    });
+  }
+  if (installedLayout?.configRoot) {
+    await migrateLegacySecretsForCurrentUser({
+      migrationRoot: path.join(installedLayout.configRoot, 'migration', 'secrets'),
+      safeRoot,
+      safeStorage,
+    });
+  }
   await mkdir(path.join(workspaceRoot, 'runtime'), { recursive: true });
   // Spawn the Qwen worker synchronously before the runtime can prewarm other
   // local models. Renderer callers await this exact shared promise via IPC.
@@ -349,6 +465,16 @@ async function startDesktopApp() {
   powerMonitor.on('suspend', () => closeSafeForSystemBoundary());
   if (!safeEntryQaMode) createTray();
   await createMainWindow();
+  if (postUpdateTrial) {
+    const health = await fetchJson(`${runtimeUrl}/api/health`);
+    await writeHealthAcknowledgement({
+      trial: postUpdateTrial,
+      backendHealth: health,
+      configValid: Boolean(installedDescriptor && installedLayout),
+      securityState: readSecurityStartupState(health),
+      windowReady: Boolean(mainWindow && !mainWindow.isDestroyed()),
+    });
+  }
   if (safeEntryQaMode) await runSafeEntryQa();
 }
 
@@ -371,10 +497,11 @@ async function createMainWindow() {
     },
   });
 
-  mainWindow.once('ready-to-show', () => {
+  const readyToShow = new Promise((resolve) => mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
     rebuildTrayMenu();
-  });
+    resolve();
+  }));
 
   if (safeEntryQaMode) {
     mainWindow.webContents.on('preload-error', (_event, preload, error) => {
@@ -406,6 +533,7 @@ async function createMainWindow() {
   configureMainWindowSecurity(mainWindow, runtimeUrl);
 
   await mainWindow.loadURL(runtimeUrl);
+  await readyToShow;
 }
 
 async function showMainWindow() {
@@ -1010,6 +1138,22 @@ function stopRuntime() {
   } finally {
     serverProcess = null;
   }
+}
+
+function readJsonFileIfPresent(filePath) {
+  try {
+    const value = JSON.parse(readFileSync(filePath, 'utf8'));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function readSecurityStartupState(health) {
+  const records = Array.isArray(health?.loadRecords) ? health.loadRecords : [];
+  const security = records.find((record) => record?.moduleId === 'security');
+  if (security?.status === 'loaded') return 'active';
+  return 'invalid';
 }
 
 async function shutdownDesktop() {
