@@ -10,7 +10,7 @@
   #define AppVersion "0.1.5"
 #endif
 #ifndef RuntimeVersion
-  #define RuntimeVersion "2026.07.3"
+  #define RuntimeVersion "2026.07.4"
 #endif
 #ifndef BackendEnvironment
   #define BackendEnvironment "backend-0.1.5-offline3"
