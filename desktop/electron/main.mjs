@@ -33,7 +33,7 @@ import { createSafeCapabilityToken } from '../safe/capability-token.mjs';
 import { normalizeSafeSecurityPolicy } from '../safe/security-policy.mjs';
 import { buildSafeShortcutDetails, safeShortcutPath } from './safe-shortcut.mjs';
 import { isAllowedSafeResourceUrl } from './safe-window-policy.mjs';
-import { ownsSafeSessionResource } from './safe-session-policy.mjs';
+import { ownsSafeSessionResource, shouldLockSafeOnBlur } from './safe-session-policy.mjs';
 import { resolveSafeStorageRoot } from './safe-storage-path.mjs';
 import { resolveRuntimeLaunch } from './runtime-entry.mjs';
 import { waitForRuntimeReady } from './runtime-startup.mjs';
@@ -59,6 +59,8 @@ const safeUiRoot = path.join(workspaceRoot, 'desktop', 'safe');
 const safePreloadPath = path.join(safeUiRoot, 'preload.cjs');
 const safeRuntimePath = path.join(safeUiRoot, 'runtime.mjs');
 const safeIndexPath = path.join(safeUiRoot, 'index.html');
+const safeAuthorizationPath = path.join(safeUiRoot, 'authorization.html');
+const safeAuthorizationPreloadPath = path.join(safeUiRoot, 'authorization-preload.cjs');
 const safeIconPath = path.join(workspaceRoot, 'assets', 'safe', 'monarch-safe.ico');
 const smokeMode = process.argv.includes('--smoke');
 const safeLaunchMode = process.argv.includes('--safe') && !safeEntryQaMode;
@@ -81,6 +83,7 @@ const speechWarmup = createSpeechWarmupCoordinator({
 });
 
 let safeWindow = null;
+let safeAuthorizationWindow = null;
 let safeProcess = null;
 let safeCapabilityKey = null;
 let safeServiceSequence = 0;
@@ -314,7 +317,9 @@ ipcMain.handle('monarch:safe-chat-lock', async (event) => {
   return requestSafeService('chatLock');
 });
 ipcMain.handle('monarch-safe:authorize-delete', async (event, value = {}) => {
-  if (!safeWindow || safeWindow.isDestroyed() || event.sender.id !== safeWindow.webContents.id || !safeCapabilityKey) return null;
+  const targetWindow = safeWindow;
+  const targetCapabilityKey = safeCapabilityKey;
+  if (!targetWindow || targetWindow.isDestroyed() || event.sender.id !== targetWindow.webContents.id || !targetCapabilityKey) return null;
   const batch = Array.isArray(value?.files)
     ? value.files.slice(0, 100).map((file) => ({
       id: String(file?.id || ''),
@@ -322,21 +327,19 @@ ipcMain.handle('monarch-safe:authorize-delete', async (event, value = {}) => {
     })).filter((file) => /^[0-9a-f-]{36}$/i.test(file.id))
     : [];
   if (batch.length) {
-    const confirmation = await dialog.showMessageBox(safeWindow, {
-      type: 'warning',
-      title: 'Monarch Safe · удаление файлов',
-      message: `Удалить выбранные файлы (${batch.length})?`,
+    const confirmed = await showSafeAuthorizationPrompt({
+      parentWindow: targetWindow,
+      title: 'Удалить выбранные файлы?',
+      message: `Файлов к удалению: ${batch.length}`,
       detail: `${batch.slice(0, 4).map((file) => `• ${file.name}`).join('\n')}${batch.length > 4 ? `\n• и ещё ${batch.length - 4}` : ''}\n\nАктивные ключи версий будут уничтожены. Операция необратима внутри хранилища.`,
-      buttons: ['Отмена', 'Удалить'],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
+      confirmLabel: `Удалить · ${batch.length}`,
+      tone: 'danger',
     });
-    if (confirmation.response !== 1 || !safeCapabilityKey) return null;
+    if (!confirmed || !ownsSafeSessionResource(safeWindow, targetWindow) || !ownsSafeSessionResource(safeCapabilityKey, targetCapabilityKey)) return null;
     return {
       tokens: batch.map((file) => ({
         id: file.id,
-        capabilityToken: createSafeCapabilityToken({ key: safeCapabilityKey, action: 'deleteFile', resourceId: file.id }),
+        capabilityToken: createSafeCapabilityToken({ key: targetCapabilityKey, action: 'deleteFile', resourceId: file.id }),
       })),
     };
   }
@@ -344,37 +347,35 @@ ipcMain.handle('monarch-safe:authorize-delete', async (event, value = {}) => {
   if (!/^[0-9a-f-]{36}$/i.test(fileId)) return null;
   const name = String(value?.name || 'выбранный файл').replace(/[\r\n\t]/g, ' ').slice(0, 160);
   const shortId = fileId.slice(0, 8);
-  const confirmation = await dialog.showMessageBox(safeWindow, {
-    type: 'warning',
-    title: 'Monarch Safe · удаление',
-    message: `Удалить «${name}» (${shortId}) и уничтожить активный ключ этой версии?`,
-    detail: 'Операция необратима внутри активного хранилища. Физические копии в snapshots и backups не контролируются.',
-    buttons: ['Отмена', 'Удалить'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true,
+  const confirmed = await showSafeAuthorizationPrompt({
+    parentWindow: targetWindow,
+    title: 'Удалить файл?',
+    message: `«${name}» · ${shortId}`,
+    detail: 'Активный ключ этой версии будет уничтожен. Операция необратима внутри Safe; снимки и внешние резервные копии остаются вне его контроля.',
+    confirmLabel: 'Удалить файл',
+    tone: 'danger',
   });
-  if (confirmation.response !== 1 || !safeCapabilityKey) return null;
-  return createSafeCapabilityToken({ key: safeCapabilityKey, action: 'deleteFile', resourceId: fileId });
+  if (!confirmed || !ownsSafeSessionResource(safeWindow, targetWindow) || !ownsSafeSessionResource(safeCapabilityKey, targetCapabilityKey)) return null;
+  return createSafeCapabilityToken({ key: targetCapabilityKey, action: 'deleteFile', resourceId: fileId });
 });
 ipcMain.handle('monarch-safe:authorize-write', async (event, value = {}) => {
-  if (!safeWindow || safeWindow.isDestroyed() || event.sender.id !== safeWindow.webContents.id || !safeCapabilityKey) return null;
+  const targetWindow = safeWindow;
+  const targetCapabilityKey = safeCapabilityKey;
+  if (!targetWindow || targetWindow.isDestroyed() || event.sender.id !== targetWindow.webContents.id || !targetCapabilityKey) return null;
   const fileId = String(value?.id || '');
   if (!/^[0-9a-f-]{36}$/i.test(fileId)) return null;
   const name = String(value?.name || 'выбранный файл').replace(/[\r\n\t]/g, ' ').slice(0, 160);
   const shortId = fileId.slice(0, 8);
-  const confirmation = await dialog.showMessageBox(safeWindow, {
-    type: 'warning',
-    title: 'Monarch Safe · новая версия',
-    message: `Сохранить изменения в «${name}» (${shortId})?`,
-    detail: 'Safe сначала запишет новую зашифрованную генерацию, затем атомарно переключит manifest и уничтожит активный ключ предыдущей версии.',
-    buttons: ['Отмена', 'Сохранить'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true,
+  const confirmed = await showSafeAuthorizationPrompt({
+    parentWindow: targetWindow,
+    title: 'Сохранить новую версию?',
+    message: `«${name}» · ${shortId}`,
+    detail: 'Safe запишет новую зашифрованную генерацию, атомарно переключит манифест и уничтожит активный ключ предыдущей версии.',
+    confirmLabel: 'Сохранить версию',
+    tone: 'primary',
   });
-  if (confirmation.response !== 1 || !safeCapabilityKey) return null;
-  return createSafeCapabilityToken({ key: safeCapabilityKey, action: 'writeFile', resourceId: fileId });
+  if (!confirmed || !ownsSafeSessionResource(safeWindow, targetWindow) || !ownsSafeSessionResource(safeCapabilityKey, targetCapabilityKey)) return null;
+  return createSafeCapabilityToken({ key: targetCapabilityKey, action: 'writeFile', resourceId: fileId });
 });
 ipcMain.on('monarch-safe:sealed', (event) => {
   if (!safeWindow || safeWindow.isDestroyed() || event.sender.id !== safeWindow.webContents.id) return;
@@ -556,7 +557,13 @@ async function showSafeWindow() {
     else if (safeSecurityPolicy.minimizeAction === 'lock') launchedSafeWindow.webContents.send('monarch-safe:force-lock');
   });
   launchedSafeWindow.on('blur', () => {
-    if (ownsSafeSessionResource(safeWindow, launchedSafeWindow) && safeSecurityPolicy.lockOnBlur) {
+    const ownsSession = ownsSafeSessionResource(safeWindow, launchedSafeWindow);
+    const trustedAuthorizationOpen = Boolean(
+      safeAuthorizationWindow
+      && !safeAuthorizationWindow.isDestroyed()
+      && safeAuthorizationWindow.getParentWindow() === launchedSafeWindow,
+    );
+    if (shouldLockSafeOnBlur({ ownsSession, lockOnBlur: safeSecurityPolicy.lockOnBlur, trustedAuthorizationOpen })) {
       launchedSafeWindow.webContents.send('monarch-safe:force-lock');
     }
   });
@@ -605,6 +612,89 @@ function presentSafeWindow(targetWindow = safeWindow) {
   targetWindow.show();
   targetWindow.focus();
   targetWindow.moveTop();
+}
+
+async function showSafeAuthorizationPrompt({ parentWindow, title, message, detail, confirmLabel, tone = 'danger' }) {
+  if (!ownsSafeSessionResource(safeWindow, parentWindow) || parentWindow.isDestroyed()) return false;
+  if (safeAuthorizationWindow && !safeAuthorizationWindow.isDestroyed()) {
+    safeAuthorizationWindow.focus();
+    return false;
+  }
+
+  const promptWindow = new BrowserWindow({
+    title: 'Monarch Safe · подтверждение',
+    parent: parentWindow,
+    modal: true,
+    frame: false,
+    width: 510,
+    height: 400,
+    minWidth: 510,
+    minHeight: 400,
+    maxWidth: 510,
+    maxHeight: 400,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    backgroundColor: '#090909',
+    show: false,
+    skipTaskbar: true,
+    ...(safeEntryQaMode ? { x: -32000, y: -32000, opacity: 0 } : {}),
+    webPreferences: {
+      preload: safeAuthorizationPreloadPath,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      devTools: false,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      partition: 'monarch-safe-authorization-isolated',
+    },
+  });
+  safeAuthorizationWindow = promptWindow;
+  promptWindow.setMenu(null);
+  promptWindow.setContentProtection(true);
+  configureSafeWindowSecurity(promptWindow, safeAuthorizationPath);
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      ipcMain.removeListener('monarch-safe:authorization-response', onResponse);
+      if (ownsSafeSessionResource(safeAuthorizationWindow, promptWindow)) safeAuthorizationWindow = null;
+      if (!promptWindow.isDestroyed()) promptWindow.destroy();
+      if (ownsSafeSessionResource(safeWindow, parentWindow) && !parentWindow.isDestroyed()) {
+        parentWindow.focus();
+      }
+      resolve(confirmed === true);
+    };
+    const onResponse = (event, confirmed) => {
+      if (promptWindow.isDestroyed() || event.sender.id !== promptWindow.webContents.id) return;
+      settle(confirmed === true);
+    };
+    ipcMain.on('monarch-safe:authorization-response', onResponse);
+    promptWindow.once('closed', () => settle(false));
+    promptWindow.on('blur', () => {
+      if (settled || safeEntryQaMode) return;
+      settle(false);
+      if (ownsSafeSessionResource(safeWindow, parentWindow) && safeSecurityPolicy.lockOnBlur) {
+        parentWindow.webContents.send('monarch-safe:force-lock');
+      }
+    });
+    promptWindow.loadFile(safeAuthorizationPath).then(() => {
+      if (settled || promptWindow.isDestroyed() || !ownsSafeSessionResource(safeWindow, parentWindow)) return settle(false);
+      promptWindow.webContents.send('monarch-safe:authorization-prompt', {
+        title: String(title || 'Подтверждение').slice(0, 120),
+        message: String(message || '').slice(0, 240),
+        detail: String(detail || '').slice(0, 1200),
+        confirmLabel: String(confirmLabel || 'Продолжить').slice(0, 80),
+        tone: tone === 'primary' ? 'primary' : 'danger',
+      });
+      promptWindow.show();
+      promptWindow.focus();
+    }).catch(() => settle(false));
+  });
 }
 
 async function runSafeEntryQa() {
@@ -697,6 +787,188 @@ async function runSafeEntryQa() {
       writeFile(path.join(outputRoot, 'safe-first-open.png'), safeCapture.toPNG()),
     ]);
 
+    await safeWindow.webContents.executeJavaScript(`(() => {
+      document.querySelector('[data-pin-length="6"]').click();
+      const fill = (selector, value) => {
+        [...document.querySelectorAll(selector + ' input')].forEach((input, index) => {
+          input.value = value[index] || '';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+      };
+      fill('#setup-pin', '482951');
+      fill('#setup-pin-confirm', '482951');
+      document.querySelector('#destruction-consent').checked = true;
+      document.querySelector('#setup-form').requestSubmit();
+    })()`, true);
+    await waitForSafeEntryQa(async () => safeWindow.webContents.executeJavaScript(
+      `!document.querySelector('#recovery-screen').hidden`,
+      true,
+    ), 30000, 'Safe entry QA could not complete isolated first-run setup.');
+    await safeWindow.webContents.executeJavaScript(`(() => {
+      document.querySelector('#recovery-saved').click();
+      document.querySelector('#enter-vault').click();
+    })()`, true);
+    await waitForSafeEntryQa(async () => safeWindow.webContents.executeJavaScript(
+      `document.querySelector('#safe-transition').hidden && !document.querySelector('#vault-screen').hidden`,
+      true,
+    ), 15000, 'Safe entry QA could not enter the disposable vault.');
+
+    await safeWindow.webContents.executeJavaScript(`document.querySelector('#new-file').click()`, true);
+    await waitForSafeEntryQa(async () => safeWindow.webContents.executeJavaScript(
+      `document.querySelector('#item-dialog').open`,
+      true,
+    ), 5000, 'Safe entry QA new-file dialog did not open.');
+    await safeWindow.webContents.executeJavaScript(`(() => {
+      document.querySelector('#item-name').value = 'delete-regression';
+      document.querySelector('#item-type').value = 'text/markdown';
+      document.querySelector('#item-form').requestSubmit();
+    })()`, true);
+    await waitForSafeEntryQa(async () => safeWindow.webContents.executeJavaScript(
+      `[...document.querySelectorAll('[data-file-id]')].some((row) => row.textContent.includes('delete-regression.md'))`,
+      true,
+    ), 10000, 'Safe entry QA file was not created.');
+
+    await safeWindow.webContents.executeJavaScript(`(() => {
+      const row = [...document.querySelectorAll('[data-file-id]')].find((entry) => entry.textContent.includes('delete-regression.md'));
+      row.querySelector('[data-delete-file]').click();
+    })()`, true);
+    await waitForSafeEntryQa(
+      () => Boolean(safeAuthorizationWindow && !safeAuthorizationWindow.isDestroyed()),
+      5000,
+      'Styled Monarch Safe deletion confirmation did not open.',
+    );
+    await waitForSafeEntryQa(async () => safeAuthorizationWindow.webContents.executeJavaScript(
+      `document.body.dataset.ready === 'true'`,
+      true,
+    ), 5000, 'Styled Monarch Safe deletion confirmation did not receive its prompt.');
+    safeAuthorizationWindow.setOpacity(1);
+    const confirmationState = await safeAuthorizationWindow.webContents.executeJavaScript(`(() => ({
+      title: document.querySelector('#authorization-title').textContent,
+      message: document.querySelector('#authorization-message').textContent,
+      detail: document.querySelector('#authorization-detail').textContent,
+      confirmLabel: document.querySelector('#authorization-confirm').textContent,
+      tone: document.body.dataset.tone,
+      bridgeKeys: Object.keys(window.monarchSafeAuthorization || {}).sort(),
+    }))()`, true);
+    await sleep(350);
+    const confirmationCapture = await safeAuthorizationWindow.webContents.capturePage();
+    await writeFile(path.join(outputRoot, 'safe-delete-confirmation.png'), confirmationCapture.toPNG());
+    await safeAuthorizationWindow.webContents.executeJavaScript(
+      `document.querySelector('#authorization-cancel').click()`,
+      true,
+    );
+    await waitForSafeEntryQa(
+      () => !safeAuthorizationWindow || safeAuthorizationWindow.isDestroyed(),
+      5000,
+      'Cancelling the styled Safe confirmation did not close it.',
+    );
+    const cancelState = await safeWindow.webContents.executeJavaScript(`Promise.all([
+      window.monarchSafe.request('status'),
+      Promise.resolve([...document.querySelectorAll('[data-file-id]')].some((row) => row.textContent.includes('delete-regression.md'))),
+    ]).then(([status, filePresent]) => ({ unlocked: status.unlocked, filePresent }))`, true);
+
+    await safeWindow.webContents.executeJavaScript(`(() => {
+      const row = [...document.querySelectorAll('[data-file-id]')].find((entry) => entry.textContent.includes('delete-regression.md'));
+      row.querySelector('[data-delete-file]').click();
+    })()`, true);
+    await waitForSafeEntryQa(
+      () => Boolean(safeAuthorizationWindow && !safeAuthorizationWindow.isDestroyed()),
+      5000,
+      'Styled Monarch Safe deletion confirmation did not reopen.',
+    );
+    await waitForSafeEntryQa(async () => safeAuthorizationWindow.webContents.executeJavaScript(
+      `document.body.dataset.ready === 'true'`,
+      true,
+    ), 5000, 'Reopened Safe deletion confirmation was not ready.');
+    await safeAuthorizationWindow.webContents.executeJavaScript(
+      `document.querySelector('#authorization-confirm').click()`,
+      true,
+    );
+    await waitForSafeEntryQa(async () => safeWindow.webContents.executeJavaScript(
+      `![...document.querySelectorAll('[data-file-id]')].some((row) => row.textContent.includes('delete-regression.md'))`,
+      true,
+    ), 10000, 'Confirmed Safe deletion did not remove the file.');
+    const confirmedDeleteState = await safeWindow.webContents.executeJavaScript(`window.monarchSafe.request('status').then((status) => ({
+      unlocked: status.unlocked,
+      toast: document.querySelector('#toast').textContent,
+      authVisible: !document.querySelector('#auth-screen').hidden,
+    }))`, true);
+
+    await safeWindow.webContents.executeJavaScript(`document.querySelector('#new-file').click()`, true);
+    await waitForSafeEntryQa(async () => safeWindow.webContents.executeJavaScript(
+      `document.querySelector('#item-dialog').open`,
+      true,
+    ), 5000, 'Safe entry QA save-regression dialog did not open.');
+    await safeWindow.webContents.executeJavaScript(`(() => {
+      document.querySelector('#item-name').value = 'save-regression';
+      document.querySelector('#item-type').value = 'text/markdown';
+      document.querySelector('#item-form').requestSubmit();
+    })()`, true);
+    await waitForSafeEntryQa(async () => safeWindow.webContents.executeJavaScript(
+      `[...document.querySelectorAll('[data-file-id]')].some((row) => row.textContent.includes('save-regression.md'))`,
+      true,
+    ), 10000, 'Safe entry QA save-regression file was not created.');
+    await safeWindow.webContents.executeJavaScript(`(() => {
+      const row = [...document.querySelectorAll('[data-file-id]')].find((entry) => entry.textContent.includes('save-regression.md'));
+      row.querySelector('.file-open-button').click();
+    })()`, true);
+    await waitForSafeEntryQa(async () => safeWindow.webContents.executeJavaScript(
+      `!document.querySelector('#editor-active').hidden`,
+      true,
+    ), 5000, 'Safe entry QA save-regression editor did not open.');
+    await safeWindow.webContents.executeJavaScript(`(() => {
+      const editor = document.querySelector('#text-editor');
+      editor.value = '# QA save regression';
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#save-file').click();
+    })()`, true);
+    await waitForSafeEntryQa(
+      () => Boolean(safeAuthorizationWindow && !safeAuthorizationWindow.isDestroyed()),
+      5000,
+      'Styled Monarch Safe save confirmation did not open.',
+    );
+    await waitForSafeEntryQa(async () => safeAuthorizationWindow.webContents.executeJavaScript(
+      `document.body.dataset.ready === 'true'`,
+      true,
+    ), 5000, 'Styled Safe save confirmation was not ready.');
+    const saveConfirmationState = await safeAuthorizationWindow.webContents.executeJavaScript(`(() => ({
+      title: document.querySelector('#authorization-title').textContent,
+      confirmLabel: document.querySelector('#authorization-confirm').textContent,
+      tone: document.body.dataset.tone,
+    }))()`, true);
+    await safeAuthorizationWindow.webContents.executeJavaScript(
+      `document.querySelector('#authorization-confirm').click()`,
+      true,
+    );
+    await waitForSafeEntryQa(async () => safeWindow.webContents.executeJavaScript(
+      `document.querySelector('#toast').textContent.includes('сохранён') && document.querySelector('#save-file').dataset.dirty === 'false'`,
+      true,
+    ), 10000, 'Confirmed Safe save did not commit the new file generation.');
+    const confirmedSaveState = await safeWindow.webContents.executeJavaScript(`window.monarchSafe.request('status').then((status) => ({
+      unlocked: status.unlocked,
+      toast: document.querySelector('#toast').textContent,
+      dirty: document.querySelector('#save-file').dataset.dirty,
+    }))`, true);
+
+    if (!confirmationState.title.includes('Удалить файл')
+      || confirmationState.tone !== 'danger'
+      || confirmationState.confirmLabel !== 'Удалить файл'
+      || JSON.stringify(confirmationState.bridgeKeys) !== JSON.stringify(['onPrompt', 'respond'])) {
+      throw new Error(`Styled Safe confirmation contract is invalid: ${JSON.stringify(confirmationState)}`);
+    }
+    if (!cancelState.unlocked || !cancelState.filePresent) {
+      throw new Error(`Cancelling deletion must keep Safe unlocked and preserve the file: ${JSON.stringify(cancelState)}`);
+    }
+    if (!confirmedDeleteState.unlocked || confirmedDeleteState.authVisible || !confirmedDeleteState.toast.includes('Файл удалён')) {
+      throw new Error(`Confirmed deletion must remove the file without locking Safe: ${JSON.stringify(confirmedDeleteState)}`);
+    }
+    if (saveConfirmationState.tone !== 'primary'
+      || saveConfirmationState.confirmLabel !== 'Сохранить версию'
+      || !confirmedSaveState.unlocked
+      || confirmedSaveState.dirty !== 'false') {
+      throw new Error(`Confirmed save must commit without locking Safe: ${JSON.stringify({ saveConfirmationState, confirmedSaveState })}`);
+    }
+
     report = {
       ok: true,
       checkedAt: new Date().toISOString(),
@@ -707,6 +979,16 @@ async function runSafeEntryQa() {
         visible: safeWindow.isVisible(),
         isolatedDocument: safeState.documentUrl === pathToFileURL(safeIndexPath).toString(),
         ...safeState,
+      },
+      deleteAuthorization: {
+        styledDialog: confirmationState,
+        cancelState,
+        confirmedDeleteState,
+        screenshot: path.join(outputRoot, 'safe-delete-confirmation.png'),
+      },
+      saveAuthorization: {
+        styledDialog: saveConfirmationState,
+        confirmedSaveState,
       },
     };
   } catch (error) {
@@ -878,8 +1160,8 @@ function closeSafeForSystemBoundary(targetWindow = safeWindow, targetProcess = s
   else stopSafeRuntime(targetProcess, targetCapabilityKey);
 }
 
-function configureSafeWindowSecurity(window) {
-  const allowedDocumentUrl = pathToFileURL(safeIndexPath).toString();
+function configureSafeWindowSecurity(window, allowedDocumentPath = safeIndexPath) {
+  const allowedDocumentUrl = pathToFileURL(allowedDocumentPath).toString();
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
   window.webContents.on('will-navigate', (event, navigationUrl) => {
