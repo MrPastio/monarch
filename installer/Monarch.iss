@@ -6,7 +6,7 @@
 #endif
 
 #define AppName "Monarch"
-#define AppVersion "0.2.4"
+#define AppVersion "0.2.3.1"
 #define AppPublisher "MrPastio"
 #define AppExeName "Monarch.exe"
 
