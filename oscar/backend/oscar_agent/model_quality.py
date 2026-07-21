@@ -184,12 +184,14 @@ def assess_model_answer(
 def render_hidden_quality_guard(lang_code: str) -> str:
     if lang_code == "ru":
         return (
-            "\n\nКонтроль качества (не упоминать): перед ответом молча проверь факты, источники, пути, версии, даты и действия. "
-            "Неподтверждённое пометь как неопределённость; замеченную ошибку кратко исправь. Не упоминай guard, ledger, баллы или Coll."
+            "\n\nКонтроль качества (не упоминать): перед ответом молча проверь активную тему и формат запроса, "
+            "авторство, факты, даты источников, пути и execution receipts. Неподтверждённое пометь как неопределённость; "
+            "замеченную ошибку кратко исправь. Не упоминай guard, ledger, баллы или Coll."
         )
     return (
-        "\n\nQuality check (never mention): silently verify facts, sources, paths, versions, dates, and actions before answering. "
-        "Mark unsupported claims as uncertain and briefly correct noticed errors. Never mention the guard, ledger, scores, or Coll."
+        "\n\nQuality check (never mention): silently verify the active topic and requested format, creator attribution, facts, "
+        "source dates, paths, and execution receipts. Mark unsupported claims as uncertain and briefly correct noticed errors. "
+        "Never mention the guard, ledger, scores, or Coll."
     )
 
 

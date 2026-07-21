@@ -13,7 +13,7 @@ describe('model runtime Oscar fallback bridge', () => {
 
   it('drops the direct-endpoint policy before Oscar adds its own system policy', () => {
     expect(prepareManagedOscarMessages([
-      { role: 'system', content: '<monarch_direct_model_policy version="2">direct only</monarch_direct_model_policy>' },
+      { role: 'system', content: '<monarch_direct_model_policy version="3.0">direct only</monarch_direct_model_policy>' },
       { role: 'system', content: '<local_user_context>{"style":"short"}</local_user_context>' },
       { role: 'user', content: 'Привет' },
     ])).toEqual([
