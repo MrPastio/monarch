@@ -49,6 +49,19 @@ ipcMain.handle('monarch-safe:authorize-write', (event, value = {}) => {
   if (!/^[0-9a-f-]{36}$/i.test(fileId)) return null;
   return createSafeCapabilityToken({ key: capabilityKey, action: 'writeFile', resourceId: fileId });
 });
+ipcMain.handle('monarch-safe:authorize-delete', (event, value = {}) => {
+  if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id || !capabilityKey) return null;
+  const files = Array.isArray(value?.files) ? value.files : null;
+  if (files) {
+    const ids = files.map((file) => String(file?.id || '')).filter((id) => /^[0-9a-f-]{36}$/i.test(id));
+    return {
+      tokens: ids.map((id) => ({ id, capabilityToken: createSafeCapabilityToken({ key: capabilityKey, action: 'deleteFile', resourceId: id }) })),
+    };
+  }
+  const fileId = String(value?.id || '');
+  if (!/^[0-9a-f-]{36}$/i.test(fileId)) return null;
+  return createSafeCapabilityToken({ key: capabilityKey, action: 'deleteFile', resourceId: fileId });
+});
 app.whenReady().then(runQa).catch(async (error) => {
   await appendFile(stagePath, `ready-failure ${error?.stack || error}\n`, 'utf8');
   app.exit(1);
@@ -141,14 +154,13 @@ async function runQa() {
 
   await evaluate(`document.querySelector('#recovery-saved').click(); document.querySelector('#enter-vault').click()`);
   await waitFor(() => evaluate(`!document.querySelector('#safe-transition').hidden && document.querySelector('#safe-transition').dataset.mode === 'unlock'`));
-  await waitFor(() => evaluate(`document.querySelector('#safe-transition').dataset.phase === 'decrypt'`));
+  await waitFor(() => evaluate(`document.querySelector('#safe-transition').classList.contains('is-open')`));
   const unlockMotion = await evaluate(`({
     visible: !document.querySelector('#safe-transition').hidden,
-    phase: document.querySelector('#safe-transition').dataset.phase,
-    title: document.querySelector('#transition-title').textContent,
-    activeRail: document.querySelectorAll('.transition-rail .is-active').length,
+    opened: document.querySelector('#safe-transition').classList.contains('is-open'),
+    layers: document.querySelectorAll('.classic-lock-layer').length,
   })`);
-  assert(unlockMotion.visible && unlockMotion.activeRail === 1, 'unlock motion must expose one meaningful active security phase');
+  assert(unlockMotion.visible && unlockMotion.opened && unlockMotion.layers === 2, 'unlock motion must be one small classic opening lock');
   await evaluate(`new Promise((resolve) => setTimeout(resolve, 150))`);
   await capture(screenshotPaths.unlock);
   await waitFor(() => evaluate(`document.querySelector('#safe-transition').hidden && !document.querySelector('#vault-screen').hidden`));
@@ -186,6 +198,13 @@ async function runQa() {
     toast: document.querySelector('#toast').textContent,
   })`);
   assert(dropFromWholeWindow.visible && dropFromWholeWindow.toast.includes('Личное'), 'File drop on the Safe window must import into the default section');
+  await openItem('file', 'created-from-all', { format: 'text/markdown' });
+  const createdFromAll = await evaluate(`(() => { const row = [...document.querySelectorAll('[data-file-id]')].find((entry) => entry.textContent.includes('created-from-all.md')); return { visible: Boolean(row), destinationHint: document.querySelector('#item-destination').textContent }; })()`);
+  assert(createdFromAll.visible, 'New file from All files must use the default section instead of demanding manual section selection');
+  await evaluate(`[...document.querySelectorAll('[data-file-id]')].find((entry) => entry.textContent.includes('created-from-all.md')).querySelector('[data-delete-file]').click()`);
+  await waitFor(() => evaluate(`![...document.querySelectorAll('[data-file-id]')].some((entry) => entry.textContent.includes('created-from-all.md'))`));
+  const directDelete = await evaluate(`({ deleted: ![...document.querySelectorAll('[data-file-id]')].some((entry) => entry.textContent.includes('created-from-all.md')), toast: document.querySelector('#toast').textContent })`);
+  assert(directDelete.deleted && directDelete.toast.includes('Файл удалён'), 'Every file row must expose a working direct deletion action');
   await capture(screenshotPaths.importAll);
   await evaluate(`document.querySelector('#toast').hidden = true`);
 
@@ -322,8 +341,39 @@ async function runQa() {
   window.setSize(1520, 960);
   await new Promise((resolve) => setTimeout(resolve, 180));
 
+  await evaluate(`document.querySelector('#safe-settings').click()`);
+  await waitFor(() => evaluate(`document.querySelector('#safe-settings-dialog').open`));
+  await evaluate(`(() => {
+    document.querySelector('#safe-auto-lock').value = '0';
+    document.querySelector('#safe-clipboard-mode').value = 'read-write';
+    document.querySelector('#safe-minimize-action').value = 'keep-unlocked';
+    document.querySelector('#safe-lock-on-blur').checked = false;
+    document.querySelector('#safe-clear-clipboard').checked = false;
+    document.querySelector('#safe-settings-pin').value = '482951';
+    document.querySelector('#safe-settings-form').requestSubmit();
+  })()`);
+  await waitFor(() => evaluate(`document.querySelector('#confirm-dialog').open && document.querySelector('#confirm-title').textContent.includes('Ослабить')`));
+  await evaluate(`document.querySelector('#confirm-action').click()`);
+  await waitFor(() => evaluate(`!document.querySelector('#safe-settings-dialog').open`));
+  const lowSecurityPolicy = await evaluate(`window.monarchSafe.request('status')`);
+  assert(lowSecurityPolicy.securityLevel === 'low' && lowSecurityPolicy.securityPolicy.clipboardMode === 'read-write', 'low security policy must require a separate warning and the current PIN before persistence');
+  await evaluate(`document.querySelector('#safe-settings').click()`);
+  await waitFor(() => evaluate(`document.querySelector('#safe-settings-dialog').open`));
+  await evaluate(`(() => {
+    document.querySelector('#safe-auto-lock').value = '300000';
+    document.querySelector('#safe-clipboard-mode').value = 'blocked';
+    document.querySelector('#safe-minimize-action').value = 'close';
+    document.querySelector('#safe-lock-on-blur').checked = true;
+    document.querySelector('#safe-clear-clipboard').checked = true;
+    document.querySelector('#safe-settings-pin').value = '482951';
+    document.querySelector('#safe-settings-form').requestSubmit();
+  })()`);
+  await waitFor(() => evaluate(`!document.querySelector('#safe-settings-dialog').open`));
+  const restoredSecurityPolicy = await evaluate(`window.monarchSafe.request('status')`);
+  assert(restoredSecurityPolicy.securityLevel === 'strong' && restoredSecurityPolicy.securityPolicy.clipboardMode === 'blocked', 'strong Safe policy must be restorable with PIN confirmation');
+
   const bridgeSurface = await evaluate(`Object.keys(window.monarchSafe).sort()`);
-  assert(JSON.stringify(bridgeSurface) === JSON.stringify(['authorizeDelete', 'authorizeWrite', 'onEvent', 'request']), 'Safe preload must expose only bounded confirmations, request and event subscription');
+  assert(JSON.stringify(bridgeSurface) === JSON.stringify(['authorizeDelete', 'authorizeWrite', 'onEvent', 'onOpenSettings', 'request']), 'Safe preload must expose only bounded confirmations, settings routing, request and event subscription');
   const popupDenied = await evaluate(`window.open('https://example.com') === null`);
   assert(popupDenied, 'new windows must be denied');
   const networkDenied = await evaluate(`fetch('https://example.com').then(() => false).catch(() => true)`);
@@ -414,6 +464,8 @@ async function runQa() {
     recoveryUnlockLayout,
     importFromAllView,
     dropFromWholeWindow,
+    createdFromAll,
+    directDelete,
     itemDialogClose,
     sectionCustomization,
     keyboardFileAccess,
@@ -422,6 +474,8 @@ async function runQa() {
     previewKinds,
     filteredRows,
     bridgeSurface,
+    lowSecurityPolicy,
+    restoredSecurityPolicy,
     popupDenied,
     networkDenied,
     clipboardDenied,
@@ -433,7 +487,7 @@ async function runQa() {
     encryptedChat: { verified: encryptedChat.verified, listed: encryptedChatList.chats.length, readBack: encryptedChatRead.record.id },
     screenshots: screenshotPaths,
   }, null, 2));
-  await writeFile(path.join(outputRoot, 'qa-report.json'), JSON.stringify({ ok: true, recoveryKeyCount: recoveryKeys.length, emergencyWordCount, unlockMotion, compactLayout, recoveryUnlockLayout, importFromAllView, dropFromWholeWindow, itemDialogClose, sectionCustomization, keyboardFileAccess, dirtyCancelState, dirtyDiscardState, previewKinds, filteredRows, bridgeSurface, popupDenied, networkDenied, clipboardDenied, rendererDestroyDenied, destructiveAuthorization, mutationAuthorization, autoLockEvents, cleanup, encryptedChat: { verified: encryptedChat.verified, listed: encryptedChatList.chats.length, readBack: encryptedChatRead.record.id }, screenshots: screenshotPaths }, null, 2), 'utf8');
+  await writeFile(path.join(outputRoot, 'qa-report.json'), JSON.stringify({ ok: true, recoveryKeyCount: recoveryKeys.length, emergencyWordCount, unlockMotion, compactLayout, recoveryUnlockLayout, importFromAllView, dropFromWholeWindow, createdFromAll, directDelete, itemDialogClose, sectionCustomization, keyboardFileAccess, dirtyCancelState, dirtyDiscardState, previewKinds, filteredRows, bridgeSurface, lowSecurityPolicy, restoredSecurityPolicy, popupDenied, networkDenied, clipboardDenied, rendererDestroyDenied, destructiveAuthorization, mutationAuthorization, autoLockEvents, cleanup, encryptedChat: { verified: encryptedChat.verified, listed: encryptedChatList.chats.length, readBack: encryptedChatRead.record.id }, screenshots: screenshotPaths }, null, 2), 'utf8');
  } catch (error) {
   console.error(error?.stack || error);
   await appendFile(stagePath, `failure ${error?.stack || error}\n`, 'utf8');

@@ -95,6 +95,20 @@ function Find-Node {
   return $null
 }
 
+function Get-Sha256Hex {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $stream = [System.IO.File]::OpenRead($Path)
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $digest = $sha256.ComputeHash($stream)
+    return [System.BitConverter]::ToString($digest).Replace("-", "")
+  } finally {
+    $sha256.Dispose()
+    $stream.Dispose()
+  }
+}
+
 try {
   if (-not (Test-Path -LiteralPath (Join-Path $root "package.json") -PathType Leaf)) {
     throw "Invalid Monarch source root: $root"
@@ -162,7 +176,7 @@ try {
   if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
     throw "Installer output is missing: $setup"
   }
-  $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash
+  $hash = Get-Sha256Hex -Path $setup
   Write-Host "Built: $setup"
   Write-Host "SHA256: $hash"
 } finally {

@@ -34,6 +34,21 @@
   --ease-spring: cubic-bezier(.16,1,.3,1);
 }
 
+/* Monarch Safe settings — isolated launch and security policy gateway. */
+.monarch-safe-settings{position:relative;overflow:hidden;background:linear-gradient(145deg,rgba(8,14,17,.92),rgba(17,15,10,.82));border-color:rgba(27,191,184,.2)}
+.monarch-safe-settings::before{content:"";position:absolute;inset:-90px auto auto -70px;width:220px;height:220px;border-radius:50%;background:rgba(14,184,177,.08);filter:blur(55px);pointer-events:none}
+.safe-settings-heading,.safe-settings-identity{display:flex;align-items:center;gap:14px}
+.safe-settings-identity img{width:64px;height:64px;object-fit:contain;filter:drop-shadow(0 10px 24px rgba(13,190,183,.16))}
+.safe-settings-identity h3{margin:0}
+.safe-settings-overview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:18px}
+.safe-settings-overview article{display:grid;gap:5px;padding:15px 16px;border:1px solid rgba(255,255,255,.08);border-radius:14px;background:rgba(255,255,255,.025);backdrop-filter:blur(16px)}
+.safe-settings-overview strong{color:#fafaf9;font-size:13px}.safe-settings-overview span{color:var(--muted);font-size:12px;line-height:1.45}
+.safe-fixed-boundaries{display:grid;gap:5px;margin-top:12px;padding:14px 16px;border:1px solid rgba(245,158,11,.18);border-radius:14px;background:rgba(245,158,11,.045)}
+.safe-fixed-boundaries span{color:#f59e0b;font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.safe-fixed-boundaries strong{color:#d6d3d1;font-size:12px;font-weight:650}
+.safe-settings-actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:16px}
+.safe-settings-note{margin:12px 0 0;color:var(--muted);font-size:12px;line-height:1.55}
+@media(max-width:720px){.safe-settings-overview{grid-template-columns:1fr}.safe-settings-heading{align-items:flex-start}.safe-settings-actions>*{width:100%}}
+
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 body {

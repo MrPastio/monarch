@@ -1,5 +1,5 @@
 import { gzipSync } from 'node:zlib';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -513,6 +513,60 @@ describe('Monarch Safe adversarial security gates', () => {
     await reopened.unlockWithPin('1234');
     const recovered = await reopened.readFile({ id: file.id });
     expect(Buffer.from(recovered.bytes).toString('utf8')).toBe('version-two');
+  });
+
+  it('requires the current PIN and explicit acknowledgement before lowering security settings', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-safe-test-'));
+    roots.push(root);
+    const vault = new SafeVault(root, { testKdf: true, deviceKey: Buffer.alloc(32, 0x41) });
+    await vault.initialize();
+    await vault.setup({ pin: '1234', pinLength: 4, destructionConfirmed: true });
+    await vault.completeSetup({ recoveryAcknowledged: true });
+    const lowPolicy = {
+      autoLockMs: 0,
+      clipboardMode: 'read-write',
+      minimizeAction: 'keep-unlocked',
+      lockOnBlur: false,
+      clearClipboardOnLock: false,
+    };
+
+    await expect(vault.updateSecurityPolicy({ pin: '9999', policy: lowPolicy, lowSecurityAcknowledged: true }))
+      .rejects.toMatchObject({ code: 'invalid-pin' });
+    expect(vault.status().attemptsRemaining).toBe(3);
+    await expect(vault.updateSecurityPolicy({ pin: '1234', policy: lowPolicy }))
+      .rejects.toMatchObject({ code: 'low-security-acknowledgement-required' });
+    await expect(vault.updateSecurityPolicy({ pin: '1234', policy: lowPolicy, lowSecurityAcknowledged: true }))
+      .resolves.toMatchObject({ securityLevel: 'low', securityPolicy: lowPolicy, autoLockMs: 0 });
+
+    vault.lock();
+    const reopened = new SafeVault(root, { testKdf: true, deviceKey: Buffer.alloc(32, 0x41) });
+    await expect(reopened.initialize()).resolves.toMatchObject({ securityLevel: 'low', securityPolicy: lowPolicy, autoLockMs: 0 });
+  });
+
+  it('renames and removes empty containers while preserving non-empty boundaries', async () => {
+    const { vault } = await createVault();
+    const section = await vault.createSection({ name: 'Проект', color: '#f59e0b' });
+    const folder = await vault.createFolder({ name: 'Черновики', sectionId: section.id });
+    await expect(vault.updateFolder({ id: folder.id, name: 'Финальные' })).resolves.toMatchObject({ name: 'Финальные' });
+    await vault.createFile({ name: 'plan.txt', text: 'safe', sectionId: section.id, folderId: folder.id });
+    await expect(vault.deleteFolder({ id: folder.id })).rejects.toMatchObject({ code: 'folder-not-empty' });
+    await expect(vault.deleteSection({ id: section.id })).rejects.toMatchObject({ code: 'section-not-empty' });
+  });
+
+  it('unlinks a hostile hardlink without overwriting the linked victim during file deletion', async () => {
+    const { root, vault } = await createVault();
+    const sectionId = vault.list().sections[0].id;
+    const file = await vault.createFile({ name: 'delete-me.txt', text: 'ciphertext', sectionId });
+    const blobPath = await currentBlobPath(root, file.id);
+    const victimPath = path.join(root, 'victim.txt');
+    const marker = Buffer.from('DO_NOT_OVERWRITE_THIS_FILE', 'utf8');
+    await writeFile(victimPath, marker);
+    await rm(blobPath);
+    await link(victimPath, blobPath);
+
+    await expect(vault.deleteFile({ id: file.id })).resolves.toMatchObject({ deleted: true });
+    await expect(readFile(victimPath)).resolves.toEqual(marker);
+    await expect(readFile(blobPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
 
