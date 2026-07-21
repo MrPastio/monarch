@@ -145,12 +145,12 @@ function dispatch(action, payload) {
   case 'readFile': return vault.readFile(payload);
   case 'writeFile':
     if (!verifySafeCapabilityToken({ token: payload.capabilityToken, key: capabilityKey, action: 'writeFile', resourceId: String(payload.id || ''), usedNonces: usedCapabilityNonces })) {
-      throw new SafeVaultError('mutation-authorization-required', 'A fresh native confirmation is required before replacing an active file generation.');
+      throw new SafeVaultError('mutation-authorization-required', 'A fresh trusted confirmation is required before replacing an active file generation.');
     }
     return vault.writeFile(payload);
   case 'deleteFile':
     if (!verifySafeCapabilityToken({ token: payload.capabilityToken, key: capabilityKey, action: 'deleteFile', resourceId: String(payload.id || ''), usedNonces: usedCapabilityNonces })) {
-      throw new SafeVaultError('destructive-authorization-required', 'A fresh native confirmation is required for file deletion.');
+      throw new SafeVaultError('destructive-authorization-required', 'A fresh trusted confirmation is required for file deletion.');
     }
     return vault.deleteFile(payload);
   case 'createArchive': return vault.createArchive(payload);

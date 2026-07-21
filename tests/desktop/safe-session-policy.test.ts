@@ -1,6 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { ownsSafeSessionResource } from '../../desktop/electron/safe-session-policy.mjs';
+import {
+  ownsSafeSessionResource,
+  shouldLockSafeOnBlur,
+} from '../../desktop/electron/safe-session-policy.mjs';
 
 describe('Monarch Safe session identity policy', () => {
   it('accepts cleanup only for the currently active runtime resource', () => {
@@ -25,6 +28,13 @@ describe('Monarch Safe session identity policy', () => {
     expect(ownsSafeSessionResource(reopenedCapabilityKey, reopenedCapabilityKey)).toBe(true);
   });
 
+  it('does not lock the active Safe behind its own trusted authorization dialog', () => {
+    expect(shouldLockSafeOnBlur({ ownsSession: true, lockOnBlur: true, trustedAuthorizationOpen: true })).toBe(false);
+    expect(shouldLockSafeOnBlur({ ownsSession: true, lockOnBlur: true, trustedAuthorizationOpen: false })).toBe(true);
+    expect(shouldLockSafeOnBlur({ ownsSession: true, lockOnBlur: false, trustedAuthorizationOpen: false })).toBe(false);
+    expect(shouldLockSafeOnBlur({ ownsSession: false, lockOnBlur: true, trustedAuthorizationOpen: false })).toBe(false);
+  });
+
   it('binds Electron exit and close cleanup to captured session resources', async () => {
     const source = await readFile('desktop/electron/main.mjs', 'utf8');
 
@@ -32,6 +42,7 @@ describe('Monarch Safe session identity policy', () => {
     expect(source).toContain('ownsSafeSessionResource(safeProcess, launchedSafeProcess)');
     expect(source).toContain('stopSafeRuntime(launchedSafeProcess, launchedCapabilityKey)');
     expect(source).toContain('closeSafeForSystemBoundary(launchedSafeWindow, launchedSafeProcess, launchedCapabilityKey)');
+    expect(source).toContain('shouldLockSafeOnBlur({');
   });
 
   it('does not pass Electron powerMonitor event objects as Safe windows', async () => {

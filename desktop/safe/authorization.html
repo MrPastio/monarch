@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>Monarch Safe · подтверждение</title>
+    <link rel="stylesheet" href="./authorization.css">
+    <script defer src="./authorization.js"></script>
+  </head>
+  <body>
+    <main class="authorization-shell" role="alertdialog" aria-modal="true" aria-labelledby="authorization-title" aria-describedby="authorization-detail">
+      <header class="authorization-brand">
+        <img src="./monarch-safe-logo.png" alt="">
+        <div>
+          <span>MONARCH SAFE</span>
+          <strong>Защищённое подтверждение</strong>
+        </div>
+      </header>
+      <section class="authorization-copy">
+        <div class="authorization-signal" aria-hidden="true"><span></span></div>
+        <div>
+          <h1 id="authorization-title">Подтверждение</h1>
+          <p id="authorization-message"></p>
+        </div>
+      </section>
+      <p id="authorization-detail" class="authorization-detail"></p>
+      <footer>
+        <button id="authorization-cancel" type="button">Отмена</button>
+        <button id="authorization-confirm" class="danger" type="button">Продолжить</button>
+      </footer>
+    </main>
+  </body>
+</html>

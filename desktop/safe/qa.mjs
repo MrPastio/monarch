@@ -277,7 +277,20 @@ async function runQa() {
   await evaluate(`document.querySelector('[data-file-id] .file-open-button').click()`);
   await waitFor(() => evaluate(`document.querySelector('#confirm-dialog').open`));
   await evaluate(`document.querySelector('#confirm-action').click()`);
-  await waitFor(() => evaluate(`!document.querySelector('#confirm-dialog').open && document.querySelector('#save-file').dataset.dirty === 'false'`));
+  try {
+    await waitFor(() => evaluate(`!document.querySelector('#confirm-dialog').open && document.querySelector('#save-file').dataset.dirty === 'false'`), 30_000);
+  } catch (error) {
+    const discardDiagnostics = await evaluate(`window.monarchSafe.request('status').then((status) => ({
+      dialogOpen: document.querySelector('#confirm-dialog').open,
+      dialogReturnValue: document.querySelector('#confirm-dialog').returnValue,
+      dirty: document.querySelector('#save-file').dataset.dirty,
+      editorVisible: !document.querySelector('#editor-active').hidden,
+      authVisible: !document.querySelector('#auth-screen').hidden,
+      toast: document.querySelector('#toast').textContent,
+      status,
+    }))`);
+    throw new Error(`Dirty-discard confirmation did not settle: ${JSON.stringify(discardDiagnostics)}; ${error?.message || error}`);
+  }
   const dirtyDiscardState = await evaluate(`({ value: document.querySelector('#text-editor').value, dirty: document.querySelector('#save-file').dataset.dirty })`);
   assert(dirtyDiscardState.value !== dirtyGuardMarker && dirtyDiscardState.dirty === 'false', 'confirming discard must reload the encrypted generation and clear dirty state');
   await evaluate(`window.monarchSafe.request('list')`);
