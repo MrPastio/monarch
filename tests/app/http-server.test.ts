@@ -41,6 +41,50 @@ describe('Monarch HTTP server security', () => {
     }
   });
 
+  it('reports server readiness independently from degraded module health', async () => {
+    let stateReads = 0;
+    const app = createFakeApplication({
+      getState: async () => {
+        stateReads += 1;
+        return {
+          runtime: {
+            snapshot: { modules: [], capabilities: [], events: [] },
+            health: { ok: false },
+            loadRecords: [],
+          },
+          app: {},
+          models: {},
+          modelRuntime: {},
+          selectedModel: {},
+          routerPipeline: {},
+          lastIntent: null,
+          system: { id: 'monarch.system.profile' },
+        } as Awaited<ReturnType<MonarchApplication['getState']>>;
+      },
+    });
+    const server = createMonarchHttpServer({
+      app,
+      publicDirectory: path.join(process.cwd(), 'src', 'ui', 'public'),
+      host: '127.0.0.1',
+      port: 4317,
+      requireApiToken: false,
+    });
+    const baseUrl = await listen(server);
+
+    try {
+      const ready = await fetch(`${baseUrl}/api/ready`);
+      expect(ready.status).toBe(200);
+      await expect(ready.json()).resolves.toEqual({ ok: true, ready: true });
+      expect(stateReads).toBe(0);
+
+      const health = await fetch(`${baseUrl}/api/health`);
+      await expect(health.json()).resolves.toMatchObject({ ok: false });
+      expect(stateReads).toBe(1);
+    } finally {
+      await close(server);
+    }
+  });
+
   it('does not disclose the UI session token to a non-loopback peer with a spoofed loopback Host', async () => {
     const server = createMonarchHttpServer({
       app: createFakeApplication(),

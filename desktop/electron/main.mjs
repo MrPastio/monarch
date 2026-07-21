@@ -1058,7 +1058,7 @@ async function startRuntime() {
   const url = `http://127.0.0.1:${port}`;
   try {
     await waitForRuntimeReady({
-      fetchHealth: () => fetchJson(`${url}/api/health`),
+      fetchHealth: () => fetchJson(`${url}/api/ready`),
       getProcessExit: () => {
         if (spawnError) return { error: spawnError };
         if (launchedProcess.exitCode !== null || launchedProcess.signalCode !== null) {

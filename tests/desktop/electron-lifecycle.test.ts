@@ -45,6 +45,7 @@ describe('Electron desktop lifecycle', () => {
     expect(source).toContain("[...runtimeLaunch.args, 'serve'");
     expect(source).toContain("MONARCH_STARTUP_TRACE: '1'");
     expect(source).toContain("import { waitForRuntimeReady } from './runtime-startup.mjs'");
+    expect(source).toContain("fetchJson(`${url}/api/ready`)");
     expect(source).toContain('timeoutMs: 60_000');
     expect(source).toContain('readErrorLog: () => readRuntimeLogTail(errPath)');
     expect(source).toContain('readOutputLog: () => readRuntimeLogTail(outPath)');
