@@ -16,7 +16,7 @@ import {
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync } from 'node:fs';
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
@@ -30,6 +30,8 @@ import {
 import { shouldHideToTrayOnClose, trayWindowLabel } from './tray-policy.mjs';
 import { loadOrCreateSafeDeviceKey } from '../safe/device-binding.mjs';
 import { createSafeCapabilityToken } from '../safe/capability-token.mjs';
+import { normalizeSafeSecurityPolicy } from '../safe/security-policy.mjs';
+import { buildSafeShortcutDetails, safeShortcutPath } from './safe-shortcut.mjs';
 import { isAllowedSafeResourceUrl } from './safe-window-policy.mjs';
 import { ownsSafeSessionResource } from './safe-session-policy.mjs';
 import { resolveSafeStorageRoot } from './safe-storage-path.mjs';
@@ -57,7 +59,9 @@ const safeUiRoot = path.join(workspaceRoot, 'desktop', 'safe');
 const safePreloadPath = path.join(safeUiRoot, 'preload.cjs');
 const safeRuntimePath = path.join(safeUiRoot, 'runtime.mjs');
 const safeIndexPath = path.join(safeUiRoot, 'index.html');
+const safeIconPath = path.join(workspaceRoot, 'assets', 'safe', 'monarch-safe.ico');
 const smokeMode = process.argv.includes('--smoke');
+const safeLaunchMode = process.argv.includes('--safe') && !safeEntryQaMode;
 const appName = 'Monarch';
 let mainWindow = null;
 const speechDiagnosticsPath = path.join(workspaceRoot, 'runtime', 'electron-speech.log');
@@ -92,17 +96,19 @@ let shutdownComplete = false;
 let shutdownPromise = null;
 const configuredSafeSessions = new WeakSet();
 const safeEntryQaEvents = [];
+let safeSecurityPolicy = normalizeSafeSecurityPolicy(null);
 
 if (!safeEntryQaMode && !app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   if (!safeEntryQaMode) {
-    app.on('second-instance', () => {
-      void showMainWindow();
+    app.on('second-instance', (_event, commandLine) => {
+      if (commandLine.includes('--safe')) void showSafeWindow();
+      else void showMainWindow();
     });
   }
 
-  app.setAppUserModelId('Monarch.App');
+  app.setAppUserModelId(safeLaunchMode ? 'Monarch.Safe' : 'Monarch.App');
 
   app.whenReady()
     .then(startDesktopApp)
@@ -134,7 +140,8 @@ app.on('before-quit', (event) => {
 });
 
 app.on('activate', () => {
-  void showMainWindow();
+  if (safeLaunchMode && !mainWindow) void showSafeWindow();
+  else void showMainWindow();
 });
 
 ipcMain.handle('monarch:get-runtime-url', () => runtimeUrl);
@@ -249,6 +256,38 @@ ipcMain.handle('monarch:open-safe', async (event) => {
   const state = await showSafeWindow();
   return { ok: true, ...state };
 });
+ipcMain.handle('monarch:open-safe-settings', async (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return { ok: false };
+  const state = await showSafeWindow();
+  safeWindow?.webContents.send('monarch-safe:open-settings');
+  return { ok: true, ...state };
+});
+ipcMain.handle('monarch:safe-shortcut-status', (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return { ok: false, created: false };
+  if (process.platform !== 'win32') return { ok: false, created: false, error: 'unsupported-platform' };
+  const shortcut = safeShortcutPath(app.getPath('desktop'));
+  return { ok: true, created: existsSync(shortcut), path: shortcut };
+});
+ipcMain.handle('monarch:safe-shortcut-create', (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return { ok: false, created: false };
+  if (process.platform !== 'win32') return { ok: false, created: false, error: 'unsupported-platform' };
+  const shortcut = safeShortcutPath(app.getPath('desktop'));
+  const details = buildSafeShortcutDetails({
+    executablePath: process.execPath,
+    appEntryPath: path.join(__dirname, 'main.mjs'),
+    iconPath: existsSync(safeIconPath) ? safeIconPath : process.execPath,
+    packaged: app.isPackaged,
+  });
+  const created = shell.writeShortcutLink(shortcut, 'create', details);
+  return { ok: created, created, path: shortcut };
+});
+ipcMain.handle('monarch:safe-shortcut-remove', async (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return { ok: false, created: false };
+  if (process.platform !== 'win32') return { ok: false, created: false, error: 'unsupported-platform' };
+  const shortcut = safeShortcutPath(app.getPath('desktop'));
+  await rm(shortcut, { force: true });
+  return { ok: true, created: false, path: shortcut };
+});
 ipcMain.handle('monarch:safe-chat-status', async (event) => {
   if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return { runtime: false, unlocked: false };
   if (!safeProcess) return { runtime: false, unlocked: false };
@@ -276,6 +315,31 @@ ipcMain.handle('monarch:safe-chat-lock', async (event) => {
 });
 ipcMain.handle('monarch-safe:authorize-delete', async (event, value = {}) => {
   if (!safeWindow || safeWindow.isDestroyed() || event.sender.id !== safeWindow.webContents.id || !safeCapabilityKey) return null;
+  const batch = Array.isArray(value?.files)
+    ? value.files.slice(0, 100).map((file) => ({
+      id: String(file?.id || ''),
+      name: String(file?.name || 'файл').replace(/[\r\n\t]/g, ' ').slice(0, 160),
+    })).filter((file) => /^[0-9a-f-]{36}$/i.test(file.id))
+    : [];
+  if (batch.length) {
+    const confirmation = await dialog.showMessageBox(safeWindow, {
+      type: 'warning',
+      title: 'Monarch Safe · удаление файлов',
+      message: `Удалить выбранные файлы (${batch.length})?`,
+      detail: `${batch.slice(0, 4).map((file) => `• ${file.name}`).join('\n')}${batch.length > 4 ? `\n• и ещё ${batch.length - 4}` : ''}\n\nАктивные ключи версий будут уничтожены. Операция необратима внутри хранилища.`,
+      buttons: ['Отмена', 'Удалить'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (confirmation.response !== 1 || !safeCapabilityKey) return null;
+    return {
+      tokens: batch.map((file) => ({
+        id: file.id,
+        capabilityToken: createSafeCapabilityToken({ key: safeCapabilityKey, action: 'deleteFile', resourceId: file.id }),
+      })),
+    };
+  }
   const fileId = String(value?.id || '');
   if (!/^[0-9a-f-]{36}$/i.test(fileId)) return null;
   const name = String(value?.name || 'выбранный файл').replace(/[\r\n\t]/g, ' ').slice(0, 160);
@@ -314,14 +378,14 @@ ipcMain.handle('monarch-safe:authorize-write', async (event, value = {}) => {
 });
 ipcMain.on('monarch-safe:sealed', (event) => {
   if (!safeWindow || safeWindow.isDestroyed() || event.sender.id !== safeWindow.webContents.id) return;
-  closeSafeForSystemBoundary();
+  if (safeSecurityPolicy.clearClipboardOnLock) clipboard.clear();
 });
 
 async function startDesktopApp() {
   await mkdir(path.join(workspaceRoot, 'runtime'), { recursive: true });
   // Spawn the Qwen worker synchronously before the runtime can prewarm other
   // local models. Renderer callers await this exact shared promise via IPC.
-  if (!smokeMode && !safeEntryQaMode) void speechWarmup.start();
+  if (!smokeMode && !safeEntryQaMode && !safeLaunchMode) void speechWarmup.start();
   runtimeUrl = await startRuntime();
 
   if (smokeMode) {
@@ -347,8 +411,9 @@ async function startDesktopApp() {
   Menu.setApplicationMenu(createApplicationMenu());
   powerMonitor.on('lock-screen', () => closeSafeForSystemBoundary());
   powerMonitor.on('suspend', () => closeSafeForSystemBoundary());
-  if (!safeEntryQaMode) createTray();
-  await createMainWindow();
+  if (!safeEntryQaMode && !safeLaunchMode) createTray();
+  if (safeLaunchMode) await showSafeWindow();
+  else await createMainWindow();
   if (safeEntryQaMode) await runSafeEntryQa();
 }
 
@@ -453,7 +518,7 @@ async function showSafeWindow() {
 
   launchedSafeWindow = new BrowserWindow({
     title: 'Monarch Safe',
-    icon: path.join(workspaceRoot, 'assets', 'icon.png'),
+    icon: existsSync(safeIconPath) ? safeIconPath : path.join(workspaceRoot, 'assets', 'icon.png'),
     width: 1520,
     height: 960,
     minWidth: 1040,
@@ -477,11 +542,31 @@ async function showSafeWindow() {
   launchedSafeWindow.setMenu(null);
   launchedSafeWindow.setContentProtection(true);
   configureSafeWindowSecurity(launchedSafeWindow);
-  launchedSafeWindow.on('minimize', () => closeSafeForSystemBoundary(launchedSafeWindow, launchedSafeProcess, launchedCapabilityKey));
-  launchedSafeWindow.on('hide', () => closeSafeForSystemBoundary(launchedSafeWindow, launchedSafeProcess, launchedCapabilityKey));
+  launchedSafeWindow.on('minimize', () => {
+    if (!ownsSafeSessionResource(safeWindow, launchedSafeWindow)) return;
+    if (safeSecurityPolicy.minimizeAction === 'close') {
+      closeSafeForSystemBoundary(launchedSafeWindow, launchedSafeProcess, launchedCapabilityKey);
+    } else if (safeSecurityPolicy.minimizeAction === 'lock') {
+      launchedSafeWindow.webContents.send('monarch-safe:force-lock');
+    }
+  });
+  launchedSafeWindow.on('hide', () => {
+    if (!ownsSafeSessionResource(safeWindow, launchedSafeWindow)) return;
+    if (safeSecurityPolicy.minimizeAction === 'close') closeSafeForSystemBoundary(launchedSafeWindow, launchedSafeProcess, launchedCapabilityKey);
+    else if (safeSecurityPolicy.minimizeAction === 'lock') launchedSafeWindow.webContents.send('monarch-safe:force-lock');
+  });
+  launchedSafeWindow.on('blur', () => {
+    if (ownsSafeSessionResource(safeWindow, launchedSafeWindow) && safeSecurityPolicy.lockOnBlur) {
+      launchedSafeWindow.webContents.send('monarch-safe:force-lock');
+    }
+  });
   launchedSafeWindow.on('closed', () => {
     if (ownsSafeSessionResource(safeWindow, launchedSafeWindow)) safeWindow = null;
     stopSafeRuntime(launchedSafeProcess, launchedCapabilityKey);
+    if (safeLaunchMode && !mainWindow) {
+      quitRequested = true;
+      app.quit();
+    }
   });
 
   let channel = null;
@@ -748,6 +833,7 @@ function handleSafeServiceMessage(targetProcess, message) {
   if (!payload || typeof payload !== 'object') return;
   if (payload.type === 'service-event') {
     if (!ownsSafeSessionResource(safeProcess, targetProcess)) return;
+    if (payload.data?.securityPolicy) safeSecurityPolicy = normalizeSafeSecurityPolicy(payload.data.securityPolicy);
     emitSafeChatStatus({ runtime: true, ...(payload.data || {}) });
     return;
   }
@@ -1020,7 +1106,9 @@ async function shutdownDesktop() {
   stopSafeRuntime();
   // Safe entry QA can attach to an already running production Oscar backend.
   // It must never shut down a runtime owned by the real Desktop instance.
-  if (!safeEntryQaMode) await stopOscarBackend().catch(() => undefined);
+  // A standalone Safe window is a client of the already-running Monarch services.
+  // Closing that shortcut must never tear down Oscar for the main Monarch app.
+  if (!safeEntryQaMode && !safeLaunchMode) await stopOscarBackend().catch(() => undefined);
   stopRuntime();
 }
 

@@ -6,6 +6,7 @@ let readyResolve;
 const ready = new Promise((resolve) => { readyResolve = resolve; });
 const pending = new Map();
 const listeners = new Set();
+const settingsListeners = new Set();
 
 ipcRenderer.on('monarch-safe:connect', (event) => {
   const nextPort = event.ports?.[0];
@@ -40,6 +41,11 @@ ipcRenderer.on('monarch-safe:force-lock', () => {
     try { listener({ event: 'force-lock', data: null }); } catch { /* isolated listener */ }
   });
 });
+ipcRenderer.on('monarch-safe:open-settings', () => {
+  settingsListeners.forEach((listener) => {
+    try { listener(); } catch { /* isolated listener */ }
+  });
+});
 
 contextBridge.exposeInMainWorld('monarchSafe', {
   authorizeDelete: (value) => ipcRenderer.invoke('monarch-safe:authorize-delete', value),
@@ -58,5 +64,10 @@ contextBridge.exposeInMainWorld('monarchSafe', {
     if (typeof listener !== 'function') return () => undefined;
     listeners.add(listener);
     return () => listeners.delete(listener);
+  },
+  onOpenSettings: (listener) => {
+    if (typeof listener !== 'function') return () => undefined;
+    settingsListeners.add(listener);
+    return () => settingsListeners.delete(listener);
   },
 });

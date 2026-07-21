@@ -17,7 +17,6 @@ import {
   rename,
   rm,
   stat,
-  truncate,
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
@@ -30,6 +29,11 @@ import {
   generateEmergencyPhrase,
   normalizeEmergencyPhrase,
 } from './emergency-phrase.mjs';
+import {
+  SAFE_SECURITY_POLICY_DEFAULTS,
+  assessSafeSecurityPolicy,
+  normalizeSafeSecurityPolicy,
+} from './security-policy.mjs';
 
 const scrypt = promisify(scryptCallback);
 const CONFIG_VERSION = 2;
@@ -71,7 +75,10 @@ export class SafeVault {
     this.blobRoot = path.join(this.rootPath, 'blobs');
     this.configPath = path.join(this.rootPath, 'config.safe.json');
     this.manifestPath = path.join(this.rootPath, 'manifest.safe');
-    this.autoLockMs = clampInteger(options.autoLockMs, options.testKdf ? 10 : 10_000, 60 * 60 * 1000, DEFAULT_AUTO_LOCK_MS);
+    this.autoLockOverrideMs = Number.isSafeInteger(options.autoLockMs)
+      ? clampInteger(options.autoLockMs, options.testKdf ? 10 : 30_000, 60 * 60 * 1000, DEFAULT_AUTO_LOCK_MS)
+      : null;
+    this.autoLockMs = this.autoLockOverrideMs ?? DEFAULT_AUTO_LOCK_MS;
     this.pinKdf = normalizeKdf(options.testKdf ? TEST_PIN_KDF : options.pinKdf || DEFAULT_PIN_KDF);
     this.recoveryKdf = normalizeKdf(options.testKdf ? TEST_RECOVERY_KDF : options.recoveryKdf || DEFAULT_RECOVERY_KDF);
     this.emergencyKdf = normalizeKdf(options.testKdf ? TEST_PIN_KDF : options.emergencyKdf || DEFAULT_PIN_KDF);
@@ -104,6 +111,8 @@ export class SafeVault {
       this.configError = error;
       this.configSealStatus = 'none';
     }
+    this.autoLockMs = this.autoLockOverrideMs
+      ?? normalizeSafeSecurityPolicy(this.config?.securityPolicy).autoLockMs;
     return this.status();
   }
 
@@ -122,6 +131,7 @@ export class SafeVault {
       && emergency.windowEligible === true
       && emergency.attemptUsed !== true
     );
+    const securityAssessment = assessSafeSecurityPolicy(this.config?.securityPolicy);
     return {
       configured,
       provisioning,
@@ -145,6 +155,9 @@ export class SafeVault {
       emergencyRecoveryOffered,
       emergencyAttemptAvailable: emergencyRecoveryOffered,
       autoLockMs: this.autoLockMs,
+      securityPolicy: securityAssessment.policy,
+      securityLevel: securityAssessment.level,
+      securityWarnings: securityAssessment.warnings,
       isolation: {
         externalPrograms: false,
         network: false,
@@ -157,6 +170,41 @@ export class SafeVault {
 
   touch() {
     this.#requireUnlocked();
+    return this.status();
+  }
+
+  async updateSecurityPolicy({ pin, policy, lowSecurityAcknowledged = false }) {
+    this.#requireActiveConfig();
+    if (this.configSealStatus === 'failed') {
+      throw new SafeVaultError('vault-config-integrity-failed', 'Safe security settings cannot change because configuration integrity failed.');
+    }
+    validatePin(pin, this.config.pinLength);
+    let key = null;
+    try {
+      key = await unwrapKey(this.config.pin, pin, `${this.config.vaultId}:pin`, this.deviceKey);
+    } catch (error) {
+      if (!(error instanceof SafeVaultError) || error.code !== 'invalid-credential') throw error;
+      throw new SafeVaultError('invalid-pin', 'Текущий PIN отклонён. Настройки Safe не изменены.');
+    } finally {
+      key?.fill(0);
+    }
+    const assessment = assessSafeSecurityPolicy(policy);
+    if (assessment.level === 'low' && lowSecurityAcknowledged !== true) {
+      throw new SafeVaultError(
+        'low-security-acknowledgement-required',
+        'Нужно отдельно подтвердить ослабление защиты Monarch Safe.',
+        { warnings: assessment.warnings },
+      );
+    }
+    this.config.securityPolicy = assessment.policy;
+    this.config.sequence += 1;
+    this.config.updatedAt = new Date().toISOString();
+    if (this.configSealStatus === 'legacy' && this.deviceKey) this.configSealStatus = 'valid';
+    await this.#persistConfig();
+    this.autoLockMs = this.autoLockOverrideMs ?? assessment.policy.autoLockMs;
+    if (this.autoLockTimer) clearTimeout(this.autoLockTimer);
+    this.autoLockTimer = null;
+    this.#armAutoLock();
     return this.status();
   }
 
@@ -222,6 +270,7 @@ export class SafeVault {
         attemptUsed: false,
       },
       attempts: { pinFailures: 0 },
+      securityPolicy: { ...SAFE_SECURITY_POLICY_DEFAULTS },
       createdAt: now,
       updatedAt: now,
     };
@@ -617,12 +666,37 @@ export class SafeVault {
     return structuredClone(section);
   }
 
+  async deleteSection({ id }) {
+    this.#requireUnlocked();
+    const section = this.#requireSection(id);
+    if (this.manifest.sections.length <= 1) {
+      throw new SafeVaultError('last-section-required', 'Safe должен содержать хотя бы один раздел.');
+    }
+    if (this.manifest.folders.some((entry) => entry.sectionId === id)
+      || this.manifest.files.some((entry) => entry.sectionId === id)) {
+      throw new SafeVaultError('section-not-empty', 'Сначала перемести или удали файлы и папки из этого раздела.');
+    }
+    this.manifest.sections = this.manifest.sections.filter((entry) => entry.id !== id);
+    await this.#persistManifest();
+    return { deleted: true, section: structuredClone(section) };
+  }
+
   async createFolder({ name, sectionId }) {
     this.#requireUnlocked();
     this.#requireSection(sectionId);
     const now = new Date().toISOString();
     const folder = { id: randomUUID(), sectionId, name: normalizeName(name), createdAt: now, updatedAt: now };
     this.manifest.folders.push(folder);
+    await this.#persistManifest();
+    return structuredClone(folder);
+  }
+
+  async updateFolder({ id, name }) {
+    this.#requireUnlocked();
+    const folder = this.manifest.folders.find((entry) => entry.id === id);
+    if (!folder) throw new SafeVaultError('folder-not-found', 'Safe folder was not found.');
+    folder.name = normalizeName(name);
+    folder.updatedAt = new Date().toISOString();
     await this.#persistManifest();
     return structuredClone(folder);
   }
@@ -1162,6 +1236,8 @@ export class SafeVault {
     if (!this.masterKey) return;
     if (this.activeOperations > 0) return;
     if (this.autoLockTimer) clearTimeout(this.autoLockTimer);
+    this.autoLockTimer = null;
+    if (this.autoLockMs === 0) return;
     this.autoLockTimer = setTimeout(() => {
       this.autoLockTimer = null;
       if (this.activeOperations > 0) return;
@@ -1187,7 +1263,8 @@ export class SafeVault {
 for (const methodName of [
   'initialize', 'setup', 'completeSetup', 'resetProvisioning', 'unlockWithPin', 'unlockWithRecoveryKey',
   'unlockWithEmergencyPhrase',
-  'destroy', 'createSection', 'updateSection', 'createFolder', 'deleteFolder', 'createFile', 'importFile',
+  'destroy', 'updateSecurityPolicy', 'createSection', 'updateSection', 'deleteSection',
+  'createFolder', 'updateFolder', 'deleteFolder', 'createFile', 'importFile',
   'readFile', 'writeFile', 'deleteFile', 'createArchive', 'extractArchive',
   'readChat', 'upsertChat', 'deleteChat', 'touch',
 ]) {
@@ -1524,6 +1601,14 @@ function validateConfig(value) {
       }
       validateCredentialEnvelope(emergency.envelope);
     }
+    if (value.securityPolicy !== undefined) {
+      const normalizedPolicy = normalizeSafeSecurityPolicy(value.securityPolicy);
+      if (!value.securityPolicy || typeof value.securityPolicy !== 'object'
+        || Object.keys(normalizedPolicy).some((key) => normalizedPolicy[key] !== value.securityPolicy[key])
+        || Object.keys(value.securityPolicy).some((key) => !(key in normalizedPolicy))) {
+        throw new SafeVaultError('invalid-config', 'Safe security policy is invalid.');
+      }
+    }
   }
 }
 
@@ -1696,28 +1781,9 @@ async function readBoundedFile(filePath, maximumBytes, code) {
 }
 
 async function secureRemove(filePath) {
-  let size = 0;
-  try { size = (await stat(filePath)).size; } catch { return; }
-  try {
-    const handle = await open(filePath, 'r+');
-    try {
-      const chunk = Buffer.allocUnsafe(Math.min(1024 * 1024, Math.max(1, size)));
-      let position = 0;
-      while (position < size) {
-        randomBytes(chunk.byteLength).copy(chunk);
-        const length = Math.min(chunk.byteLength, size - position);
-        await handle.write(chunk, 0, length, position);
-        position += length;
-      }
-      chunk.fill(0);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await truncate(filePath, 0);
-  } catch {
-    // Cryptographic erasure removes key envelopes first; physical overwrite is best effort on SSDs.
-  }
+  // Deletion is cryptographic first: the authenticated key envelope is removed
+  // before this unlink. Rewriting a path is both unreliable on SSDs and unsafe
+  // when a hostile local process replaces it with a hardlink/symlink.
   await rm(filePath, { force: true }).catch(() => undefined);
 }
 

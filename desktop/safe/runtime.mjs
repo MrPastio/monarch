@@ -67,7 +67,7 @@ async function handleRequest(port, request) {
     const result = await dispatch(action, readRecord(request.payload));
     port.postMessage({ type: 'response', id, ok: true, result });
     if (result?.bytes instanceof Uint8Array) result.bytes.fill(0);
-    if (['setup', 'completeSetup', 'resetProvisioning', 'unlockPin', 'unlockRecovery', 'unlockEmergency', 'lock'].includes(action)) {
+    if (['setup', 'completeSetup', 'resetProvisioning', 'unlockPin', 'unlockRecovery', 'unlockEmergency', 'updateSecurityPolicy', 'lock'].includes(action)) {
       port.postMessage({ type: 'event', event: 'status', data: vault.status() });
       emitParentStatus('status', vault.status());
     }
@@ -131,11 +131,14 @@ function dispatch(action, payload) {
   case 'unlockPin': return vault.unlockWithPin(String(payload.pin || ''));
   case 'unlockRecovery': return vault.unlockWithRecoveryKey(String(payload.key || ''));
   case 'unlockEmergency': return vault.unlockWithEmergencyPhrase(String(payload.phrase || ''));
+  case 'updateSecurityPolicy': return vault.updateSecurityPolicy(payload);
   case 'lock': return Promise.resolve(vault.lock());
   case 'list': return Promise.resolve(vault.list());
   case 'createSection': return vault.createSection(payload);
   case 'updateSection': return vault.updateSection(payload);
+  case 'deleteSection': return vault.deleteSection(payload);
   case 'createFolder': return vault.createFolder(payload);
+  case 'updateFolder': return vault.updateFolder(payload);
   case 'deleteFolder': return vault.deleteFolder(payload);
   case 'createFile': return vault.createFile(payload);
   case 'importFile': return vault.importFile(payload);

@@ -35,7 +35,7 @@ const CATEGORY_LABELS = Object.freeze({
   note: 'Заметка',
 });
 
-const SETTINGS_TABS = new Set(['general', 'memory', 'skills', 'telegram', 'system']);
+const SETTINGS_TABS = new Set(['general', 'memory', 'skills', 'telegram', 'safe', 'system']);
 const SKILL_INITIAL_LIMIT = 12;
 const SKILL_PAGE_SIZE = 12;
 
@@ -63,6 +63,9 @@ export function initSettingsPane() {
   const voiceForm = document.querySelector('#oscar-voice-settings-form');
   const testVoiceButton = document.querySelector('#oscar-voice-test');
   const resetVoiceTuningButton = document.querySelector('#oscar-voice-reset-tuning');
+  const safeSettingsButton = document.querySelector('#safe-open-security-settings');
+  const safeShortcutButton = document.querySelector('#safe-shortcut-toggle');
+  const safeOpenButton = document.querySelector('#safe-open-now');
 
   document.querySelectorAll('[data-settings-preset]').forEach((button) => {
     button.addEventListener('click', () => selectCommunicationPreset(button.dataset.settingsPreset, true));
@@ -133,6 +136,9 @@ export function initSettingsPane() {
   refreshTelegramButton?.addEventListener('click', () => void loadTelegramSettings());
   toggleTelegramRemoteButton?.addEventListener('click', () => void toggleTelegramRemote());
   revokeTelegramButton?.addEventListener('click', () => void revokeTelegramPairings());
+  safeSettingsButton?.addEventListener('click', () => void openSafeSecuritySettings());
+  safeShortcutButton?.addEventListener('click', () => void toggleSafeShortcut());
+  safeOpenButton?.addEventListener('click', () => void openSafeNow());
   refreshSkillsButton?.addEventListener('click', () => void loadSkillSettings(true));
   skillsSearch?.addEventListener('input', () => {
     visibleSkillLimit = SKILL_INITIAL_LIMIT;
@@ -352,9 +358,73 @@ async function ensureSettingsTabLoaded(tab) {
     else if (tab === 'memory') await loadMemorySettings();
     else if (tab === 'skills') await loadSkillSettings();
     else if (tab === 'telegram') await loadTelegramSettings();
+    else if (tab === 'safe') await loadSafeSettings();
   } catch {
     loadedSettingsTabs.delete(tab);
   }
+}
+
+async function loadSafeSettings() {
+  const bridge = window.monarchDesktop;
+  const badge = document.querySelector('#safe-shortcut-status');
+  const button = document.querySelector('#safe-shortcut-toggle');
+  const feedback = document.querySelector('#safe-settings-feedback');
+  if (!bridge?.getSafeShortcutStatus) {
+    if (badge) badge.textContent = 'Только Desktop';
+    if (button) button.disabled = true;
+    setStatus(feedback, 'Ярлык и изолированные настройки доступны в приложении Monarch для Windows.');
+    return;
+  }
+  try {
+    const result = await bridge.getSafeShortcutStatus();
+    if (!result?.ok) throw new Error(result?.error === 'unsupported-platform' ? 'Отдельный ярлык сейчас поддерживается только в Windows.' : 'Не удалось проверить ярлык Safe.');
+    if (badge) badge.textContent = result.created ? 'Ярлык создан' : 'Без отдельного ярлыка';
+    if (button) {
+      button.disabled = false;
+      button.dataset.created = String(result.created === true);
+      button.textContent = result.created ? 'Удалить отдельный ярлык' : 'Создать отдельный ярлык';
+    }
+    setStatus(feedback, result.created ? 'Monarch Safe можно запускать отдельно с рабочего стола.' : 'Основное приложение и данные Safe останутся общими; ярлык меняет только способ запуска.');
+  } catch (error) {
+    if (badge) badge.textContent = 'Недоступно';
+    setStatus(feedback, readErrorMessage(error), true);
+  }
+}
+
+async function toggleSafeShortcut() {
+  const bridge = window.monarchDesktop;
+  const button = document.querySelector('#safe-shortcut-toggle');
+  const feedback = document.querySelector('#safe-settings-feedback');
+  if (!bridge?.createSafeShortcut || !bridge?.removeSafeShortcut) return loadSafeSettings();
+  const remove = button?.dataset.created === 'true';
+  setBusy(button, true, remove ? 'Удаляю…' : 'Создаю…');
+  try {
+    const result = remove ? await bridge.removeSafeShortcut() : await bridge.createSafeShortcut();
+    if (!result?.ok) throw new Error('Windows не подтвердил изменение ярлыка Monarch Safe.');
+    loadedSettingsTabs.delete('safe');
+    await loadSafeSettings();
+  } catch (error) {
+    setStatus(feedback, readErrorMessage(error), true);
+    setBusy(button, false, remove ? 'Удалить отдельный ярлык' : 'Создать отдельный ярлык');
+  }
+}
+
+async function openSafeSecuritySettings() {
+  const feedback = document.querySelector('#safe-settings-feedback');
+  try {
+    const result = await window.monarchDesktop?.openSafeSettings?.();
+    if (!result?.ok) throw new Error('Изолированное окно Safe недоступно.');
+    setStatus(feedback, 'Настройки открыты в изолированном окне. Разблокируй Safe и подтверди изменения текущим PIN.');
+  } catch (error) { setStatus(feedback, readErrorMessage(error), true); }
+}
+
+async function openSafeNow() {
+  const feedback = document.querySelector('#safe-settings-feedback');
+  try {
+    const result = await window.monarchDesktop?.openSafe?.();
+    if (!result?.ok) throw new Error('Изолированное окно Safe недоступно.');
+    setStatus(feedback, result.created ? 'Monarch Safe открыт.' : 'Окно Monarch Safe уже было открыто.');
+  } catch (error) { setStatus(feedback, readErrorMessage(error), true); }
 }
 
 async function loadProfileSettings() {

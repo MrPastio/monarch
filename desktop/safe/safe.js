@@ -5,6 +5,7 @@ import {
   seedSafeFileContent,
   withSafeFileExtension,
 } from './file-formats.mjs';
+import { assessSafeSecurityPolicy, normalizeSafeSecurityPolicy } from './security-policy.mjs';
 
 const bridge = window.monarchSafe;
 const $ = (selector) => document.querySelector(selector);
@@ -13,18 +14,6 @@ const MAX_EDITABLE_HEX_BYTES = 64 * 1024;
 const UI_AUTO_LOCK_GRACE_MS = 1500;
 const RUNTIME_ACTIVITY_TOUCH_THROTTLE_MS = 750;
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
-const TRANSITION_PHASES = {
-  unlock: [
-    ['verify', 'Проверяю локальный контур', 'Устройство и sealed-конфигурация подтверждаются внутри Safe', 260],
-    ['keys', 'Ключи собраны в памяти', 'Master scope открыт только для этой изолированной сессии', 300],
-    ['decrypt', 'Восстанавливаю пространство', 'Структура файлов расшифровывается без внешних процессов', 360],
-    ['open', 'Monarch Safe готов', 'Локальный контур открыт · сеть и внешние приложения отключены', 420],
-  ],
-  lock: [
-    ['closing', 'Закрываю пространство', 'Открытые представления и временные ключи очищаются', 320],
-    ['sealed', 'Safe запечатан', 'Ключи выгружены · локальный контур закрыт', 300],
-  ],
-};
 const state = {
   status: null,
   manifest: null,
@@ -45,6 +34,7 @@ const state = {
   runtimeTouchAt: 0,
   runtimeTouchPending: false,
   transitionPromise: null,
+  pendingSettingsOpen: false,
 };
 
 bridge?.onEvent(({ event, data }) => {
@@ -56,6 +46,10 @@ bridge?.onEvent(({ event, data }) => {
       if (event === 'auto-lock') void playSafeTransition('lock');
     }
   }
+});
+bridge?.onOpenSettings?.(() => {
+  state.pendingSettingsOpen = true;
+  if (state.status?.unlocked) openSecuritySettings();
 });
 
 document.addEventListener('DOMContentLoaded', init);
@@ -81,7 +75,22 @@ function bindEvents() {
   $('#item-form').addEventListener('submit', submitItemDialog);
   $('#item-cancel').addEventListener('click', () => $('#item-dialog').close('cancel'));
   $('#item-close').addEventListener('click', () => $('#item-dialog').close('cancel'));
+  $('#item-delete').addEventListener('click', deleteEditedContainer);
   $('#item-type').addEventListener('change', updateFileFormatHint);
+  $('#safe-settings-form').addEventListener('submit', saveSecuritySettings);
+  $('#safe-settings-close').addEventListener('click', closeSecuritySettings);
+  $('#safe-settings-cancel').addEventListener('click', closeSecuritySettings);
+  $('#confirm-action').addEventListener('click', (event) => {
+    event.preventDefault();
+    $('#confirm-dialog').close('default');
+  });
+  $('#confirm-form button[value="cancel"]').addEventListener('click', (event) => {
+    event.preventDefault();
+    $('#confirm-dialog').close('cancel');
+  });
+  for (const selector of ['#safe-auto-lock', '#safe-minimize-action', '#safe-clipboard-mode', '#safe-lock-on-blur', '#safe-clear-clipboard']) {
+    $(selector).addEventListener('change', renderSecurityAssessment);
+  }
   $('#recovery-saved').addEventListener('change', (event) => { $('#enter-vault').disabled = !event.target.checked; });
   $('#emergency-word-count').addEventListener('input', (event) => {
     state.emergencyWordCount = Number(event.target.value);
@@ -115,10 +124,13 @@ function bindEvents() {
     $('#drop-overlay').hidden = true;
     void importFiles(event.dataTransfer.files);
   });
-  document.addEventListener('visibilitychange', () => { if (document.hidden && state.status?.unlocked) void lockVault(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && state.status?.unlocked && currentSecurityPolicy().lockOnBlur) void lockVault();
+  });
   window.addEventListener('pagehide', () => { if (state.status?.unlocked) void request('lock').catch(() => undefined); });
   for (const type of ['copy', 'cut', 'paste']) {
     document.addEventListener(type, (event) => {
+      if (!shouldBlockClipboardEvent(type)) return;
       event.preventDefault();
       toast('Системный буфер обмена отключён внутри Safe.', true);
     }, true);
@@ -140,15 +152,23 @@ async function handleClick(event) {
   if (event.target.closest('#enter-vault')) { await enterVault(); return; }
   if (event.target.closest('#restart-provisioning')) { state.status = await request('resetProvisioning'); showAuth(); return; }
   if (event.target.closest('#lock-now,#lock-now-top')) { await requestManualLock(); return; }
+  if (event.target.closest('#safe-settings')) { openSecuritySettings(); return; }
   if (event.target.closest('#edit-section')) { openItemDialog('edit-section'); return; }
   if (event.target.closest('#new-section')) { openItemDialog('section'); return; }
   if (event.target.closest('#new-folder')) { openItemDialog('folder'); return; }
   if (event.target.closest('#new-file')) { openItemDialog('file'); return; }
   if (event.target.closest('#import-files')) { $('#file-input').click(); return; }
   if (event.target.closest('#archive-files')) { await archiveSelected(); return; }
+  if (event.target.closest('#delete-selected')) { await deleteSelectedFiles(); return; }
   if (event.target.closest('#save-file')) { await saveCurrentFile(); return; }
   if (event.target.closest('#delete-file')) { await deleteCurrentFile(); return; }
   if (event.target.closest('#extract-archive')) { await extractCurrentArchive(); return; }
+  const deleteFile = event.target.closest('[data-delete-file]');
+  if (deleteFile) { event.stopPropagation(); await deleteFilesById([deleteFile.dataset.deleteFile]); return; }
+  const editFolder = event.target.closest('[data-edit-folder]');
+  if (editFolder) { event.stopPropagation(); openItemDialog('edit-folder', editFolder.dataset.editFolder); return; }
+  const deleteFolder = event.target.closest('[data-delete-folder]');
+  if (deleteFolder) { event.stopPropagation(); await deleteFolderById(deleteFolder.dataset.deleteFolder); return; }
   const tab = event.target.closest('[data-editor-tab]');
   if (tab) { setEditorTab(tab.dataset.editorTab); return; }
   const folderBack = event.target.closest('[data-folder-back]');
@@ -165,13 +185,14 @@ async function handleClick(event) {
   const folder = event.target.closest('[data-folder-id]');
   if (folder) { state.folderId = folder.dataset.folderId; state.selected.clear(); renderFiles(); $('#breadcrumb [data-folder-back]')?.focus({ preventScroll: true }); return; }
   const check = event.target.closest('[data-file-check]');
-  if (check) { event.stopPropagation(); check.checked ? state.selected.add(check.dataset.fileCheck) : state.selected.delete(check.dataset.fileCheck); return; }
+  if (check) { event.stopPropagation(); check.checked ? state.selected.add(check.dataset.fileCheck) : state.selected.delete(check.dataset.fileCheck); renderSelectionState(); return; }
   const row = event.target.closest('[data-file-id]');
   if (row) await openFile(row.dataset.fileId);
 }
 
 function showAuth() {
   clearTimeout(state.lockTimer);
+  if ($('#safe-settings-dialog')?.open) $('#safe-settings-dialog').close();
   purgePlaintextUi();
   $('#vault-screen').hidden = true;
   $('#recovery-screen').hidden = true;
@@ -324,6 +345,7 @@ async function enterVault() {
     $('#vault-screen').classList.add('is-revealed');
     window.setTimeout(() => $('#vault-screen').classList.remove('is-revealed'), reducedMotion.matches ? 80 : 900);
     armUiLock();
+    if (state.pendingSettingsOpen) openSecuritySettings();
   } catch (error) { authError(error.message); }
 }
 
@@ -353,35 +375,19 @@ async function playSafeTransition(mode) {
   if (state.transitionPromise) return state.transitionPromise;
   const overlay = $('#safe-transition');
   if (!overlay) return undefined;
-  const phases = TRANSITION_PHASES[mode] || TRANSITION_PHASES.unlock;
   state.transitionPromise = (async () => {
     overlay.dataset.mode = mode;
-    overlay.dataset.phase = phases[0][0];
-    $('#transition-kicker').textContent = mode === 'lock' ? 'MONARCH SAFE · SEALING' : 'MONARCH SAFE · LOCAL VAULT';
-    overlay.classList.remove('is-leaving');
+    overlay.classList.remove('is-leaving', 'is-open');
     overlay.hidden = false;
     document.body.classList.add('safe-transition-active');
     await nextPaint();
     overlay.classList.add('is-visible');
-    for (const [phase, title, detail, duration] of phases) {
-      overlay.dataset.phase = phase;
-      $('#transition-title').textContent = title;
-      $('#transition-detail').textContent = detail;
-      overlay.querySelector('.transition-core').classList.remove('phase-copy-in');
-      void overlay.querySelector('.transition-core').offsetWidth;
-      overlay.querySelector('.transition-core').classList.add('phase-copy-in');
-      overlay.querySelectorAll('[data-transition-step]').forEach((step) => {
-        const order = mode === 'unlock' ? ['verify', 'keys', 'decrypt', 'open'] : ['closing', 'sealed'];
-        const current = order.indexOf(phase);
-        const own = order.indexOf(step.dataset.transitionStep);
-        step.classList.toggle('is-complete', own >= 0 && own < current);
-        step.classList.toggle('is-active', own === current);
-      });
-      await delay(reducedMotion.matches ? 45 : duration);
-    }
+    await delay(reducedMotion.matches ? 20 : 55);
+    overlay.classList.toggle('is-open', mode === 'unlock');
+    await delay(reducedMotion.matches ? 35 : mode === 'unlock' ? 210 : 150);
     overlay.classList.add('is-leaving');
-    await delay(reducedMotion.matches ? 30 : mode === 'unlock' ? 300 : 220);
-    overlay.classList.remove('is-visible', 'is-leaving');
+    await delay(reducedMotion.matches ? 25 : 110);
+    overlay.classList.remove('is-visible', 'is-leaving', 'is-open');
     overlay.hidden = true;
     document.body.classList.remove('safe-transition-active');
   })().finally(() => { state.transitionPromise = null; });
@@ -417,7 +423,11 @@ function renderFiles() {
   const folders = state.manifest.folders.filter((folder) => state.sectionId !== 'all' && folder.sectionId === state.sectionId && !state.folderId);
   folders.forEach((folder) => {
     const open = element('button', { type: 'button', class: 'file-open-button', 'aria-label': `Открыть папку «${folder.name}»` }, iconName('folder', folder.name));
-    const row = element('tr', { 'data-folder-id': folder.id }); row.append(element('td'), element('td', {}, open), element('td', {}, 'Папка'), element('td', {}, formatDate(folder.updatedAt)), element('td', {}, '—')); body.append(row);
+    const actions = element('div', { class: 'row-actions' },
+      element('button', { type: 'button', 'data-edit-folder': folder.id, 'aria-label': `Переименовать папку «${folder.name}»`, title: 'Переименовать' }, '✎'),
+      element('button', { type: 'button', class: 'row-delete', 'data-delete-folder': folder.id, 'aria-label': `Удалить папку «${folder.name}»`, title: 'Удалить' }, '×'),
+    );
+    const row = element('tr', { 'data-folder-id': folder.id }); row.append(element('td'), element('td', {}, open), element('td', {}, 'Папка'), element('td', {}, formatDate(folder.updatedAt)), element('td', {}, '—'), element('td', { class: 'row-actions-cell' }, actions)); body.append(row);
   });
   let files = state.manifest.files.filter((file) => (state.sectionId === 'all' || file.sectionId === state.sectionId) && (!state.folderId || file.folderId === state.folderId));
   const query = $('#safe-search').value.trim().toLowerCase(); if (query) files = files.filter((file) => file.name.toLowerCase().includes(query));
@@ -427,7 +437,8 @@ function renderFiles() {
     const row = element('tr', { 'data-file-id': file.id, class: state.currentFile?.id === file.id ? 'active' : '' });
     const checkbox = element('input', { type: 'checkbox', 'data-file-check': file.id, 'aria-label': `Выбрать ${file.name}` }); checkbox.checked = state.selected.has(file.id);
     const open = element('button', { type: 'button', class: 'file-open-button', 'aria-label': `Открыть файл «${file.name}»` }, iconName(fileKind(file), file.name));
-    row.append(element('td', { class: 'select-cell' }, checkbox), element('td', {}, open), element('td', {}, kindLabel(file)), element('td', {}, formatDate(file.updatedAt)), element('td', {}, formatBytes(file.size))); body.append(row);
+    const deleteButton = element('button', { type: 'button', class: 'row-delete', 'data-delete-file': file.id, 'aria-label': `Удалить файл «${file.name}»`, title: 'Удалить файл' }, '×');
+    row.append(element('td', { class: 'select-cell' }, checkbox), element('td', {}, open), element('td', {}, kindLabel(file)), element('td', {}, formatDate(file.updatedAt)), element('td', {}, formatBytes(file.size)), element('td', { class: 'row-actions-cell' }, deleteButton)); body.append(row);
   });
   [...body.children].forEach((row, index) => row.style.setProperty('--motion-index', index));
   $('#empty-state').hidden = folders.length + files.length > 0;
@@ -438,6 +449,7 @@ function renderFiles() {
       element('span', { 'aria-current': 'page' }, folderName),
     );
   } else $('#breadcrumb').textContent = sectionName();
+  renderSelectionState(files.map((file) => file.id));
 }
 
 async function openFile(id) {
@@ -520,18 +532,27 @@ async function saveCurrentFile() {
   finally { bytes?.fill(0); }
 }
 
-function openItemDialog(mode) {
-  if (mode !== 'section' && state.sectionId === 'all') return toast('Сначала выбери раздел.', true);
+function openItemDialog(mode, entityId = null) {
   const editingSection = mode === 'edit-section';
+  const editingFolder = mode === 'edit-folder';
   const section = editingSection ? state.manifest.sections.find((entry) => entry.id === state.sectionId) : null;
+  const folder = editingFolder ? state.manifest.folders.find((entry) => entry.id === entityId) : null;
   if (editingSection && !section) return toast('Раздел не найден.', true);
+  if (editingFolder && !folder) return toast('Папка не найдена.', true);
   state.itemMode = mode;
-  $('#item-dialog-title').textContent = editingSection ? 'Настроить раздел' : mode === 'section' ? 'Новый раздел' : mode === 'folder' ? 'Новая папка' : 'Новый файл';
-  $('#item-submit').textContent = editingSection ? 'Сохранить' : 'Создать';
+  $('#item-dialog').dataset.entityId = entityId || '';
+  $('#item-dialog-title').textContent = editingSection ? 'Настроить раздел' : editingFolder ? 'Переименовать папку' : mode === 'section' ? 'Новый раздел' : mode === 'folder' ? 'Новая папка' : 'Новый файл';
+  $('#item-submit').textContent = editingSection || editingFolder ? 'Сохранить' : 'Создать';
   $('#item-type-row').hidden = mode !== 'file';
   $('#item-color-row').hidden = !['section', 'edit-section'].includes(mode);
-  $('#item-name').value = section?.name || '';
+  $('#item-delete').hidden = !editingSection && !editingFolder;
+  $('#item-name').value = section?.name || folder?.name || '';
   $('#item-color').value = section?.color || '#f59e0b';
+  const destination = ['file', 'folder'].includes(mode) ? resolveCreationDestination() : null;
+  $('#item-destination').textContent = destination
+    ? `Будет создано в разделе «${destination.name}»${state.folderId && mode === 'file' ? ' · в открытой папке' : ''}.`
+    : '';
+  $('#item-destination').hidden = !destination;
   if (mode === 'file') updateFileFormatHint();
   $('#item-dialog').showModal(); $('#item-name').focus();
 }
@@ -541,19 +562,57 @@ async function submitItemDialog(event) {
   try {
     if (state.itemMode === 'section') await request('createSection', { name: $('#item-name').value, color: $('#item-color').value });
     else if (state.itemMode === 'edit-section') await request('updateSection', { id: state.sectionId, name: $('#item-name').value, color: $('#item-color').value });
-    else if (state.itemMode === 'folder') await request('createFolder', { name: $('#item-name').value, sectionId: state.sectionId });
+    else if (state.itemMode === 'edit-folder') await request('updateFolder', { id: $('#item-dialog').dataset.entityId, name: $('#item-name').value });
+    else if (state.itemMode === 'folder') {
+      const destination = resolveCreationDestination();
+      if (!destination) throw new Error('Safe не содержит раздела для новой папки.');
+      const folder = await request('createFolder', { name: $('#item-name').value, sectionId: destination.id });
+      if (state.sectionId === 'all') { state.sectionId = destination.id; state.folderId = folder.id; }
+    }
     else {
+      const destination = resolveCreationDestination();
+      if (!destination) throw new Error('Safe не содержит раздела для нового файла.');
       const formatId = $('#item-type').value;
       const format = getSafeFileFormat(formatId);
       await request('createFile', {
         name: withSafeFileExtension($('#item-name').value, formatId),
         mime: format.mime,
         text: seedSafeFileContent(formatId),
-        sectionId: state.sectionId,
+        sectionId: destination.id,
         folderId: state.folderId,
       });
     }
     $('#item-dialog').close(); state.manifest = await request('list'); renderAll();
+  } catch (error) { toast(error.message, true); }
+}
+
+function resolveCreationDestination() {
+  if (!state.manifest?.sections?.length) return null;
+  if (state.sectionId !== 'all') {
+    const selected = state.manifest.sections.find((section) => section.id === state.sectionId);
+    if (selected) return selected;
+  }
+  return state.manifest.sections[0];
+}
+
+async function deleteEditedContainer() {
+  const id = $('#item-dialog').dataset.entityId;
+  if (!id) return;
+  const isSection = state.itemMode === 'edit-section';
+  const label = isSection ? 'раздел' : 'папку';
+  if (!await confirmInsideSafe({
+    title: `Удалить ${label}`,
+    copy: `Удалить ${label} «${$('#item-name').value}»? Это возможно только если внутри нет файлов и вложенных папок.`,
+    actionLabel: 'Удалить',
+  })) return;
+  try {
+    await request(isSection ? 'deleteSection' : 'deleteFolder', { id });
+    $('#item-dialog').close();
+    state.sectionId = isSection ? 'all' : state.sectionId;
+    if (!isSection && state.folderId === id) state.folderId = null;
+    state.manifest = await request('list');
+    renderAll();
+    toast(`${isSection ? 'Раздел' : 'Папка'} удалён${isSection ? '' : 'а'}.`);
   } catch (error) { toast(error.message, true); }
 }
 
@@ -621,8 +680,61 @@ async function archiveSelected() {
 }
 
 async function extractCurrentArchive() { try { await request('extractArchive', { id: state.currentFile.id, sectionId: state.currentFile.sectionId, folderId: state.currentFile.folderId }); state.manifest = await request('list'); renderAll(); toast('Архив проверен и распакован внутри Safe.'); } catch (error) { toast(error.message, true); } }
-async function deleteCurrentFile() { if (!state.currentFile || !await confirmInsideSafe({ title: 'Удаление внутри Safe', copy: `Удалить файл и уничтожить его активный ключ шифрования?${state.currentDirty ? ' Несохранённый черновик также будет безвозвратно очищен.' : ''}`, actionLabel: 'Удалить' })) return; try { const capabilityToken = await bridge.authorizeDelete({ id: state.currentFile.id, name: state.currentFile.name }); if (!capabilityToken) return; await request('deleteFile', { id: state.currentFile.id, capabilityToken }); state.manifest = await request('list'); state.selected.delete(state.currentFile.id); closeEditor(); renderAll(); toast('Файл удалён: активный ключ версии уничтожен, шифротекст очищен насколько позволяет носитель.'); } catch (error) { toast(error.message, true); } }
+async function deleteCurrentFile() {
+  if (!state.currentFile) return;
+  if (state.currentDirty && !await confirmInsideSafe({
+    title: 'Несохранённый черновик',
+    copy: 'Удаление также безвозвратно очистит несохранённые изменения в редакторе.',
+    actionLabel: 'Продолжить',
+  })) return;
+  await deleteFilesById([state.currentFile.id]);
+}
+async function deleteSelectedFiles() {
+  await deleteFilesById([...state.selected]);
+}
+async function deleteFilesById(ids) {
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  if (!uniqueIds.length) return;
+  const files = uniqueIds.map((id) => state.manifest.files.find((file) => file.id === id)).filter(Boolean);
+  if (!files.length) return;
+  try {
+    const authorization = files.length === 1
+      ? await bridge.authorizeDelete({ id: files[0].id, name: files[0].name })
+      : await bridge.authorizeDelete({ files: files.map(({ id, name }) => ({ id, name })) });
+    const tokens = typeof authorization === 'string'
+      ? [{ id: files[0].id, capabilityToken: authorization }]
+      : Array.isArray(authorization?.tokens) ? authorization.tokens : [];
+    if (!tokens.length) return;
+    for (const token of tokens) await request('deleteFile', token);
+    const deletedIds = new Set(tokens.map((entry) => entry.id));
+    state.manifest = await request('list');
+    deletedIds.forEach((id) => state.selected.delete(id));
+    if (state.currentFile && deletedIds.has(state.currentFile.id)) closeEditor();
+    renderAll();
+    toast(tokens.length === 1 ? 'Файл удалён. Его активный ключ уничтожен.' : `Удалено файлов: ${tokens.length}. Активные ключи уничтожены.`);
+  } catch (error) { toast(error.message, true); }
+}
+async function deleteFolderById(id) {
+  const folder = state.manifest.folders.find((entry) => entry.id === id);
+  if (!folder) return;
+  if (!await confirmInsideSafe({ title: 'Удалить папку', copy: `Удалить пустую папку «${folder.name}»?`, actionLabel: 'Удалить' })) return;
+  try {
+    await request('deleteFolder', { id });
+    state.manifest = await request('list');
+    if (state.folderId === id) state.folderId = null;
+    renderAll();
+    toast('Папка удалена.');
+  } catch (error) { toast(error.message, true); }
+}
 function toggleSelectAll(event) { visibleFileIds().forEach((id) => event.target.checked ? state.selected.add(id) : state.selected.delete(id)); renderFiles(); }
+function renderSelectionState(visibleIds = visibleFileIds()) {
+  const selectedVisible = visibleIds.filter((id) => state.selected.has(id));
+  $('#delete-selected').disabled = state.selected.size === 0;
+  $('#delete-selected').textContent = state.selected.size ? `Удалить · ${state.selected.size}` : 'Удалить выбранное';
+  $('#archive-files').disabled = state.selected.size === 0 || state.sectionId === 'all';
+  $('#select-all').checked = visibleIds.length > 0 && selectedVisible.length === visibleIds.length;
+  $('#select-all').indeterminate = selectedVisible.length > 0 && selectedVisible.length < visibleIds.length;
+}
 function closeEditor() { revokeObjectUrl(); state.currentBytes?.fill(0); state.currentFile = null; state.currentBytes = null; state.currentEditable = false; setCurrentFileDirty(false); $('#text-editor').value = ''; $('#text-editor').readOnly = false; $('#hex-editor').value = ''; $('#binary-summary').textContent = ''; $('#binary-summary').hidden = true; $('#save-file').hidden = false; $('#editor-empty').hidden = false; $('#editor-active').hidden = true; }
 function markCurrentFileDirty() { armUiLock(); setCurrentFileDirty(true); }
 function setCurrentFileDirty(value) {
@@ -645,7 +757,7 @@ function focusFileControl(attribute, id) {
 function armUiLock() {
   clearTimeout(state.lockTimer);
   if (!state.status?.unlocked) return;
-  state.lockTimer = setTimeout(lockVault, (state.status.autoLockMs || 300000) + UI_AUTO_LOCK_GRACE_MS);
+  scheduleUiLock();
   const now = Date.now();
   if (state.runtimeTouchPending || now - state.runtimeTouchAt < RUNTIME_ACTIVITY_TOUCH_THROTTLE_MS) return;
   state.runtimeTouchAt = now;
@@ -657,10 +769,95 @@ function armUiLock() {
 }
 async function request(action, payload = {}) {
   clearTimeout(state.lockTimer);
-  if (state.status?.unlocked) {
-    state.lockTimer = setTimeout(lockVault, (state.status.autoLockMs || 300000) + UI_AUTO_LOCK_GRACE_MS);
-  }
+  if (state.status?.unlocked) scheduleUiLock();
   return bridge.request(action, payload);
+}
+function scheduleUiLock() {
+  const milliseconds = Number(state.status?.autoLockMs);
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return;
+  state.lockTimer = setTimeout(lockVault, milliseconds + UI_AUTO_LOCK_GRACE_MS);
+}
+function currentSecurityPolicy() {
+  return normalizeSafeSecurityPolicy(state.status?.securityPolicy);
+}
+function shouldBlockClipboardEvent(type) {
+  const mode = currentSecurityPolicy().clipboardMode;
+  if (mode === 'read-write') return false;
+  if (mode === 'copy-only') return type === 'paste';
+  return true;
+}
+function openSecuritySettings() {
+  state.pendingSettingsOpen = false;
+  if (!state.status?.unlocked) {
+    state.pendingSettingsOpen = true;
+    toast('Сначала разблокируй Safe. Настройки откроются сразу после входа.', true);
+    return;
+  }
+  const policy = currentSecurityPolicy();
+  $('#safe-auto-lock').value = String(policy.autoLockMs);
+  $('#safe-minimize-action').value = policy.minimizeAction;
+  $('#safe-clipboard-mode').value = policy.clipboardMode;
+  $('#safe-lock-on-blur').checked = policy.lockOnBlur;
+  $('#safe-clear-clipboard').checked = policy.clearClipboardOnLock;
+  $('#safe-settings-pin').value = '';
+  $('#safe-settings-error').textContent = '';
+  renderSecurityAssessment();
+  $('#safe-settings-dialog').showModal();
+  $('#safe-auto-lock').focus();
+}
+function closeSecuritySettings() {
+  $('#safe-settings-pin').value = '';
+  $('#safe-settings-error').textContent = '';
+  $('#safe-settings-dialog').close('cancel');
+}
+function readSecurityPolicyForm() {
+  return normalizeSafeSecurityPolicy({
+    autoLockMs: Number($('#safe-auto-lock').value),
+    minimizeAction: $('#safe-minimize-action').value,
+    clipboardMode: $('#safe-clipboard-mode').value,
+    lockOnBlur: $('#safe-lock-on-blur').checked,
+    clearClipboardOnLock: $('#safe-clear-clipboard').checked,
+  });
+}
+function renderSecurityAssessment() {
+  const assessment = assessSafeSecurityPolicy(readSecurityPolicyForm());
+  const panel = $('#safe-policy-assessment');
+  panel.dataset.level = assessment.level;
+  panel.querySelector('strong').textContent = assessment.level === 'low'
+    ? 'Пониженная защита'
+    : assessment.level === 'balanced'
+      ? 'Сбалансированный профиль'
+      : 'Сильный профиль';
+  $('#safe-policy-warnings').replaceChildren(...assessment.warnings.map((warning) => element('li', {}, warning)));
+  return assessment;
+}
+async function saveSecuritySettings(event) {
+  event.preventDefault();
+  const pin = $('#safe-settings-pin').value;
+  $('#safe-settings-pin').value = '';
+  const assessment = renderSecurityAssessment();
+  let lowSecurityAcknowledged = false;
+  if (assessment.level === 'low') {
+    lowSecurityAcknowledged = await confirmInsideSafe({
+      title: 'Ослабить защиту Safe?',
+      copy: `Эти параметры менее безопасны:\n${assessment.warnings.map((warning) => `• ${warning}`).join('\n')}\n\nПродолжить можно только осознанно.`,
+      actionLabel: 'Да, применить',
+    });
+    if (!lowSecurityAcknowledged) return;
+  }
+  try {
+    state.status = await request('updateSecurityPolicy', {
+      pin,
+      policy: assessment.policy,
+      lowSecurityAcknowledged,
+    });
+    closeSecuritySettings();
+    armUiLock();
+    toast('Настройки безопасности подтверждены текущим PIN и сохранены.');
+  } catch (error) {
+    $('#safe-settings-error').textContent = error.message;
+    $('#safe-settings-pin').focus();
+  }
 }
 function updateAttempts() {
   $('#pin-attempts').textContent = state.status?.attemptsRemaining ?? 0;
@@ -707,6 +904,7 @@ function clearCredentialInputs() {
     input.classList.remove('has-value');
   });
   $('#emergency-input').value = '';
+  $('#safe-settings-pin').value = '';
 }
 function confirmInsideSafe({ title = 'Подтверждение', copy, actionLabel = 'Продолжить' }) {
   const dialog = $('#confirm-dialog');
