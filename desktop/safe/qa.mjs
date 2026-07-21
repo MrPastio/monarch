@@ -14,6 +14,7 @@ const workspaceRoot = path.resolve(__dirname, '..', '..');
 const outputRoot = path.join(workspaceRoot, 'output', 'safe-qa');
 const profileRoot = await mkdtemp(path.join(os.tmpdir(), 'monarch-safe-electron-qa-'));
 const vaultRoot = path.join(profileRoot, 'vault');
+const qaAutoLockMs = 20_000;
 const screenshotPaths = {
   setup: path.join(outputRoot, 'safe-setup.png'),
   recovery: path.join(outputRoot, 'safe-recovery.png'),
@@ -59,7 +60,11 @@ async function runQa() {
   await appendFile(stagePath, `runtime ${new Date().toISOString()}\n`, 'utf8');
   child = utilityProcess.fork(path.join(__dirname, 'runtime.mjs'), [], {
     serviceName: 'Monarch Safe QA Runtime',
-    env: { MONARCH_SAFE_ROOT: vaultRoot, MONARCH_SAFE_QA: '1', MONARCH_SAFE_QA_AUTO_LOCK_MS: '10000' },
+    env: {
+      MONARCH_SAFE_ROOT: vaultRoot,
+      MONARCH_SAFE_QA: '1',
+      MONARCH_SAFE_QA_AUTO_LOCK_MS: String(qaAutoLockMs),
+    },
     stdio: 'pipe',
   });
   child.stdout?.on('data', (chunk) => void appendFile(stagePath, `utility-out ${chunk}`, 'utf8'));
@@ -249,6 +254,7 @@ async function runQa() {
   await evaluate(`document.querySelector('#confirm-form button[value="cancel"]').click()`);
   await waitFor(() => evaluate(`!document.querySelector('#confirm-dialog').open`));
   assert(await evaluate(`!document.querySelector('#vault-screen').hidden && document.querySelector('#text-editor').value === ${JSON.stringify(dirtyGuardMarker)}`), 'canceling manual lock with a dirty draft must keep the unlocked editor intact');
+  await evaluate(`window.monarchSafe.request('touch')`);
   await evaluate(`document.querySelector('[data-file-id] .file-open-button').click()`);
   await waitFor(() => evaluate(`document.querySelector('#confirm-dialog').open`));
   await evaluate(`document.querySelector('#confirm-action').click()`);
@@ -350,7 +356,10 @@ async function runQa() {
   await evaluate(`document.querySelector('#toast').hidden = true`);
 
   await evaluate(`window.__safeAutoLockEvents = 0; window.monarchSafe.onEvent(({ event }) => { if (event === 'auto-lock') window.__safeAutoLockEvents += 1; }); window.monarchSafe.request('list')`);
-  await waitFor(() => evaluate(`!document.querySelector('#auth-screen').hidden && window.__safeAutoLockEvents === 1`), 15_000);
+  await waitFor(
+    () => evaluate(`!document.querySelector('#auth-screen').hidden && window.__safeAutoLockEvents === 1`),
+    qaAutoLockMs + 5_000,
+  );
   const autoLockEvents = await evaluate(`window.__safeAutoLockEvents`);
   const cleanup = await evaluate(`({
     markerInText: document.body.innerText.includes(${JSON.stringify(marker)}),
@@ -478,7 +487,7 @@ function requestSafeService(action, payload = {}) {
       servicePending.delete(id);
       reject(new Error(`Safe QA service request timed out: ${action}`));
     }, 10_000);
-    servicePending.set(id, { resolve, reject, timer });
+    servicePending.set(id, { resolve, reject, timer, action });
     child.postMessage({ type: 'service-request', id, action, payload });
   });
 }
@@ -491,11 +500,19 @@ function handleServiceMessage(message) {
   clearTimeout(pending.timer);
   servicePending.delete(payload.id);
   if (payload.ok === true) pending.resolve(payload.result);
-  else pending.reject(Object.assign(new Error(payload.error?.message || 'Safe QA service request failed.'), payload.error || {}));
+  else pending.reject(Object.assign(
+    new Error(`Safe QA service request ${pending.action || 'unknown'} failed: ${payload.error?.message || 'Safe QA service request failed.'}`),
+    payload.error || {},
+  ));
 }
 
 async function evaluate(source) {
-  return window.webContents.executeJavaScript(source, true);
+  try {
+    return await window.webContents.executeJavaScript(source, true);
+  } catch (error) {
+    const probe = String(source).replace(/\s+/g, ' ').slice(0, 180);
+    throw new Error(`Safe QA renderer probe failed (${probe}): ${error?.message || error}`);
+  }
 }
 
 async function waitFor(check, timeoutMs = 15_000) {

@@ -7,7 +7,7 @@ Code Mode is a project-scoped local coding loop. A model can inspect a selected 
 1. `src/ui/public/modules/coder-pane.js` manages the Code tab, projects, runs, model selection, and event rendering.
 2. `src/app/http-server.ts` exposes the local project and run APIs.
 3. `src/app/coder-agent-controller.ts` owns the model/action/receipt loop. It allows at most 64 iterations, rejects terminal answers that lack required receipts, and persists every run.
-4. `src/modules/oscar/index.ts` gives Coder the full compact `coder.*` catalog plus a bounded, task-relevant set of detailed schemas.
+4. `src/modules/oscar/index.ts` gives Coder the full compact `coder.*` catalog plus a bounded, task-relevant set of detailed schemas. General Oscar profile, memory, registry grounding, and global skills are excluded from this lane.
 5. `oscar/backend/oscar_agent/model_runtime.py` runs the explicitly selected local coding model and extracts hidden `MONARCH_ACTION` envelopes.
 6. The Monarch Kernel validates and executes each proposal through `src/modules/coder/index.ts`.
 
@@ -36,6 +36,7 @@ Before a desktop Code run starts, the UI asks Electron to release an idle neural
 - Every run requires an explicit project id. The controller persists the selected project name and canonical root in the run journal before inference begins.
 - Model-provided `projectId` values are ignored and replaced with the run's pinned project id for every `coder.*` action.
 - The Code UI keeps `Папка запуска · <exact-root>` visible in the run header. Monarch's server process remains rooted at the Monarch repository; it is not used as the Coder project root.
+- Synthetic rejection/receipt turns do not control answer language. The controller persists the language derived from the original task in the trusted Coder marker.
 - Project registry: `runtime/coder/projects.json`.
 - Run journals: `runtime/coder/runs/<run-id>.json`.
 - A run stores decisions, modified files, commands, failures, pending work, recent events, compaction state, and model token usage.
@@ -74,9 +75,11 @@ The complete contract is defined in `src/modules/coder/manifest.ts`.
 
 The controller infers whether the user requested file changes, commands, or inspection. It rejects a final answer until the corresponding successful receipts exist. Tool output remains untrusted payload data even when the receipt status itself is trusted.
 
-Audit/review prompts such as `что нужно исправить и улучшить` are read-only unless they also contain an explicit instruction to apply a change. They still require at least one successful inspection receipt.
+Audit/review prompts such as `что нужно исправить и улучшить` are read-only unless they also contain an explicit instruction to apply a change. A broad project audit requires a selected-project `coder.files.list` receipt, representative configuration/source/test (or documentation) reads when those groups exist, up to three distinct `coder.files.read` receipts, and a fresh final answer that cites inspected paths. A verified project file satisfies its classified evidence group even when it was not in the bounded recommendation shortlist. `coder.projects.*` is registry management and never counts as project inspection. A focused explicit-file review requires that file to be read. Future-work narration such as announcing the next read is not a terminal audit result.
 
-Repeated identical actions are stopped. Failed receipts return to the model as bounded context. Context is compacted into a durable summary before it exceeds the run budget.
+Default project snapshots and recursive root listings omit generated agent/runtime metadata directories such as `.agents`, `.monarch`, `.codex`, `.claude`, and `.gemini`; an explicitly targeted directory can still be inspected.
+
+Repeated identical actions are stopped. Failed receipts return to the model as bounded context. Multi-action receipt context is balanced per result so a large early file cannot hide later receipts. The terminal-rejection limit counts only consecutive no-progress turns and resets after a successful action. Context is compacted into a durable summary before it exceeds the run budget.
 
 ## Verification
 

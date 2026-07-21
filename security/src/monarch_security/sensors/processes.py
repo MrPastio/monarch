@@ -67,11 +67,36 @@ class ProcessSensor:
                     ad_value=None,
                 ))
                 item["cmdline"] = proc.cmdline()
-                parent = proc.parent()
-                item["parent_name"] = parent.name() if parent else None
+                lineage = self._bounded_lineage(proc)
+                item["parent_name"] = lineage[0]["name"] if lineage else None
+                item["parent_exe"] = lineage[0]["exe"] if lineage else None
+                item["ancestor_names"] = [entry["name"] for entry in lineage]
+                item["ancestor_exes"] = [entry["exe"] for entry in lineage]
             except (self._psutil.NoSuchProcess, self._psutil.AccessDenied):
                 item["cmdline"] = []
                 item["parent_name"] = None
+                item["parent_exe"] = None
+                item["ancestor_names"] = []
+                item["ancestor_exes"] = []
+
+    def _bounded_lineage(self, process, *, limit: int = 4) -> list[dict[str, str | None]]:
+        assert self._psutil is not None
+        lineage: list[dict[str, str | None]] = []
+        try:
+            current = process.parent()
+        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied):
+            return lineage
+        while current is not None and len(lineage) < max(1, min(8, int(limit))):
+            try:
+                lineage.append({
+                    "name": current.name(),
+                    "exe": current.exe(),
+                })
+                parent_fn = getattr(current, "parent", None)
+                current = parent_fn() if callable(parent_fn) else None
+            except (self._psutil.NoSuchProcess, self._psutil.AccessDenied):
+                break
+        return lineage
 
     def _snapshot_tasklist(self) -> Iterable[dict]:
         completed = subprocess.run(
@@ -118,6 +143,9 @@ class ProcessSensor:
                 "username": info.get("username"),
                 "ppid": info.get("ppid"),
                 "parent_name": info.get("parent_name"),
+                "parent_exe": info.get("parent_exe"),
+                "ancestor_names": info.get("ancestor_names") or [],
+                "ancestor_exes": info.get("ancestor_exes") or [],
                 "create_time": info.get("create_time"),
             },
         )

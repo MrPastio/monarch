@@ -1,9 +1,12 @@
 export type MonarchModuleKind =
+  | 'suite'
   | 'system'
   | 'interface'
   | 'domain'
   | 'runtime'
   | 'tooling';
+
+export type MonarchModuleStage = 'alpha' | 'beta' | 'stable';
 
 export type MonarchRisk =
   | 'none'
@@ -105,11 +108,13 @@ export interface MonarchModuleManifest {
   id: string;
   name: string;
   version: string;
+  stage?: MonarchModuleStage;
   kind: MonarchModuleKind;
   description: string;
   owns: string[];
   capabilities: MonarchCapability[];
   permissions: MonarchRisk[];
+  parentSuiteId?: string;
   dependencies?: string[];
   events?: string[];
 }

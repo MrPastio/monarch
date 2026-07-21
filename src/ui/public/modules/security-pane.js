@@ -57,6 +57,11 @@ const elements = {
   securityIncidentList: document.querySelector('#security-incident-list'),
   securityIncidentDetail: document.querySelector('#security-incident-detail'),
   securityIncidentsRefresh: document.querySelector('#security-incidents-refresh'),
+  securityIncidentFilters: typeof document.querySelectorAll === 'function'
+    ? Array.from(document.querySelectorAll('[data-security-incident-filter]'))
+    : [],
+  securityIncidentActiveCount: document.querySelector('#security-incident-active-count'),
+  securityIncidentAllCount: document.querySelector('#security-incident-all-count'),
   securityScanNetwork: document.querySelector('#security-scan-network'),
   securityNetworkResult: document.querySelector('#security-network-result'),
   securityNetworkMetrics: document.querySelector('#security-network-metrics'),
@@ -124,6 +129,13 @@ export function initSecurityPane(appRenderCallback) {
   if (elements.securityIncidentsRefresh) {
     elements.securityIncidentsRefresh.addEventListener('click', () => {
       void loadSecurityIncidents(appRenderCallback);
+    });
+  }
+  for (const filter of elements.securityIncidentFilters) {
+    filter.addEventListener('click', () => {
+      state.security.incidentFilter = filter.dataset.securityIncidentFilter === 'all' ? 'all' : 'active';
+      state.security.selectedIncidentId = null;
+      renderIncidentWorkspace();
     });
   }
 
@@ -418,8 +430,9 @@ export async function loadSecurityIncidents(appRenderCallback) {
     state.security.incidents = incidentResult;
     state.security.responseServiceStatus = responseServiceStatus;
     const incidents = readSecurityIncidents();
-    if (!state.security.selectedIncidentId && incidents.length) {
-      state.security.selectedIncidentId = incidents[0].incident_id || null;
+    const visibleIncidents = filteredSecurityIncidents(incidents);
+    if (!visibleIncidents.some((incident) => incident.incident_id === state.security.selectedIncidentId)) {
+      state.security.selectedIncidentId = visibleIncidents[0]?.incident_id || null;
     }
   } catch (error) {
     state.security.error = error instanceof Error ? error.message : String(error);
@@ -1535,6 +1548,21 @@ function renderIncidentWorkspace() {
   const incidents = readSecurityIncidents();
   const openIncidents = incidents.filter((incident) => !['resolved', 'dismissed'].includes(incident.status));
   const decisions = openIncidents.filter((incident) => incident.decision_required);
+  const visibleIncidents = filteredSecurityIncidents(incidents);
+  const selectedIncidentId = visibleIncidents.some((incident) => incident.incident_id === state.security.selectedIncidentId)
+    ? state.security.selectedIncidentId
+    : visibleIncidents[0]?.incident_id || null;
+  state.security.selectedIncidentId = selectedIncidentId;
+  if (elements.securityIncidentActiveCount) {
+    elements.securityIncidentActiveCount.textContent = String(openIncidents.length);
+  }
+  if (elements.securityIncidentAllCount) {
+    elements.securityIncidentAllCount.textContent = String(incidents.length);
+  }
+  for (const filter of elements.securityIncidentFilters) {
+    const selected = filter.dataset.securityIncidentFilter === (state.security.incidentFilter === 'all' ? 'all' : 'active');
+    filter.setAttribute('aria-pressed', String(selected));
+  }
   if (elements.securityIncidentSummaryCount) {
     elements.securityIncidentSummaryCount.textContent = String(decisions.length);
   }
@@ -1559,9 +1587,16 @@ function renderIncidentWorkspace() {
           <span>События появятся здесь после детерминированной проверки.</span>
         </div>
       `;
+    } else if (!visibleIncidents.length) {
+      elements.securityIncidentList.innerHTML = `
+        <div class="security-list-empty">
+          <strong>Активных инцидентов нет</strong>
+          <span>Закрытые события доступны через фильтр «Все».</span>
+        </div>
+      `;
     } else {
-      elements.securityIncidentList.innerHTML = incidents.map((incident) => `
-        <button type="button" class="security-incident-row ${incident.incident_id === state.security.selectedIncidentId ? 'selected' : ''}" data-security-incident-id="${escapeHtml(incident.incident_id || '')}">
+      elements.securityIncidentList.innerHTML = visibleIncidents.map((incident) => `
+        <button type="button" class="security-incident-row ${incident.incident_id === selectedIncidentId ? 'selected' : ''}" data-security-incident-id="${escapeHtml(incident.incident_id || '')}">
           <b class="risk-${escapeHtml(riskTone(incident.risk_score))}">${escapeHtml(incident.risk_score || 0)}<small>/800</small></b>
           <span>
             <strong>${escapeHtml(localizeIncidentTitle(incident.title))}</strong>
@@ -1580,8 +1615,8 @@ function renderIncidentWorkspace() {
   }
 
   if (!elements.securityIncidentDetail) return;
-  const selected = incidents.find((incident) => incident.incident_id === state.security.selectedIncidentId)
-    || incidents[0];
+  const selected = visibleIncidents.find((incident) => incident.incident_id === selectedIncidentId)
+    || visibleIncidents[0];
   if (!selected) {
     elements.securityIncidentDetail.innerHTML = `
       <div class="security-list-empty">
@@ -2008,6 +2043,11 @@ function readIncidentSummary(payload) {
 function readSecurityIncidents() {
   const payload = readSecurityPayload(state.security.incidents);
   return Array.isArray(payload?.incidents) ? payload.incidents : [];
+}
+
+function filteredSecurityIncidents(incidents) {
+  if (state.security.incidentFilter === 'all') return incidents;
+  return incidents.filter((incident) => !['resolved', 'dismissed'].includes(incident.status));
 }
 
 function readSecurityQuarantine() {

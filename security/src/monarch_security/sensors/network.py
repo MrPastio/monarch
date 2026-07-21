@@ -415,17 +415,41 @@ def _enrich_process_names(items: list[dict[str, Any]]) -> None:
             # Command lines frequently contain session tokens, API keys, and
             # other secrets. Network telemetry only needs process identity.
             info = process.as_dict(attrs=["name", "exe", "create_time"], ad_value=None)
+            lineage = _bounded_process_lineage(process, psutil)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
         details[pid] = {
             "process_name": info.get("name"),
             "process_exe": info.get("exe"),
             "process_start_time": info.get("create_time"),
+            "process_parent_name": lineage[0]["name"] if lineage else None,
+            "process_parent_exe": lineage[0]["exe"] if lineage else None,
+            "process_ancestor_names": [entry["name"] for entry in lineage],
+            "process_ancestor_exes": [entry["exe"] for entry in lineage],
         }
     for item in items:
         pid_value = item.get("owning_process")
         if str(pid_value or "").isdigit():
             item.update(details.get(int(pid_value), {}))
+
+
+def _bounded_process_lineage(process, psutil, *, limit: int = 4) -> list[dict[str, str | None]]:
+    lineage: list[dict[str, str | None]] = []
+    try:
+        current = process.parent()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return lineage
+    while current is not None and len(lineage) < max(1, min(8, int(limit))):
+        try:
+            lineage.append({
+                "name": current.name(),
+                "exe": current.exe(),
+            })
+            parent_fn = getattr(current, "parent", None)
+            current = parent_fn() if callable(parent_fn) else None
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            break
+    return lineage
 
 def _enrich_dns_names(items: list[dict[str, Any]], cache: dict[str, str]) -> None:
     if not cache:

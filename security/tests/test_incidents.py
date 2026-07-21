@@ -58,6 +58,28 @@ def _decision() -> ActionDecision:
 
 
 class IncidentRiskTests(unittest.TestCase):
+    def test_device_correlation_uses_instance_id_and_preserves_it_in_evidence(self):
+        first = _assessment(
+            "device.connected",
+            75,
+            {"instance_id": r"USB\VID_1111&PID_0001\A"},
+        )
+        same_label_other_device = _assessment(
+            "device.connected",
+            75,
+            {"instance_id": r"USB\VID_2222&PID_0002\B"},
+        )
+
+        self.assertNotEqual(
+            correlation_key(first),
+            correlation_key(same_label_other_device),
+        )
+        evidence = IncidentEvidence.from_assessment(first)
+        self.assertEqual(
+            evidence.response_scope["instance_id"],
+            r"USB\VID_1111&PID_0001\A",
+        )
+
     def test_process_correlation_includes_creation_time_to_survive_pid_reuse(self):
         first = _assessment(
             "process.started",

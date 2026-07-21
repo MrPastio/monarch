@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { MonarchApplication } from '../../src/app/application';
@@ -52,6 +52,8 @@ describe('CoderAgentController', () => {
       expect(completed.status).toBe('completed');
       expect(completed.answer).toContain('Готово');
       expect(completed.answer).toContain('подтверждённым результатам Monarch Kernel');
+      expect(completed.answer).toContain('Итог Coder:');
+      expect(completed.answer).toContain('файл создан через Kernel');
       expect(completed.summary.failures).toEqual([]);
       expect(completed.context).toMatchObject({ modelCalls: 2, modelTotalTokens: 112 });
       expect(completed.events.some((event) => event.capabilityId === 'coder.files.write' && event.ok)).toBe(true);
@@ -185,25 +187,35 @@ describe('CoderAgentController', () => {
       await writeFile(path.join(snapshot.project.root, 'README.md'), '# Audit target\n', 'utf8');
       const executeCapability = app.executeCapability.bind(app);
       let turn = 0;
+      const modelMessages: unknown[] = [];
       app.executeCapability = (async (execution) => {
         if (execution.moduleId !== 'oscar') return executeCapability(execution);
         turn += 1;
+        modelMessages.push((execution.input as any).messages);
         return {
           ok: true,
           summary: 'mock coder turn',
           output: {
             response: turn === 1
               ? {
-                answer: 'Проверяю README.',
-                action_proposals: [{
-                  capabilityId: 'coder.files.read',
-                  args: { path: 'README.md' },
-                  reason: 'inspect the project documentation',
-                  expectedEffect: 'read project context',
-                }],
+                answer: 'Проверяю дерево проекта и README.md.',
+                action_proposals: [
+                  {
+                    capabilityId: 'coder.files.list',
+                    args: { path: '.', recursive: true, limit: 100 },
+                    reason: 'inspect the selected project tree',
+                    expectedEffect: 'list project files',
+                  },
+                  {
+                    capabilityId: 'coder.files.read',
+                    args: { path: 'README.md' },
+                    reason: 'inspect the project documentation',
+                    expectedEffect: 'read project context',
+                  },
+                ],
                 usage: {},
               }
-              : { answer: 'Аудит завершён: перечислены рекомендации без изменения файлов.', action_proposals: [], usage: {} },
+              : { answer: 'Аудит README.md завершён: перечислены рекомендации без изменения файлов.', action_proposals: [], usage: {} },
           },
         };
       }) as typeof app.executeCapability;
@@ -213,8 +225,370 @@ describe('CoderAgentController', () => {
 
       expect(completed.status).toBe('completed');
       expect(completed.events.some((event) => event.error === 'terminal-receipts-missing')).toBe(false);
+      expect(completed.events.some((event) => event.capabilityId === 'coder.files.list' && event.ok)).toBe(true);
       expect(completed.events.some((event) => event.capabilityId === 'coder.files.read' && event.ok)).toBe(true);
+      expect(completed.answer).toContain('Аудит README.md завершён: перечислены рекомендации');
+      expect(completed.answer).toContain('Проверенные файлы: README.md.');
+      const systemContext = String((modelMessages[0] as any[])?.[0]?.content || '');
+      expect(systemContext).toContain('"terminalEvidence":{"review":{"scope":"project","requireProjectTree":true,"minimumDistinctFileReads":1');
+      expect(systemContext).toContain('"responseLanguage":"ru"');
       expect(turn).toBe(2);
+    } finally {
+      await app.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, CONTROLLER_TEST_TIMEOUT_MS);
+
+  it('accepts a verified audit read from the required group even when the path is outside the recommendation shortlist', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-coder-audit-group-evidence-'));
+    const app = new MonarchApplication({ workspaceRoot: root });
+    await app.start();
+    try {
+      const controller = new CoderAgentController(app);
+      const snapshot = await controller.createProject('Audit Group Evidence');
+      await mkdir(path.join(snapshot.project.root, 'src'), { recursive: true });
+      await mkdir(path.join(snapshot.project.root, 'tests'), { recursive: true });
+      await writeFile(path.join(snapshot.project.root, 'package.json'), '{"name":"audit-groups"}\n', 'utf8');
+      await writeFile(path.join(snapshot.project.root, 'src', 'index.ts'), 'export const ready = true;\n', 'utf8');
+      await Promise.all(Array.from({ length: 13 }, (_, index) => (
+        writeFile(
+          path.join(snapshot.project.root, 'tests', `a${String(index).padStart(2, '0')}.test.ts`),
+          `test('placeholder ${index}', () => expect(true).toBe(true));\n`,
+          'utf8',
+        )
+      )));
+      await writeFile(
+        path.join(snapshot.project.root, 'tests', 'z-real.test.ts'),
+        "test('real evidence', () => expect(true).toBe(true));\n",
+        'utf8',
+      );
+      const executeCapability = app.executeCapability.bind(app);
+      let turn = 0;
+      app.executeCapability = (async (execution) => {
+        if (execution.moduleId !== 'oscar') return executeCapability(execution);
+        turn += 1;
+        return {
+          ok: true,
+          summary: 'mock coder turn',
+          output: {
+            response: turn === 1
+              ? {
+                  answer: 'Проверяю репрезентативные файлы проекта.',
+                  action_proposals: [
+                    {
+                      capabilityId: 'coder.files.list',
+                      args: { path: '.', recursive: true, limit: 100 },
+                      reason: 'inspect the project tree',
+                      expectedEffect: 'list project files',
+                    },
+                    {
+                      capabilityId: 'coder.files.read',
+                      args: { path: 'package.json' },
+                      reason: 'inspect configuration',
+                      expectedEffect: 'read package.json',
+                    },
+                    {
+                      capabilityId: 'coder.files.read',
+                      args: { path: 'src/index.ts' },
+                      reason: 'inspect source',
+                      expectedEffect: 'read source entrypoint',
+                    },
+                    {
+                      capabilityId: 'coder.files.read',
+                      args: { path: 'tests/z-real.test.ts' },
+                      reason: 'inspect a representative test selected by the model',
+                      expectedEffect: 'read test evidence',
+                    },
+                  ],
+                  usage: {},
+                }
+              : {
+                  answer: 'Приоритеты: 1) усилить package.json; 2) проверить src/index.ts; 3) расширить tests/z-real.test.ts.',
+                  action_proposals: [],
+                  usage: {},
+                },
+          },
+        };
+      }) as typeof app.executeCapability;
+
+      const started = controller.start('Проведи аудит проекта и перечисли приоритетные улучшения.', snapshot.project.id);
+      const completed = await waitForTerminal(controller, started.id);
+
+      expect(completed.status).toBe('completed');
+      expect(completed.error).toBe('');
+      expect(completed.events.some((event) => event.kind === 'tool-result'
+        && event.capabilityId === 'coder.files.read'
+        && JSON.stringify(event.output).includes('z-real.test.ts'))).toBe(true);
+      expect(completed.events.some((event) => event.detail.includes('at least one tests file'))).toBe(false);
+      expect(turn).toBe(2);
+    } finally {
+      await app.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, CONTROLLER_TEST_TIMEOUT_MS);
+
+  it('rejects progress narration after audit evidence is complete and asks for concrete findings', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-coder-audit-final-findings-'));
+    const app = new MonarchApplication({ workspaceRoot: root });
+    await app.start();
+    try {
+      const controller = new CoderAgentController(app);
+      const snapshot = await controller.createProject('Audit Final Findings');
+      await mkdir(path.join(snapshot.project.root, 'src'), { recursive: true });
+      await mkdir(path.join(snapshot.project.root, 'tests'), { recursive: true });
+      await writeFile(path.join(snapshot.project.root, 'package.json'), '{"name":"final-findings"}\n', 'utf8');
+      await writeFile(path.join(snapshot.project.root, 'src', 'index.ts'), 'export const ready = true;\n', 'utf8');
+      await writeFile(path.join(snapshot.project.root, 'tests', 'unit.test.ts'), "test('ready', () => expect(true).toBe(true));\n", 'utf8');
+      const executeCapability = app.executeCapability.bind(app);
+      let turn = 0;
+      app.executeCapability = (async (execution) => {
+        if (execution.moduleId !== 'oscar') return executeCapability(execution);
+        turn += 1;
+        const response = turn === 1
+          ? {
+              answer: 'Проверяю package.json, src/index.ts и tests/unit.test.ts.',
+              action_proposals: [
+                {
+                  capabilityId: 'coder.files.list',
+                  args: { path: '.', recursive: true, limit: 100 },
+                  reason: 'inspect project tree',
+                  expectedEffect: 'list files',
+                },
+                {
+                  capabilityId: 'coder.files.read',
+                  args: { path: 'package.json' },
+                  reason: 'inspect configuration',
+                  expectedEffect: 'read package.json',
+                },
+                {
+                  capabilityId: 'coder.files.read',
+                  args: { path: 'src/index.ts' },
+                  reason: 'inspect source',
+                  expectedEffect: 'read source',
+                },
+                {
+                  capabilityId: 'coder.files.read',
+                  args: { path: 'tests/unit.test.ts' },
+                  reason: 'inspect tests',
+                  expectedEffect: 'read tests',
+                },
+              ],
+              usage: {},
+            }
+          : turn === 2
+            ? {
+                answer: 'Продолжаю аудит. Следующие шаги: проверю package.json, изучу src/index.ts и проанализирую tests/unit.test.ts.',
+                action_proposals: [],
+                usage: {},
+              }
+            : {
+                answer: 'Выявлен риск: package.json не содержит проверочного скрипта. Рекомендую связать src/index.ts с tests/unit.test.ts и добавить CI.',
+                action_proposals: [],
+                usage: {},
+              };
+        return { ok: true, summary: 'mock coder turn', output: { response } };
+      }) as typeof app.executeCapability;
+
+      const started = controller.start('Проведи аудит проекта и перечисли приоритетные улучшения.', snapshot.project.id);
+      const completed = await waitForTerminal(controller, started.id);
+
+      expect(completed.status).toBe('completed');
+      expect(completed.events.some((event) => event.error === 'terminal-receipts-missing'
+        && event.detail.includes('concrete findings'))).toBe(true);
+      expect(completed.answer).toContain('Выявлен риск');
+      expect(turn).toBe(3);
+    } finally {
+      await app.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, CONTROLLER_TEST_TIMEOUT_MS);
+
+  it('counts only consecutive ungrounded terminal turns and resets the limit after verified progress', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-coder-audit-progress-reset-'));
+    const app = new MonarchApplication({ workspaceRoot: root });
+    await app.start();
+    try {
+      const controller = new CoderAgentController(app);
+      const snapshot = await controller.createProject('Audit Progress Reset');
+      await mkdir(path.join(snapshot.project.root, 'src'), { recursive: true });
+      await mkdir(path.join(snapshot.project.root, 'tests'), { recursive: true });
+      await writeFile(path.join(snapshot.project.root, 'package.json'), '{"name":"progress-reset"}\n', 'utf8');
+      await writeFile(path.join(snapshot.project.root, 'src', 'index.ts'), 'export const ready = true;\n', 'utf8');
+      await writeFile(path.join(snapshot.project.root, 'tests', 'unit.test.ts'), "test('ready', () => expect(true).toBe(true));\n", 'utf8');
+      const executeCapability = app.executeCapability.bind(app);
+      let turn = 0;
+      app.executeCapability = (async (execution) => {
+        if (execution.moduleId !== 'oscar') return executeCapability(execution);
+        turn += 1;
+        const action = turn === 1
+          ? {
+              capabilityId: 'coder.files.list',
+              args: { path: '.', recursive: true, limit: 100 },
+              reason: 'inspect project tree',
+              expectedEffect: 'list files',
+            }
+          : turn === 3
+            ? {
+                capabilityId: 'coder.files.read',
+                args: { path: 'package.json' },
+                reason: 'inspect configuration',
+                expectedEffect: 'read package.json',
+              }
+            : turn === 5
+              ? {
+                  capabilityId: 'coder.files.read',
+                  args: { path: 'src/index.ts' },
+                  reason: 'inspect source',
+                  expectedEffect: 'read source',
+                }
+              : turn === 7
+                ? {
+                    capabilityId: 'coder.files.read',
+                    args: { path: 'tests/unit.test.ts' },
+                    reason: 'inspect tests',
+                    expectedEffect: 'read test',
+                  }
+                : null;
+        const final = turn >= 8;
+        return {
+          ok: true,
+          summary: 'mock coder turn',
+          output: {
+            response: {
+              answer: final
+                ? 'Приоритеты по package.json, src/index.ts и tests/unit.test.ts сформированы.'
+                : action
+                  ? `Выполняю подтверждаемое действие ${turn}.`
+                  : 'Продолжаю аудит и далее прочитаю недостающий файл.',
+              action_proposals: action ? [action] : [],
+              usage: {},
+            },
+          },
+        };
+      }) as typeof app.executeCapability;
+
+      const started = controller.start('Проведи аудит проекта и перечисли приоритетные улучшения.', snapshot.project.id);
+      const completed = await waitForTerminal(controller, started.id);
+
+      expect(completed.status).toBe('completed');
+      expect(completed.events.filter((event) => event.error === 'terminal-receipts-missing')).toHaveLength(3);
+      expect(completed.events.some((event) => event.kind === 'tool-result'
+        && event.capabilityId === 'coder.files.read'
+        && JSON.stringify(event.output).includes('unit.test.ts'))).toBe(true);
+      expect(turn).toBe(8);
+    } finally {
+      await app.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, CONTROLLER_TEST_TIMEOUT_MS);
+
+  it('balances multi-read receipt context so the model sees every file result', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-coder-balanced-receipts-'));
+    const app = new MonarchApplication({ workspaceRoot: root });
+    await app.start();
+    try {
+      const controller = new CoderAgentController(app);
+      const snapshot = await controller.createProject('Balanced Receipts');
+      await writeFile(path.join(snapshot.project.root, 'a.txt'), `${'a'.repeat(5_000)}\nTAIL_A\n`, 'utf8');
+      await writeFile(path.join(snapshot.project.root, 'b.txt'), `${'b'.repeat(5_000)}\nTAIL_B\n`, 'utf8');
+      await writeFile(path.join(snapshot.project.root, 'c.txt'), `${'c'.repeat(5_000)}\nTAIL_C\n`, 'utf8');
+      const executeCapability = app.executeCapability.bind(app);
+      const modelMessages: unknown[] = [];
+      let turn = 0;
+      app.executeCapability = (async (execution) => {
+        if (execution.moduleId !== 'oscar') return executeCapability(execution);
+        turn += 1;
+        modelMessages.push((execution.input as any).messages);
+        return {
+          ok: true,
+          summary: 'mock coder turn',
+          output: {
+            response: turn === 1
+              ? {
+                  answer: 'Читаю три файла одним пакетом.',
+                  action_proposals: ['a.txt', 'b.txt', 'c.txt'].map((file) => ({
+                    capabilityId: 'coder.files.read',
+                    args: { path: file },
+                    reason: `inspect ${file}`,
+                    expectedEffect: `read ${file}`,
+                  })),
+                  usage: {},
+                }
+              : {
+                  answer: 'Файлы a.txt, b.txt и c.txt прочитаны.',
+                  action_proposals: [],
+                  usage: {},
+                },
+          },
+        };
+      }) as typeof app.executeCapability;
+
+      const started = controller.start('Прочитай файлы a.txt, b.txt и c.txt.', snapshot.project.id);
+      const completed = await waitForTerminal(controller, started.id);
+      const receiptPrompt = String((modelMessages[1] as any[])?.at(-1)?.content || '');
+
+      expect(completed.status).toBe('completed');
+      expect(receiptPrompt).toContain('a.txt');
+      expect(receiptPrompt).toContain('b.txt');
+      expect(receiptPrompt).toContain('c.txt');
+      expect(receiptPrompt).toContain('TAIL_A');
+      expect(receiptPrompt).toContain('TAIL_B');
+      expect(receiptPrompt).toContain('TAIL_C');
+      expect(turn).toBe(2);
+    } finally {
+      await app.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, CONTROLLER_TEST_TIMEOUT_MS);
+
+  it('does not accept the global project registry as evidence for a selected-project audit', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-coder-audit-evidence-'));
+    const app = new MonarchApplication({ workspaceRoot: root });
+    await app.start();
+    try {
+      const controller = new CoderAgentController(app);
+      const snapshot = await controller.createProject('Audit Evidence');
+      await writeFile(path.join(snapshot.project.root, 'package.json'), '{"name":"audit-evidence"}\n', 'utf8');
+      await writeFile(path.join(snapshot.project.root, 'README.md'), '# Audit evidence\n', 'utf8');
+      const executeCapability = app.executeCapability.bind(app);
+      let turn = 0;
+      app.executeCapability = (async (execution) => {
+        if (execution.moduleId !== 'oscar') return executeCapability(execution);
+        turn += 1;
+        return {
+          ok: true,
+          summary: 'mock coder turn',
+          output: {
+            response: turn === 1
+              ? {
+                  answer: 'Проверяю проект.',
+                  action_proposals: [{
+                    capabilityId: 'coder.projects.list',
+                    args: {},
+                    reason: 'incorrectly use the global registry as audit evidence',
+                    expectedEffect: 'list registered projects',
+                  }],
+                  usage: {},
+                }
+              : {
+                  answer: 'Общий аудит завершён: улучшите структуру, тесты и документацию.',
+                  action_proposals: [],
+                  usage: {},
+                },
+          },
+        };
+      }) as typeof app.executeCapability;
+
+      const started = controller.start('Проведи аудит проекта и перечисли приоритетные улучшения.', snapshot.project.id);
+      const completed = await waitForTerminal(controller, started.id);
+
+      expect(completed.status).toBe('failed');
+      expect(completed.events.some((event) => event.capabilityId === 'coder.projects.list' && event.ok)).toBe(true);
+      expect(completed.events.some((event) => event.capabilityId === 'coder.files.list' && event.ok)).toBe(false);
+      expect(completed.events.some((event) => event.capabilityId === 'coder.files.read' && event.ok)).toBe(false);
+      expect(completed.error).toContain('coder.files.list');
+      expect(completed.error).toContain('distinct project file');
+      expect(turn).toBe(4);
     } finally {
       await app.stop();
       await rm(root, { recursive: true, force: true });
@@ -265,7 +639,7 @@ describe('CoderAgentController', () => {
                 ],
                 usage: {},
               }
-              : { answer: 'Аудит завершён по прочитанному README.', action_proposals: [], usage: {} },
+              : { answer: 'Аудит завершён по прочитанному README.md.', action_proposals: [], usage: {} },
           },
         };
       }) as typeof app.executeCapability;
@@ -307,16 +681,24 @@ describe('CoderAgentController', () => {
           ? { answer: 'Анализ завершён.', action_proposals: [], usage: {} }
           : turn === 2
             ? {
-              answer: 'Применяю исправление.',
-              action_proposals: [{
-                capabilityId: 'coder.files.write',
-                args: { path: 'value.txt', content: 'after', overwrite: true },
-                reason: 'apply the requested correction',
-                expectedEffect: 'update value.txt',
-              }],
-              usage: {},
-            }
-            : { answer: 'Исправление применено.', action_proposals: [], usage: {} };
+                answer: 'Проверяю и исправляю value.txt.',
+                action_proposals: [
+                  {
+                    capabilityId: 'coder.files.read',
+                    args: { path: 'value.txt' },
+                    reason: 'inspect the requested file before editing',
+                    expectedEffect: 'read value.txt',
+                  },
+                  {
+                    capabilityId: 'coder.files.write',
+                    args: { path: 'value.txt', content: 'after', overwrite: true },
+                    reason: 'apply the requested correction',
+                    expectedEffect: 'update value.txt',
+                  },
+                ],
+                usage: {},
+              }
+            : { answer: 'Исправление value.txt применено после проверки файла.', action_proposals: [], usage: {} };
         return { ok: true, summary: 'mock coder turn', output: { response } };
       }) as typeof app.executeCapability;
 
@@ -325,6 +707,7 @@ describe('CoderAgentController', () => {
 
       expect(completed.status).toBe('completed');
       expect(completed.events.some((event) => event.error === 'terminal-receipts-missing')).toBe(true);
+      expect(completed.events.some((event) => event.capabilityId === 'coder.files.read' && event.ok)).toBe(true);
       await expect(readFile(path.join(snapshot.project.root, 'value.txt'), 'utf8')).resolves.toBe('after');
     } finally {
       await app.stop();

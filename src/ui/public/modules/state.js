@@ -52,6 +52,7 @@ export const state = {
     incidents: null,
     activeTab: 'overview',
     selectedIncidentId: null,
+    incidentFilter: 'active',
     recentScans: [],
     scanFeedback: null,
       networkResult: null,

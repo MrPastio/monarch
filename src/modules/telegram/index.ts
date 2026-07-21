@@ -425,6 +425,7 @@ export class TelegramModule implements MonarchModule {
           limit: 50,
           allowed_updates: ['message', 'callback_query'],
         }, signal);
+        this.lastError = '';
         for (const update of updates) {
           await this.refreshState();
           if (update.update_id < this.state.offset) continue;

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 from pathlib import Path
+import re
 
 from monarch_security.config import RouterConfig
 from monarch_security.events import RuleAssessment, SecurityEvent
@@ -233,20 +235,40 @@ class RuleEngine:
         name = str(facts.get("name", "")).lower()
         exe = str(facts.get("exe", "")).lower()
         cmdline = _normalized_command_line(facts.get("cmdline", []))
+        codex_managed_shell = _is_codex_managed_powershell(facts)
+        decoded = _decode_powershell_encoded_command(facts.get("cmdline", []))
+        if decoded is not None:
+            if codex_managed_shell:
+                cmdline = _normalized_command_line(decoded)
+            else:
+                cmdline = f"{cmdline} {_normalized_command_line(decoded)}"
         score = 0
         reasons: list[str] = []
 
-        if name in SUSPICIOUS_PROCESS_NAMES:
+        if name in SUSPICIOUS_PROCESS_NAMES and not codex_managed_shell:
             score += 22
             reasons.append(f"Process name is high-attention: {name}")
+        elif codex_managed_shell:
+            reasons.append("System PowerShell is managed by the installed Codex package")
 
         if any(marker in exe for marker in TEMP_PATH_MARKERS):
             score += 25
             reasons.append("Executable path is in a user/temp download location")
 
-        matched = sorted(marker for marker in SUSPICIOUS_CMD_MARKERS if marker in cmdline)
+        matched = _matched_command_markers(cmdline)
+        if codex_managed_shell:
+            matched = [
+                marker
+                for marker in matched
+                if marker not in {
+                    "-enc",
+                    "-encodedcommand",
+                    "-nop",
+                    "executionpolicy bypass",
+                }
+            ]
         if matched:
-            score += 18 + min(35, 7 * len(matched))
+            score += 21 + min(35, 7 * len(matched))
             reasons.append("Command line contains suspicious markers: " + ", ".join(matched))
 
         parent_name = str(facts.get("parent_name", "")).lower()
@@ -286,7 +308,11 @@ class RuleEngine:
                 score += 8
                 reasons.append("Connection targets a public internet address")
             process_name = str(facts.get("process_name") or "").lower()
-            if process_name in SUSPICIOUS_PROCESS_NAMES:
+            codex_managed_shell = _is_codex_managed_powershell(
+                facts,
+                process_prefix="process_",
+            )
+            if process_name in SUSPICIOUS_PROCESS_NAMES and not codex_managed_shell:
                 if remote_public:
                     score += 45
                     reasons.append(
@@ -297,14 +323,14 @@ class RuleEngine:
                     reasons.append(
                         f"Suspicious process has an established connection: {process_name}"
                     )
+            elif codex_managed_shell:
+                reasons.append("Network owner is a Codex-managed system PowerShell process")
             process_exe = str(facts.get("process_exe") or "").lower()
             if remote_public and any(marker in process_exe for marker in TEMP_PATH_MARKERS):
                 score += 20
                 reasons.append("Public internet connection is owned by a temp/download executable")
             process_cmdline = _normalized_command_line(facts.get("process_cmdline", []))
-            matched_cmd_markers = sorted(
-                marker for marker in SUSPICIOUS_CMD_MARKERS if marker in process_cmdline
-            )
+            matched_cmd_markers = _matched_command_markers(process_cmdline)
             if remote_public and matched_cmd_markers:
                 score += 25
                 reasons.append(
@@ -378,7 +404,7 @@ class RuleEngine:
         if any(marker in value for marker in TEMP_PATH_MARKERS):
             score += 20
             reasons.append("Persistence command references temp/download location")
-        if any(marker in value for marker in SUSPICIOUS_CMD_MARKERS):
+        if _matched_command_markers(value):
             score += 20
             reasons.append("Persistence command contains suspicious command markers")
 
@@ -631,3 +657,80 @@ def _normalized_command_line(value) -> str:
         .replace("\u2013", "-")
         .replace("\u2014", "-")
     )
+
+
+_CODEX_PARENT_PATH = re.compile(
+    r"^[a-z]:\\program files\\windowsapps\\openai\.codex_[^\\]+__2p2nqsd0c76g0"
+    r"\\app\\chatgpt\.exe$",
+    re.IGNORECASE,
+)
+
+
+def _is_codex_managed_powershell(
+    facts: dict,
+    *,
+    process_prefix: str = "",
+) -> bool:
+    name = str(facts.get(f"{process_prefix}name") or "").casefold()
+    executable = _normalized_windows_path(facts.get(f"{process_prefix}exe"))
+    parent_names = [str(facts.get(f"{process_prefix}parent_name") or "")]
+    parent_executables = [facts.get(f"{process_prefix}parent_exe")]
+    ancestor_names = facts.get(f"{process_prefix}ancestor_names")
+    ancestor_executables = facts.get(f"{process_prefix}ancestor_exes")
+    if isinstance(ancestor_names, (list, tuple)):
+        parent_names.extend(str(item) for item in ancestor_names)
+    if isinstance(ancestor_executables, (list, tuple)):
+        parent_executables.extend(ancestor_executables)
+    trusted_lineage = any(
+        str(parent_name).casefold() == "chatgpt.exe"
+        and bool(_CODEX_PARENT_PATH.fullmatch(_normalized_windows_path(parent_executable)))
+        for parent_name, parent_executable in zip(
+            parent_names,
+            parent_executables,
+            strict=False,
+        )
+    )
+    return bool(
+        name == "powershell.exe"
+        and executable.endswith(
+            r"\windows\system32\windowspowershell\v1.0\powershell.exe"
+        )
+        and trusted_lineage
+    )
+
+
+def _decode_powershell_encoded_command(value, *, max_bytes: int = 131_072) -> str | None:
+    if isinstance(value, str):
+        arguments = value.split()
+    else:
+        arguments = [str(item) for item in value or []]
+    encoded: str | None = None
+    for index, argument in enumerate(arguments[:-1]):
+        if argument.casefold() in {"-enc", "-encodedcommand"}:
+            encoded = arguments[index + 1]
+            break
+    if not encoded or len(encoded) > max_bytes * 2:
+        return None
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        if len(raw) > max_bytes:
+            return None
+        return raw.decode("utf-16-le", errors="strict")
+    except (ValueError, UnicodeError):
+        return None
+
+
+def _normalized_windows_path(value) -> str:
+    return str(value or "").strip().replace("/", "\\").casefold()
+
+
+def _matched_command_markers(command_line: str) -> list[str]:
+    matched: list[str] = []
+    for marker in SUSPICIOUS_CMD_MARKERS:
+        if marker.startswith("-") and " " not in marker:
+            pattern = rf"(?<![\w-]){re.escape(marker)}(?![\w-])"
+            if re.search(pattern, command_line):
+                matched.append(marker)
+        elif marker in command_line:
+            matched.append(marker)
+    return sorted(matched)

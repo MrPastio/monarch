@@ -97,4 +97,79 @@ describe('MonarchModuleLoader', () => {
       });
     }).toThrow(/must declare permission risk write for capability/i);
   });
+
+  it('should activate suite before its member module', async () => {
+    const events: string[] = [];
+    const kernel = new MonarchKernel();
+    kernel.registerModule({
+      manifest: {
+        id: 'smoke-suite-member',
+        name: 'Smoke Suite Member',
+        version: '0.1.0',
+        kind: 'domain',
+        parentSuiteId: 'smoke-suite',
+        description: 'Smoke-only suite member.',
+        owns: ['smoke member'],
+        permissions: [],
+        dependencies: ['smoke-suite'],
+        capabilities: [],
+      },
+      async activate(): Promise<void> {
+        events.push('member');
+      },
+    });
+    kernel.registerModule({
+      manifest: {
+        id: 'smoke-suite',
+        name: 'Smoke Suite',
+        version: '0.1.0',
+        kind: 'suite',
+        description: 'Smoke-only promoted suite.',
+        owns: ['smoke suite'],
+        permissions: [],
+        capabilities: [],
+      },
+      async activate(): Promise<void> {
+        events.push('suite');
+      },
+    });
+
+    await kernel.start();
+    expect(events).toEqual(['suite', 'member']);
+    await kernel.stop();
+  });
+
+  it('should reject a suite member whose parent is not a suite', async () => {
+    const kernel = new MonarchKernel();
+    kernel.registerModule({
+      manifest: {
+        id: 'smoke-parent',
+        name: 'Smoke Parent',
+        version: '0.1.0',
+        kind: 'system',
+        description: 'Smoke-only invalid suite parent.',
+        owns: ['smoke parent'],
+        permissions: [],
+        capabilities: [],
+      },
+      async activate(): Promise<void> {},
+    });
+    kernel.registerModule({
+      manifest: {
+        id: 'smoke-child',
+        name: 'Smoke Child',
+        version: '0.1.0',
+        kind: 'domain',
+        parentSuiteId: 'smoke-parent',
+        description: 'Smoke-only invalid suite child.',
+        owns: ['smoke child'],
+        permissions: [],
+        dependencies: ['smoke-parent'],
+        capabilities: [],
+      },
+      async activate(): Promise<void> {},
+    });
+
+    await expect(kernel.start()).rejects.toThrow(/parent smoke-parent must have kind suite/i);
+  });
 });

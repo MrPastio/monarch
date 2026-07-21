@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+import hashlib
 import json
 import uuid
 
@@ -27,7 +28,7 @@ class SecurityEvent:
             "kind": self.kind,
             "source": self.source,
             "subject": self.subject,
-            "facts": self.facts,
+            "facts": _safe_serialized_facts(self.kind, self.facts),
         }
 
 
@@ -73,3 +74,52 @@ class ActionDecision:
 
 def json_line(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=True, sort_keys=True)
+
+
+_SAFE_PROCESS_FLAGS = {
+    "-command",
+    "-encodedcommand",
+    "-enc",
+    "-executionpolicy",
+    "-file",
+    "-nologo",
+    "-noninteractive",
+    "-noprofile",
+    "-windowstyle",
+}
+
+
+def _safe_serialized_facts(kind: str, facts: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(facts)
+    if kind != "process.started":
+        return safe
+
+    command_line = safe.pop("cmdline", None)
+    safe.pop("username", None)
+    if isinstance(command_line, str):
+        arguments = command_line.split()
+    elif isinstance(command_line, (list, tuple)):
+        arguments = [str(item) for item in command_line]
+    else:
+        arguments = []
+    canonical = "\0".join(arguments).encode("utf-8", errors="replace")
+    safe["command_line"] = {
+        "present": bool(arguments),
+        "argument_count": len(arguments),
+        "sha256": hashlib.sha256(canonical).hexdigest() if arguments else None,
+        "flags": sorted({
+            _normalized_flag(argument)
+            for argument in arguments
+            if _normalized_flag(argument) in _SAFE_PROCESS_FLAGS
+        }),
+        "encoded": any(
+            _normalized_flag(argument) in {"-enc", "-encodedcommand"}
+            for argument in arguments
+        ),
+    }
+    safe["user_context_present"] = bool(facts.get("username"))
+    return safe
+
+
+def _normalized_flag(value: str) -> str:
+    return str(value).split("=", 1)[0].split(":", 1)[0].casefold()

@@ -135,6 +135,29 @@ describe('Monarch HTTP server security', () => {
     }
   });
 
+  it('serves Studio raster assets with browser-safe content types', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-http-media-'));
+    await writeFile(path.join(root, 'index.html'), '<!doctype html><title>ok</title>', 'utf8');
+    await writeFile(path.join(root, 'preview.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const server = createMonarchHttpServer({
+      app: createFakeApplication(),
+      publicDirectory: root,
+      host: '127.0.0.1',
+      port: 4317,
+      requireApiToken: false,
+    });
+    const baseUrl = await listen(server);
+
+    try {
+      const response = await fetch(`${baseUrl}/preview.png`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe('image/png');
+    } finally {
+      await close(server);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('exposes skill metadata progressively and protects it with the session token', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-http-skills-'));
     const skillDirectory = path.join(root, '.agents', 'skills', 'unit-review');

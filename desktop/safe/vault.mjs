@@ -155,6 +155,11 @@ export class SafeVault {
     };
   }
 
+  touch() {
+    this.#requireUnlocked();
+    return this.status();
+  }
+
   async setup({ pin, pinLength, emergencyWordCount = EMERGENCY_DEFAULT_WORDS, destructionConfirmed }) {
     if (this.configError) throw this.configError;
     if (this.config?.status === 'active' || this.config?.status === 'pending') {
@@ -1184,7 +1189,7 @@ for (const methodName of [
   'unlockWithEmergencyPhrase',
   'destroy', 'createSection', 'updateSection', 'createFolder', 'deleteFolder', 'createFile', 'importFile',
   'readFile', 'writeFile', 'deleteFile', 'createArchive', 'extractArchive',
-  'readChat', 'upsertChat', 'deleteChat',
+  'readChat', 'upsertChat', 'deleteChat', 'touch',
 ]) {
   const operation = SafeVault.prototype[methodName];
   Object.defineProperty(SafeVault.prototype, methodName, {

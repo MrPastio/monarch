@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/styles-v2.css">
     <link rel="stylesheet" href="/sharing.css">
     <link rel="stylesheet" href="/coder.css">
+    <link rel="stylesheet" href="/studio.css">
     <link rel="stylesheet" href="/startup/monarch-startup.css">
     <script>
       const startupType = localStorage.getItem('monarch.startup.type') || 'original';
@@ -34,6 +35,7 @@
         <div class="sidebar-top">
           <button class="sidebar-brand-mark" type="button" aria-label="Monarch" data-monarch-brand-cycle>
             <strong class="monarch-brand-word" data-monarch-brand-label>Monarch</strong>
+            <span class="product-stage-badge">beta</span>
           </button>
           <div class="sidebar-chat-actions">
             <button class="claude-new-chat-btn" type="button" id="new-task-button" title="Новый чат">
@@ -59,6 +61,10 @@
           <button class="nav-item" type="button" data-scroll-target="workspace-section" aria-label="Открыть проект" title="Проект">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>
             <span>Проект</span>
+          </button>
+          <button class="nav-item monarch-modules-nav" type="button" data-scroll-target="modules-section" aria-label="Открыть Monarch Modules" title="Monarch Modules">
+            <img class="nav-library-icon" src="/assets/icons/phosphor/circles-four.svg" alt="">
+            <span>Modules</span>
           </button>
           <button class="nav-item" type="button" data-scroll-target="security-section" aria-label="Открыть защиту" title="Защита">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="M9.5 12.5 11 14l3.5-4"></path></svg>
@@ -713,6 +719,10 @@
                       <strong>Инциденты</strong>
                       <button class="claude-ghost-btn" id="security-incidents-refresh" type="button">Обновить</button>
                     </div>
+                    <div class="security-incident-filters" role="group" aria-label="Фильтр инцидентов">
+                      <button type="button" data-security-incident-filter="active" aria-pressed="true">Активные <span id="security-incident-active-count">0</span></button>
+                      <button type="button" data-security-incident-filter="all" aria-pressed="false">Все <span id="security-incident-all-count">0</span></button>
+                    </div>
                     <div id="security-incident-list" class="security-incident-list"></div>
                   </section>
                   <section id="security-incident-detail" class="security-incident-detail"></section>
@@ -860,6 +870,274 @@
                 <div id="workspace-module-list" class="file-tree-mock"></div>
               </div>
             </div>
+          </div>
+        </section>
+
+        <!-- E. MONARCH MODULES / STUDIO -->
+        <section class="claude-view view-hidden modules-view" id="modules-section">
+          <div class="modules-workspace" id="modules-workspace">
+            <header class="modules-tabs" role="tablist" aria-label="Monarch Modules">
+              <button class="modules-tab active" type="button" role="tab" aria-selected="true" data-modules-tab="studio">Studio <span class="modules-stage-badge">alpha</span></button>
+              <button class="modules-tab" type="button" role="tab" aria-selected="false" data-modules-tab="builder">Создать модуль</button>
+              <button class="modules-tab" type="button" role="tab" aria-selected="false" data-modules-tab="library">Мои модули</button>
+              <span class="modules-runtime-badge"><span></span> Modules · alpha · local-first</span>
+            </header>
+
+            <section class="modules-panel studio-panel" data-modules-panel="studio">
+              <div class="studio-editor" data-editor-mode="photo">
+                <div class="studio-canvas-column">
+                  <div class="studio-stage" id="studio-stage">
+                    <div class="studio-photo-preview" id="studio-photo-preview" style="--studio-split: 34%; --studio-filter: brightness(1.08) contrast(1.05) saturate(1.08);">
+                      <img class="studio-photo-before" id="studio-photo-before" src="/assets/studio/guided-portrait.png" alt="Фото до обработки">
+                      <div class="studio-photo-after-clip" id="studio-photo-after-clip">
+                        <img class="studio-photo-after" id="studio-photo-after" src="/assets/studio/guided-portrait.png" alt="Фото после обработки">
+                      </div>
+                      <canvas class="studio-annotation-canvas" id="studio-annotation-canvas" aria-label="Разметка поверх фото"></canvas>
+                      <div class="studio-before-label">До</div>
+                      <div class="studio-after-label">После</div>
+                      <div class="studio-split-line" aria-hidden="true"></div>
+                      <label class="studio-split-handle" title="Сравнить до и после">
+                        <span class="studio-split-grip" aria-hidden="true">
+                          <img class="studio-split-caret-left" src="/assets/icons/phosphor/caret-right.svg" alt="">
+                          <img src="/assets/icons/phosphor/caret-right.svg" alt="">
+                        </span>
+                        <input id="studio-split" type="range" min="8" max="92" value="34" aria-label="Граница сравнения до и после">
+                      </label>
+                      <div class="studio-text-overlay" id="studio-text-overlay" hidden></div>
+                    </div>
+
+                    <div class="studio-video-preview" id="studio-video-preview" hidden>
+                      <video id="studio-video" preload="metadata" playsinline></video>
+                      <div class="studio-video-empty" id="studio-video-empty">
+                        <img src="/assets/icons/phosphor/video.svg" alt="">
+                        <strong>Добавь видео</strong>
+                        <span>MP4, WebM или MOV — всё останется локально</span>
+                        <button type="button" class="studio-secondary-action" data-studio-open-media="video">Выбрать файл</button>
+                      </div>
+                      <div class="studio-video-overlay" id="studio-video-overlay" hidden></div>
+                    </div>
+                  </div>
+                </div>
+
+                <aside class="studio-inspector" aria-label="Инструменты Studio">
+                  <div class="studio-inspector-heading">
+                    <div>
+                      <span class="studio-step-label">Шаг 2 из 3</span>
+                      <h2>Что хочешь улучшить?</h2>
+                    </div>
+                    <button class="studio-icon-button" type="button" id="studio-reset" aria-label="Сбросить изменения" title="Сбросить изменения">
+                      <img src="/assets/icons/phosphor/x.svg" alt="">
+                    </button>
+                  </div>
+
+                  <div class="studio-photo-tools" id="studio-photo-tools">
+                    <section class="studio-tool-group open" data-studio-tool="light">
+                      <button class="studio-tool-heading" type="button" data-studio-accordion="light" aria-expanded="true">
+                        <span><img src="/assets/icons/phosphor/sun.svg" alt="">Свет и цвет</span>
+                        <img class="studio-caret" src="/assets/icons/phosphor/caret-up.svg" alt="">
+                      </button>
+                      <div class="studio-tool-content">
+                        <div class="studio-preset-list" role="radiogroup" aria-label="Быстрые стили">
+                          <button class="studio-preset active" type="button" data-studio-preset="auto" aria-pressed="true">
+                            <img src="/assets/studio/preset-auto.png" alt="Горное озеро">
+                            <span><strong>Автоулучшение</strong><small>Чистый естественный результат</small></span>
+                            <img class="studio-check" src="/assets/icons/phosphor/check.svg" alt="Выбрано">
+                          </button>
+                          <button class="studio-preset" type="button" data-studio-preset="warm" aria-pressed="false">
+                            <img src="/assets/studio/preset-warm.png" alt="Тёплый рассвет">
+                            <span><strong>Теплее и ярче</strong><small>Мягкий золотой свет</small></span>
+                            <img class="studio-check" src="/assets/icons/phosphor/check.svg" alt="">
+                          </button>
+                          <button class="studio-preset" type="button" data-studio-preset="cool" aria-pressed="false">
+                            <img src="/assets/studio/preset-cool.png" alt="Холодное лесное озеро">
+                            <span><strong>Холоднее и контрастнее</strong><small>Глубокие тени и детали</small></span>
+                            <img class="studio-check" src="/assets/icons/phosphor/check.svg" alt="">
+                          </button>
+                        </div>
+                        <button class="studio-fine-toggle" type="button" id="studio-fine-toggle" aria-expanded="false">
+                          <span>Точно настроить</span><img src="/assets/icons/phosphor/caret-right.svg" alt="">
+                        </button>
+                        <div class="studio-fine-controls" id="studio-fine-controls" hidden>
+                          <label><span>Экспозиция <output id="studio-exposure-output">8</output></span><input id="studio-exposure" type="range" min="-50" max="50" value="8"></label>
+                          <label><span>Контраст <output id="studio-contrast-output">5</output></span><input id="studio-contrast" type="range" min="-50" max="50" value="5"></label>
+                          <label><span>Цвет <output id="studio-saturation-output">8</output></span><input id="studio-saturation" type="range" min="-50" max="50" value="8"></label>
+                          <label><span>Тепло <output id="studio-warmth-output">4</output></span><input id="studio-warmth" type="range" min="-50" max="50" value="4"></label>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section class="studio-tool-group" data-studio-tool="crop">
+                      <button class="studio-tool-heading" type="button" data-studio-accordion="crop" aria-expanded="false">
+                        <span><img src="/assets/icons/phosphor/crop.svg" alt="">Кадр</span>
+                        <img class="studio-caret" src="/assets/icons/phosphor/caret-down.svg" alt="">
+                      </button>
+                      <div class="studio-tool-content" hidden>
+                        <div class="studio-segmented" aria-label="Соотношение сторон">
+                          <button type="button" data-studio-ratio="original" class="active">Оригинал</button>
+                          <button type="button" data-studio-ratio="1 / 1">1:1</button>
+                          <button type="button" data-studio-ratio="4 / 5">4:5</button>
+                          <button type="button" data-studio-ratio="16 / 9">16:9</button>
+                        </div>
+                        <button class="studio-inline-action" type="button" id="studio-rotate">Повернуть на 90°</button>
+                      </div>
+                    </section>
+
+                    <section class="studio-tool-group" data-studio-tool="retouch">
+                      <button class="studio-tool-heading" type="button" data-studio-accordion="retouch" aria-expanded="false">
+                        <span><img src="/assets/icons/phosphor/smiley.svg" alt="">Ретушь</span>
+                        <img class="studio-caret" src="/assets/icons/phosphor/caret-down.svg" alt="">
+                      </button>
+                      <div class="studio-tool-content" hidden>
+                        <label class="studio-switch-row"><span><strong>Мягкая кожа</strong><small>Лёгкое сглаживание без пластика</small></span><input id="studio-skin" type="checkbox"></label>
+                        <label class="studio-switch-row"><span><strong>Поднять детали</strong><small>Чёткость глаз, волос и ткани</small></span><input id="studio-detail" type="checkbox"></label>
+                      </div>
+                    </section>
+
+                    <section class="studio-tool-group" data-studio-tool="transform" data-studio-advanced-group hidden>
+                      <button class="studio-tool-heading" type="button" data-studio-accordion="transform" aria-expanded="false">
+                        <span><img src="/assets/icons/phosphor/sliders-horizontal.svg" alt="">Размер и отражение</span>
+                        <img class="studio-caret" src="/assets/icons/phosphor/caret-down.svg" alt="">
+                      </button>
+                      <div class="studio-tool-content" hidden>
+                        <div class="studio-dimension-grid">
+                          <label class="studio-field"><span>Ширина, px</span><input id="studio-output-width" type="number" min="1" max="4096" inputmode="numeric"></label>
+                          <label class="studio-field"><span>Высота, px</span><input id="studio-output-height" type="number" min="1" max="4096" inputmode="numeric"></label>
+                        </div>
+                        <div class="studio-inline-buttons">
+                          <button class="studio-inline-action" type="button" id="studio-flip-x">Отразить по горизонтали</button>
+                          <button class="studio-inline-action" type="button" id="studio-flip-y">По вертикали</button>
+                        </div>
+                        <button class="studio-inline-action" type="button" id="studio-source-size">Вернуть размер источника</button>
+                      </div>
+                    </section>
+
+                    <section class="studio-tool-group" data-studio-tool="draw" data-studio-advanced-group hidden>
+                      <button class="studio-tool-heading" type="button" data-studio-accordion="draw" aria-expanded="false">
+                        <span><img src="/assets/icons/phosphor/magic-wand.svg" alt="">Разметка</span>
+                        <img class="studio-caret" src="/assets/icons/phosphor/caret-down.svg" alt="">
+                      </button>
+                      <div class="studio-tool-content" hidden>
+                        <div class="studio-segmented studio-draw-tools" aria-label="Инструмент разметки">
+                          <button type="button" data-studio-draw-tool="pen" class="active">Кисть</button>
+                          <button type="button" data-studio-draw-tool="rectangle">Рамка</button>
+                          <button type="button" data-studio-draw-tool="ellipse">Круг</button>
+                        </div>
+                        <div class="studio-draw-settings">
+                          <label><span>Толщина</span><input id="studio-draw-size" type="range" min="2" max="36" value="8"></label>
+                          <label><span>Цвет</span><input id="studio-draw-color" type="color" value="#ff8428"></label>
+                        </div>
+                        <div class="studio-inline-buttons">
+                          <button class="studio-inline-action" type="button" id="studio-draw-toggle">Начать рисовать</button>
+                          <button class="studio-inline-action" type="button" id="studio-draw-clear">Очистить</button>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section class="studio-tool-group" data-studio-tool="text">
+                      <button class="studio-tool-heading" type="button" data-studio-accordion="text" aria-expanded="false">
+                        <span><img src="/assets/icons/phosphor/text-t.svg" alt="">Текст</span>
+                        <img class="studio-caret" src="/assets/icons/phosphor/caret-down.svg" alt="">
+                      </button>
+                      <div class="studio-tool-content" hidden>
+                        <label class="studio-field"><span>Надпись</span><input id="studio-text-input" maxlength="80" placeholder="Добавить текст"></label>
+                        <div class="studio-text-settings">
+                          <label><span>Размер</span><input id="studio-text-size" type="range" min="18" max="96" value="42"></label>
+                          <label><span>Цвет</span><input id="studio-text-color" type="color" value="#ffffff"></label>
+                        </div>
+                      </div>
+                    </section>
+                  </div>
+
+                  <div class="studio-video-tools" id="studio-video-tools" hidden>
+                    <section class="studio-tool-group open">
+                      <div class="studio-tool-heading static"><span><img src="/assets/icons/phosphor/scissors.svg" alt="">Монтаж</span></div>
+                      <div class="studio-tool-content">
+                        <label class="studio-field"><span>Начало <output id="studio-trim-start-output">0:00</output></span><input id="studio-trim-start" type="range" min="0" max="100" value="0"></label>
+                        <label class="studio-field"><span>Конец <output id="studio-trim-end-output">0:00</output></span><input id="studio-trim-end" type="range" min="0" max="100" value="100"></label>
+                        <label class="studio-field"><span>Скорость</span><select id="studio-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>
+                        <label class="studio-field"><span>Громкость <output id="studio-volume-output">100%</output></span><input id="studio-volume" type="range" min="0" max="100" value="100"></label>
+                      </div>
+                    </section>
+                    <section class="studio-tool-group open">
+                      <div class="studio-tool-heading static"><span><img src="/assets/icons/phosphor/text-t.svg" alt="">Текст поверх видео</span></div>
+                      <div class="studio-tool-content"><label class="studio-field"><input id="studio-video-text" maxlength="80" placeholder="Например: Лето 2026"></label></div>
+                    </section>
+                  </div>
+                </aside>
+              </div>
+
+              <footer class="studio-action-bar">
+                <div class="studio-history-area">
+                  <span>Недавние шаги</span>
+                  <div class="studio-history" id="studio-history" aria-live="polite">
+                    <button type="button" data-studio-history-index="0" class="active">Автоулучшение<img src="/assets/icons/phosphor/arrow-counter-clockwise.svg" alt="Отменить"></button>
+                  </div>
+                </div>
+                <div class="studio-video-timeline" id="studio-video-timeline" hidden>
+                  <button class="studio-play-button" type="button" id="studio-play" aria-label="Воспроизвести"><img src="/assets/icons/phosphor/play.svg" alt=""></button>
+                  <div class="studio-timeline-track"><div id="studio-timeline-progress"></div><span id="studio-timeline-label">Добавь видео для монтажа</span></div>
+                </div>
+                <div class="studio-primary-actions">
+                  <label class="studio-mode-select"><span>Режим</span><select id="studio-mode"><option value="photo">Фото</option><option value="video">Видео</option></select></label>
+                  <label class="studio-mode-select" id="studio-photo-format-control"><span>Формат</span><select id="studio-photo-format"><option value="png" selected>PNG</option><option value="jpeg">JPEG</option><option value="webp">WebP</option></select></label>
+                  <input id="studio-photo-input" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+                  <input id="studio-video-input" type="file" accept="video/mp4,video/webm,video/quicktime" hidden>
+                  <button class="studio-secondary-action" type="button" data-studio-open-media="photo"><img src="/assets/icons/phosphor/folder-open.svg" alt="">Открыть другое фото</button>
+                  <button class="studio-save-action" type="button" id="studio-save"><img src="/assets/icons/phosphor/download-simple.svg" alt=""><span>Сохранить</span></button>
+                </div>
+              </footer>
+              <p class="studio-status" id="studio-status" aria-live="polite">Фото готово к обработке · всё работает локально</p>
+            </section>
+
+            <section class="modules-panel module-builder-panel" data-modules-panel="builder" hidden>
+              <div class="module-builder-copy">
+                <span class="modules-eyebrow">Monarch Module Builder</span>
+                <h2>Новый модуль без ручной рутины</h2>
+                <p>Три понятных шага: опиши задачу, проверь будущие файлы и только потом создай scaffold.</p>
+                <ol class="module-builder-steps" aria-label="Этапы создания модуля">
+                  <li class="active"><span>1</span><strong>Основа</strong><small>Название и назначение</small></li>
+                  <li><span>2</span><strong>Предпросмотр</strong><small>Контракты и файлы</small></li>
+                  <li><span>3</span><strong>Создание</strong><small>Без перезаписи</small></li>
+                </ol>
+              </div>
+              <form class="module-builder-form" id="module-builder-form">
+                <div class="module-builder-grid">
+                  <label class="studio-field"><span>Название</span><input id="module-builder-name" required maxlength="80" placeholder="Например: Monarch Notes"></label>
+                  <label class="studio-field"><span>ID модуля</span><input id="module-builder-id" required maxlength="64" pattern="[a-z0-9-]+" placeholder="monarch-notes"></label>
+                </div>
+                <label class="studio-field"><span>Что он делает?</span><textarea id="module-builder-description" required maxlength="240" rows="3" placeholder="Одно ясное предложение о пользе модуля"></textarea></label>
+                <div class="module-builder-grid">
+                  <label class="studio-field"><span>Стартовый рецепт</span><select id="module-builder-template"><option value="empty">Пустой модуль</option><option value="reader">Чтение данных</option><option value="workspace-tool" selected>Инструмент рабочей области</option></select></label>
+                  <label class="studio-field"><span>Принадлежность</span><select id="module-builder-parent"><option value="suite" selected>Внутри Monarch Modules</option><option value="standalone">Самостоятельный</option></select></label>
+                </div>
+                <div class="module-builder-actions">
+                  <button class="studio-secondary-action" type="submit"><img src="/assets/icons/phosphor/eye.svg" alt="">Показать файлы</button>
+                  <button class="studio-save-action" type="button" id="module-builder-create" disabled><img src="/assets/icons/phosphor/plus.svg" alt="">Создать модуль</button>
+                </div>
+                <p class="studio-status" id="module-builder-status" aria-live="polite">Ничего не будет записано до явного создания.</p>
+                <div class="module-scaffold-preview" id="module-scaffold-preview" hidden></div>
+              </form>
+            </section>
+
+            <section class="modules-panel module-library-panel" data-modules-panel="library" hidden>
+              <div class="module-library-header">
+                <div><span class="modules-eyebrow">Suite</span><h2>Мои модули</h2><p>Инструменты, которые живут внутри Monarch Modules.</p></div>
+                <button class="studio-secondary-action" type="button" id="module-library-refresh"><img src="/assets/icons/phosphor/arrow-counter-clockwise.svg" alt="">Обновить</button>
+              </div>
+              <div class="module-library-grid" id="module-library-grid">
+                <article class="module-library-card featured">
+                  <div class="module-card-icon"><img src="/assets/icons/phosphor/image.svg" alt=""></div>
+                  <div><span>Alpha · готов к работе</span><h3>Monarch Studio</h3><p>Фото, базовый видеомонтаж и локальный экспорт в одном спокойном интерфейсе.</p></div>
+                  <button type="button" data-open-studio>Открыть Studio</button>
+                </article>
+                <article class="module-library-card create-card">
+                  <div class="module-card-icon"><img src="/assets/icons/phosphor/magic-wand.svg" alt=""></div>
+                  <div><span>Guided Builder</span><h3>Создать следующий</h3><p>Выбери рецепт, посмотри каждый файл и создай безопасный scaffold.</p></div>
+                  <button type="button" data-open-builder>Начать</button>
+                </article>
+              </div>
+              <p class="studio-status" id="module-library-status" aria-live="polite"></p>
+            </section>
           </div>
         </section>
 

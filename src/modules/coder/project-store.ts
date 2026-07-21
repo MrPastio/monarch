@@ -10,6 +10,11 @@ const MAX_PROJECTS = 200;
 const SNAPSHOT_SKIP_DIRECTORIES = new Set([
   '.git',
   '.hg',
+  '.agents',
+  '.claude',
+  '.codex',
+  '.gemini',
+  '.monarch',
   '.svn',
   '.next',
   '.nuxt',

@@ -223,6 +223,7 @@
 .coder-run-summary p { margin: 0; color: rgba(255, 255, 255, .58); font-size: 10.5px; line-height: 1.45; white-space: pre-wrap; }
 .coder-run-summary button { min-height: 34px; flex: none; padding: 0 11px; border: 1px solid rgba(255, 168, 77, .25); border-radius: 9px; color: #1c120b; background: linear-gradient(135deg, var(--coder-yellow), var(--coder-orange)); font-size: 10px; font-weight: 750; cursor: pointer; }
 .coder-run-summary[data-status="failed"] { border-color: rgba(255, 112, 101, .2); background: rgba(255, 112, 101, .04); }
+.coder-run-summary[data-status="warning"] { border-color: rgba(248, 201, 92, .28); background: linear-gradient(135deg, rgba(248, 201, 92, .08), rgba(255, 138, 61, .035)); }
 .coder-run-summary[data-status="disconnected"] { border-color: rgba(248, 201, 92, .2); }
 .coder-activity-toolbar { grid-area: toolbar; min-height: 40px; padding: 6px 13px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid rgba(255, 255, 255, .045); color: rgba(255, 255, 255, .66); font-size: 10px; }
 .coder-event-count { margin-right: auto; color: rgba(255, 255, 255, .34); font: 500 9px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }

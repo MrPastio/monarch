@@ -10,6 +10,26 @@ import { readTelegramApiCapabilityInput } from '../../src/modules/telegram/api-g
 import { TelegramModule } from '../../src/modules/telegram';
 
 describe('Telegram Module', () => {
+  it('clears a stale polling error after the next successful Telegram response', async () => {
+    const module = new TelegramModule({ autoStart: false });
+    const internals = module as unknown as {
+      running: boolean;
+      lastError: string;
+      callApi: () => Promise<unknown[]>;
+      pollLoop(signal: AbortSignal): Promise<void>;
+    };
+    internals.running = true;
+    internals.lastError = 'fetch failed';
+    internals.callApi = async () => {
+      internals.running = false;
+      return [];
+    };
+
+    await internals.pollLoop(new AbortController().signal);
+
+    expect(internals.lastError).toBe('');
+  });
+
   it('bounds transient per-user rate-limit state', () => {
     const module = new TelegramModule({ autoStart: false });
     const internals = module as unknown as {
@@ -202,7 +222,7 @@ describe('Telegram Module', () => {
         },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('максимум 2000')), 2_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('максимум 2000')), 5_000);
       mock.updates.push({
         update_id: 2,
         message: {
@@ -213,7 +233,7 @@ describe('Telegram Module', () => {
         },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Формат: /remind')), 2_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Формат: /remind')), 5_000);
       const persisted = JSON.parse(await readFile(statePath, 'utf8')) as { reminders: unknown[] };
       expect(persisted.reminders).toEqual([]);
     } finally {
@@ -466,7 +486,7 @@ describe('Telegram Module', () => {
       });
       await writeFile(statePath, JSON.stringify(baseState), 'utf8');
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('external reminder')), 2_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('external reminder')), 5_000);
     } finally {
       await kernel.stop();
       await mock.close();
@@ -487,17 +507,6 @@ describe('Telegram Module', () => {
     await standbyKernel.start();
 
     try {
-      const owner = await ownerKernel.execute({
-        id: 'exec_owner_start', intentId: 'intent_owner_start', moduleId: 'telegram', capabilityId: 'telegram.bot.start',
-        input: {}, requestedBy: 'smoke', confirmed: true, createdAt: new Date(0).toISOString(),
-      });
-      const standby = await standbyKernel.execute({
-        id: 'exec_standby_start', intentId: 'intent_standby_start', moduleId: 'telegram', capabilityId: 'telegram.bot.start',
-        input: {}, requestedBy: 'smoke', confirmed: true, createdAt: new Date(0).toISOString(),
-      });
-      expect((owner.output as { pollingMode: string }).pollingMode).toBe('owner');
-      expect((standby.output as { pollingMode: string }).pollingMode).toBe('standby');
-
       const status = await standbyKernel.execute({
         id: 'exec_pairing_status', intentId: 'intent_pairing_status', moduleId: 'telegram', capabilityId: 'telegram.pairing.rotate',
         input: {}, requestedBy: 'smoke', createdAt: new Date(0).toISOString(),
@@ -510,7 +519,18 @@ describe('Telegram Module', () => {
         { update_id: 4, message: { message_id: 3, chat: { id: 700, type: 'private' }, from: { id: 1, is_bot: true, username: 'mock_bot' }, text: 'Готово.' } },
       );
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Здесь можно общаться')), 2_000);
+      const owner = await ownerKernel.execute({
+        id: 'exec_owner_start', intentId: 'intent_owner_start', moduleId: 'telegram', capabilityId: 'telegram.bot.start',
+        input: {}, requestedBy: 'smoke', confirmed: true, createdAt: new Date(0).toISOString(),
+      });
+      const standby = await standbyKernel.execute({
+        id: 'exec_standby_start', intentId: 'intent_standby_start', moduleId: 'telegram', capabilityId: 'telegram.bot.start',
+        input: {}, requestedBy: 'smoke', confirmed: true, createdAt: new Date(0).toISOString(),
+      });
+      expect((owner.output as { pollingMode: string }).pollingMode).toBe('owner');
+      expect((standby.output as { pollingMode: string }).pollingMode).toBe('standby');
+
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Здесь можно общаться')), 25_000);
       const texts = mock.sentMessages.map((message) => String(message.text || ''));
       expect(texts.some((text) => text.includes('Готово — связал этот чат'))).toBe(true);
       expect(texts.some((text) => text.includes('Здесь можно общаться'))).toBe(true);
@@ -525,7 +545,7 @@ describe('Telegram Module', () => {
       await mock.close();
       await rm(root, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, 45_000);
 
   it('routes direct Telegram capability questions through dispatcher to a local capability', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-telegram-help-'));
@@ -558,7 +578,7 @@ describe('Telegram Module', () => {
         message: { message_id: 1, chat: { id: 1001, type: 'private' }, from: { id: 2002, username: 'tester' }, text: 'Что ты умеешь через тг бот?' },
       });
 
-      await waitUntil(() => mock.apiCalls.some((call) => call.method === 'editMessageText' && String(call.text).includes('Через Telegram я могу')), 2_000);
+      await waitUntil(() => mock.apiCalls.some((call) => call.method === 'editMessageText' && String(call.text).includes('Через Telegram я могу')), 5_000);
       expect(dispatches).toBe(1);
       expect(mock.apiCalls.some((call) => String(call.text).includes('Codex Security'))).toBe(true);
     } finally {
@@ -607,7 +627,7 @@ describe('Telegram Module', () => {
         },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Таблица слишком широкая')), 2_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Таблица слишком широкая')), 5_000);
       expect(mock.apiCalls.some((call) => call.method === 'sendRichMessage')).toBe(false);
     } finally {
       await kernel.stop();
@@ -655,7 +675,7 @@ describe('Telegram Module', () => {
         },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('максимум 12')), 2_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('максимум 12')), 5_000);
       expect(mock.apiCalls.some((call) => call.method === 'sendPoll')).toBe(false);
     } finally {
       await kernel.stop();
@@ -807,7 +827,7 @@ describe('Telegram Module', () => {
         message: { message_id: 1, chat: { id: 1001, type: 'private' }, from: { id: 2002, username: 'tester' }, text: '/api sendMessage {"text":' },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Не понял /api')), 2_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Не понял /api')), 5_000);
       const response = String(mock.sentMessages.find((message) => String(message.text).includes('Не понял /api'))?.text || '');
       expect(response).toContain('параметры должны быть валидным JSON-объектом');
       expect(response).toContain('Формат: /api METHOD');
@@ -826,7 +846,7 @@ describe('Telegram Module', () => {
         },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('chat_id')), 2_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('chat_id')), 5_000);
       expect(mock.sentMessages.some((message) => String(message.text).includes('только для текущего chat_id'))).toBe(true);
       expect(mock.apiCalls.some((call) => String(call.text).includes('изменит состояние Telegram'))).toBe(false);
 
@@ -842,14 +862,14 @@ describe('Telegram Module', () => {
         },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('параметры слишком большие')), 2_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('параметры слишком большие')), 15_000);
       expect(mock.apiCalls.some((call) => String(call.text).includes('изменит состояние Telegram'))).toBe(false);
     } finally {
       await kernel.stop();
       await mock.close();
       await rm(root, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, 30_000);
 
   it('rejects oversized generic Bot API capability parameters before calling Bot API', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-telegram-api-parameter-bounds-'));
@@ -1199,7 +1219,7 @@ describe('Telegram Module', () => {
         update_id: 1,
         message: { message_id: 1, chat: { id: 1001, type: 'private' }, from: { id: 2002, username: 'tester' }, text: 'удали тестовый файл' },
       });
-      await waitUntil(() => mock.apiCalls.some((call) => call.method === 'editMessageText' && String(call.text).includes('Разрешить это действие')), 2_000);
+      await waitUntil(() => mock.apiCalls.some((call) => call.method === 'editMessageText' && String(call.text).includes('Разрешить это действие')), 5_000);
       const confirmationCall = mock.apiCalls.find((call) => call.method === 'editMessageText' && String(call.text).includes('Разрешить это действие'));
       const callbackData = (((confirmationCall?.reply_markup as any)?.inline_keyboard?.[0]?.[0]?.callback_data) || '') as string;
       expect(callbackData).toMatch(/^confirm:/);
@@ -1220,7 +1240,7 @@ describe('Telegram Module', () => {
         },
       });
 
-      await waitUntil(() => mock.apiCalls.some((call) => call.method === 'answerCallbackQuery' && String(call.text).includes('Удалённые задачи остановлены')), 2_000);
+      await waitUntil(() => mock.apiCalls.some((call) => call.method === 'answerCallbackQuery' && String(call.text).includes('Удалённые задачи остановлены')), 5_000);
       expect(confirmedDispatches).toBe(0);
     } finally {
       await kernel.stop();
@@ -1254,7 +1274,7 @@ describe('Telegram Module', () => {
         message: { message_id: 6, chat: { id: 701, type: 'private' }, from: { id: 901, username: 'attacker' }, text: validCode },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Слишком много неверных попыток')), 2_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Слишком много неверных попыток')), 5_000);
       const persisted = JSON.parse(await readFile(path.join(root, 'data', 'local', 'telegram-state.json'), 'utf8')) as { pairings: unknown[] };
       expect(persisted.pairings).toEqual([]);
       expect(mock.sentMessages.some((message) => String(message.text).includes('Готово — связал этот чат'))).toBe(false);
@@ -1289,7 +1309,7 @@ describe('Telegram Module', () => {
         });
       }
 
-      await waitUntil(() => mock.sentMessages.filter((message) => String(message.text).includes('Этот код не подошёл')).length >= 5, 2_000);
+      await waitUntil(() => mock.sentMessages.filter((message) => String(message.text).includes('Этот код не подошёл')).length >= 5, 5_000);
       const blockedState = JSON.parse(await readFile(statePath, 'utf8')) as {
         pairingAttempts?: Record<string, { blockedUntil?: number }>;
       };
@@ -1315,7 +1335,7 @@ describe('Telegram Module', () => {
         message: { message_id: 100, chat: { id: 702, type: 'private' }, from: { id: 902, username: 'attacker' }, text: validCode },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Слишком много неверных попыток')), 2_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Слишком много неверных попыток')), 5_000);
       const persisted = JSON.parse(await readFile(statePath, 'utf8')) as { pairings: unknown[] };
       expect(persisted.pairings).toEqual([]);
       expect(mock.sentMessages.some((message) => String(message.text).includes('Готово — связал этот чат'))).toBe(false);

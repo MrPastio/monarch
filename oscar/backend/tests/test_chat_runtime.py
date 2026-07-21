@@ -3318,16 +3318,30 @@ def test_coder_tiers_load_only_from_separate_coder_root(monkeypatch, tmp_path: P
 
 def test_coder_context_marker_becomes_a_trusted_bounded_runtime_contract(tmp_path: Path):
     runtime = LocalModelRuntime(make_settings(tmp_path))
-    marker = '<monarch_coder_mode>{"project":{"root":"E:\\\\Work"}}</monarch_coder_mode>'
+    marker = '<monarch_coder_mode>{"responseLanguage":"ru","project":{"root":"E:\\\\Work"}}</monarch_coder_mode>'
+    live_registry = (
+        '<live_monarch_system>{"resolvedMentionIds":["workspace"],'
+        '"modules":[{"id":"workspace","name":"Monarch Workspace","description":"Must not enter Coder"}]}'
+        '</live_monarch_system>'
+    )
+    local_profile = '<local_user_context>{"profile":{"adaptiveSummary":"Must not enter Coder"}}</local_user_context>'
 
     prompt = runtime._build_prompt_messages(
         [
             ChatMessage(role="system", content=marker),
+            ChatMessage(role="system", content=live_registry),
+            ChatMessage(role="system", content=local_profile),
             ChatMessage(role="user", content="CODER MODE TASK: проверь проект"),
+            ChatMessage(role="user", content="CODER TOOL RECEIPTS: Continue from these Kernel facts."),
         ],
         [],
         "high",
-        [],
+        [ChatSkillContext(
+            name="monarch-security",
+            description="Global Oscar skill",
+            instructions="Must not enter Coder",
+            source="builtin://monarch/security",
+        )],
         [
             ChatCapabilityContext(id="coder.files.read", module="coder", system="Monarch Coder", title="Read", description="Read file", risk="read"),
             ChatCapabilityContext(id="coder.files.write", module="coder", system="Monarch Coder", title="Write", description="Write file", risk="write"),
@@ -3341,8 +3355,26 @@ def test_coder_context_marker_becomes_a_trusted_bounded_runtime_contract(tmp_pat
     assert '"capabilityId":"workspace.files.write"' not in prompt[0].content
     assert marker in prompt[0].content
     assert "it is the only working root" in prompt[0].content
+    assert "coder.projects.* is never inspection evidence" in prompt[0].content
+    assert "Never merely announce a future read" in prompt[0].content
+    assert "batch independent reads" in prompt[0].content
+    assert "Язык ответа: русский (ru)" in prompt[0].content
     assert str(runtime.settings.workspace_root.resolve()) not in prompt[0].content
     assert "Agent operating context" not in prompt[0].content
+    assert live_registry not in prompt[0].content
+    assert local_profile not in prompt[0].content
+    assert "Must not enter Coder" not in prompt[0].content
+
+    request = ChatRequest(
+        messages=[
+            ChatMessage(role="system", content=marker),
+            ChatMessage(role="system", content=live_registry),
+            ChatMessage(role="user", content="CODER TOOL RECEIPTS: Continue from these Kernel facts."),
+        ],
+        use_memory=False,
+    )
+    assert main_module.expected_request_language(request) == "ru"
+    assert main_module.live_monarch_registry_snapshot(request) is None
 
 
 def test_runtime_cancel_stops_llama_stream():

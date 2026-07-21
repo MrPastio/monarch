@@ -25,6 +25,8 @@ class DeviceSensor:
     def snapshot(self) -> list[dict[str, Any]]:
         self.last_error = None
         command = (
+            "$OutputEncoding = [Console]::OutputEncoding = "
+            "[System.Text.UTF8Encoding]::new($false);\n"
             "Get-PnpDevice -PresentOnly | "
             "Select-Object Class,FriendlyName,InstanceId,Status | "
             "ConvertTo-Json -Compress"
