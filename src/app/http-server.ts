@@ -114,6 +114,11 @@ async function handleRequest(
 ): Promise<void> {
   const url = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`);
 
+  if (request.method === 'GET' && url.pathname === '/api/ready') {
+    sendJson(response, 200, { ok: true, ready: true });
+    return;
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/coder') {
     enforceReadApiToken(request, session);
     const coder = getCoderController(app);
