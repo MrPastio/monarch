@@ -3349,6 +3349,12 @@ def detect_quality_flags(answer: str, expected_language: str = "auto") -> list[s
     ]) or len(re.findall(r"\bя\s*[-—]", answer, flags=re.IGNORECASE)) >= 3:
         flags.append("identity_confusion")
 
+    if re_search_any(lowered, [
+        r"mrpastio.{0,100}(?:создал|создавш\w*|создател\w*|стоит\s+за\s+созданием)\s+monarch\s+(?:и|&)\s+codex",
+        r"mrpastio.{0,100}(?:created|creator\s+of|built)\s+monarch\s+(?:and|&)\s+codex",
+    ]):
+        flags.append("creator_confusion")
+
     if re_search_any(answer, [
         r"\bRules:",
         r"\bYou are Oscar\b",

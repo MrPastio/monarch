@@ -5,6 +5,7 @@ import base64
 import gc
 import json
 import logging
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -927,7 +928,7 @@ def test_model_runtime_preserves_monarch_supplied_system_context():
 
     assert len(prompt) == 2
     assert prompt[0].role == "system"
-    assert "Monarch-supplied context blocks" in prompt[0].content
+    assert "Переданные Monarch context blocks" in prompt[0].content
     assert "Пользователь предпочитает краткий русский ответ" in prompt[0].content
     assert prompt[1].role == "user"
     assert prompt[1].content == "Привет"
@@ -951,10 +952,10 @@ def test_model_runtime_treats_resolved_live_registry_mentions_as_separate_module
         "low",
     )
 
-    assert "resolvedMentionIds contains multiple ids" in prompt[0].content
-    assert "they are separate registered modules" in prompt[0].content
-    assert "Write a natural answer in the user's language" in prompt[0].content
-    assert "do not dump raw JSON" in prompt[0].content
+    assert "Несколько resolvedMentionIds" in prompt[0].content
+    assert "отдельные модули" in prompt[0].content
+    assert "Используй релевантные факты естественно" in prompt[0].content
+    assert "не выгружай raw JSON" in prompt[0].content
     assert "Monarch Safe" in prompt[0].content
     assert "Monarch Sharing" in prompt[0].content
 
@@ -1459,7 +1460,7 @@ def test_model_prompt_exposes_real_monarch_capabilities_without_claiming_success
 
     assert "workspace.files.read" in prompt[0].content
     assert "Monarch Workspace" in prompt[0].content
-    assert "never pretend an action succeeded" in prompt[0].content
+    assert "Видимый текст не должен утверждать успех" in prompt[0].content
     assert "sandbox=read-only" in prompt[0].content
 
 
@@ -1526,8 +1527,9 @@ def test_model_prompt_contains_authoritative_workspace_root(tmp_path):
     assert "Agent operating context" in prompt[0].content
     assert "environment.inspect" in prompt[0].content
     assert "workspace.files.write" in prompt[0].content
-    assert "You are not a decorative chat layer" in prompt[0].content
-    assert "Never print raw tool-call syntax" in prompt[0].content
+    assert "не декоративный чат" in prompt[0].content
+    assert "[[MONARCH_ACTION:" in prompt[0].content
+    assert "raw tool JSON" in prompt[0].content
 
 
 def test_conversation_message_create_persists_predispatched_action(monkeypatch, tmp_path):
@@ -2202,12 +2204,14 @@ def test_prompt_builder_uses_russian_only_base_prompt():
     )
     system = messages[0].content
 
-    assert "Ты Oscar" in system
-    assert "MrPastio" in system
-    assert "соло-разработчиком" in system
-    assert "Правила поведения" in system
+    assert '<oscar_agent_policy version="3.0" language="ru">' in system
+    assert "Тебя зовут Oscar" in system
+    assert "Тебя и Monarch создал MrPastio" in system
+    assert "Codex создан OpenAI" in system
+    assert "создавший Monarch и Codex" not in system
+    assert "Главная цель" in system
     assert "You are Oscar" not in system
-    assert "Rules:" not in system
+    assert "Primary objective" not in system
 
 
 def test_prompt_builder_uses_english_only_base_prompt():
@@ -2220,10 +2224,53 @@ def test_prompt_builder_uses_english_only_base_prompt():
     )
     system = messages[0].content
 
-    assert "You are Oscar" in system
-    assert "MrPastio" in system
-    assert "Rules:" in system
-    assert "Правила поведения" not in system
+    assert '<oscar_agent_policy version="3.0" language="en">' in system
+    assert "Your name is Oscar" in system
+    assert "MrPastio created you and Monarch" in system
+    assert "Codex was created by OpenAI" in system
+    assert "MrPastio created Monarch and Codex" not in system
+    assert "Primary objective" in system
+    assert "Главная цель" not in system
+
+
+def test_prompt_carries_current_turn_date_and_preserves_elliptical_followups():
+    runtime = LocalModelRuntime(Settings(api_token="test", mock_model=True))
+
+    messages = runtime._build_prompt_messages(
+        [
+            ChatMessage(role="user", content="Расскажи о реалистичном сценарии"),
+            ChatMessage(role="assistant", content="Краткий сценарий."),
+            ChatMessage(role="user", content="ещё больше"),
+        ],
+        [],
+        "low",
+    )
+    system = messages[0].content
+
+    assert datetime.now().astimezone().date().isoformat() in system
+    assert "Сохраняй активную тему диалога" in system
+    assert "ещё больше" in system
+    assert "один конкретный вопрос" in system
+
+
+def test_prompt_keeps_agent_catalog_for_short_action_followup():
+    runtime = LocalModelRuntime(Settings(api_token="test", mock_model=True))
+
+    messages = runtime._build_prompt_messages(
+        [
+            ChatMessage(role="user", content="Проверь проект и исправь найденную проблему"),
+            ChatMessage(role="assistant", content="Нужно прочитать конфигурацию."),
+            ChatMessage(role="user", content="Продолжай"),
+        ],
+        [],
+        "low",
+    )
+    system = messages[0].content
+
+    assert '<monarch_action_policy version="3.0">' in system
+    assert "workspace.files.read" in system
+    assert "workspace.files.write" in system
+    assert "не обещай сделать позже" in system
 
 
 def test_simple_chat_prompt_skips_unneeded_agent_catalog_and_environment():
@@ -2237,9 +2284,9 @@ def test_simple_chat_prompt_skips_unneeded_agent_catalog_and_environment():
         )
         system = messages[0].content
 
-        assert len(system) < 2500
+        assert len(system) < 7000
         assert "Agent operating context" not in system
-        assert "Monarch agent capability contract" not in system
+        assert '<monarch_action_policy version="3.0">' not in system
         assert "workspace.files.write" not in system
 
 
@@ -2265,6 +2312,24 @@ def test_quality_gate_flags_broken_identity_answer():
     )
 
     assert "identity_confusion" in flags
+
+
+def test_quality_gate_flags_false_codex_creator_attribution():
+    flags = main_module.detect_quality_flags(
+        "MrPastio — соло-разработчик, создавший Monarch и Codex.",
+        "ru",
+    )
+
+    assert "creator_confusion" in flags
+
+
+def test_quality_gate_allows_correct_codex_creator_attribution():
+    flags = main_module.detect_quality_flags(
+        "MrPastio создал Monarch и Oscar. Codex создан OpenAI и помогает в инженерной работе.",
+        "ru",
+    )
+
+    assert "creator_confusion" not in flags
 
 
 def test_quality_gate_allows_valid_russian_answer():
@@ -3349,15 +3414,16 @@ def test_coder_context_marker_becomes_a_trusted_bounded_runtime_contract(tmp_pat
         ChatAccessContext(sandboxMode="workspace-write", approvalPolicy="on-request"),
     )
 
-    assert "Authoritative Monarch Coder Mode contract" in prompt[0].content
-    assert "autonomously propose only listed coder.* capabilities" in prompt[0].content
+    assert '<monarch_coder_agent_policy version="3.0">' in prompt[0].content
+    assert "understand the requested outcome -> inspect real project evidence" in prompt[0].content
+    assert "Propose only listed coder.* capabilities" in prompt[0].content
     assert '"capabilityId":"coder.files.write"' in prompt[0].content
     assert '"capabilityId":"workspace.files.write"' not in prompt[0].content
     assert marker in prompt[0].content
-    assert "it is the only working root" in prompt[0].content
-    assert "coder.projects.* is never inspection evidence" in prompt[0].content
-    assert "Never merely announce a future read" in prompt[0].content
-    assert "batch independent reads" in prompt[0].content
+    assert "is the only working root" in prompt[0].content
+    assert "coder.projects.* metadata is not inspection evidence" in prompt[0].content
+    assert "Never end with a future-tense promise" in prompt[0].content
+    assert "batching independent reads" in prompt[0].content
     assert "Язык ответа: русский (ru)" in prompt[0].content
     assert str(runtime.settings.workspace_root.resolve()) not in prompt[0].content
     assert "Agent operating context" not in prompt[0].content
@@ -3833,7 +3899,7 @@ async def test_chat_environment_questions_are_grounded_in_model_context(monkeypa
     assert str(settings.workspace_root.resolve()) in captured["system"]
     assert "environment.inspect" in captured["system"]
     assert "workspace.files.write" in captured["system"]
-    assert "not a decorative chat layer" in captured["system"]
+    assert "не декоративный чат" in captured["system"]
 
     conversation = store.get_conversation("environment-truth")
     assert [message["role"] for message in conversation["messages"]] == ["user", "assistant"]

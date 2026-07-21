@@ -25,10 +25,16 @@ describe('assistant local profile context', () => {
 
     const messages = await buildAssistantModelMessages({ text: 'Привет', context });
     expect(messages[0]?.content).toContain('<monarch_direct_model_policy');
+    expect(messages[0]?.content).toContain('version="3.0"');
+    expect(messages[0]?.content).toContain('Oscar и Monarch создал MrPastio');
+    expect(messages[0]?.content).toContain('Codex создан OpenAI');
+    expect(messages[0]?.content).not.toContain('MrPastio создал Monarch и Codex');
+    expect(messages[0]?.content).toContain('короткие follow-up');
+    expect(messages[0]?.content).toContain('execution result/receipt');
     const localContext = messages.find((message) => message.content.includes('<local_user_context>'))?.content || '';
     expect(localContext).toContain('Сначала результат');
     expect(localContext).toContain('Не удалять чужие изменения');
     expect(localContext).not.toContain('Временная заметка');
-    expect(messages[0]?.content.length).toBeLessThan(1800);
+    expect(messages[0]?.content.length).toBeLessThan(3200);
   });
 });
