@@ -2,9 +2,13 @@
 
 Monarch задуман как локальная AI-экосистема, а не просто приложение-ассистент.
 
+**Стадия продукта:** `Beta`. Suite `Monarch Modules` и дочерний модуль
+`Monarch Studio` находятся в стадии `Alpha`: основные пути уже работают, но их
+контракты и расширенный функционал ещё могут меняться до стабилизации.
+
 Направление проекта: расширяемая архитектура из маленького системного ядра, роутеров, инструментов, локальных модельных рантаймов, памяти, интерфейсов и независимых доменных блоков. Каждый блок может вырасти в полноценную подсистему, но при этом говорить с остальным Monarch через единый контракт.
 
-Текущий статус: рабочая local-first платформа из 19 встроенных module packages, TypeScript control plane, Electron shell, Oscar FastAPI/model runtime, отдельного Monarch Security protector, Safe utility process, Coder/Voice/Sharing/Telegram surfaces и единого capability execution pipeline.
+Текущий статус: публичная `Beta` с TypeScript control plane, Electron shell, Oscar FastAPI/model runtime, Monarch Security, Safe, Coder, Voice, Sharing, Telegram, promoted suite `Monarch Modules`, alpha-версией `Monarch Studio` и единым capability execution pipeline.
 
 ## Установка На Windows
 

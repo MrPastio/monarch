@@ -11,6 +11,7 @@ const $ = (selector) => document.querySelector(selector);
 const MAX_EDITABLE_TEXT_BYTES = 4 * 1024 * 1024;
 const MAX_EDITABLE_HEX_BYTES = 64 * 1024;
 const UI_AUTO_LOCK_GRACE_MS = 1500;
+const RUNTIME_ACTIVITY_TOUCH_THROTTLE_MS = 750;
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const TRANSITION_PHASES = {
   unlock: [
@@ -41,6 +42,8 @@ const state = {
   itemMode: 'file',
   importing: false,
   lockTimer: 0,
+  runtimeTouchAt: 0,
+  runtimeTouchPending: false,
   transitionPromise: null,
 };
 
@@ -69,7 +72,10 @@ async function init() {
 }
 
 function bindEvents() {
+  document.addEventListener('click', armUiLock, true);
   document.addEventListener('click', handleClick);
+  document.addEventListener('pointerdown', armUiLock, true);
+  document.addEventListener('keydown', armUiLock, true);
   $('#setup-form').addEventListener('submit', setupVault);
   $('#unlock-form').addEventListener('submit', unlockVault);
   $('#item-form').addEventListener('submit', submitItemDialog);
@@ -636,8 +642,26 @@ function focusFileControl(attribute, id) {
   const row = [...$('#file-list').querySelectorAll(attribute)].find((entry) => entry.getAttribute(attributeName) === id);
   row?.querySelector('.file-open-button')?.focus({ preventScroll: true });
 }
-function armUiLock() { clearTimeout(state.lockTimer); if (state.status?.unlocked) state.lockTimer = setTimeout(lockVault, (state.status.autoLockMs || 300000) + UI_AUTO_LOCK_GRACE_MS); }
-async function request(action, payload = {}) { armUiLock(); return bridge.request(action, payload); }
+function armUiLock() {
+  clearTimeout(state.lockTimer);
+  if (!state.status?.unlocked) return;
+  state.lockTimer = setTimeout(lockVault, (state.status.autoLockMs || 300000) + UI_AUTO_LOCK_GRACE_MS);
+  const now = Date.now();
+  if (state.runtimeTouchPending || now - state.runtimeTouchAt < RUNTIME_ACTIVITY_TOUCH_THROTTLE_MS) return;
+  state.runtimeTouchAt = now;
+  state.runtimeTouchPending = true;
+  bridge.request('touch')
+    .then((status) => { if (status?.unlocked) state.status = status; })
+    .catch(() => undefined)
+    .finally(() => { state.runtimeTouchPending = false; });
+}
+async function request(action, payload = {}) {
+  clearTimeout(state.lockTimer);
+  if (state.status?.unlocked) {
+    state.lockTimer = setTimeout(lockVault, (state.status.autoLockMs || 300000) + UI_AUTO_LOCK_GRACE_MS);
+  }
+  return bridge.request(action, payload);
+}
 function updateAttempts() {
   $('#pin-attempts').textContent = state.status?.attemptsRemaining ?? 0;
   $('#key-attempts').textContent = state.status?.recoveryAttemptAvailable ? '1' : '0';

@@ -114,6 +114,7 @@ security/src/*.egg-info/
 *.tar.gz
 /monarch_detailed_review.pdf
 /monarch_safe_audit.pdf
+/artifacts/audits/
 /installer/out/
 /.monarch-public-snapshot
 

@@ -757,6 +757,10 @@ def event_family(kind: str) -> str:
 def correlation_key(assessment: RuleAssessment) -> str:
     event = assessment.event
     facts = event.facts
+    if event.kind == "device.connected":
+        instance_id = facts.get("instance_id")
+        if isinstance(instance_id, str) and instance_id.strip():
+            return f"device:{instance_id.strip().casefold()}"
     for key in ("owning_process", "pid", "process_id"):
         value = facts.get(key)
         if str(value or "").isdigit() and int(value) > 0:
@@ -879,6 +883,9 @@ def _evidence_entities(evidence: IncidentEvidence) -> set[str]:
     port = scope.get("remote_port")
     if isinstance(address, str) and address.strip():
         entities.add(f"endpoint:{address.strip().lower()}:{port or '*'}")
+    instance_id = scope.get("instance_id")
+    if isinstance(instance_id, str) and instance_id.strip():
+        entities.add(f"device:{instance_id.strip().casefold()}")
     return entities
 
 
@@ -917,7 +924,7 @@ def _incident_status(value: Any) -> IncidentStatus:
 def _bounded_scope(scope: dict[str, Any], *, allow_empty: bool = False) -> dict[str, Any]:
     allowed = {
         "path", "pid", "owning_process", "process_start_time", "remote_address", "remote_port",
-        "protocol", "direction", "rule_id",
+        "protocol", "direction", "rule_id", "instance_id",
     }
     bounded: dict[str, Any] = {}
     for key, value in scope.items():
@@ -938,7 +945,7 @@ def _response_scope(facts: dict[str, Any]) -> dict[str, Any]:
         key: facts.get(key)
         for key in (
             "path", "pid", "owning_process", "remote_address", "remote_port",
-            "protocol", "direction",
+            "protocol", "direction", "instance_id",
         )
         if facts.get(key) is not None
     }

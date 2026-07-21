@@ -1429,6 +1429,35 @@ def is_coder_mode_request(request: ChatRequest) -> bool:
     )
 
 
+def coder_mode_metadata(request: ChatRequest) -> dict:
+    for message in request.messages:
+        content = message.content.strip()
+        if message.role != "system" or not (
+            content.startswith("<monarch_coder_mode>")
+            and content.endswith("</monarch_coder_mode>")
+        ):
+            continue
+        payload_text = re.sub(
+            r"^\s*<monarch_coder_mode>\s*|\s*</monarch_coder_mode>\s*$",
+            "",
+            content,
+        )
+        try:
+            payload = json.loads(payload_text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def expected_request_language(request: ChatRequest) -> str:
+    if is_coder_mode_request(request):
+        candidate = str(coder_mode_metadata(request).get("responseLanguage") or "").strip().lower()
+        if candidate in {"ru", "en", "uk", "bg"}:
+            return candidate
+    return expected_response_language(latest_user_text(request))
+
+
 def extract_action_proposals(answer: str, request: ChatRequest) -> tuple[str, list[dict]]:
     text = str(answer or "")
     matches = list(re.finditer(r"\[\[MONARCH_ACTION:([\s\S]*?)\]\]", text, flags=re.IGNORECASE))
@@ -1631,7 +1660,7 @@ def record_model_quality_result(
 ) -> None:
     if not tier or tier == "system":
         return
-    expected_lang = expected_response_language(latest_user_text(request))
+    expected_lang = expected_request_language(request)
     detected_flags = detect_quality_flags(answer, expected_lang)
     merged_flags = list(dict.fromkeys([*(quality_flags or []), *detected_flags]))
     assessment = assess_model_answer(
@@ -1673,7 +1702,7 @@ def log_route_debug_trace(
             {
                 "inputPreview": latest_user[:120],
                 "normalizedInputPreview": normalized[:120],
-                "detectedLanguage": expected_response_language(latest_user) if latest_user else "auto",
+                "detectedLanguage": expected_request_language(request) if latest_user else "auto",
                 "intentKind": route_hint_intent(request) or detect_meta_intent(latest_user) or "unknown",
                 "riskHint": request.route.riskHint if request.route and request.route.riskHint else "none",
                 "routeHintTier": route_hint_tier(request),
@@ -2317,7 +2346,7 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                     full_answer = grounded_answer
 
                 if not is_explicit_gemma_override(request):
-                    detected_quality_flags = detect_quality_flags(full_answer, expected_response_language(latest_user_text(request)))
+                    detected_quality_flags = detect_quality_flags(full_answer, expected_request_language(request))
                     quality_flags = list(dict.fromkeys([*quality_flags, *detected_quality_flags]))
                     if detected_quality_flags and quality_regeneration_enabled(request):
                         regenerated_answer, regenerated_quality_flags, quality_regenerated = await maybe_regenerate_for_quality(
@@ -2486,7 +2515,7 @@ def should_auto_continue(
 
 
 def automatic_continuation_messages(request: ChatRequest, answer: str) -> list[ChatMessage]:
-    instruction = continuation_instruction(expected_response_language(latest_user_text(request)))
+    instruction = continuation_instruction(expected_request_language(request))
     # The tail is enough to preserve the cut point while leaving room for the
     # original request, retrieved context, and a generous continuation budget.
     return request.messages + [
@@ -2496,7 +2525,7 @@ def automatic_continuation_messages(request: ChatRequest, answer: str) -> list[C
 
 
 def automatic_research_continuation_messages(request: ChatRequest, answer: str) -> list[ChatMessage]:
-    language = expected_response_language(latest_user_text(request))
+    language = expected_request_language(request)
     instruction = (
         "Продолжи окончательный исследовательский ответ ровно с оборванного места. "
         "Не повторяй уже написанное, не добавляй новое вступление и не начинай ответ заново. "
@@ -3033,7 +3062,7 @@ def refers_to_previous_answer(text: str) -> bool:
 
 def render_runtime_recovery_answer(request: ChatRequest) -> str:
     latest_user = next((message.content for message in reversed(request.messages) if message.role == "user"), "").strip()
-    language = expected_response_language(latest_user) if latest_user else "auto"
+    language = expected_request_language(request) if latest_user else "auto"
     if language == "ru":
         if latest_user:
             return (
@@ -3073,7 +3102,7 @@ async def maybe_rewrite_answer_language(
     latest_user = next((message.content for message in reversed(request.messages) if message.role == "user"), "")
     if not latest_user:
         return None
-    expected_lang = expected_response_language(latest_user)
+    expected_lang = expected_request_language(request)
     if expected_lang not in {"ru", "en", "uk", "bg"}:
         return None
     explicit_language = detect_requested_language(latest_user)
@@ -3122,6 +3151,8 @@ async def maybe_rewrite_answer_language(
 
 
 def live_monarch_registry_snapshot(request: ChatRequest) -> dict | None:
+    if is_coder_mode_request(request):
+        return None
     for message in request.messages:
         if message.role != "system" or "<live_monarch_system>" not in message.content:
             continue
@@ -3185,7 +3216,7 @@ def detect_registry_grounding_flags(request: ChatRequest, answer: str) -> list[s
         flags.append("registry_false_ambiguity")
     if "<live_monarch_system>" in normalized_answer or "resolvedmentionids" in normalized_answer:
         flags.append("registry_context_leak")
-    expected_lang = expected_response_language(latest_user_text(request))
+    expected_lang = expected_request_language(request)
     if expected_lang != "auto" and detect_user_language(answer) not in {expected_lang, "auto"}:
         flags.append("registry_language_drift")
     return list(dict.fromkeys(flags))
@@ -3209,7 +3240,7 @@ async def maybe_regenerate_for_registry_grounding(
         f'{item["name"]} (id={item["id"]}): {item["description"]}'
         for item in resolved
     )
-    expected_lang = expected_response_language(latest_user_text(request))
+    expected_lang = expected_request_language(request)
     language_instruction = {
         "ru": "Answer only in Russian.",
         "uk": "Answer only in Ukrainian.",
@@ -3263,7 +3294,7 @@ async def maybe_regenerate_for_quality(
     sources,
     full_answer: str,
 ) -> tuple[str, list[str], bool]:
-    expected_lang = expected_response_language(latest_user_text(request))
+    expected_lang = expected_request_language(request)
     quality_flags = detect_quality_flags(full_answer, expected_lang)
     if not quality_flags:
         return full_answer, [], False

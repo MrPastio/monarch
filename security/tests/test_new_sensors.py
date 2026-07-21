@@ -168,7 +168,16 @@ class NewSensorSignatureTests(unittest.TestCase):
                 return ["worker.exe", "--run"]
 
             def parent(self):
-                return SimpleNamespace(name=lambda: "parent.exe")
+                grandparent = SimpleNamespace(
+                    name=lambda: "grandparent.exe",
+                    exe=lambda: r"C:\Tools\grandparent.exe",
+                    parent=lambda: None,
+                )
+                return SimpleNamespace(
+                    name=lambda: "parent.exe",
+                    exe=lambda: r"C:\Tools\parent.exe",
+                    parent=lambda: grandparent,
+                )
 
         fake_process = FakeProcess()
         fake_psutil = SimpleNamespace(
@@ -189,3 +198,8 @@ class NewSensorSignatureTests(unittest.TestCase):
         self.assertEqual(fake_process.detail_attrs, ["pid", "name", "exe", "username", "ppid", "create_time"])
         self.assertEqual(events[0].facts["cmdline"], ["worker.exe", "--run"])
         self.assertEqual(events[0].facts["parent_name"], "parent.exe")
+        self.assertEqual(events[0].facts["parent_exe"], r"C:\Tools\parent.exe")
+        self.assertEqual(
+            events[0].facts["ancestor_names"],
+            ["parent.exe", "grandparent.exe"],
+        )

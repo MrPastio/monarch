@@ -1,6 +1,6 @@
 {
   "name": "monarch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Local-first AI ecosystem architecture kernel.",
@@ -72,6 +72,8 @@
     "vitest": "^4.1.8"
   },
   "dependencies": {
+    "fabric": "7.4.0",
+    "mediabunny": "1.50.9",
     "undici": "^7.28.0"
   },
   "optionalDependencies": {

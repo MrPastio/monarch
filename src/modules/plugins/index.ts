@@ -130,6 +130,8 @@ export class PluginsModule implements MonarchModule {
         ],
         manifestFields: [
           'id, name, version, kind, description',
+          'kind suite for promoted product-level module groups',
+          'parentSuiteId for suite membership; the parent suite must also be a dependency',
           'owns: domain words the router can use',
           'permissions: declared risks the module is allowed to expose',
           'capabilities: typed actions with risk, inputSchema, outputSchema, routing metadata',
@@ -151,6 +153,7 @@ export class PluginsModule implements MonarchModule {
         docs: [
           'docs/03_MODULE_CONTRACT.md',
           'docs/07_ADDING_MODULE.md',
+          'docs/10_MONARCH_STUDIO.md',
         ],
       },
     };
@@ -176,6 +179,7 @@ function summarizePlugin(
     owns: record.manifest.owns,
     permissions: record.manifest.permissions,
     dependencies: record.manifest.dependencies || [],
+    parentSuiteId: record.manifest.parentSuiteId,
     events: record.manifest.events || [],
     capabilities: capabilities.map(summarizeCapability),
   };

@@ -15,6 +15,7 @@ import { initOscarVoiceMode } from './modules/oscar-voice-mode.js';
 import { installOscarSnakeEasterEgg } from './modules/oscar-snake-game.js';
 import { installMonarchBrandEasterEgg } from './modules/brand-easter-egg.js';
 import { initCoderPane } from './modules/coder-pane.js';
+import { initStudioPane, setStudioActive } from './modules/studio-pane.js';
 
 // Elements
 const elements = {
@@ -310,6 +311,7 @@ document.addEventListener('click', (event) => {
         'oscar-section',
         'security-section',
         'workspace-section',
+        'modules-section',
         'models-section',
         'sharing-section',
         'logs-section',
@@ -320,6 +322,8 @@ document.addEventListener('click', (event) => {
         if (el) el.classList.add('view-hidden');
       });
       target.classList.remove('view-hidden');
+      elements.shell?.classList.toggle('modules-active', targetId === 'modules-section');
+      setStudioActive(targetId === 'modules-section');
       resetViewScroll(target);
       renderActiveView(targetId);
       target.classList.remove('view-entering');
@@ -540,6 +544,7 @@ function init() {
   initSecurityPane(render);
   initSharingPane();
   initSettingsPane();
+  initStudioPane();
   initVoiceInput();
   initOscarVoiceMode();
   installOscarSnakeEasterEgg({

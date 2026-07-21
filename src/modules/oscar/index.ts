@@ -376,6 +376,7 @@ export class OscarModule implements MonarchModule {
     }
 
     const lastUserMessage = messages.slice(-1).find(m => m.role === 'user')?.content || '';
+    const coderMode = isCoderModeMessages(messages);
     let effectiveWebSearch = webSearch;
     if (effectiveWebSearch === true && shouldKeepOscarQueryLocal(lastUserMessage)) {
       effectiveWebSearch = false;
@@ -383,13 +384,17 @@ export class OscarModule implements MonarchModule {
 
     try {
       const chatRequest = createDefaultOscarChatRequest(
-        await withLocalUserContext(messages, context, lastUserMessage),
+        coderMode ? messages : await withLocalUserContext(messages, context, lastUserMessage),
         effectiveWebSearch,
         input
       );
-      applyMonarchRegistryRouteFloor(chatRequest, lastUserMessage);
+      if (!coderMode) applyMonarchRegistryRouteFloor(chatRequest, lastUserMessage);
       this.attachCapabilityCatalog(chatRequest, context, lastUserMessage);
-      await this.attachAgentSkills(chatRequest, lastUserMessage, context);
+      if (!coderMode) {
+        await this.attachAgentSkills(chatRequest, lastUserMessage, context);
+      } else {
+        chatRequest.skills = [];
+      }
       const response = await this.client.chat(chatRequest);
       await context.emit('oscar.chat.completed', this.manifest.id, {
         webSearch: effectiveWebSearch === true,
@@ -433,6 +438,7 @@ export class OscarModule implements MonarchModule {
     }
 
     const lastUserMessage = messages.slice(-1).find(m => m.role === 'user')?.content || '';
+    const coderMode = isCoderModeMessages(messages);
     const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
     let effectiveWebSearch = typeof record.web_search === 'boolean' ? record.web_search : undefined;
     if (effectiveWebSearch === true && shouldKeepOscarQueryLocal(lastUserMessage)) {
@@ -441,13 +447,17 @@ export class OscarModule implements MonarchModule {
 
     try {
       const chatRequest = createDefaultOscarChatRequest(
-        await withLocalUserContext(messages, context, lastUserMessage),
+        coderMode ? messages : await withLocalUserContext(messages, context, lastUserMessage),
         effectiveWebSearch,
         input
       );
-      applyMonarchRegistryRouteFloor(chatRequest, lastUserMessage);
+      if (!coderMode) applyMonarchRegistryRouteFloor(chatRequest, lastUserMessage);
       this.attachCapabilityCatalog(chatRequest, context, lastUserMessage);
-      await this.attachAgentSkills(chatRequest, lastUserMessage, context);
+      if (!coderMode) {
+        await this.attachAgentSkills(chatRequest, lastUserMessage, context);
+      } else {
+        chatRequest.skills = [];
+      }
       const stream = this.client.streamChat(chatRequest);
       
       return {
@@ -613,9 +623,7 @@ export class OscarModule implements MonarchModule {
     context: MonarchKernelContext,
     prompt: string,
   ): void {
-    const coderMode = request.messages.some((message) => message.role === 'system'
-      && message.content.trim().startsWith('<monarch_coder_mode>')
-      && message.content.trim().endsWith('</monarch_coder_mode>'));
+    const coderMode = isCoderModeMessages(request.messages);
     request.access = context.getPermissionProfile();
     const catalog = selectCapabilityCatalog(
       context.listCapabilities()
@@ -845,6 +853,12 @@ export class OscarModule implements MonarchModule {
       return backendUnavailableResult(error);
     }
   }
+}
+
+function isCoderModeMessages(messages: readonly OscarChatMessage[]): boolean {
+  return messages.some((message) => message.role === 'system'
+    && message.content.trim().startsWith('<monarch_coder_mode>')
+    && message.content.trim().endsWith('</monarch_coder_mode>'));
 }
 
 function createOscarRouteHint(

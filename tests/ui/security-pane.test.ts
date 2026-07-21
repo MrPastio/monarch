@@ -319,6 +319,7 @@ describe('Security pane rendering', () => {
         }] } },
       },
       selectedIncidentId: 'inc-42',
+      incidentFilter: 'active',
       recentScans: [],
     };
     const { renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
@@ -335,6 +336,42 @@ describe('Security pane rendering', () => {
     expect(elements['#security-incident-detail'].innerHTML).toContain('не меняет риск');
     expect(elements['#security-incident-detail'].innerHTML).toContain('Предложить изоляцию');
     expect(elements['#security-incident-detail'].innerHTML).toContain('Событие безопасно');
+  });
+
+  it('keeps resolved incident history out of the default active queue', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', {
+      querySelector: (selector: string) => elements[selector] || null,
+      querySelectorAll: () => [],
+    });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = {
+      busy: false,
+      statusBusy: false,
+      status: securityStatus(true),
+      lastResult: null,
+      audit: null,
+      error: '',
+      incidentsBusy: false,
+      incidentFilter: 'active',
+      incidents: { ok: true, output: { payload: { incidents: [
+        { incident_id: 'open-1', title: 'Open event', primary_subject: 'active.exe', risk_score: 300, status: 'open', decision_required: true },
+        { incident_id: 'closed-1', title: 'Closed event', primary_subject: 'history.exe', risk_score: 200, status: 'dismissed', decision_required: false },
+      ] } } },
+      selectedIncidentId: null,
+      recentScans: [],
+    };
+    const { renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+
+    renderSecurity();
+    expect(elements['#security-incident-active-count'].textContent).toBe('1');
+    expect(elements['#security-incident-all-count'].textContent).toBe('2');
+    expect(elements['#security-incident-list'].innerHTML).toContain('active.exe');
+    expect(elements['#security-incident-list'].innerHTML).not.toContain('history.exe');
+
+    state.security.incidentFilter = 'all';
+    renderSecurity();
+    expect(elements['#security-incident-list'].innerHTML).toContain('history.exe');
   });
 
   it('renders the live Network Center workspace', async () => {
@@ -719,6 +756,8 @@ function createSecurityDom(): Record<string, FakeElement> {
     '#security-incident-tab-count',
     '#security-incident-list',
     '#security-incident-detail',
+    '#security-incident-active-count',
+    '#security-incident-all-count',
     '#security-network-result',
     '#security-network-metrics',
     '#security-network-profiles',

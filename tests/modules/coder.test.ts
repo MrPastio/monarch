@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { MonarchKernel } from '../../src/core';
@@ -32,6 +32,14 @@ describe('Coder Mode', () => {
       expect(write.output).toMatchObject({ verified: true, sizeBytes: 27 });
       expect((write.output as any).sha256).toMatch(/^[a-f0-9]{64}$/);
       expect(await readFile(path.join(project.root, 'src', 'index.ts'), 'utf8')).toContain('ready');
+      await mkdir(path.join(project.root, '.agents', 'session'), { recursive: true });
+      await writeFile(path.join(project.root, '.agents', 'session', 'trace.txt'), 'generated trace', 'utf8');
+      const listed = await execute(module, 'coder.files.list', { projectId: project.id, recursive: true });
+      expect((listed.output as any).entries.some((entry: any) => entry.path.startsWith('.agents'))).toBe(false);
+      expect((listed.output as any).entries.some((entry: any) => entry.path.startsWith('.monarch'))).toBe(false);
+      const snapshot = await module.projects.snapshot(project.id);
+      expect(snapshot.entries.some((entry) => entry.path.startsWith('.agents'))).toBe(false);
+      expect(snapshot.entries.some((entry) => entry.path.startsWith('.monarch'))).toBe(false);
 
       const monarchBlocked = await execute(module, 'coder.files.write', {
         projectId: project.id,

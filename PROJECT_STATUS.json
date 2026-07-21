@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "project": {
+    "id": "monarch",
+    "name": "Monarch",
+    "stage": "beta"
+  },
+  "components": [
+    {
+      "id": "monarch-modules",
+      "name": "Monarch Modules",
+      "stage": "alpha"
+    },
+    {
+      "id": "studio",
+      "name": "Monarch Studio",
+      "stage": "alpha"
+    }
+  ]
+}

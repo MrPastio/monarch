@@ -688,8 +688,15 @@ function renderRunSummary(run) {
   if (!elements.runSummary) return;
   const disconnected = isRunActive(run) && coderState.pollDisconnected;
   const terminal = run && ['completed', 'failed', 'cancelled'].includes(run.status);
+  const warningCount = run?.status === 'completed' && Array.isArray(run?.summary?.failures)
+    ? run.summary.failures.filter(Boolean).length
+    : 0;
   elements.runSummary.hidden = !disconnected && !terminal;
-  elements.runSummary.dataset.status = disconnected ? 'disconnected' : run?.status || '';
+  elements.runSummary.dataset.status = disconnected
+    ? 'disconnected'
+    : warningCount > 0
+      ? 'warning'
+      : run?.status || '';
   elements.runRetry.hidden = true;
   if (!run || (!disconnected && !terminal)) return;
   if (disconnected) {
@@ -702,10 +709,15 @@ function renderRunSummary(run) {
     }
     return;
   }
-  elements.runSummaryKicker.textContent = run.status === 'completed' ? 'РЕЗУЛЬТАТ' : run.status === 'failed' ? 'СЕССИЯ ОСТАНОВЛЕНА' : 'СЕССИЯ ОСТАНОВЛЕНА';
+  elements.runSummaryKicker.textContent = run.status === 'completed'
+    ? warningCount > 0 ? 'РЕЗУЛЬТАТ С ПРЕДУПРЕЖДЕНИЯМИ' : 'РЕЗУЛЬТАТ'
+    : 'СЕССИЯ ОСТАНОВЛЕНА';
   if (run.status === 'completed') {
-    elements.runSummaryTitle.textContent = 'Задача завершена';
-    elements.runSummaryDetail.textContent = lastAssistantDetail(run.events) || 'Проверь изменённые файлы и выполненные проверки справа.';
+    elements.runSummaryTitle.textContent = warningCount > 0 ? 'Часть результата требует проверки' : 'Задача завершена';
+    const outcome = terminalAnswerPreview(run);
+    elements.runSummaryDetail.textContent = warningCount > 0
+      ? `${warningCount} ${warningCount === 1 ? 'предупреждение осталось' : 'предупреждения осталось'} в журнале.${outcome ? ` ${outcome}` : ''}`
+      : outcome || 'Проверь изменённые файлы и выполненные проверки справа.';
     elements.runRetry.textContent = 'Продолжить новой задачей';
   } else if (run.status === 'failed') {
     elements.runSummaryTitle.textContent = 'Не удалось завершить задачу';
@@ -1019,7 +1031,7 @@ function presentCoderEvent(event, requestedModel) {
     const labels = {
       queued: ['Задача поставлена в очередь', 'Coder готовит локальную сессию.'],
       running: ['Сессия запущена', 'Coder работает с закреплённой папкой проекта.'],
-      completed: ['Сессия завершена', 'Результат и проверки собраны.'],
+      completed: ['Сессия завершена', 'Подтверждённый результат сохранён.'],
       failed: ['Сессия остановлена', presentCoderFailureDetail(detail)],
     };
     const [statusTitle, statusDetail] = labels[runStatus] || [title, detail];
@@ -1444,6 +1456,14 @@ function mergeRunIntoOverview(run) {
 function lastAssistantDetail(events) {
   const event = [...(events || [])].reverse().find((entry) => entry.kind === 'assistant' && String(entry.detail || '').trim());
   return event ? String(event.detail).trim() : '';
+}
+
+function terminalAnswerPreview(run) {
+  const answer = String(run?.answer || '').trim();
+  if (!answer) return lastAssistantDetail(run?.events);
+  const analytical = answer.split(/\nИтог Coder:\s*\n/i).at(-1)?.trim() || answer;
+  const singleLine = analytical.replace(/\s+/g, ' ').trim();
+  return singleLine.length <= 360 ? singleLine : `${singleLine.slice(0, 357)}…`;
 }
 
 function lastFailureDetail(events) {

@@ -60,7 +60,7 @@ describe('Memory Module', () => {
     }
   });
 
-  it('should migrate v1 legacy snapshot to v2', async () => {
+  it('should migrate v1 legacy snapshot to v3', async () => {
     const filePath = path.join(
       process.cwd(),
       'runtime',
@@ -104,6 +104,72 @@ describe('Memory Module', () => {
       expect(persisted.version).toBe(3);
     } finally {
       await kernel?.stop().catch(() => undefined);
+      await rm(filePath, { force: true });
+    }
+  });
+
+  it('should preserve v3 metadata and unknown extension fields when persisting', async () => {
+    const filePath = path.join(
+      process.cwd(),
+      'runtime',
+      `smoke-memory-v3-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
+    );
+    const snapshot = {
+      version: 3,
+      records: [
+        {
+          id: 'mem_v3_smoke',
+          text: 'structured Monarch memory',
+          source: 'smoke',
+          createdAt: new Date(0).toISOString(),
+          updatedAt: new Date(0).toISOString(),
+          category: 'project',
+          tier: 'long',
+          importance: 0.8,
+          accessCount: 0,
+          pinned: false,
+          decayRate: 0.02,
+          type: 'architecture_note',
+          title: 'Architecture note',
+          tags: ['studio', 'modules'],
+          priority: 0.9,
+          relatedFiles: ['src/modules/studio/index.ts'],
+          relatedModules: ['studio'],
+          customExtension: { schema: 7, preserved: true },
+        },
+      ],
+    };
+
+    try {
+      await writeFile(filePath, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+      const store = new MonarchMemoryStore({ filePath });
+      await store.load();
+      const records = await store.search('structured Monarch');
+      expect(records[0]).toMatchObject({
+        type: 'architecture_note',
+        title: 'Architecture note',
+        tags: ['studio', 'modules'],
+        priority: 0.9,
+        relatedFiles: ['src/modules/studio/index.ts'],
+        relatedModules: ['studio'],
+        customExtension: { schema: 7, preserved: true },
+      });
+
+      const persisted = JSON.parse(await readFile(filePath, 'utf8')) as {
+        version: number;
+        records: Array<Record<string, unknown>>;
+      };
+      expect(persisted.version).toBe(3);
+      expect(persisted.records[0]).toMatchObject({
+        type: 'architecture_note',
+        title: 'Architecture note',
+        tags: ['studio', 'modules'],
+        priority: 0.9,
+        relatedFiles: ['src/modules/studio/index.ts'],
+        relatedModules: ['studio'],
+        customExtension: { schema: 7, preserved: true },
+      });
+    } finally {
       await rm(filePath, { force: true });
     }
   });

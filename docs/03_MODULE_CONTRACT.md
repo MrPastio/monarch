@@ -44,6 +44,28 @@ export const filesModulePackage: MonarchModulePackage = {
 - `dependencies`
 - `events`
 
+## Suite-модули
+
+`kind: 'suite'` обозначает продуктовый модуль верхнего уровня: он получает отдельную
+навигационную поверхность и группирует связанные модули. Suite не получает повышенных
+разрешений и не обходит router, permission gate, audit или Security.
+
+Дочерний модуль указывает `parentSuiteId` и обязательно добавляет этот suite в
+`dependencies`. Это гарантирует, что suite активируется раньше дочернего модуля и
+останавливается после него.
+
+```ts
+export const studioManifest: MonarchModuleManifest = {
+  id: 'studio',
+  name: 'Monarch Studio',
+  version: '0.1.0',
+  kind: 'domain',
+  parentSuiteId: 'monarch-modules',
+  dependencies: ['monarch-modules'],
+  // ...
+};
+```
+
 ## Lifecycle
 
 Минимально каждый модуль должен поддерживать:

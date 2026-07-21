@@ -449,6 +449,26 @@ describe('Monarch Safe adversarial security gates', () => {
     expect(autoLockEvents).toBe(1);
   });
 
+  it('renews the authoritative auto-lock lease on explicit user activity', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-safe-test-'));
+    roots.push(root);
+    const vault = new SafeVault(root, {
+      testKdf: true,
+      autoLockMs: 40,
+      deviceKey: Buffer.alloc(32, 0x63),
+    });
+    await vault.initialize();
+    await vault.setup({ pin: '1234', pinLength: 4, destructionConfirmed: true });
+    await vault.completeSetup({ recoveryAcknowledged: true });
+
+    await delay(25);
+    await expect(vault.touch()).resolves.toMatchObject({ unlocked: true });
+    await delay(25);
+    expect(vault.status()).toMatchObject({ unlocked: true });
+    await delay(35);
+    expect(vault.status()).toMatchObject({ unlocked: false });
+  });
+
   it('keeps the previous active generation readable when a manifest commit fails', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-safe-test-'));
     roots.push(root);

@@ -1274,7 +1274,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function shouldSkipDirectory(name: string): boolean {
-  return new Set(['.git', '.hg', '.svn', '.venv', 'node_modules', 'dist', 'build', 'target', 'vendor']).has(name.toLowerCase());
+  return new Set([
+    '.git', '.hg', '.agents', '.claude', '.codex', '.gemini', '.monarch', '.svn', '.venv',
+    'node_modules', 'dist', 'build', 'target', 'vendor',
+  ]).has(name.toLowerCase());
 }
 
 export function createCoderModule(options: CoderModuleOptions = {}): MonarchModule {

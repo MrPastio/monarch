@@ -4301,6 +4301,7 @@ body[data-theme="dark"] .claude-composer {
   }
 
   .app-shell {
+    width: 100%;
     min-height: 100vh;
     min-height: 100dvh;
     height: auto;

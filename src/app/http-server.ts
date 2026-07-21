@@ -986,6 +986,19 @@ function contentTypeForPath(filePath: string): string {
     return 'application/json; charset=utf-8';
   case '.svg':
     return 'image/svg+xml';
+  case '.png':
+    return 'image/png';
+  case '.jpg':
+  case '.jpeg':
+    return 'image/jpeg';
+  case '.webp':
+    return 'image/webp';
+  case '.gif':
+    return 'image/gif';
+  case '.woff':
+    return 'font/woff';
+  case '.woff2':
+    return 'font/woff2';
   default:
     return 'application/octet-stream';
   }

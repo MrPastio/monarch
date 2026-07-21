@@ -9,6 +9,7 @@ import type {
 import { nowIso, normalizeId, uniqueStrings } from './utils';
 
 const ALLOWED_MODULE_KINDS: readonly MonarchModuleKind[] = [
+  'suite',
   'system',
   'interface',
   'domain',
@@ -111,11 +112,41 @@ export class MonarchModuleRegistry {
     const visiting = new Set<string>();
     const visited = new Set<string>();
 
+    validateSuiteRelationships(this.records);
+
     for (const moduleId of this.records.keys()) {
       visitModule(moduleId, this.records, visiting, visited, order, []);
     }
 
     return order;
+  }
+}
+
+function validateSuiteRelationships(records: Map<string, MonarchModuleRecord>): void {
+  for (const record of records.values()) {
+    const parentSuiteId = record.manifest.parentSuiteId;
+    if (!parentSuiteId) {
+      continue;
+    }
+
+    if (parentSuiteId === record.manifest.id) {
+      throw new Error(`Module ${record.manifest.id} cannot be its own parent suite.`);
+    }
+
+    const parent = records.get(parentSuiteId);
+    if (!parent) {
+      throw new Error(`Module ${record.manifest.id} has missing parent suite: ${parentSuiteId}`);
+    }
+    if (parent.manifest.kind !== 'suite') {
+      throw new Error(
+        `Module ${record.manifest.id} parent ${parentSuiteId} must have kind suite.`
+      );
+    }
+    if (!(record.manifest.dependencies || []).includes(parentSuiteId)) {
+      throw new Error(
+        `Module ${record.manifest.id} must declare parent suite ${parentSuiteId} as a dependency.`
+      );
+    }
   }
 }
 
@@ -174,6 +205,12 @@ function normalizeManifest(manifest: MonarchModuleManifest): MonarchModuleManife
   }
 
   const permissions = uniqueStrings(manifest.permissions || []) as MonarchRisk[];
+  const parentSuiteId = manifest.parentSuiteId
+    ? normalizeId(manifest.parentSuiteId)
+    : undefined;
+  if (manifest.parentSuiteId && !parentSuiteId) {
+    throw new Error(`Module ${id} has invalid parentSuiteId.`);
+  }
   for (const permission of permissions) {
     if (!ALLOWED_RISKS.includes(permission)) {
       throw new Error(`Module ${id} has invalid permission risk: ${String(permission)}`);
@@ -217,6 +254,7 @@ function normalizeManifest(manifest: MonarchModuleManifest): MonarchModuleManife
     owns: uniqueStrings(manifest.owns || []),
     capabilities,
     permissions,
+    ...(parentSuiteId ? { parentSuiteId } : {}),
     dependencies: uniqueStrings(manifest.dependencies || []).map(normalizeId),
     events: uniqueStrings(manifest.events || []),
   };

@@ -22,6 +22,7 @@
 6. Delimited data payloads escape `<` and `>` so content cannot close its own boundary.
 7. Coder policy is owned by the trusted Oscar runtime; the controller supplies project/context data without duplicating policy prose.
 8. Voice policies stay short enough for small local models and never imply memory, web, tools or device control where those lanes lack them.
+9. Coder is a closed project-scoped prompt lane: general Oscar profile, memory, live Monarch registry, global skills, and synthetic receipt-language inference cannot enter it.
 
 ## Current budgets and measured effect
 

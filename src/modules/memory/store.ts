@@ -8,6 +8,7 @@ export type MonarchMemoryCategory = 'fact' | 'preference' | 'project' | 'correct
 export type MonarchMemoryRecordStatus = 'active' | 'closed' | 'expired';
 
 export interface MonarchMemoryRecord {
+  [key: string]: unknown;
   id: string;
   text: string;
   type: MonarchMemoryEntryType;
@@ -387,9 +388,11 @@ function readLegacyRecord(record: unknown, filePath: string, index: number): Mon
   }
 
   const data = record as Record<string, unknown>;
+  const extraFields = readExtraFields(data);
   const text = readRequiredString(data, 'text', filePath, index);
   const createdAt = readRequiredString(data, 'createdAt', filePath, index);
   return {
+    ...extraFields,
     id: readRequiredString(data, 'id', filePath, index),
     text,
     type: inferMemoryType(text),
@@ -416,6 +419,7 @@ function readRecord(rawRecord: unknown, filePath: string, index: number): Monarc
   }
 
   const data = rawRecord as Record<string, unknown>;
+  const extraFields = readExtraFields(data);
   const id = readRequiredString(data, 'id', filePath, index);
   const text = readRequiredString(data, 'text', filePath, index);
   const source = readRequiredString(data, 'source', filePath, index);
@@ -427,6 +431,7 @@ function readRecord(rawRecord: unknown, filePath: string, index: number): Monarc
   const tier = readTier(data.tier, importance, Boolean(data.pinned));
   const lastAccessedAt = readOptionalString(data, 'lastAccessedAt');
   const memoryRecord: MonarchMemoryRecord = {
+    ...extraFields,
     id,
     text,
     type,
@@ -458,6 +463,27 @@ function readRecord(rawRecord: unknown, filePath: string, index: number): Monarc
     memoryRecord.closedAt = closedAt;
   }
   return memoryRecord;
+}
+
+function readExtraFields(data: Record<string, unknown>): Record<string, unknown> {
+  const known = new Set([
+    'id', 'text', 'source', 'createdAt', 'updatedAt', 'category', 'tier',
+    'importance', 'accessCount', 'pinned', 'decayRate', 'lastAccessedAt',
+    'expiresAt', 'closedAt', 'type', 'title', 'tags', 'priority',
+    'relatedFiles', 'relatedModules',
+  ]);
+  return Object.fromEntries(
+    Object.entries(data)
+      .filter(([key]) => !known.has(key))
+      .map(([key, value]) => [key, cloneJsonValue(value)])
+  );
+}
+
+function cloneJsonValue(value: unknown): unknown {
+  if (value === undefined) {
+    return null;
+  }
+  return JSON.parse(JSON.stringify(value)) as unknown;
 }
 
 function readRequiredString(

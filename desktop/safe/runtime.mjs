@@ -124,6 +124,7 @@ function dispatch(action, payload) {
   if (!vault) throw new SafeVaultError('runtime-not-ready', 'Safe runtime is not ready.');
   switch (action) {
   case 'status': return Promise.resolve(vault.status());
+  case 'touch': return vault.touch();
   case 'setup': return vault.setup(payload);
   case 'completeSetup': return vault.completeSetup(payload);
   case 'resetProvisioning': return vault.resetProvisioning();

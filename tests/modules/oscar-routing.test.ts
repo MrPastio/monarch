@@ -292,11 +292,45 @@ describe('OscarModule Routing & Filtering', () => {
   });
 
   it('restricts a trusted Coder turn to coder capabilities', async () => {
-    (mockContext.listCapabilities as any).mockReturnValue([
+    const capabilities = [
       { id: 'workspace.files.write', moduleId: 'workspace', title: 'Workspace write', description: 'write', risk: 'write' },
       { id: 'coder.files.read', moduleId: 'coder', title: 'Coder read', description: 'read', risk: 'read', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } },
       { id: 'coder.files.write', moduleId: 'coder', title: 'Coder write', description: 'write', risk: 'write', inputSchema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } } } },
+    ];
+    (mockContext.listCapabilities as any).mockReturnValue(capabilities);
+    (mockContext.listModules as any).mockReturnValue([
+      {
+        manifest: {
+          id: 'workspace', name: 'Monarch Workspace', version: '0.1.0', kind: 'tooling',
+          description: 'Workspace files.', owns: ['files'], permissions: ['read'],
+          capabilities: [capabilities[0]],
+        },
+        status: 'active',
+        registeredAt: new Date(0).toISOString(),
+      },
+      {
+        manifest: {
+          id: 'profile', name: 'Monarch Identity', version: '0.1.0', kind: 'system',
+          description: 'Identity profile.', owns: ['identity'], permissions: ['read'],
+          capabilities: [],
+        },
+        status: 'active',
+        registeredAt: new Date(0).toISOString(),
+      },
+      {
+        manifest: {
+          id: 'diagnostics', name: 'Monarch Diagnostics', version: '0.1.0', kind: 'system',
+          description: 'Kernel audit status.', owns: ['kernel', 'audit', 'status'], permissions: ['read'],
+          capabilities: [],
+        },
+        status: 'active',
+        registeredAt: new Date(0).toISOString(),
+      },
     ]);
+    (mockContext as any).execute = vi.fn().mockResolvedValue({
+      ok: true,
+      output: { profile: { adaptiveSummary: 'must not enter Coder' } },
+    });
     const marker = '<monarch_coder_mode>{"project":{"root":"E:\\\\Work"}}</monarch_coder_mode>';
 
     await module.executeCapability({
@@ -304,17 +338,36 @@ describe('OscarModule Routing & Filtering', () => {
       input: {
         messages: [
           { role: 'system', content: marker },
-          { role: 'user', content: 'Create hello.txt' },
+          { role: 'user', content: 'CODER MODE TASK\nПроведи аудит проекта.' },
+          {
+            role: 'user',
+            content: 'CODER TOOL RECEIPTS\nExecution status and capability identity are trusted Kernel facts. '
+              + 'The project contains models and SECURITY_AUDIT.md. Continue from these results.',
+          },
         ],
         use_memory: false,
       },
     } as any, mockContext);
 
-    expect(mockClient.chat.mock.calls[0][0].capabilities.map((capability: any) => capability.id)).toEqual([
+    const request = mockClient.chat.mock.calls[0][0];
+    expect(request.capabilities.map((capability: any) => capability.id)).toEqual([
       'coder.files.read',
       'coder.files.write',
     ]);
-    expect(mockClient.chat.mock.calls[0][0].capabilities.every((capability: any) => capability.inputSchema)).toBe(true);
+    expect(request.capabilities.every((capability: any) => capability.inputSchema)).toBe(true);
+    expect(request.messages).toEqual([
+      { role: 'system', content: marker },
+      { role: 'user', content: 'CODER MODE TASK\nПроведи аудит проекта.' },
+      {
+        role: 'user',
+        content: 'CODER TOOL RECEIPTS\nExecution status and capability identity are trusted Kernel facts. '
+          + 'The project contains models and SECURITY_AUDIT.md. Continue from these results.',
+      },
+    ]);
+    expect(request.messages.some((message: any) => message.content.includes('<live_monarch_system>'))).toBe(false);
+    expect(request.messages.some((message: any) => message.content.includes('<local_user_context>'))).toBe(false);
+    expect(request.skills).toEqual([]);
+    expect((mockContext as any).execute).not.toHaveBeenCalled();
   });
 
   it('keeps the full Coder index while bounding detailed schemas to the relevant working set', async () => {
