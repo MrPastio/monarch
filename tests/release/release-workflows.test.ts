@@ -48,14 +48,19 @@ describe('Monarch distribution workflows', () => {
     expect(workflow).toContain("cron: '17 5 * * 1'");
   });
 
-  it('does not commit a production private or invented public key', async () => {
+  it('keeps signing keys external and arms only the accepted immutable components', async () => {
     const docs = await read('release/README.md');
     const sample = await read('release/examples/stable-bootstrap.json');
     const releaseSpec = JSON.parse(await read('release/stable-release-spec.json'));
     expect(docs).toContain('No production private key or invented public key is committed');
     expect(sample).not.toContain('BEGIN PRIVATE KEY');
     expect(sample).not.toContain('BEGIN PUBLIC KEY');
-    expect(releaseSpec.available).toBe(false);
-    expect(releaseSpec.withdrawnReason).toContain('deliberately disarmed');
+    expect(releaseSpec.available).toBe(true);
+    expect(releaseSpec.withdrawnReason).toBeNull();
+    expect(releaseSpec.compatibility).toMatchObject({
+      runtimeVersion: '2026.07.6',
+      backendEnvironment: 'backend-0.1.5-offline4',
+    });
+    expect(JSON.stringify(releaseSpec)).not.toContain('bootstrap-pending');
   });
 });

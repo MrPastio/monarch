@@ -33,7 +33,7 @@
       <aside class="sidebar" aria-label="Навигация">
         
         <div class="sidebar-top">
-          <button class="sidebar-brand-mark" type="button" aria-label="Monarch" data-monarch-brand-cycle>
+          <button class="sidebar-brand-mark" type="button" aria-label="Показать маскота Oscar" aria-pressed="false" title="Показать маскота Oscar" data-monarch-brand-cycle>
             <strong class="monarch-brand-word" data-monarch-brand-label>Monarch</strong>
             <span class="product-stage-badge">beta</span>
           </button>
@@ -1547,10 +1547,10 @@
                       </select>
                     </div>
                     <div class="preference-card">
-                      <label for="inspector-default-select">Инспектор</label>
+                      <label for="inspector-default-select">Мини-маскот в активном чате</label>
                       <select id="inspector-default-select">
-                        <option value="open">Открыт</option>
                         <option value="closed">Скрыт</option>
+                        <option value="open">Показан</option>
                       </select>
                     </div>
                     <div class="preference-card">
@@ -1635,9 +1635,12 @@
       </main>
 
       <!-- 3. Artifact Panel (Inspector) - Slides in like Claude Artifacts -->
-      <aside class="inspector mascot-mode mascot-active" id="inspector" aria-label="Помощник Oscar и краткая диагностика">
+      <aside class="inspector mascot-mode mascot-active" id="inspector" aria-label="Перемещаемый маскот Oscar" aria-hidden="true">
         <div class="mascot-view" id="mascot-view">
-          <img id="mascot-img" src="/assets/mascot/oscar-idle.png" alt="Oscar Mascot" />
+          <img id="mascot-img" src="/assets/mascot/oscar-idle.png" alt="Маскот Oscar" draggable="false" />
+          <button class="mascot-resize-handle" type="button" data-mascot-resize aria-label="Изменить размер маскота Oscar" title="Потяни, чтобы изменить размер">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 16 16 8"></path><path d="M12 18 18 12"></path></svg>
+          </button>
           <div class="mascot-caption">
             <span id="mascot-meta" class="mascot-meta">Ожидание</span>
             <strong id="mascot-title">Oscar</strong>

@@ -8,7 +8,7 @@ import { initOscarPane, loadOscarConversations, loadOscarStatus, renderOscar, st
 import { initSecurityPane, loadSecurityStatus, renderSecurity, renderSecurityPolicyControls } from './modules/security-pane.js';
 import { renderModelManager } from './modules/model-manager.js';
 import { initSharingPane, renderSharingPane } from './modules/sharing-pane.js';
-import { syncMascotFromRuntime } from './modules/mascot-controller.js';
+import { initMascotInteraction, syncMascotFromRuntime } from './modules/mascot-controller.js';
 import { initSettingsPane } from './modules/settings-pane.js';
 import { initUpdatePane } from './modules/update-pane.js';
 import { initVoiceInput } from './modules/voice-input.js';
@@ -17,6 +17,7 @@ import { installOscarSnakeEasterEgg } from './modules/oscar-snake-game.js';
 import { installMonarchBrandEasterEgg } from './modules/brand-easter-egg.js';
 import { initCoderPane } from './modules/coder-pane.js';
 import { initStudioPane, setStudioActive } from './modules/studio-pane.js';
+import { normalizeUiPreferences, serializeUiPreferences } from './modules/ui-preferences.js';
 
 // Elements
 const elements = {
@@ -80,16 +81,16 @@ function renderActiveView(activeView) {
 
 // Global Action Delegate
 document.addEventListener('click', (event) => {
+  const brandMascotToggle = event.target.closest('[data-monarch-brand-cycle]');
+  if (brandMascotToggle) {
+    toggleMascotVisibility();
+    return;
+  }
+
   // A. Toggle Context Drawer
   const toggleBtn = event.target.closest('#toggle-inspector-btn, [data-inspector-toggle]');
   if (toggleBtn) {
-    const shell = elements.shell || document.getElementById('app-shell');
-    if (shell) {
-      const isCollapsed = shell.classList.toggle('inspector-collapsed');
-      preferences.inspector = isCollapsed ? 'closed' : 'open';
-      savePreferences();
-      updateInspectorToggleControls(isCollapsed);
-    }
+    toggleMascotVisibility();
     return;
   }
 
@@ -350,6 +351,10 @@ document.addEventListener('click', (event) => {
   }
 });
 
+elements.shell?.addEventListener('monarch:mascot-surface-changed', () => {
+  updateInspectorToggleControls(preferences.inspector === 'closed');
+});
+
 async function launchSafeFromUi(button) {
   if (!window.monarchDesktop?.openSafe) {
     showSafeLaunchFeedback(
@@ -392,6 +397,20 @@ function hideSafeLaunchFeedback() {
   safeLaunchFeedbackTimer = 0;
   const node = document.querySelector('#safe-launch-feedback');
   if (node) node.hidden = true;
+}
+
+function toggleMascotVisibility() {
+  const shell = elements.shell || document.getElementById('app-shell');
+  if (!shell) return;
+  if (!shell.classList.contains('mascot-dialog-active')) {
+    updateInspectorToggleControls(preferences.inspector === 'closed');
+    return;
+  }
+  const isVisible = !shell.classList.contains('mascot-visible');
+  preferences.inspector = isVisible ? 'open' : 'closed';
+  savePreferences();
+  applyPreferences();
+  renderMascot();
 }
 
 function closeComposerOptions() {
@@ -547,6 +566,7 @@ function init() {
   initSettingsPane();
   initStudioPane();
   initUpdatePane();
+  initMascotInteraction();
   initVoiceInput();
   initOscarVoiceMode();
   installOscarSnakeEasterEgg({
@@ -689,22 +709,15 @@ function animateEnteredNode(node) {
 
 function readPreferences() {
   try {
-    const parsed = JSON.parse(localStorage.getItem('monarch.ui.preferences') || '{}');
-    return {
-      density: ['comfortable', 'compact'].includes(parsed.density) ? parsed.density : 'comfortable',
-      inspector: ['open', 'closed'].includes(parsed.inspector) ? parsed.inspector : 'open',
-    };
+    return normalizeUiPreferences(JSON.parse(localStorage.getItem('monarch.ui.preferences') || '{}'));
   } catch {
-    return {
-      density: 'comfortable',
-      inspector: 'open',
-    };
+    return normalizeUiPreferences({});
   }
 }
 
 function savePreferences() {
   try {
-    localStorage.setItem('monarch.ui.preferences', JSON.stringify(preferences));
+    localStorage.setItem('monarch.ui.preferences', JSON.stringify(serializeUiPreferences(preferences)));
   } catch {
     // UI preferences are optional; Monarch should still boot without browser storage.
   }
@@ -715,7 +728,9 @@ function applyPreferences() {
   document.body.dataset.density = preferences.density;
 
   if (elements.shell) {
-    elements.shell.classList.toggle('inspector-collapsed', preferences.inspector === 'closed');
+    const mascotHidden = preferences.inspector === 'closed';
+    elements.shell.classList.toggle('inspector-collapsed', mascotHidden);
+    elements.shell.classList.toggle('mascot-visible', !mascotHidden);
   }
 
   if (elements.densitySelect) {
@@ -729,14 +744,24 @@ function applyPreferences() {
 }
 
 function updateInspectorToggleControls(isCollapsed) {
-  document.querySelectorAll('#toggle-inspector-btn, [data-inspector-toggle]').forEach((button) => {
-    const label = isCollapsed ? 'Показать помощника Oscar' : 'Скрыть помощника Oscar';
+  const shell = elements.shell || document.getElementById('app-shell');
+  const emptyHome = shell?.classList.contains('mascot-empty-home') === true;
+  const dialogActive = shell?.classList.contains('mascot-dialog-active') === true;
+  const surfaceVisible = emptyHome || (dialogActive && !isCollapsed);
+  document.querySelectorAll('#toggle-inspector-btn, [data-inspector-toggle], [data-monarch-brand-cycle]').forEach((button) => {
+    const label = emptyHome
+      ? 'Центральный маскот Oscar всегда видим до первого сообщения'
+      : isCollapsed ? 'Показать мини-маскота Oscar' : 'Скрыть мини-маскота Oscar';
     const textLabel = button.querySelector('span:not([aria-hidden="true"])');
-    if (textLabel) textLabel.textContent = 'Помощник';
+    if (textLabel && !button.matches('[data-monarch-brand-cycle]')) textLabel.textContent = 'Мини-маскот';
     button.title = label;
     button.setAttribute('aria-label', label);
-    button.setAttribute('aria-expanded', String(!isCollapsed));
+    button.setAttribute('aria-expanded', String(surfaceVisible));
+    button.setAttribute('aria-disabled', String(emptyHome));
+    if (button.matches('[data-monarch-brand-cycle]')) button.setAttribute('aria-pressed', String(dialogActive && !isCollapsed));
   });
+  const inspector = document.getElementById('inspector');
+  if (inspector) inspector.setAttribute('aria-hidden', String(!surfaceVisible || !inspector.classList.contains('mascot-active')));
 }
 
 function syncDiagnosticsToggleControl() {
@@ -855,6 +880,7 @@ function renderMascot(activeView = readActiveViewId()) {
     coding: /```/.test(reply),
     detail,
   });
+  updateInspectorToggleControls(preferences.inspector === 'closed');
 }
 
 function readActiveViewId() {

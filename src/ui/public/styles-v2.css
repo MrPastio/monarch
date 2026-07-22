@@ -1869,8 +1869,7 @@ body.voice-mode-open { overflow: hidden; }
   body[data-density="compact"] .oscar-message-card { padding-bottom: 8px; }
 }
 
-.app-shell.inspector-collapsed .inspector,
-.app-shell.inspector-collapsed.mascot-empty-home:has(#oscar-section:not(.view-hidden)) .inspector {
+.app-shell.inspector-collapsed.mascot-dialog-active .inspector {
   display: none !important;
 }
 
@@ -2516,6 +2515,133 @@ select {
 }
 select:hover:not(:disabled) { border-color: var(--line-strong); }
 select option:checked { color: var(--text); background: #242628; }
+
+/* Oscar has two surfaces: permanent central home mascot and user-controlled dialog mini-mascot. */
+.app-shell .inspector { display: none !important; }
+.app-shell.mascot-empty-home .inspector.mascot-active:not(.snake-game-host-active),
+.app-shell.mascot-dialog-active.mascot-visible .inspector.mascot-active:not(.snake-game-host-active) {
+  display: block !important;
+  position: fixed;
+  z-index: 48;
+  padding: 0;
+  border: 0;
+  opacity: 1;
+  background: transparent;
+}
+.app-shell.mascot-empty-home .inspector.mascot-active:not(.snake-game-host-active) {
+  left: calc(var(--sidebar) + (100vw - var(--sidebar)) / 2);
+  top: clamp(170px, 23vh, 224px);
+  right: auto;
+  bottom: auto;
+  width: 184px;
+  height: 184px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.app-shell.mascot-dialog-active.mascot-visible .inspector.mascot-active:not(.snake-game-host-active) {
+  left: var(--mascot-x, 200px);
+  top: var(--mascot-y, 170px);
+  right: auto;
+  bottom: auto;
+  width: var(--mascot-size, 104px);
+  height: var(--mascot-size, 104px);
+  transform: none;
+  pointer-events: auto;
+}
+.app-shell .inspector.snake-game-host-active { display: block !important; }
+.app-shell.mascot-empty-home .inspector.mascot-active:not(.snake-game-host-active) .mascot-view,
+.app-shell.mascot-dialog-active.mascot-visible .inspector.mascot-active:not(.snake-game-host-active) .mascot-view {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  touch-action: none;
+  user-select: none;
+}
+.app-shell.mascot-empty-home .inspector.mascot-active:not(.snake-game-host-active) .mascot-view {
+  cursor: default;
+  pointer-events: none;
+}
+.app-shell.mascot-dialog-active.mascot-visible .inspector.mascot-active:not(.snake-game-host-active) .mascot-view {
+  cursor: grab;
+  pointer-events: auto;
+}
+.app-shell.mascot-dialog-active.mascot-visible .inspector.mascot-active:not(.snake-game-host-active) .mascot-view::before {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  display: block;
+  border: 1px solid transparent;
+  border-radius: 24%;
+  background: transparent;
+  pointer-events: none;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+.app-shell.mascot-dialog-active.mascot-visible .inspector.mascot-active:not(.snake-game-host-active):hover .mascot-view::before,
+.app-shell.mascot-dialog-active.mascot-visible .inspector.mascot-active.is-dragging .mascot-view::before,
+.app-shell.mascot-dialog-active.mascot-visible .inspector.mascot-active.is-resizing .mascot-view::before {
+  border-color: rgba(255, 184, 24, .16);
+  background: rgba(255, 184, 24, .018);
+}
+.app-shell.mascot-empty-home .inspector.mascot-active:not(.snake-game-host-active) .mascot-view > img,
+.app-shell.mascot-dialog-active.mascot-visible .inspector.mascot-active:not(.snake-game-host-active) .mascot-view > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  filter: drop-shadow(0 20px 30px rgba(0, 0, 0, .46)) drop-shadow(0 0 18px rgba(255, 153, 22, .07));
+}
+.app-shell.mascot-visible .inspector.is-dragging .mascot-view { cursor: grabbing; }
+.app-shell.mascot-empty-home .mascot-resize-handle { display: none; }
+.mascot-resize-handle {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  z-index: 3;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid rgba(255, 184, 24, .22);
+  border-radius: 9px;
+  color: #ffd16a;
+  background: rgba(20, 19, 16, .78);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .28), inset 0 1px rgba(255, 255, 255, .07);
+  backdrop-filter: blur(14px);
+  cursor: nwse-resize;
+  opacity: 0;
+  transition: opacity 150ms ease, transform 150ms ease;
+  touch-action: none;
+}
+.mascot-resize-handle svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+.mascot-view:hover .mascot-resize-handle,
+.mascot-resize-handle:focus-visible,
+.inspector.is-resizing .mascot-resize-handle { opacity: 1; }
+.sidebar-brand-mark[aria-pressed="true"] .monarch-brand-word { color: #ffd16a; }
+
+@media (pointer: coarse) {
+  .mascot-resize-handle { opacity: .72; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mascot-resize-handle,
+  .app-shell.mascot-dialog-active.mascot-visible .inspector.mascot-active .mascot-view::before { transition: none; }
+}
 
 /* Fewer visible frames, more surface depth and a stable card rhythm. */
 .doc-content { gap: 18px; }

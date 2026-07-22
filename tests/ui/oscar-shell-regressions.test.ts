@@ -41,6 +41,21 @@ describe('Oscar live shell regressions', () => {
     expect(styles).toMatch(/\.composer-options-popover\s*\{[^}]*right:\s*48px;[^}]*z-index:\s*72;/s);
   });
 
+  it('keeps the central mascot permanent until the first message and only then enables the movable mini-mascot', () => {
+    expect(indexSource).toContain('data-monarch-brand-cycle');
+    expect(indexSource).toContain('data-mascot-resize');
+    expect(appSource).toContain('toggleMascotVisibility();');
+    expect(appSource).toContain('normalizeUiPreferences(JSON.parse(');
+    expect(appSource).toContain('serializeUiPreferences(preferences)');
+    expect(oscarSource).toContain('!hasSentOscarMessage(state.oscar.messages)');
+    expect(oscarSource).toContain("dispatchEvent(new Event('monarch:mascot-surface-changed'))");
+    expect(styles).toContain('.app-shell.mascot-empty-home .inspector.mascot-active:not(.snake-game-host-active)');
+    expect(styles).toContain('.app-shell.mascot-dialog-active.mascot-visible .inspector.mascot-active:not(.snake-game-host-active)');
+    expect(styles).toContain('.app-shell.mascot-empty-home .mascot-resize-handle { display: none; }');
+    expect(styles).toContain('left: var(--mascot-x, 200px);');
+    expect(styles).toContain('.mascot-resize-handle');
+  });
+
   it('offers explicit research control and renders animated high-level research progress', () => {
     expect(indexSource).toContain('id="oscar-research-dropdown-btn"');
     expect(indexSource).toContain('data-value="deep"');
@@ -91,7 +106,7 @@ describe('Oscar live shell regressions', () => {
 
   it('makes persisted density and inspector preferences affect the active stylesheet', () => {
     expect(styles).toContain('body[data-density="compact"] .nav-item');
-    expect(styles).toMatch(/\.app-shell\.inspector-collapsed \.inspector,[\s\S]*?display:\s*none !important;/);
+    expect(styles).toMatch(/\.app-shell\.inspector-collapsed\.mascot-dialog-active \.inspector\s*\{[^}]*display:\s*none !important;/s);
   });
 
   it('loads persistent conversations in bounded pages with an explicit older-message control', () => {

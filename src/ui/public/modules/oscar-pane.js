@@ -26,7 +26,7 @@ import {
   looksLikeProtectedAgentAction,
   resolveContextualAgentAction
 } from './utils.js';
-import { setMascotState } from './mascot-controller.js';
+import { hasSentOscarMessage, setMascotState } from './mascot-controller.js';
 import { createOscarSpeechController } from './oscar-speech.js';
 import { resolveOscarComposerPrimaryAction } from './voice-mode-state.js';
 
@@ -2242,10 +2242,11 @@ export function renderOscar() {
   renderRamWarning();
   renderGenerationStatus();
 
-  const isEmptyConversation = state.oscar.messages.length === 0;
+  const isEmptyConversation = !hasSentOscarMessage(state.oscar.messages);
   elements.oscarThread.classList.toggle('is-empty', isEmptyConversation);
   elements.shell?.classList.toggle('mascot-empty-home', isEmptyConversation);
   elements.shell?.classList.toggle('mascot-dialog-active', !isEmptyConversation);
+  elements.shell?.dispatchEvent(new Event('monarch:mascot-surface-changed'));
   if (isEmptyConversation) {
     animatedOscarUserMessages.clear();
     elements.oscarThread.innerHTML = `
