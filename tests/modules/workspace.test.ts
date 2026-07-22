@@ -3,7 +3,7 @@ import path from 'node:path';
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createMonarchRuntime } from '../../src/bootstrap';
-import { MonarchKernel } from '../../src/core';
+import { evaluateFilesystemAccess, MonarchKernel } from '../../src/core';
 import { WorkspaceModule } from '../../src/modules/workspace';
 
 describe('Workspace Module', () => {
@@ -41,6 +41,53 @@ describe('Workspace Module', () => {
       await kernel.stop();
       await rm(root, { recursive: true, force: true });
       await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('blocks the production Safe parent before filesystem access even in Full Access', async () => {
+    const workspaceRoot = process.cwd();
+    const safeParent = path.join(path.parse(workspaceRoot).root, 'MonarchData', 'Safe');
+    const syntheticReadPath = path.join(safeParent, 'safe-v1', 'never-read.test');
+    const policyEvaluation = evaluateFilesystemAccess(syntheticReadPath, 'read', {
+      workspaceRoot,
+      sandboxRoot: workspaceRoot,
+      fallbackRoot: workspaceRoot,
+      allowFullDiskAccess: true,
+      protectWorkspaceInternals: false,
+    });
+
+    // This assertion runs before the Kernel attempt so a policy regression
+    // cannot fall through to any filesystem API under the production Safe path.
+    expect(policyEvaluation).toMatchObject({
+      allowed: false,
+      reason: 'red-zone-read-blocked',
+      resolvedPath: syntheticReadPath,
+    });
+    expect(policyEvaluation.redZoneRoots).toContain(safeParent);
+
+    const kernel = new MonarchKernel({
+      permissionProfile: {
+        sandboxMode: 'danger-full-access',
+        approvalPolicy: 'never',
+        autonomyMode: 'full-local',
+      },
+    });
+    kernel.registerModule(new WorkspaceModule({ workspaceRoot }));
+    await kernel.start();
+    try {
+      const blocked = await executeWorkspace(kernel, 'workspace.files.read', { path: syntheticReadPath });
+      expect(blocked).toMatchObject({
+        ok: false,
+        error: 'filesystem-policy-blocked',
+        metadata: {
+          evaluation: {
+            reason: 'red-zone-read-blocked',
+            resolvedPath: syntheticReadPath,
+          },
+        },
+      });
+    } finally {
+      await kernel.stop();
     }
   });
 

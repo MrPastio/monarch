@@ -4,6 +4,7 @@ import type {
   MonarchActionExternality,
   MonarchActionNovelty,
   MonarchActionPredicate,
+  MonarchActionPredicateJsonValue,
   MonarchActionProposalInput,
   MonarchActionProposalProvenance,
   MonarchActionProposalV1,
@@ -14,6 +15,7 @@ import type {
   MonarchRisk,
   MonarchRiskVector,
 } from './contracts';
+import { actionPredicateValueError } from './action-predicate';
 import { createMonarchId } from './utils';
 
 const MAX_PROPOSAL_REASON_CHARS = 1_000;
@@ -74,8 +76,8 @@ export function normalizeActionProposal(
   const expectedEffect = readBoundedString(value.expectedEffect, MAX_EXPECTED_EFFECT_CHARS)
     || describeExpectedEffect(options.capability.risk, capabilityId, scope);
   const provenance = normalizeProvenance(value.provenance, options);
-  const preconditions = normalizePredicates(value.preconditions);
-  const verification = normalizePredicates(value.verification);
+  const preconditions = normalizePredicates(value.preconditions, 'preconditions');
+  const verification = normalizePredicates(value.verification, 'verification');
 
   const actionIdentity = {
     version: 1,
@@ -238,15 +240,39 @@ function normalizeProvenance(
   };
 }
 
-function normalizePredicates(value: MonarchActionPredicate[] | undefined): MonarchActionPredicate[] {
-  if (!Array.isArray(value)) return [];
+function normalizePredicates(value: MonarchActionPredicate[] | undefined, field: string): MonarchActionPredicate[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new MonarchActionProtocolError('proposal-predicates-invalid', `${field} must be an array.`);
+  }
+  if (value.length > MAX_PREDICATES) {
+    throw new MonarchActionProtocolError('proposal-predicates-invalid', `${field} exceeds the ${MAX_PREDICATES}-predicate limit.`);
+  }
   const result: MonarchActionPredicate[] = [];
-  for (const entry of value.slice(0, MAX_PREDICATES)) {
-    if (!entry || typeof entry !== 'object') continue;
-    if (!['exists', 'not-exists', 'equals', 'contains', 'status'].includes(entry.kind)) continue;
+  for (const [index, entryValue] of value.entries()) {
+    if (!entryValue || typeof entryValue !== 'object' || Array.isArray(entryValue)) {
+      throw new MonarchActionProtocolError('proposal-predicate-invalid', `${field}[${index}] must be an object.`);
+    }
+    const entry = entryValue as unknown as Record<string, unknown>;
+    const kind = entry.kind;
+    if (kind !== 'exists' && kind !== 'not-exists' && kind !== 'equals' && kind !== 'contains' && kind !== 'status') {
+      throw new MonarchActionProtocolError('proposal-predicate-invalid', `${field}[${index}].kind is unsupported.`);
+    }
     const target = readBoundedString(entry.target, 1_000);
-    if (!target) continue;
-    result.push({ kind: entry.kind, target, ...(entry.value !== undefined ? { value: sortJsonValue(entry.value) } : {}) });
+    if (!target) {
+      throw new MonarchActionProtocolError('proposal-predicate-invalid', `${field}[${index}].target is required.`);
+    }
+    const valueError = actionPredicateValueError(entry);
+    if (valueError) {
+      throw new MonarchActionProtocolError('proposal-predicate-invalid', `${field}[${index}] ${valueError}`);
+    }
+    if (kind === 'exists' || kind === 'not-exists') {
+      result.push({ kind, target });
+    } else if (kind === 'status') {
+      result.push({ kind, target, value: entry.value as string | number | boolean });
+    } else {
+      result.push({ kind, target, value: sortJsonValue(entry.value) as MonarchActionPredicateJsonValue });
+    }
   }
   return result;
 }

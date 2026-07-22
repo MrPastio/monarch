@@ -31,6 +31,23 @@ describe('Electron runtime entry', () => {
     expect(launch.args).toEqual([tsx, source]);
   });
 
+  it('uses live TypeScript in development even when an older bundle exists', () => {
+    const bundle = path.join(workspaceRoot, 'dist', 'monarch-server.mjs');
+    const tsx = path.join(workspaceRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+    const source = path.join(workspaceRoot, 'src', 'main.ts');
+    const launch = resolveRuntimeLaunch({
+      workspaceRoot,
+      preferSource: true,
+      fileExists: (candidate: string) => [bundle, tsx, source].includes(candidate),
+    });
+
+    expect(launch).toEqual({
+      kind: 'tsx',
+      entryPath: source,
+      args: [tsx, source],
+    });
+  });
+
   it('fails closed when neither runtime form exists', () => {
     expect(() => resolveRuntimeLaunch({
       workspaceRoot,

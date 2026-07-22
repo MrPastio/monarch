@@ -3,9 +3,21 @@ import path from 'node:path';
 
 export function resolveRuntimeLaunch({
   workspaceRoot,
+  preferSource = false,
   fileExists = existsSync,
 }) {
   const bundledMain = path.join(workspaceRoot, 'dist', 'monarch-server.mjs');
+  const tsxCli = path.join(workspaceRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  const sourceMain = path.join(workspaceRoot, 'src', 'main.ts');
+  const sourceAvailable = fileExists(tsxCli) && fileExists(sourceMain);
+  if (preferSource && sourceAvailable) {
+    return {
+      kind: 'tsx',
+      entryPath: sourceMain,
+      args: [tsxCli, sourceMain],
+    };
+  }
+
   if (fileExists(bundledMain)) {
     return {
       kind: 'bundle',
@@ -14,9 +26,7 @@ export function resolveRuntimeLaunch({
     };
   }
 
-  const tsxCli = path.join(workspaceRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
-  const sourceMain = path.join(workspaceRoot, 'src', 'main.ts');
-  if (fileExists(tsxCli) && fileExists(sourceMain)) {
+  if (sourceAvailable) {
     return {
       kind: 'tsx',
       entryPath: sourceMain,

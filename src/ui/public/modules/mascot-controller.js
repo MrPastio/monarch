@@ -14,11 +14,13 @@ export const MASCOT_STATES = {
 };
 
 const MASCOT_VISIBLE_VIEWS = new Set([
-  'command-center',
   'oscar-section',
-  'security-section',
-  'models-section',
 ]);
+
+const MASCOT_LAYOUT_STORAGE_KEY = 'monarch.mascot.layout.v2';
+const MASCOT_INTERACTION_INSTALL_KEY = '__monarchMascotInteraction';
+const MASCOT_MIN_SIZE = 88;
+const MASCOT_MAX_SIZE = 320;
 
 let currentMascotState = '';
 let idleActionTimer = null;
@@ -39,7 +41,12 @@ export function setMascotView(viewId) {
   }
   inspector.classList.toggle('mascot-active', MASCOT_VISIBLE_VIEWS.has(viewId));
   inspector.dataset.mascotView = viewId || '';
-  if (!MASCOT_VISIBLE_VIEWS.has(viewId)) {
+  const shell = inspector.closest('.app-shell');
+  const visible = shell?.classList.contains('mascot-empty-home') === true
+    || (shell?.classList.contains('mascot-dialog-active') === true
+      && shell.classList.contains('mascot-visible'));
+  inspector.setAttribute('aria-hidden', String(!visible || !MASCOT_VISIBLE_VIEWS.has(viewId)));
+  if (!MASCOT_VISIBLE_VIEWS.has(viewId) || !visible) {
     clearIdleAction();
     clearIdleActionTimer();
   } else if (currentMascotState === 'idle') {
@@ -114,6 +121,163 @@ export function syncMascotFromRuntime({ activeView, busy, errored, securityRunni
     return;
   }
   setMascotState('idle', { title: 'Oscar', detail: detail || 'Готов к локальной работе' });
+}
+
+export function createDefaultMascotLayout(viewport = {}) {
+  const width = Math.max(320, Number(viewport.width) || 1280);
+  const height = Math.max(320, Number(viewport.height) || 720);
+  const size = width <= 620 ? 88 : width <= 980 ? 92 : 104;
+  const x = width - size - (width <= 620 ? 18 : 32);
+  const y = Math.max(86, height - size - (width <= 620 ? 190 : 180));
+  return clampMascotLayout({ x, y, size }, { width, height });
+}
+
+export function hasSentOscarMessage(messages) {
+  return Array.isArray(messages) && messages.some((message) => message?.role === 'user');
+}
+
+export function clampMascotLayout(layout = {}, viewport = {}) {
+  const width = Math.max(320, Number(viewport.width) || 1280);
+  const height = Math.max(320, Number(viewport.height) || 720);
+  const maxSize = Math.max(MASCOT_MIN_SIZE, Math.min(MASCOT_MAX_SIZE, width - 16, height - 16));
+  const size = clampNumber(Number(layout.size) || MASCOT_MIN_SIZE, MASCOT_MIN_SIZE, maxSize);
+  return {
+    x: clampNumber(Number(layout.x) || 0, 8, Math.max(8, width - size - 8)),
+    y: clampNumber(Number(layout.y) || 0, 8, Math.max(8, height - size - 8)),
+    size,
+  };
+}
+
+export function initMascotInteraction(options = {}) {
+  const documentObject = options.documentObject || globalThis.document;
+  const windowObject = options.windowObject || globalThis.window;
+  if (!documentObject?.querySelector || !windowObject?.addEventListener) return null;
+  if (documentObject[MASCOT_INTERACTION_INSTALL_KEY]) return documentObject[MASCOT_INTERACTION_INSTALL_KEY];
+
+  const inspector = documentObject.querySelector(options.inspectorSelector || '#inspector');
+  const mascotView = documentObject.querySelector(options.mascotSelector || '#mascot-view');
+  const resizeHandle = documentObject.querySelector(options.resizeSelector || '[data-mascot-resize]');
+  if (!inspector || !mascotView || !resizeHandle) return null;
+
+  const readViewport = () => ({
+    width: Math.max(320, Number(windowObject.innerWidth) || 1280),
+    height: Math.max(320, Number(windowObject.innerHeight) || 720),
+  });
+  let layout = loadMascotLayout(windowObject, readViewport());
+  let gesture = null;
+  let suppressClick = false;
+
+  const applyLayout = (nextLayout) => {
+    layout = clampMascotLayout(nextLayout, readViewport());
+    inspector.style.setProperty('--mascot-x', `${Math.round(layout.x)}px`);
+    inspector.style.setProperty('--mascot-y', `${Math.round(layout.y)}px`);
+    inspector.style.setProperty('--mascot-size', `${Math.round(layout.size)}px`);
+    inspector.dataset.mascotPositioned = 'true';
+  };
+
+  const persistLayout = () => {
+    try {
+      windowObject.localStorage?.setItem(MASCOT_LAYOUT_STORAGE_KEY, JSON.stringify(layout));
+    } catch {
+      // Layout persistence is optional.
+    }
+  };
+
+  const beginGesture = (mode, event) => {
+    if (event.button !== undefined && event.button !== 0) return;
+    if (inspector.classList.contains('snake-game-host-active')) return;
+    const shell = inspector.closest('.app-shell');
+    if (
+      !shell?.classList.contains('mascot-dialog-active')
+      || !shell.classList.contains('mascot-visible')
+      || !inspector.classList.contains('mascot-active')
+    ) return;
+    event.preventDefault();
+    event.stopPropagation();
+    gesture = {
+      mode,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      layout: { ...layout },
+      moved: false,
+    };
+    inspector.classList.toggle('is-resizing', mode === 'resize');
+    inspector.classList.toggle('is-dragging', mode === 'drag');
+    event.currentTarget?.setPointerCapture?.(event.pointerId);
+  };
+
+  const onMascotPointerDown = (event) => {
+    if (event.target.closest('button, a, input, textarea, select, [role="button"], .oscar-snake-game')) return;
+    beginGesture('drag', event);
+  };
+  const onResizePointerDown = (event) => beginGesture('resize', event);
+  const onPointerMove = (event) => {
+    if (!gesture || (gesture.pointerId !== undefined && event.pointerId !== gesture.pointerId)) return;
+    const deltaX = event.clientX - gesture.startX;
+    const deltaY = event.clientY - gesture.startY;
+    gesture.moved ||= Math.abs(deltaX) + Math.abs(deltaY) > 4;
+    if (gesture.mode === 'resize') {
+      applyLayout({
+        ...gesture.layout,
+        size: gesture.layout.size + Math.max(deltaX, deltaY),
+      });
+    } else {
+      applyLayout({
+        ...gesture.layout,
+        x: gesture.layout.x + deltaX,
+        y: gesture.layout.y + deltaY,
+      });
+    }
+  };
+  const endGesture = (event) => {
+    if (!gesture || (gesture.pointerId !== undefined && event.pointerId !== gesture.pointerId)) return;
+    suppressClick = gesture.moved;
+    gesture = null;
+    inspector.classList.remove('is-dragging', 'is-resizing');
+    persistLayout();
+    windowObject.setTimeout?.(() => { suppressClick = false; }, 0);
+  };
+  const suppressDraggedClick = (event) => {
+    if (!suppressClick || !mascotView.contains(event.target)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    suppressClick = false;
+  };
+  const onWindowResize = () => {
+    applyLayout(layout);
+    persistLayout();
+  };
+
+  mascotView.addEventListener('pointerdown', onMascotPointerDown);
+  resizeHandle.addEventListener('pointerdown', onResizePointerDown);
+  windowObject.addEventListener('pointermove', onPointerMove);
+  windowObject.addEventListener('pointerup', endGesture);
+  windowObject.addEventListener('pointercancel', endGesture);
+  windowObject.addEventListener('resize', onWindowResize);
+  documentObject.addEventListener('click', suppressDraggedClick, true);
+  applyLayout(layout);
+
+  const controller = {
+    getLayout: () => ({ ...layout }),
+    resetPosition() {
+      applyLayout(createDefaultMascotLayout(readViewport()));
+      persistLayout();
+      return { ...layout };
+    },
+    destroy() {
+      mascotView.removeEventListener('pointerdown', onMascotPointerDown);
+      resizeHandle.removeEventListener('pointerdown', onResizePointerDown);
+      windowObject.removeEventListener('pointermove', onPointerMove);
+      windowObject.removeEventListener('pointerup', endGesture);
+      windowObject.removeEventListener('pointercancel', endGesture);
+      windowObject.removeEventListener('resize', onWindowResize);
+      documentObject.removeEventListener('click', suppressDraggedClick, true);
+      delete documentObject[MASCOT_INTERACTION_INSTALL_KEY];
+    },
+  };
+  documentObject[MASCOT_INTERACTION_INSTALL_KEY] = controller;
+  return controller;
 }
 
 function scheduleIdleAction() {
@@ -236,4 +400,18 @@ function metaForMascotState(value) {
   default:
     return 'Готов';
   }
+}
+
+function loadMascotLayout(windowObject, viewport) {
+  try {
+    const stored = JSON.parse(windowObject.localStorage?.getItem(MASCOT_LAYOUT_STORAGE_KEY) || 'null');
+    if (stored && typeof stored === 'object') return clampMascotLayout(stored, viewport);
+  } catch {
+    // Use a safe in-chat default when storage is unavailable or invalid.
+  }
+  return createDefaultMascotLayout(viewport);
+}
+
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }

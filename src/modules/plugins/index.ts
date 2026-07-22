@@ -161,7 +161,9 @@ export class PluginsModule implements MonarchModule {
 }
 
 function mentionsPlugins(text: string): boolean {
-  return /(plugin|plugins|extension|extensions|package registry|module package|плагин|плагины|расширени|пакет модул|реестр)/i.test(text);
+  return /\b(?:plugins?|package registry|module package|monarch extensions?)\b/i.test(text)
+    || /\bextensions?\b.{0,24}\b(?:browser|software|code|module|monarch)\b|\b(?:browser|software|code|module|monarch)\b.{0,24}\bextensions?\b/i.test(text)
+    || /плагин|пакет\s+модул|реестр\s+(?:плагин|модул)|расширени.{0,24}(?:браузер|программ|код|модул|monarch|монарх)/i.test(text);
 }
 
 function summarizePlugin(

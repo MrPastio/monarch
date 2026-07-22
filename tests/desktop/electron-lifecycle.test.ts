@@ -41,7 +41,7 @@ describe('Electron desktop lifecycle', () => {
     const source = readFileSync(path.resolve('desktop/electron/main.mjs'), 'utf8');
 
     expect(source).toContain("import { resolveRuntimeLaunch } from './runtime-entry.mjs'");
-    expect(source).toContain('const runtimeLaunch = resolveRuntimeLaunch({ workspaceRoot })');
+    expect(source).toContain('preferSource: !app.isPackaged');
     expect(source).toContain("[...runtimeLaunch.args, 'serve'");
     expect(source).toContain("MONARCH_STARTUP_TRACE: '1'");
     expect(source).toContain("import { waitForRuntimeReady } from './runtime-startup.mjs'");

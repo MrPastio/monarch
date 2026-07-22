@@ -1,5 +1,15 @@
 param(
   [string]$InstallDirectory = "",
+  [string]$InstallRoot = "",
+  [string]$AppVersion = "0.2.3.2",
+  [string]$RuntimeVersion = "2026.07.1",
+  [string]$BackendEnvironment = "backend-0.1.5",
+  [int]$DataSchemaVersion = 1,
+  [int]$MinimumReadableDataSchema = 1,
+  [int]$MaximumReadableDataSchema = 1,
+  [int]$MinimumModelCatalogSchema = 1,
+  [int]$MaximumModelCatalogSchema = 1,
+  [string]$PayloadRoot = "",
   [switch]$CpuOnly,
   [switch]$SkipOscar,
   [switch]$SkipSecurity,
@@ -18,6 +28,21 @@ $root = if ($InstallDirectory) {
   [System.IO.Path]::GetFullPath($InstallDirectory)
 } else {
   [System.IO.Path]::GetFullPath((Join-Path $scriptRoot ".."))
+}
+$appRoot = if ($InstallRoot) {
+  [System.IO.Path]::GetFullPath($InstallRoot)
+} else {
+  $root
+}
+$installerLogRoot = Join-Path $appRoot "installer-logs"
+try {
+  New-Item -ItemType Directory -Path $installerLogRoot -Force | Out-Null
+  $installerLogStamp = [DateTimeOffset]::UtcNow.ToString("yyyyMMdd-HHmmss")
+  $installerLogPath = Join-Path $installerLogRoot "bootstrap-$AppVersion-$installerLogStamp.log"
+  Start-Transcript -LiteralPath $installerLogPath -Force | Out-Null
+  Write-Host "Installer log: $installerLogPath"
+} catch {
+  Write-Warning "Unable to start installer transcript: $($_.Exception.Message)"
 }
 
 if ($env:OS -ne "Windows_NT") {
@@ -42,6 +67,46 @@ $windowsBuild = if ($windowsBuildProperty) { $windowsBuildProperty.Value } else 
 Write-Host "Windows 10/11 x64 ready (build $windowsBuild)"
 if (-not (Test-Path -LiteralPath (Join-Path $root "package.json") -PathType Leaf)) {
   throw "Monarch source root is invalid: $root"
+}
+
+. (Join-Path $root "installer\layout.ps1")
+$layout = if ($InstallRoot) {
+  Initialize-MonarchInstallLayout `
+    -InstallRoot $appRoot `
+    -VersionRoot $root `
+    -AppVersion $AppVersion `
+    -RuntimeVersion $RuntimeVersion `
+    -BackendEnvironment $BackendEnvironment `
+    -PayloadRoot $PayloadRoot
+} else {
+  foreach ($relativeDirectory in @(
+    "artifacts\generated",
+    "data\local",
+    "logs",
+    "runtime",
+    "secrets",
+    "tmp"
+  )) {
+    New-Item -ItemType Directory -Path (Join-Path $root $relativeDirectory) -Force | Out-Null
+  }
+  [ordered]@{ payloadRoot = $root }
+}
+if ($InstallRoot) {
+  $env:MONARCH_CONFIG_ROOT = [string]$layout.configRoot
+  $env:MONARCH_DATA_ROOT = [string]$layout.dataRoot
+  $env:MONARCH_LOGS_ROOT = [string]$layout.logsRoot
+  $oscarConfigDirectory = Join-Path $layout.configRoot "config\oscar"
+  $oscarConfigPath = Join-Path $oscarConfigDirectory ".env"
+  if (-not (Test-Path -LiteralPath $oscarConfigPath -PathType Leaf)) {
+    New-Item -ItemType Directory -Path $oscarConfigDirectory -Force | Out-Null
+    $legacyOscarConfig = Join-Path $root "oscar\.env"
+    $oscarConfigSource = if (Test-Path -LiteralPath $legacyOscarConfig -PathType Leaf) {
+      $legacyOscarConfig
+    } else {
+      Join-Path $root "oscar\.env.example"
+    }
+    Copy-Item -LiteralPath $oscarConfigSource -Destination $oscarConfigPath
+  }
 }
 
 function Write-Step {
@@ -246,17 +311,6 @@ function Ensure-Venv {
 
 Set-Location $root
 
-foreach ($relativeDirectory in @(
-  "artifacts\generated",
-  "data\local",
-  "logs",
-  "runtime",
-  "secrets",
-  "tmp"
-)) {
-  New-Item -ItemType Directory -Path (Join-Path $root $relativeDirectory) -Force | Out-Null
-}
-
 Write-Step "Preparing isolated Node.js runtime"
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\ensure-node.ps1") `
   -Install -Quiet
@@ -349,14 +403,20 @@ if ($InstallVoiceTts) {
   Assert-NativeSuccess "Voice TTS runtime installation"
 }
 
-Write-Step "Building Monarch launcher"
-& (Join-Path $root "scripts\build-launcher.ps1")
-Assert-NativeSuccess "Monarch launcher build"
-
 $manifest = [ordered]@{
   schemaVersion = 1
+  appVersion = $AppVersion
+  runtimeVersion = $RuntimeVersion
+  backendEnvironment = $BackendEnvironment
+  dataSchemaVersion = $DataSchemaVersion
+  minimumReadableDataSchema = $MinimumReadableDataSchema
+  maximumReadableDataSchema = $MaximumReadableDataSchema
+  minimumModelCatalogSchema = $MinimumModelCatalogSchema
+  maximumModelCatalogSchema = $MaximumModelCatalogSchema
   installedAt = [DateTimeOffset]::UtcNow.ToString("o")
-  installRoot = $root
+  installRoot = $appRoot
+  versionRoot = $root
+  payloadRoot = $layout.payloadRoot
   nodeVersion = $nodeVersion
   python = $python
   oscar = -not $SkipOscar
@@ -365,12 +425,65 @@ $manifest = [ordered]@{
   voiceTts = [bool]$InstallVoiceTts
   smallModel = [bool]$InstallSmallModel
 }
-$manifestPath = Join-Path $root "runtime\install-manifest.json"
-$manifest | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+$manifestPath = Join-Path $appRoot "install-manifest.json"
+Write-MonarchAtomicJson -Path $manifestPath -Value $manifest
+if ($InstallRoot) {
+  Write-MonarchVersionDescriptor `
+    -VersionRoot $root `
+    -AppVersion $AppVersion `
+    -RuntimeVersion $RuntimeVersion `
+    -BackendEnvironment $BackendEnvironment `
+    -DataSchemaVersion $DataSchemaVersion `
+    -MinimumReadableDataSchema $MinimumReadableDataSchema `
+    -MaximumReadableDataSchema $MaximumReadableDataSchema `
+    -MinimumModelCatalogSchema $MinimumModelCatalogSchema `
+    -MaximumModelCatalogSchema $MaximumModelCatalogSchema | Out-Null
+
+  $previousVersion = ""
+  $currentPointer = Join-Path $appRoot "current.json"
+  if (Test-Path -LiteralPath $currentPointer -PathType Leaf) {
+    try {
+      $existingPointer = Get-Content -LiteralPath $currentPointer -Raw | ConvertFrom-Json
+      if ($existingPointer.currentVersion -and
+          $existingPointer.currentVersion -ne $AppVersion) {
+        $previousVersion = [string]$existingPointer.currentVersion
+      }
+    } catch {
+      throw "Existing current.json is invalid; refusing to replace the active version."
+    }
+  }
+  if ($previousVersion) {
+    New-MonarchPendingUpdate `
+      -InstallRoot $appRoot `
+      -Layout $layout `
+      -PreviousVersion $previousVersion `
+      -CandidateVersion $AppVersion `
+      -CandidateRuntimeVersion $RuntimeVersion `
+      -CandidateBackendEnvironment $BackendEnvironment `
+      -CandidateDataSchemaVersion $DataSchemaVersion | Out-Null
+  } else {
+    $schemaPath = Join-Path $appRoot "data-schema.json"
+    $schemaState = Get-Content -LiteralPath $schemaPath -Raw | ConvertFrom-Json
+    if ([int]$schemaState.dataSchemaVersion -ne $DataSchemaVersion) {
+      $existingData = @(Get-ChildItem -LiteralPath $layout.dataRoot -Force -ErrorAction SilentlyContinue)
+      if ($existingData.Count -gt 0) {
+        throw "Existing data needs a bootstrap migration before schema $DataSchemaVersion can be activated."
+      }
+      Write-MonarchAtomicJson -Path $schemaPath -Value ([ordered]@{
+        schemaVersion = 1
+        dataSchemaVersion = $DataSchemaVersion
+        updatedAt = [DateTimeOffset]::UtcNow.ToString("o")
+      })
+    }
+    Set-MonarchCurrentVersion `
+      -InstallRoot $appRoot `
+      -CurrentVersion $AppVersion
+  }
+}
 
 Write-Host ""
 Write-Host "Monarch installation completed." -ForegroundColor Green
-Write-Host "Launcher: $(Join-Path $root 'Monarch.exe')"
+Write-Host "Launcher: $(Join-Path $appRoot 'Monarch.exe')"
 if (-not $NonInteractive) {
   Write-Host "Models are local, optional assets and are never committed to Git."
 }

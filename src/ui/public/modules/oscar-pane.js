@@ -21,11 +21,12 @@ import {
   createThinkParser,
   extractOscarActionProposal,
   shouldPreDispatchAgentAction,
+  canAutoConfirmDirectAgentAction,
   executionNeedsAuthoritativeReceipt,
   looksLikeProtectedAgentAction,
   resolveContextualAgentAction
 } from './utils.js';
-import { setMascotState } from './mascot-controller.js';
+import { hasSentOscarMessage, setMascotState } from './mascot-controller.js';
 import { createOscarSpeechController } from './oscar-speech.js';
 import { resolveOscarComposerPrimaryAction } from './voice-mode-state.js';
 
@@ -1880,7 +1881,7 @@ async function handleDispatchedAction(text, confirmed, confirmationToken, appRen
       { error: true },
     );
     replacePendingOscarMessage(assistantMessage);
-    queueDispatchedConversationPersistence(userText, assistantMessage.content, persistUser && !confirmed);
+    queueDispatchedConversationPersistence(userText, assistantMessage.content, persistUser && (!confirmed || dispatchContext.autoConfirmedDirectAction === true));
     state.oscar.context = { summary: message, request: null, sources: [], skills: [] };
     appRenderCallback();
     return true;
@@ -1902,7 +1903,7 @@ async function handleDispatchedAction(text, confirmed, confirmationToken, appRen
       { error: !clarification },
     );
     replacePendingOscarMessage(assistantMessage);
-    queueDispatchedConversationPersistence(userText, assistantMessage.content, persistUser && !confirmed);
+    queueDispatchedConversationPersistence(userText, assistantMessage.content, persistUser && (!confirmed || dispatchContext.autoConfirmedDirectAction === true));
     state.oscar.context = {
       summary: clarification || 'No safe system route.',
       request: null,
@@ -1928,6 +1929,25 @@ async function handleDispatchedAction(text, confirmed, confirmationToken, appRen
     summary: String(execution.summary || result.summary || '').slice(0, 600),
     output: String(outputSummary || '').slice(0, 1200),
   }] : planEvidence;
+
+  if (needsConfirmation && !confirmed && canAutoConfirmDirectAgentAction(result.route, text, dispatchContext)) {
+    replacePendingOscarMessage(createOscarMessage(
+      'assistant',
+      `**${systemName}** выполняет явно заданную системную команду.`,
+      systemName,
+      { pending: true, streamPhase: 'device-confirmed' },
+    ));
+    appRenderCallback();
+    return handleDispatchedAction(
+      text,
+      true,
+      confirmation.token,
+      appRenderCallback,
+      userText,
+      persistUser,
+      { ...dispatchContext, autoConfirmedDirectAction: true },
+    );
+  }
 
   if (!needsConfirmation && execution?.ok && planIndex + 1 < planCommands.length) {
     const nextIndex = planIndex + 1;
@@ -1994,7 +2014,7 @@ async function handleDispatchedAction(text, confirmed, confirmationToken, appRen
     } : null,
   });
   replacePendingOscarMessage(assistantMessage);
-  queueDispatchedConversationPersistence(userText, assistantMessage.content, persistUser && !confirmed);
+  queueDispatchedConversationPersistence(userText, assistantMessage.content, persistUser && (!confirmed || dispatchContext.autoConfirmedDirectAction === true));
   state.oscar.context = {
     summary: result.summary,
     request: {
@@ -2138,6 +2158,7 @@ function subsystemDisplayName(moduleId) {
     assistant: 'Monarch Agent',
     astra: 'Monarch Skills',
     diagnostics: 'Monarch Diagnostics',
+    device: 'Monarch Device',
     memory: 'Monarch Memory',
     models: 'Monarch Models',
     oscar: 'Monarch Oscar',
@@ -2221,10 +2242,11 @@ export function renderOscar() {
   renderRamWarning();
   renderGenerationStatus();
 
-  const isEmptyConversation = state.oscar.messages.length === 0;
+  const isEmptyConversation = !hasSentOscarMessage(state.oscar.messages);
   elements.oscarThread.classList.toggle('is-empty', isEmptyConversation);
   elements.shell?.classList.toggle('mascot-empty-home', isEmptyConversation);
   elements.shell?.classList.toggle('mascot-dialog-active', !isEmptyConversation);
+  elements.shell?.dispatchEvent(new Event('monarch:mascot-surface-changed'));
   if (isEmptyConversation) {
     animatedOscarUserMessages.clear();
     elements.oscarThread.innerHTML = `

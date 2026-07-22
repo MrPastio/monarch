@@ -41,16 +41,34 @@ if (-not $SkipTorch) {
     Assert-CommandSuccess "Oscar PyTorch installation"
 }
 
-& $VenvPython -m pip install -r requirements.txt
-Assert-CommandSuccess "Oscar Python dependency installation"
+$FilteredRequirements = Join-Path $Root ".requirements-installer.tmp"
+try {
+    # llama-cpp-python publishes Windows wheels on its own index. Installing it
+    # from PyPI first makes pip compile llama.cpp locally and then replace that
+    # build with the GPU wheel, adding minutes and requiring Visual Studio.
+    Get-Content -LiteralPath (Join-Path $Root "requirements.txt") |
+        Where-Object { $_ -notmatch '^\s*llama-cpp-python(?:\s*[=<>!~].*)?\s*$' } |
+        Set-Content -LiteralPath $FilteredRequirements -Encoding UTF8
+    & $VenvPython -m pip install -r $FilteredRequirements
+    Assert-CommandSuccess "Oscar Python dependency installation"
+} finally {
+    Remove-Item -LiteralPath $FilteredRequirements -Force -ErrorAction SilentlyContinue
+}
+
+$LlamaWheelIndex = if ($CpuOnly) {
+    "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+} else {
+    "https://abetlen.github.io/llama-cpp-python/whl/cu125"
+}
+& $VenvPython -m pip install --force-reinstall --no-cache-dir --no-deps `
+    llama-cpp-python==0.3.30 `
+    --index-url $LlamaWheelIndex `
+    --only-binary llama-cpp-python
+Assert-CommandSuccess "Oscar llama.cpp wheel installation"
 
 if (-not $CpuOnly) {
     # Keep llama.cpp on the NVIDIA GPU without requiring a machine-wide CUDA
     # Toolkit. The 12.5 wheel is compatible with newer NVIDIA drivers.
-    & $VenvPython -m pip install --force-reinstall --no-cache-dir --no-deps `
-        llama-cpp-python==0.3.30 `
-        --index-url https://abetlen.github.io/llama-cpp-python/whl/cu125
-    Assert-CommandSuccess "Oscar CUDA llama.cpp installation"
     & $VenvPython -m pip install --no-cache-dir `
         nvidia-cuda-runtime-cu12==12.5.82 `
         nvidia-cublas-cu12==12.5.3.2 `
@@ -68,8 +86,14 @@ if (-not $SkipFrontendInstall) {
     }
 }
 
-if (-not (Test-Path -LiteralPath (Join-Path $Root ".env"))) {
-    Copy-Item -LiteralPath (Join-Path $Root ".env.example") -Destination (Join-Path $Root ".env")
+$OscarEnvPath = if ($env:MONARCH_CONFIG_ROOT) {
+    Join-Path $env:MONARCH_CONFIG_ROOT "config\oscar\.env"
+} else {
+    Join-Path $Root ".env"
+}
+if (-not (Test-Path -LiteralPath $OscarEnvPath)) {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $OscarEnvPath) -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $Root ".env.example") -Destination $OscarEnvPath
 }
 
 Write-Host "Installed. Backend: .\scripts\backend.ps1  Frontend: .\scripts\frontend.ps1"

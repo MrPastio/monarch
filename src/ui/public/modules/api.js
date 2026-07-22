@@ -588,8 +588,28 @@ export async function executeVoiceModeDeviceAction(text, signal) {
 export async function executeVoiceModeAction(candidate, text, signal) {
   const actionId = String(candidate?.actionId || '').trim();
   const slots = candidate?.slots && typeof candidate.slots === 'object' ? candidate.slots : {};
+  if (actionId === 'time.query') {
+    return executeVoiceConfirmedCapability('device', 'device.system.time.get', { kind: 'time' }, signal);
+  }
+
+  if (actionId === 'device.volume.status') {
+    return executeVoiceConfirmedCapability('device', 'device.volume.get', {}, signal);
+  }
+
   if (actionId === 'device.volume') {
-    return executeVoiceModeDeviceAction(String(text || '').trim(), signal);
+    const action = String(slots.operation || '').trim();
+    const value = Number(slots.value);
+    const delta = Number(slots.delta);
+    if (action === 'set' && Number.isFinite(value) && value >= 0 && value <= 100) {
+      return executeVoiceConfirmedCapability('device', 'device.volume.set', { action, value: Math.round(value) }, signal);
+    }
+    if (action === 'change' && Number.isFinite(delta) && delta !== 0 && Math.abs(delta) <= 100) {
+      return executeVoiceConfirmedCapability('device', 'device.volume.set', { action, delta: Math.round(delta) }, signal);
+    }
+    if (action === 'mute' || action === 'unmute') {
+      return executeVoiceConfirmedCapability('device', 'device.volume.set', { action }, signal);
+    }
+    return voiceActionClarification('Как изменить громкость?');
   }
 
   if (actionId === 'device.brightness.status') {

@@ -133,6 +133,11 @@ CONTEXTUAL_REFERENCE_PATTERN = re.compile(
     r"предыдущ\w*|прошл\w*|выше|ранее|обсужд\w*|упомянут\w*)\b)",
     re.IGNORECASE,
 )
+CONTEXTUAL_ANAPHORIC_PATTERN = re.compile(
+    r"\b(?:he|she|they|him|her|them|his|hers|theirs|"
+    r"он|она|они|его|е[её]|ему|нему|ней|не[её]|ним|ними|них|их)\b",
+    re.IGNORECASE,
+)
 CONTEXTUAL_FOLLOWUP_CUE_PATTERN = re.compile(
     r"(?:^(?:а|и)?\s*(?:теперь|тогда|дальше|затем|после\s+этого|в\s+таком\s+случае)\b|"
     r"^(?:and\s+)?(?:now|then|next|after\s+that)\b|"
@@ -143,12 +148,14 @@ CONTEXTUAL_FOLLOWUP_CUE_PATTERN = re.compile(
 )
 CONTEXTUAL_GENERIC_TOKEN_PATTERN = re.compile(
     r"(?:а|и|но|ну|же|теперь|тогда|дальше|затем|давай|дайте|пожалуйста|после|этого|"
-    r"в|во|на|по|для|про|об|о|с|со|к|из|у|сам\w*|более|менее|ещ[её]|"
+    r"в|во|на|по|для|про|об|о|с|со|к|из|у|как|что|почему|кто|где|когда|ты|вы|"
+    r"сам\w*|более|менее|ещ[её]|так\w*|"
     r"скажи|расскажи|покажи|дай|сделай|спрогнозир\w*|оцени|разбер\w*|рассмотр\w*|"
-    r"продолж\w*|сравни\w*|реал[еи]стич\w*|вероятн\w*|оптимистич\w*|"
+    r"продолж\w*|сравни\w*|относ\w*|дума\w*|счита\w*|сдел\w*|реал[еи]стич\w*|вероятн\w*|оптимистич\w*|"
     r"пессимистич\w*|альтернативн\w*|друг\w*|худш\w*|лучш\w*|"
     r"сценар\w*|вариант\w*|исход\w*|прогноз\w*|риск\w*|последств\w*|вывод\w*|"
     r"and|but|now|then|next|please|after|that|this|the|a|an|for|of|about|with|"
+    r"how|what|why|who|where|when|you|think|feel|consider|do|did|"
     r"tell|show|give|make|predict|forecast|assess|analyze|continue|compare|"
     r"most|more|less|same|another|other|realistic|likely|optimistic|pessimistic|"
     r"alternative|opposite|worst|best|scenario|option|outcome|forecast|risk|"
@@ -1175,14 +1182,16 @@ def is_context_dependent_followup(text: str) -> bool:
     normalized = " ".join(str(text or "").split())
     if not normalized or len(normalized) > CONTEXTUAL_FOLLOWUP_MAX_CHARS:
         return False
-    if CONTEXTUAL_REFERENCE_PATTERN.search(normalized):
+    if CONTEXTUAL_ANAPHORIC_PATTERN.search(normalized):
         return True
-    if not CONTEXTUAL_FOLLOWUP_CUE_PATTERN.search(normalized):
+    has_reference = bool(CONTEXTUAL_REFERENCE_PATTERN.search(normalized))
+    if not has_reference and not CONTEXTUAL_FOLLOWUP_CUE_PATTERN.search(normalized):
         return False
     tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", normalized.lower())
     content_tokens = [
         token for token in tokens
         if not CONTEXTUAL_GENERIC_TOKEN_PATTERN.fullmatch(token)
+        and not CONTEXTUAL_REFERENCE_PATTERN.fullmatch(token)
     ]
     return not content_tokens
 
@@ -1661,7 +1670,7 @@ def record_model_quality_result(
     if not tier or tier == "system":
         return
     expected_lang = expected_request_language(request)
-    detected_flags = detect_quality_flags(answer, expected_lang)
+    detected_flags = detect_quality_flags(answer, expected_lang, request)
     merged_flags = list(dict.fromkeys([*(quality_flags or []), *detected_flags]))
     assessment = assess_model_answer(
         answer,
@@ -2346,9 +2355,9 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                     full_answer = grounded_answer
 
                 if not is_explicit_gemma_override(request):
-                    detected_quality_flags = detect_quality_flags(full_answer, expected_request_language(request))
+                    detected_quality_flags = detect_quality_flags(full_answer, expected_request_language(request), request)
                     quality_flags = list(dict.fromkeys([*quality_flags, *detected_quality_flags]))
-                    if detected_quality_flags and quality_regeneration_enabled(request):
+                    if detected_quality_flags and quality_regeneration_enabled(request, detected_quality_flags):
                         regenerated_answer, regenerated_quality_flags, quality_regenerated = await maybe_regenerate_for_quality(
                             tier,
                             request,
@@ -3295,10 +3304,10 @@ async def maybe_regenerate_for_quality(
     full_answer: str,
 ) -> tuple[str, list[str], bool]:
     expected_lang = expected_request_language(request)
-    quality_flags = detect_quality_flags(full_answer, expected_lang)
+    quality_flags = detect_quality_flags(full_answer, expected_lang, request)
     if not quality_flags:
         return full_answer, [], False
-    if not quality_regeneration_enabled(request):
+    if not quality_regeneration_enabled(request, quality_flags):
         return full_answer, quality_flags, False
 
     stronger_tier = next_stronger_tier(tier)
@@ -3326,19 +3335,73 @@ async def maybe_regenerate_for_quality(
         async for piece in iterate_in_threadpool(retry_generator):
             retry_pieces.append(piece)
         regenerated = "".join(retry_pieces).strip()
-        return regenerated or full_answer, quality_flags, bool(regenerated)
+        regenerated_flags = detect_quality_flags(regenerated, expected_lang, request) if regenerated else quality_flags
+        original_critical = len(CRITICAL_QUALITY_FLAGS.intersection(quality_flags))
+        regenerated_critical = len(CRITICAL_QUALITY_FLAGS.intersection(regenerated_flags))
+        improved = bool(regenerated) and (
+            regenerated_critical < original_critical
+            or (regenerated_critical == original_critical and len(regenerated_flags) < len(quality_flags))
+        )
+        return (regenerated if improved else full_answer), quality_flags, improved
     except Exception as exc:
         logging.exception("Oscar quality regeneration failed")
         model_runtime.last_error = str(exc)
         return full_answer, quality_flags, False
 
 
-def quality_regeneration_enabled(_request: ChatRequest) -> bool:
+CRITICAL_QUALITY_FLAGS = {"stale_answer_repeat", "irrelevant_identity_fallback"}
+
+DIRECT_IDENTITY_QUESTION_PATTERN = re.compile(
+    r"(?:кто\s+(?:тебя|вас|oscar|оскара)\s+создал|кто\s+тво[йя]\s+создател|"
+    r"кем\s+ты\s+создан|кто\s+ты|что\s+ты|что\s+такое\s+(?:oscar|оскар)|"
+    r"who\s+created\s+you|who\s+is\s+your\s+creator|who\s+are\s+you|what\s+are\s+you)",
+    re.IGNORECASE,
+)
+IDENTITY_CREATION_SUBJECT_PATTERN = re.compile(
+    r"\b(?:тебя|ты|тво\w*|сво\w*|oscar|оскар|you|your|yourself)\b",
+    re.IGNORECASE,
+)
+IDENTITY_CREATION_TOPIC_PATTERN = re.compile(
+    r"\b(?:созда\w*|создател\w*|происхожд\w*|появ\w*|creation|created|creator|origin)\b",
+    re.IGNORECASE,
+)
+IDENTITY_CREATION_NARRATIVE_PATTERN = re.compile(
+    r"\b(?:расскаж\w*|росскаж\w*|опиш\w*|объясн\w*|истори\w*|как|когда|почему|зачем|"
+    r"tell|describe|explain|story|history|how|when|why)\b",
+    re.IGNORECASE,
+)
+IDENTITY_OTHER_PREDICATE_PATTERN = re.compile(
+    r"\b(?:отнош\w*|дума\w*|мнени\w*|чувств\w*|оцени\w*|нрав\w*|"
+    r"feel|think|opinion|regard|attitude|like|dislike)\b",
+    re.IGNORECASE,
+)
+
+
+def quality_regeneration_enabled(_request: ChatRequest, quality_flags: list[str] | None = None) -> bool:
+    if CRITICAL_QUALITY_FLAGS.intersection(quality_flags or []):
+        return True
     value = os.getenv("OSCAR_ENABLE_QUALITY_REGENERATION", "").strip().lower()
     return value in {"1", "true", "yes", "on"}
 
 
-def detect_quality_flags(answer: str, expected_language: str = "auto") -> list[str]:
+def is_direct_identity_request(text: str) -> bool:
+    value = str(text or "").strip()
+    if DIRECT_IDENTITY_QUESTION_PATTERN.search(value):
+        return True
+    if IDENTITY_OTHER_PREDICATE_PATTERN.search(value):
+        return False
+    return bool(
+        IDENTITY_CREATION_SUBJECT_PATTERN.search(value)
+        and IDENTITY_CREATION_TOPIC_PATTERN.search(value)
+        and IDENTITY_CREATION_NARRATIVE_PATTERN.search(value)
+    )
+
+
+def detect_quality_flags(
+    answer: str,
+    expected_language: str = "auto",
+    request: ChatRequest | None = None,
+) -> list[str]:
     lowered = answer.lower()
     flags: list[str] = []
     if re_search_any(lowered, [
@@ -3373,7 +3436,40 @@ def detect_quality_flags(answer: str, expected_language: str = "auto") -> list[s
     ]):
         flags.append("capability_denial")
 
-    return flags
+    if request is not None:
+        user_messages = [
+            message.content.strip() for message in request.messages
+            if message.role == "user" and message.content.strip()
+        ]
+        assistant_messages = [
+            message.content.strip() for message in request.messages
+            if message.role == "assistant" and message.content.strip()
+        ]
+        normalized_answer = normalize_quality_text(answer)
+        if (
+            len(normalized_answer) >= 12
+            and normalized_answer in {normalize_quality_text(item) for item in assistant_messages}
+            and len(user_messages) >= 2
+            and normalize_quality_text(user_messages[-1]) != normalize_quality_text(user_messages[-2])
+        ):
+            flags.append("stale_answer_repeat")
+
+        latest_user = user_messages[-1] if user_messages else ""
+        direct_identity_request = is_direct_identity_request(latest_user)
+        identity_only_answer = len(answer.strip()) <= 260 and bool(re.search(
+            r"(?:^|[.!?]\s*)(?:меня\s+создал|я\s*[-—]?\s*(?:локальн|ai[- ]?ассистент|"
+            r"искусственн\w*\s+интеллект)|i\s+was\s+created\s+by|i\s+am\s+(?:a\s+)?(?:local|ai)\s+assistant)",
+            answer.strip(),
+            flags=re.IGNORECASE,
+        ))
+        if identity_only_answer and not direct_identity_request:
+            flags.append("irrelevant_identity_fallback")
+
+    return list(dict.fromkeys(flags))
+
+
+def normalize_quality_text(value: str) -> str:
+    return re.sub(r"[^a-zа-яё0-9]+", " ", str(value or "").casefold()).strip()
 
 
 def re_search_any(text: str, patterns: list[str]) -> bool:

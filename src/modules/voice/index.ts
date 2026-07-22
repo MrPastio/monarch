@@ -142,7 +142,7 @@ export class VoiceModule implements MonarchModule {
 
   async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
     const text = intent.text.toLowerCase();
-    if (!/(voice|speech|stt|tts|microphone)/i.test(text)) {
+    if (!mentionsVoiceSubsystem(text)) {
       return null;
     }
 
@@ -920,6 +920,11 @@ export class VoiceModule implements MonarchModule {
     }
     return summary;
   }
+}
+
+function mentionsVoiceSubsystem(text: string): boolean {
+  return /\b(?:monarch voice|voice (?:mode|bridge|assistant|status|settings)|speech (?:recognition|synthesis)|stt|tts|microphone)\b/i.test(text)
+    || /\bvoice\b.{0,32}\b(?:start|stop|launch|status|settings|microphone|stt|tts)\b|\b(?:start|stop|launch|status|settings|microphone|stt|tts)\b.{0,32}\bvoice\b/i.test(text);
 }
 
 type ValidSttInput<T> = { ok: true } & T;

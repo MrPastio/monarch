@@ -47,10 +47,78 @@ PUBLIC_SUBJECT_PATTERN = re.compile(
     r"openai|anthropic|google|microsoft|meta|apple|nvidia)",
     re.IGNORECASE,
 )
-FRESHNESS_PATTERN = re.compile(
-    r"(?:\b(?:latest|current|today|recent|newest|now)\b|актуальн|свеж|последн|сегодня|сейчас)",
+TEMPORAL_QUALIFIER_PATTERN = re.compile(
+    r"(?:\b(?:latest|current|today|recent|newest|now|this\s+(?:week|month|year))\b|"
+    r"актуальн|свеж|последн|сегодня|сейчас|на\s+данный\s+момент|в\s+этом\s+(?:году|месяце|неделе))",
     re.IGNORECASE,
 )
+DIRECT_FRESHNESS_SUBJECT_PATTERN = re.compile(
+    r"(?:\b(?:news|weather|forecast|exchange\s+rate|standings|sports?\s+score)\b|"
+    r"новост|погод|прогноз\s+погод|курс\s+(?:валют|доллар|евро|гривн|рубл)|"
+    r"турнирн\w*\s+таблиц|сч[её]т\s+матч|результат\w*\s+матч)",
+    re.IGNORECASE,
+)
+CHANGING_EXTERNAL_SUBJECT_PATTERN = re.compile(
+    r"(?:\b(?:company|corporation|government|market|stock|product|software|library|framework|"
+    r"release|version|update|election|regulation|standard|api|openai|anthropic|google|microsoft|"
+    r"apple|nvidia|windows|android|ios|macos|python|node(?:\.js)?|react)\b|"
+    r"компан|корпорац|правительств|рынок|акци[ия]|продукт|программ|библиотек|фреймворк|"
+    r"релиз|верси|обновлен|выбор|регулирован|регламент|стандарт|"
+    r"openai|anthropic|google|microsoft|apple|nvidia|windows|android|ios|macos|python|react|"
+    r"(?:ai|llm|языков\w*)\s+модел)",
+    re.IGNORECASE,
+)
+LIVE_VALUE_PATTERN = re.compile(
+    r"(?:\b(?:price|quote)\b.{0,32}\b(?:btc|bitcoin|eth|ethereum|stock|share|product|gas|oil|gold)\b|"
+    r"\b(?:btc|bitcoin|eth|ethereum|stock|share|product|gas|oil|gold)\b.{0,32}\b(?:price|quote)\b|"
+    r"цен[аы].{0,32}(?:btc|bitcoin|биткоин|ethereum|эфир|акци|товар|бензин|нефт|золот)|"
+    r"(?:btc|bitcoin|биткоин|ethereum|эфир|акци|товар|бензин|нефт|золот).{0,32}цен[аы])",
+    re.IGNORECASE,
+)
+LIVE_SCHEDULE_PATTERN = re.compile(
+    r"(?:\b(?:schedule|timetable)\b.{0,40}\b(?:flight|train|bus|match|game|event|concert|cinema)\b|"
+    r"\b(?:flight|train|bus|match|game|event|concert|cinema)\b.{0,40}\b(?:schedule|timetable)\b|"
+    r"расписан.{0,40}(?:рейс|поезд|автобус|матч|игр|турнир|концерт|кино)|"
+    r"(?:рейс|поезд|автобус|матч|игр|турнир|концерт|кино).{0,40}расписан)",
+    re.IGNORECASE,
+)
+OFFICEHOLDER_PATTERN = re.compile(
+    r"(?:\b(?:who|current|name)\b.{0,32}\b(?:president|prime\s+minister|ceo)\b|"
+    r"\b(?:president|prime\s+minister|ceo)\b.{0,32}\b(?:who|current|name)\b|"
+    r"(?:кто|как\s+зовут|сейчас|нынешн|текущ).{0,32}(?:президент|премьер[- ]?министр|генеральн\w*\s+директор)|"
+    r"(?:президент|премьер[- ]?министр|генеральн\w*\s+директор).{0,32}(?:кто|как\s+зовут|сейчас|нынешн|текущ))",
+    re.IGNORECASE,
+)
+DEFINITIONAL_QUERY_PATTERN = re.compile(
+    r"^\s*(?:что\s+такое|что\s+означает|что\s+значит|объясни|поясни|what\s+is|what\s+does|explain)\b",
+    re.IGNORECASE,
+)
+
+
+def has_freshness_signal(text: str) -> bool:
+    """Return true only when the query actually needs time-sensitive facts.
+
+    Temporal adjectives alone are ambiguous ("current" in electricity,
+    "последний элемент", "сейчас в моём коде") and must not silently enable
+    network search or increase the model tier.
+    """
+
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return False
+    if DEFINITIONAL_QUERY_PATTERN.search(normalized) and not TEMPORAL_QUALIFIER_PATTERN.search(normalized):
+        return False
+    if (
+        DIRECT_FRESHNESS_SUBJECT_PATTERN.search(normalized)
+        or LIVE_VALUE_PATTERN.search(normalized)
+        or LIVE_SCHEDULE_PATTERN.search(normalized)
+        or OFFICEHOLDER_PATTERN.search(normalized)
+    ):
+        return True
+    return bool(
+        TEMPORAL_QUALIFIER_PATTERN.search(normalized)
+        and CHANGING_EXTERNAL_SUBJECT_PATTERN.search(normalized)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +166,7 @@ def resolve_research_decision(query: str, preference: str = RESEARCH_MODE_AUTO) 
     if PUBLIC_SUBJECT_PATTERN.search(text):
         features.append("public-subject")
         score += 0.12
-    if FRESHNESS_PATTERN.search(text):
+    if has_freshness_signal(text):
         features.append("freshness")
         score += 0.08
     if _is_multipart(text):

@@ -8,7 +8,7 @@ import {
 const visualStates = ['idle', 'listening', 'thinking', 'speaking', 'paused'];
 
 describe('voice mode visual contract', () => {
-  it('retries one failed Qwen warmup exactly once before voice preparation', async () => {
+  it('retries one failed Qwen warmup exactly once without gating voice preparation', async () => {
     const speech = {
       awaitWarmup: vi.fn(async () => ({ status: 'failed', ok: false, error: 'os-1455' })),
       retryWarmup: vi.fn(async () => ({ status: 'ready', ok: true, engine: 'qwen3-tts-cuda-graph' })),
@@ -97,9 +97,13 @@ describe('voice mode visual contract', () => {
     expect(source).toContain('createVoiceOrbFrame');
     expect(source).toContain('drawVoiceOrbRings');
     expect(source).toContain('drawVoiceOrbBands');
-    expect(source).toContain('warmVoiceModeSpeech(speech).then(continueAfterSpeechWarmup');
+    expect(source).toContain('warmVoiceModeSpeech(speech).then(recordSpeechWarmup');
     expect(source).toContain('if (!isOpen || openingTurn !== turnId) return;');
     expect(source).toContain('void prepareVoiceModeModels().catch(() =>');
+    expect(source.indexOf('void prepareVoiceModeModels().catch(() =>')).toBeLessThan(
+      source.indexOf('void warmVoiceModeSpeech(speech).then(recordSpeechWarmup'),
+    );
+    expect(source).toContain('openTimer = window.setTimeout(startListening, reducedMotion?.matches ? 40 : 140)');
     expect(source).toContain('void releaseVoiceModeModels().catch(() =>');
     expect(source).toContain("surface.dataset.speechWarmup = ready ? 'ready' : 'failed'");
     expect(source).toContain('describeVoiceSpeechFallback(speechState.playback)');

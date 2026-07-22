@@ -368,10 +368,12 @@ function windowsKnownUserFolderCandidates(kind: MonarchKnownUserFolder): string[
 
 function defaultRedZoneRoots(workspaceRoot: string, protectWorkspaceInternals: boolean): string[] {
   const systemRoot = process.env.SystemRoot || path.join(systemDriveRoot(), 'Windows');
+  const workspaceDriveRoot = path.parse(workspaceRoot).root || systemDriveRoot();
   const userProfile = process.env.USERPROFILE || process.env.HOME || '';
   const appData = process.env.APPDATA || '';
   const localAppData = process.env.LOCALAPPDATA || '';
   const roots = [
+    path.join(workspaceDriveRoot, 'MonarchData', 'Safe'),
     systemRoot,
     process.env.ProgramFiles || path.join(systemDriveRoot(), 'Program Files'),
     process.env['ProgramFiles(x86)'] || path.join(systemDriveRoot(), 'Program Files (x86)'),

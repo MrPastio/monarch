@@ -19,6 +19,7 @@ import { getAgentSkillRegistry } from '../modules/astra/agent-skills';
 import type { MonarchApprovalPolicy, MonarchAutonomyMode, MonarchSandboxMode } from '../core';
 import { CoderAgentController } from './coder-agent-controller';
 import type { CoderModelId } from '../modules/coder/types';
+import { handleAgentTaskHttpRequest } from './agent-task-http';
 
 export interface MonarchHttpServerOptions {
   app: MonarchApplication;
@@ -64,12 +65,23 @@ export function createMonarchHttpServer(options: MonarchHttpServerOptions): Serv
     void handleRequest(options.app, publicRoot, session, request, response).catch((error: unknown) => {
       const normalized = normalizeError(error);
       sendJson(response, normalized.statusCode, {
+        ...(isAgentTaskApiRequest(request.url) ? { version: 1 } : {}),
         ok: false,
         error: normalized.code,
         message: normalized.message,
       });
     });
   });
+}
+
+function isAgentTaskApiRequest(rawUrl: string | undefined): boolean {
+  if (!rawUrl) return false;
+  try {
+    const pathname = new URL(rawUrl, 'http://127.0.0.1').pathname;
+    return pathname === '/api/agent/tasks' || pathname.startsWith('/api/agent/tasks/');
+  } catch {
+    return false;
+  }
 }
 
 export async function startMonarchHttpServer(
@@ -116,6 +128,17 @@ async function handleRequest(
 
   if (request.method === 'GET' && url.pathname === '/api/ready') {
     sendJson(response, 200, { ok: true, ready: true });
+    return;
+  }
+
+  if (await handleAgentTaskHttpRequest({
+    app,
+    url,
+    request,
+    response,
+    enforceMutation: () => enforceMutationGuards(request, session),
+    enforceRead: () => enforceReadApiToken(request, session),
+  })) {
     return;
   }
 

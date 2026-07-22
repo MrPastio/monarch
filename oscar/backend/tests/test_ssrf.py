@@ -85,6 +85,36 @@ def test_search_planner_prefers_official_source_for_openai_product():
     assert weather_queries[0].endswith("weather now temperature")
 
 
+@pytest.mark.parametrize("query", [
+    "Почему мне сейчас грустно?",
+    "Что сейчас происходит в моем коде?",
+    "Объясни current в электричестве",
+    "Какой current branch в git?",
+    "Актуальна ли эта идея?",
+    "Свежий хлеб полезнее?",
+    "Последний элемент списка",
+    "Объясни закон Ома",
+    "Что такое цена деления?",
+    "Составь расписание дня",
+    "Сделай расписание тренировок",
+    "Что такое погода?",
+    "Что означает слово президент?",
+])
+def test_temporal_words_without_external_fresh_subject_stay_local(query):
+    assert should_auto_search(query) == (False, "not-needed")
+
+
+@pytest.mark.parametrize("query", [
+    "Кто сейчас президент США?",
+    "Какая сегодня погода в Киеве?",
+    "Последние новости OpenAI",
+    "Какая сейчас версия Python?",
+    "Расписание поездов Киев Львов",
+])
+def test_time_sensitive_external_facts_still_enable_search(query):
+    assert should_auto_search(query)[0] is True
+
+
 def test_search_results_deduplicate_same_title_on_same_host():
     results = unique_results([
         RawSearchResult(title="GPT-5.6 Preview System Card", url="https://safety.example/gpt-5-6"),

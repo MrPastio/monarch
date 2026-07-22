@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const oscarSource = readFileSync('src/ui/public/modules/oscar-pane.js', 'utf8');
+const utilsSource = readFileSync('src/ui/public/modules/utils.js', 'utf8');
 const styles = readFileSync('src/ui/public/styles-v2.css', 'utf8');
 const appSource = readFileSync('src/ui/public/app.js', 'utf8');
 const indexSource = readFileSync('src/ui/public/index.html', 'utf8');
@@ -40,6 +41,21 @@ describe('Oscar live shell regressions', () => {
     expect(styles).toMatch(/\.composer-options-popover\s*\{[^}]*right:\s*48px;[^}]*z-index:\s*72;/s);
   });
 
+  it('keeps the central mascot permanent until the first message and only then enables the movable mini-mascot', () => {
+    expect(indexSource).toContain('data-monarch-brand-cycle');
+    expect(indexSource).toContain('data-mascot-resize');
+    expect(appSource).toContain('toggleMascotVisibility();');
+    expect(appSource).toContain('normalizeUiPreferences(JSON.parse(');
+    expect(appSource).toContain('serializeUiPreferences(preferences)');
+    expect(oscarSource).toContain('!hasSentOscarMessage(state.oscar.messages)');
+    expect(oscarSource).toContain("dispatchEvent(new Event('monarch:mascot-surface-changed'))");
+    expect(styles).toContain('.app-shell.mascot-empty-home .inspector.mascot-active:not(.snake-game-host-active)');
+    expect(styles).toContain('.app-shell.mascot-dialog-active.mascot-visible .inspector.mascot-active:not(.snake-game-host-active)');
+    expect(styles).toContain('.app-shell.mascot-empty-home .mascot-resize-handle { display: none; }');
+    expect(styles).toContain('left: var(--mascot-x, 200px);');
+    expect(styles).toContain('.mascot-resize-handle');
+  });
+
   it('offers explicit research control and renders animated high-level research progress', () => {
     expect(indexSource).toContain('id="oscar-research-dropdown-btn"');
     expect(indexSource).toContain('data-value="deep"');
@@ -48,6 +64,23 @@ describe('Oscar live shell regressions', () => {
     expect(oscarSource).toContain("event.type === 'research'");
     expect(styles).toContain('.oscar-live-stage[data-phase^="research-"]');
     expect(styles).toContain('@media (prefers-reduced-motion: reduce)');
+  });
+
+  it('replaces generic thinking dots with the Monarch-adapted ThinkingOrb states', () => {
+    expect(utilsSource).toContain('renderMonarchThinkingOrb(streamPhase)');
+    expect(utilsSource).toContain('renderMonarchThinkingOrb(phase)');
+    expect(utilsSource).not.toContain('class="oscar-thinking-dots"');
+    expect(styles).toContain('MIT-derived motion primitive: @illuma-ai/icons ThinkingOrb 2.7.0');
+    expect(styles).toContain('.monarch-thinking-orb[data-orb-phase="research-search"]');
+    expect(styles).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.monarch-thinking-orb__core/);
+  });
+
+  it('renders ordinary thinking as a bare orb without a status card or copy', () => {
+    expect(utilsSource).toContain('class="oscar-message assistant pending thinking-only"');
+    expect(utilsSource).toContain('class="oscar-orb-only-status"');
+    expect(utilsSource).not.toContain('class="oscar-thinking-copy"');
+    expect(styles).toContain('.oscar-orb-only-status');
+    expect(styles).toMatch(/\.oscar-thinking-only\s*\{[^}]*display:\s*inline-grid;[^}]*place-items:\s*center;/s);
   });
 
   it('keeps research confirmation in the answer card and morphs it into visible stages', () => {
@@ -73,7 +106,7 @@ describe('Oscar live shell regressions', () => {
 
   it('makes persisted density and inspector preferences affect the active stylesheet', () => {
     expect(styles).toContain('body[data-density="compact"] .nav-item');
-    expect(styles).toMatch(/\.app-shell\.inspector-collapsed \.inspector,[\s\S]*?display:\s*none !important;/);
+    expect(styles).toMatch(/\.app-shell\.inspector-collapsed\.mascot-dialog-active \.inspector\s*\{[^}]*display:\s*none !important;/s);
   });
 
   it('loads persistent conversations in bounded pages with an explicit older-message control', () => {

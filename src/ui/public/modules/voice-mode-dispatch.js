@@ -56,7 +56,9 @@ export async function dispatchVoiceModeTurn(
   switch (lane) {
   case 'scripted':
     if ([
+      'time.query',
       'device.volume',
+      'device.volume.status',
       'device.brightness',
       'device.brightness.status',
       'device.app.open',

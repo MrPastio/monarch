@@ -135,7 +135,7 @@ class SecurityRuleExpansionTests(unittest.TestCase):
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                r"E:\Workspace\monarch-security\scripts\test.ps1",
+                r"X:\MonarchFixture\security\scripts\test.ps1",
             ],
         })
 

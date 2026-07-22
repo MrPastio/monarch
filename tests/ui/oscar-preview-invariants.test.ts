@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 const appSource = readFileSync('oscar/frontend/src/App.tsx', 'utf8');
 const styles = readFileSync('oscar/frontend/src/styles.css', 'utf8');
+const thinkingOrbSource = readFileSync('oscar/frontend/src/components/ThinkingOrb.tsx', 'utf8');
 
 describe('Oscar React preview invariants', () => {
   it('keeps one authoritative dark token block', () => {
@@ -53,5 +54,24 @@ describe('Oscar React preview invariants', () => {
     expect(appSource).toContain('aria-label="Сводка сессии"');
     expect(navItemSource).toContain('<div className={`nav-item');
     expect(navItemSource).not.toContain('<button');
+  });
+
+  it('uses the Illuma ThinkingOrb as a bounded state-aware stream signal', () => {
+    expect(appSource).toContain("import { ThinkingOrb } from './components/ThinkingOrb'");
+    expect(thinkingOrbSource).toContain('@illuma-ai/icons/brand ThinkingOrb 2.7.0 (MIT)');
+    expect(appSource).toContain('function resolveStreamOrbPhase(');
+    expect(appSource).toContain('data-orb-phase={phase}');
+    expect(styles).toContain('.monarch-thinking-orb[data-orb-phase="search"]');
+    expect(styles).toContain('.monarch-thinking-orb__core');
+    expect(styles).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.monarch-thinking-orb__core/);
+  });
+
+  it('keeps ordinary thinking orb-only and reserves activity copy for research or search', () => {
+    expect(appSource).toContain('function isResearchOrSearchStream(');
+    expect(appSource).toContain('className="message-row assistant thinking-orb-only"');
+    expect(appSource).toContain('className="stream-live orb-only"');
+    expect(appSource).toContain('isStreaming && detailedStream ? <StreamProgress');
+    expect(styles).toContain('.stream-live.orb-only');
+    expect(styles).toContain('.message-row.assistant.thinking-orb-only');
   });
 });

@@ -91,24 +91,19 @@ describe('VoiceProfileRuntime', () => {
 });
 
 describe('VoiceModeModelManager', () => {
-  it('keeps every LLM lazy, never spawns Micro, and releases the exact Lite worker', async () => {
+  it('keeps legacy local LLM workers dormant when normal Voice routing is Fast-only', async () => {
     const fixture = await createWorkerFixture(['micro', 'lite']);
     const manager = fixture.manager();
     const prepared = await manager.prepare();
-    const lite = await manager.respond({ profile: 'lite', text: 'сократи длинную фразу' });
 
     expect(prepared).toMatchObject({ status: 'ready', backend: 'llama-cpp-cpu', profiles: [] });
-    expect(lite).toMatchObject({ profile: 'lite', text: 'lite: сократи длинную фразу' });
+    await expect(manager.respond({ profile: 'lite', text: 'сократи длинную фразу' })).rejects.toMatchObject({
+      code: 'voice-mode-profile-route-mismatch',
+    });
     expect(manager.snapshot()).toMatchObject({
       profiles: {
         micro: { state: 'idle', profile: 'micro' },
-        lite: {
-          state: 'ready',
-          profile: 'lite',
-          repository: 'unsloth/Qwen3-1.7B-GGUF',
-          license: 'Apache-2.0',
-          sha256: 'B139949C5BD74937AD8ED8C8CF3D9FFB1E99C866C823204DC42C0D91FA181897',
-        },
+        lite: { state: 'idle', profile: 'lite' },
       },
     });
 
@@ -119,7 +114,7 @@ describe('VoiceModeModelManager', () => {
       code: 'voice-mode-profile-route-mismatch',
     });
 
-    await expect(manager.release()).resolves.toEqual({ status: 'released', profiles: ['lite'] });
+    await expect(manager.release()).resolves.toEqual({ status: 'released', profiles: [] });
     expect(manager.snapshot().profiles).toMatchObject({
       micro: { state: 'idle' },
       lite: { state: 'idle' },

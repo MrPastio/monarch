@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover - optional runtime dependency
 
 from .config import Settings
 from .memory import MemoryStore, normalize_text
-from .research import resolve_research_decision
+from .research import has_freshness_signal, resolve_research_decision
 from .schemas import SearchResult
 
 MAX_SEARCH_QUERY_CHARS = 2048
@@ -109,13 +109,6 @@ EXPLICIT_WEB_PATTERN = re.compile(
     r"\b(?:web|online|internet)\b|"
     r"(?:найди|поищи|проверь|посмотри).{0,36}(?:в\s+сети|в\s+интернете|на\s+сайте|сайт|онлайн)|"
     r"(?:в\s+сети|в\s+интернете|на\s+сайте|веб[- ]?поиск|поищи|загугли))",
-    re.IGNORECASE,
-)
-FRESHNESS_PATTERN = re.compile(
-    r"(?:\b(?:latest|current|today|recent|newest|price|release|version|schedule|news|weather|"
-    r"president|ceo|law|regulation)\b|"
-    r"(?:актуальн|свеж|последн|сегодня|сейчас|новост|цен[аы]|курс|релиз|верси|расписан|погод|"
-    r"президент|директор|закон|правил|регламент|стандарт))",
     re.IGNORECASE,
 )
 PUBLIC_PRODUCT_PATTERN = re.compile(
@@ -696,7 +689,7 @@ def should_auto_search(query: str) -> tuple[bool, str]:
     research = resolve_research_decision(normalized)
     if research.mode == "deep":
         return True, "deep-research"
-    if FRESHNESS_PATTERN.search(normalized):
+    if has_freshness_signal(normalized):
         return True, "freshness-required"
     if PUBLIC_PRODUCT_PATTERN.search(normalized):
         return True, "versioned-public-product"

@@ -1467,7 +1467,12 @@ function securityRuntimeError(error: unknown): MonarchExecutionResult {
 }
 
 function mentionsSecurity(text: string): boolean {
-  return /(security|protect|protector|defender|firewall|virus|malware|threat|incident|quarantine|emergency|audit|integrity|scan|usb|autorun|persistence|безопас|защит|антивирус|вирус|угроз|инцидент|карантин|экстрен|скан|аудит|целост|автозапуск)/i.test(text);
+  const strongTechnicalCue = /\b(?:security|monarch security|protector|defender|firewall|antivirus|malware|trojan|ransomware|quarantine|autorun|persistence|agent guard|usb)\b|монарх\s+security|модул[а-яё]*\s+безопасност|антивирус|троян|карантин|автозапуск|фаервол|защитник\s+windows/i;
+  if (strongTechnicalCue.test(text)) return true;
+  if (/^(?:security|безопасность|проверь безопасность|статус защиты)[.!? ]*$/i.test(text)) return true;
+  const weakSecurityCue = /\b(?:security|protect|virus|threat|incident|emergency|audit|integrity|scan)\b|безопас|защит|вирус|угроз|инцидент|экстрен|скан|аудит|целост/i;
+  const technicalTarget = /\b(?:monarch|oscar|windows|computer|host|system|file|process|network|port|device|code|repo(?:sitory)?)\b|монарх|оскар|windows|компьютер|хост|систем|файл|процесс|сеть|порт|устройств|код|репозитор/i;
+  return weakSecurityCue.test(text) && technicalTarget.test(text);
 }
 
 function extractSensor(text: string): SensorId | '' {

@@ -34,6 +34,7 @@ import {
   User,
 } from 'lucide-react';
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { ThinkingOrb } from './components/ThinkingOrb';
 import { BackendHttpError, cancelGeneration, getHardware, getHealth, getMemoryStats, getModelStatus, listWorkspace, previewChatRoute, readWorkspaceFile, runSearch, runWorkspaceAction, searchWorkspace, streamChat } from './lib/api';
 import type { ChatImageAttachment, ChatRequest, ChatSource, HardwareInfo, MemoryStats, ModelStatus, SearchResult, StreamEvent, UiMessage, WorkspaceEntry, WorkspaceToolResult } from './types';
 import ReactMarkdown from 'react-markdown';
@@ -1482,6 +1483,18 @@ function MessageBubble({ message, now }: { message: UiMessage; now: number }) {
   const isStreaming = !isUser && Boolean(message.pending);
   const isDegraded = !isUser && message.streamOk === false;
   const content = message.content || (message.pending ? '' : '...');
+  const detailedStream = !isUser && isResearchOrSearchStream(message);
+
+  if (!isUser && isStreaming && !content && !detailedStream) {
+    const status = formatStreamStatus(message);
+    return (
+      <article className="message-row assistant thinking-orb-only" aria-busy="true">
+        <span className="stream-orb-only" role="status" aria-label={status}>
+          <MonarchThinkingOrb phase={resolveStreamOrbPhase(message)} />
+        </span>
+      </article>
+    );
+  }
 
   return (
     <article className={`message-row ${message.role} ${isDegraded ? 'degraded' : ''}`} aria-busy={isStreaming}>
@@ -1494,10 +1507,10 @@ function MessageBubble({ message, now }: { message: UiMessage; now: number }) {
         {!isUser && (
           <div className="message-head">
             <span>Oscar</span>
-            {isStreaming ? <StreamLiveStatus message={message} /> : null}
+            {isStreaming ? <StreamLiveStatus message={message} detailed={detailedStream} /> : null}
           </div>
         )}
-        {!isUser && message.streamEvents?.length ? <StreamTrace events={message.streamEvents} now={now} active={isStreaming} /> : null}
+        {!isUser && detailedStream && message.streamEvents?.length ? <StreamTrace events={message.streamEvents} now={now} active={isStreaming} /> : null}
         <div className={`message-body ${isStreaming ? 'is-streaming' : ''} ${!content ? 'is-waiting' : ''}`}>
           {isUser ? (
             content
@@ -1513,7 +1526,7 @@ function MessageBubble({ message, now }: { message: UiMessage; now: number }) {
           )}
         </div>
         {message.imageAttachments?.length ? <ImageAttachmentStrip images={message.imageAttachments} /> : null}
-        {isStreaming ? <StreamProgress message={message} now={now} /> : null}
+        {isStreaming && detailedStream ? <StreamProgress message={message} now={now} /> : null}
         {message.sources?.length ? <SourceList sources={message.sources} /> : null}
         {message.toolResults?.length ? <ToolResultList results={message.toolResults} compact /> : null}
         {!isUser && !isStreaming && message.usage ? <MessageUsage usage={message.usage} /> : null}
@@ -1535,16 +1548,33 @@ function ImageAttachmentStrip({ images }: { images: ChatImageAttachment[] }) {
   );
 }
 
-function StreamLiveStatus({ message }: { message: UiMessage }) {
+function StreamLiveStatus({ message, detailed }: { message: UiMessage; detailed: boolean }) {
   const status = formatStreamStatus(message);
   const count = formatStreamCount(message);
+  const phase = resolveStreamOrbPhase(message);
+
+  if (!detailed) {
+    return (
+      <span className="stream-live orb-only" role="status" aria-label={status}>
+        <MonarchThinkingOrb phase={phase} />
+      </span>
+    );
+  }
 
   return (
     <span className="stream-live" aria-live="polite">
-      <span className="stream-dot" aria-hidden="true" />
+      <MonarchThinkingOrb phase={phase} />
       <span>{status}</span>
       {count ? <em>{count}</em> : null}
       {message.streamCorrected ? <strong>исправлено</strong> : null}
+    </span>
+  );
+}
+
+function MonarchThinkingOrb({ phase }: { phase: 'route' | 'search' | 'write' | 'error' }) {
+  return (
+    <span className="monarch-thinking-orb" data-orb-phase={phase} aria-hidden="true">
+      <ThinkingOrb size={14} className="monarch-thinking-orb__core" />
     </span>
   );
 }
@@ -1966,6 +1996,28 @@ function formatStreamStatus(message: UiMessage) {
   if (status === 'searching') return 'ищу контекст';
   if (status === 'offline') return 'нет связи';
   return status;
+}
+
+function resolveStreamOrbPhase(message: UiMessage): 'route' | 'search' | 'write' | 'error' {
+  const events = message.streamEvents ?? [];
+  const latest = events[events.length - 1];
+  const status = `${message.streamStatus ?? ''} ${latest?.kind ?? ''} ${latest?.label ?? ''} ${latest?.detail ?? ''}`.toLowerCase();
+  if (message.streamOk === false || latest?.kind === 'error' || /error|ошиб|fallback|offline/.test(status)) return 'error';
+  if (latest?.kind === 'search' || latest?.kind === 'source' || /search|source|web|internet|поиск|источник|контекст|исслед/.test(status)) return 'search';
+  if (message.content || latest?.kind === 'token' || latest?.kind === 'replace' || /token|фрагм|пиш|ответ|replace/.test(status)) return 'write';
+  return 'route';
+}
+
+function isResearchOrSearchStream(message: UiMessage): boolean {
+  const events = message.streamEvents ?? [];
+  if (events.some((event) => event.kind === 'research' || event.kind === 'search' || event.kind === 'source')) {
+    return true;
+  }
+  const activity = [
+    message.streamStatus ?? '',
+    ...events.flatMap((event) => [event.kind, event.label, event.detail ?? '']),
+  ].join(' ').toLowerCase();
+  return /research|search|source|web|internet|исслед|поиск|источник/.test(activity);
 }
 
 function formatGemmaModeLabel(model: ModelStatus | null) {

@@ -25,7 +25,7 @@ describe('assistant local profile context', () => {
 
     const messages = await buildAssistantModelMessages({ text: 'Привет', context });
     expect(messages[0]?.content).toContain('<monarch_direct_model_policy');
-    expect(messages[0]?.content).toContain('version="3.0"');
+    expect(messages[0]?.content).toContain('version="3.1"');
     expect(messages[0]?.content).toContain('Oscar и Monarch создал MrPastio');
     expect(messages[0]?.content).toContain('Codex создан OpenAI');
     expect(messages[0]?.content).not.toContain('MrPastio создал Monarch и Codex');

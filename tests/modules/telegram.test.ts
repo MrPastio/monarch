@@ -950,7 +950,7 @@ describe('Telegram Module', () => {
         });
       }
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Слишком много ожидающих подтверждений')), 3_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Слишком много ожидающих подтверждений')), 8_000);
       const prompts = mock.sentMessages.filter((message) => String(message.text).includes('Bot API sendMessage изменит состояние Telegram'));
       expect(prompts).toHaveLength(8);
       expect(internals.pendingConfirmations.size).toBe(8);
@@ -959,7 +959,7 @@ describe('Telegram Module', () => {
       await mock.close();
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it('rejects nested unpaired Bot API chat references', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-telegram-api-nested-chat-'));

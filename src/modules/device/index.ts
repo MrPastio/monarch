@@ -10,6 +10,15 @@ import type {
   MonarchRouteDecision,
 } from '../../core';
 import { permissionModeForRisk } from '../../core';
+import { classifyVoiceBrightnessIntent } from './device-brightness';
+import {
+  classifyVoiceVolumeIntent,
+  executeSystemVolumeAction,
+  executeVoiceVolumeStatus,
+  runWindowsVolumeAction,
+  type VoiceVolumeAction,
+  type VoiceVolumeState,
+} from './device-volume';
 import { deviceManifest } from './manifest';
 
 const execFileAsync = promisify(execFile);
@@ -22,7 +31,11 @@ export type DevicePowerShellRunner = (
 export class DeviceModule implements MonarchModule {
   readonly manifest = deviceManifest;
 
-  constructor(private readonly runPowerShell: DevicePowerShellRunner = runPowerShellCommand) {}
+  constructor(
+    private readonly runPowerShell: DevicePowerShellRunner = runPowerShellCommand,
+    private readonly now: () => Date = () => new Date(),
+    private readonly runVolume: (action: VoiceVolumeAction) => Promise<VoiceVolumeState> = runWindowsVolumeAction,
+  ) {}
 
   async activate(context: MonarchKernelContext): Promise<void> {
     await context.emit('device.activated', this.manifest.id, {
@@ -43,6 +56,24 @@ export class DeviceModule implements MonarchModule {
 
   async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
     const text = intent.text.toLowerCase();
+    const clock = extractSystemClockRequest(text);
+    if (clock) {
+      return route(intent, 'device.system.time.get', 'read', clock, 0.99);
+    }
+    const volume = classifyVoiceVolumeIntent(intent.text);
+    if (volume.kind === 'status') {
+      return route(intent, 'device.volume.get', 'read', {}, 0.98);
+    }
+    if (volume.kind === 'action' && volume.action) {
+      return route(intent, 'device.volume.set', 'device-control', { ...volume.action }, 0.98);
+    }
+    const brightness = classifyVoiceBrightnessIntent(intent.text);
+    if (brightness.kind === 'status') {
+      return route(intent, 'device.brightness.get', 'read', {}, 0.97);
+    }
+    if (brightness.kind === 'action') {
+      return route(intent, 'device.brightness.set', 'device-control', brightnessRouteInput(brightness.slots), 0.97);
+    }
     const browserOpen = extractBrowserOpenRequest(text);
     if (browserOpen) {
       return route(intent, 'device.browser.open', 'device-control', browserOpen, 0.97);
@@ -69,6 +100,9 @@ export class DeviceModule implements MonarchModule {
     request: MonarchExecutionRequest,
     context: MonarchKernelContext
   ): Promise<MonarchExecutionResult> {
+    if (request.capabilityId === 'device.system.time.get') {
+      return this.readSystemTime(request.input, context);
+    }
     if (process.platform !== 'win32') {
       return { ok: false, summary: 'This device-control capability requires Windows.', error: 'platform-not-supported' };
     }
@@ -78,6 +112,12 @@ export class DeviceModule implements MonarchModule {
       }
       if (request.capabilityId === 'device.browser.open') {
         return await this.openBrowser(request.input, context);
+      }
+      if (request.capabilityId === 'device.volume.get') {
+        return await this.controlVolume({ action: 'get' }, context, false);
+      }
+      if (request.capabilityId === 'device.volume.set') {
+        return await this.controlVolume(normalizeVolumeRequest(request.input), context, true);
       }
       if (request.capabilityId === 'device.brightness.get') {
         return await this.controlBrightness({}, context, false);
@@ -114,6 +154,47 @@ export class DeviceModule implements MonarchModule {
         error: 'device-action-failed',
       };
     }
+  }
+
+  private async readSystemTime(
+    input: unknown,
+    context: MonarchKernelContext,
+  ): Promise<MonarchExecutionResult> {
+    const kind = readRecord(input).kind === 'date' ? 'date' : 'time';
+    const observedAt = this.now();
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
+    const text = kind === 'date'
+      ? `Сегодня ${new Intl.DateTimeFormat('ru-RU', {
+          weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+        }).format(observedAt)}.`
+      : `Сейчас ${new Intl.DateTimeFormat('ru-RU', {
+          hour: '2-digit', minute: '2-digit', hour12: false,
+        }).format(observedAt)}.`;
+    const output = {
+      text,
+      kind,
+      observedAt: observedAt.toISOString(),
+      timeZone,
+      performed: false,
+      verified: true,
+      authoritative: true,
+      source: 'system-clock',
+    };
+    await context.emit('device.system.time.read', this.manifest.id, output);
+    return { ok: true, summary: text, output };
+  }
+
+  private async controlVolume(
+    action: VoiceVolumeAction,
+    context: MonarchKernelContext,
+    mutating: boolean,
+  ): Promise<MonarchExecutionResult> {
+    const result = mutating
+      ? await executeSystemVolumeAction(action, this.runVolume)
+      : await executeVoiceVolumeStatus(this.runVolume);
+    const output = { ...result, authoritative: true };
+    await context.emit(mutating ? 'device.volume.changed' : 'device.volume.read', this.manifest.id, output);
+    return { ok: true, summary: result.text, output };
   }
 
   private async controlBrightness(
@@ -200,6 +281,7 @@ $verified = $levels.Count -gt 0 -and $mismatches.Count -eq 0
         level,
         requested,
         verified: true,
+        authoritative: true,
         text,
       },
     };
@@ -312,7 +394,13 @@ $process = Start-Process -FilePath 'explorer.exe' -ArgumentList @("shell:AppsFol
     return {
       ok: true,
       summary: `Открыл ${String(payload.displayName || app)}.`,
-      output: { ...payload, text: `Открыл ${String(payload.displayName || app)}.` },
+      output: {
+        ...payload,
+        performed: true,
+        verified: true,
+        authoritative: true,
+        text: `Открыл ${String(payload.displayName || app)}.`,
+      },
     };
   }
 
@@ -344,14 +432,18 @@ if ($browser -eq 'default') {
       : request.query
         ? `Открыл поиск в браузере по запросу «${request.query}».`
         : 'Открыл страницу в браузере.';
-    return { ok: true, summary: text, output: { ...payload, text } };
+    return {
+      ok: true,
+      summary: text,
+      output: { ...payload, performed: true, verified: true, authoritative: true, text },
+    };
   }
 }
 
 function route(
   intent: MonarchIntent,
   capabilityId: string,
-  risk: 'delete' | 'device-control',
+  risk: 'read' | 'delete' | 'device-control',
   input: Record<string, unknown>,
   confidence: number
 ): MonarchRouteDecision {
@@ -396,7 +488,8 @@ export function normalizeApplicationRequest(value: unknown): string {
   if (!app || !/^[\p{L}\p{N} ._-]+$/u.test(app)) {
     throw new Error('Application name is empty or contains unsupported characters.');
   }
-  return app;
+  const alias = app.toLowerCase().replace(/ё/g, 'е');
+  return APPLICATION_ALIASES[alias] || app;
 }
 
 export function normalizeBrowserRequest(input: unknown): {
@@ -419,8 +512,31 @@ export function normalizeBrowserRequest(input: unknown): {
       ? provider === 'youtube'
         ? `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`
         : `https://www.google.com/search?q=${encodeURIComponent(query)}`
-      : 'https://www.google.com/';
+      : provider === 'youtube'
+        ? 'https://www.youtube.com/'
+        : 'https://www.google.com/';
   return { target, browser, provider, ...(query ? { query } : {}) };
+}
+
+export function normalizeVolumeRequest(input: unknown): VoiceVolumeAction {
+  const record = readRecord(input);
+  const action = String(record.action || '').trim();
+  if (action === 'mute' || action === 'unmute') return { action };
+  if (action === 'set') {
+    const value = Number(record.value);
+    if (!Number.isInteger(value) || value < 0 || value > 100) {
+      throw new Error('Volume value must be an integer between 0 and 100.');
+    }
+    return { action, value };
+  }
+  if (action === 'change') {
+    const delta = Number(record.delta);
+    if (!Number.isInteger(delta) || delta === 0 || Math.abs(delta) > 100) {
+      throw new Error('Volume delta must be a non-zero integer between -100 and 100.');
+    }
+    return { action, delta };
+  }
+  throw new Error('Volume action must be set, change, mute, or unmute.');
 }
 
 export function normalizeBrightnessRequest(
@@ -473,10 +589,63 @@ function extractApplicationName(text: string): string | null {
 
 function extractBrowserOpenRequest(text: string): Record<string, unknown> | null {
   if (!/(?:^|\s)(?:открой|покажи|перейди|зайди|open|browse)(?=\s|$)/iu.test(text)) return null;
+  const browser = /(?:^|\s)(?:chrome|хром)(?=\s|$)/iu.test(text)
+    ? 'chrome'
+    : /(?:^|\s)edge(?=\s|$)/iu.test(text)
+      ? 'edge'
+      : /(?:^|\s)firefox(?=\s|$)/iu.test(text)
+        ? 'firefox'
+        : 'default';
+  if (/(?:^|\s)(?:youtube|ютуб\p{L}*)(?=\s|$)/iu.test(text)) {
+    const query = text.match(/(?:найди|поищи|включи|вруби|воспроизведи|поставь)\s+(.+?)\s+(?:на|в)\s+(?:youtube|ютуб\p{L}*)\s*$/iu)?.[1]?.trim();
+    return { provider: 'youtube', browser, ...(query ? { query } : {}) };
+  }
   if (!/(?:сайт|страниц|ссылк|браузер|https?:|www\.|\.(?:com|org|net|io|ru|ua|dev|app))/iu.test(text)) return null;
   const url = text.match(/(?:https?:\/\/|www\.)[^\s]+|[\p{L}\p{N}.-]+\.(?:com|org|net|io|ru|ua|dev|app)(?:\/[^\s]*)?/iu)?.[0];
-  return url ? { url, browser: 'default' } : { browser: 'default' };
+  return url ? { url, browser } : { browser };
 }
+
+function extractSystemClockRequest(text: string): { kind: 'time' | 'date' } | null {
+  const normalized = text.replace(/ё/g, 'е');
+  if (/(?:сколько\s+времени|сколько\s+часов).{0,32}(?:займет|занимает|осталось|прошло|нужно|потребуется)/iu.test(normalized)) {
+    return null;
+  }
+  if (/(?:который\s+час|сколько\s+(?:сейчас\s+)?времени|текущее\s+время|точное\s+время|what\s+time\s+is\s+it|current\s+time)/iu.test(normalized)) {
+    return { kind: 'time' };
+  }
+  if (/(?:какое\s+сегодня\s+число|какая\s+сегодня\s+дата|какой\s+сегодня\s+день|today'?s\s+date|current\s+date)/iu.test(normalized)) {
+    return { kind: 'date' };
+  }
+  return null;
+}
+
+function brightnessRouteInput(slots: Record<string, string>): Record<string, unknown> {
+  if (slots.operation === 'set') return { operation: 'set', value: Number(slots.value) };
+  if (slots.operation === 'change') return { operation: 'change', delta: Number(slots.delta) };
+  throw new Error('Brightness action is missing a complete operation.');
+}
+
+const APPLICATION_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  'telegram': 'telegram',
+  'telegram desktop': 'telegram',
+  'телеграм': 'telegram',
+  'телеграмм': 'telegram',
+  'калькулятор': 'calculator',
+  'calc': 'calculator',
+  'блокнот': 'notepad',
+  'виндовс терминал': 'terminal',
+  'windows terminal': 'terminal',
+  'терминал': 'terminal',
+  'проводник': 'explorer',
+  'браузер': 'browser',
+  'хром': 'chrome',
+  'google chrome': 'chrome',
+  'visual studio code': 'vscode',
+  'vs code': 'vscode',
+  'код': 'vscode',
+  'дискорд': 'discord',
+  'стим': 'steam',
+});
 
 function parsePowerShellJson(output: string): Record<string, unknown> {
   const line = output.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean).at(-1) || '{}';

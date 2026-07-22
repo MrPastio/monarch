@@ -14,20 +14,46 @@ function handlers() {
 }
 
 describe('voice mode lane dispatcher', () => {
-  it('keeps scripted commands on the dedicated Kernel capability', async () => {
+  it('routes the clock through the authoritative Device capability, never a model', async () => {
     const laneHandlers = handlers();
     const controller = new AbortController();
 
     await expect(dispatchVoiceModeTurn({
       text: '  который час  ',
-      candidate: { lane: 'scripted', actionId: 'time.query' },
+      candidate: {
+        lane: 'scripted',
+        actionId: 'time.query',
+        slots: { query: 'local-clock', timeZone: 'system' },
+      },
       signal: controller.signal,
-    }, laneHandlers)).resolves.toEqual({ ok: true, text: 'scripted' });
+    }, laneHandlers)).resolves.toEqual({ ok: true, text: 'device' });
 
-    expect(laneHandlers.executeScripted).toHaveBeenCalledWith('который час', controller.signal);
+    expect(laneHandlers.executeAction).toHaveBeenCalledWith(
+      expect.objectContaining({ lane: 'scripted', actionId: 'time.query' }),
+      'который час',
+      controller.signal,
+    );
+    expect(laneHandlers.executeScripted).not.toHaveBeenCalled();
     expect(laneHandlers.respond).not.toHaveBeenCalled();
     expect(laneHandlers.respondFast).not.toHaveBeenCalled();
     expect(laneHandlers.release).not.toHaveBeenCalled();
+  });
+
+  it('routes volume status through the read-only Device capability', async () => {
+    const laneHandlers = handlers();
+
+    await dispatchVoiceModeTurn({
+      text: 'какая сейчас громкость',
+      candidate: { lane: 'scripted', actionId: 'device.volume.status' },
+    }, laneHandlers);
+
+    expect(laneHandlers.executeAction).toHaveBeenCalledWith(
+      expect.objectContaining({ actionId: 'device.volume.status' }),
+      'какая сейчас громкость',
+      undefined,
+    );
+    expect(laneHandlers.executeScripted).not.toHaveBeenCalled();
+    expect(laneHandlers.respondFast).not.toHaveBeenCalled();
   });
 
   it('routes volume through the token-confirmed device executor, never a model', async () => {
