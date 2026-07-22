@@ -1052,9 +1052,7 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
         try {
           const metadata = await stat(contenderPath);
           if (Date.now() - metadata.mtimeMs >= this.lockTtlMs) {
-            await unlink(contenderPath).catch((error: unknown) => {
-              if (errorCode(error) !== 'ENOENT') throw error;
-            });
+            await unlinkLockClaim(contenderPath);
           } else {
             hasYoungMalformedClaim = true;
           }
@@ -1069,9 +1067,7 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
       }
       const expired = Date.parse(lock.expiresAt) <= normalizeDate(this.now()).getTime();
       if (lock.ownerId !== ownerId && (expired || !this.processAlive(lock.pid))) {
-        await unlink(contenderPath).catch((error: unknown) => {
-          if (errorCode(error) !== 'ENOENT') throw error;
-        });
+        await unlinkLockClaim(contenderPath);
         continue;
       }
       contenders.push({ filePath: contenderPath, lock });
@@ -1086,7 +1082,7 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
       if (!lock || lock.ownerId !== ownerId) {
         throw new AgentTaskStoreError(`Agent task store lock claim ${claimPath} changed ownership.`);
       }
-      await unlink(claimPath);
+      await unlinkLockClaim(claimPath);
     } catch (error) {
       if (errorCode(error) !== 'ENOENT') {
         if (error instanceof AgentTaskStoreError) throw error;
@@ -2023,6 +2019,22 @@ function errorCode(error: unknown): string | undefined {
   return error && typeof error === 'object' && 'code' in error
     ? String((error as { code?: unknown }).code ?? '')
     : undefined;
+}
+
+async function unlinkLockClaim(filePath: string): Promise<void> {
+  const retryableCodes = new Set(['EACCES', 'EBUSY', 'EPERM']);
+  const maximumAttempts = process.platform === 'win32' ? 5 : 1;
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    try {
+      await unlink(filePath);
+      return;
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === 'ENOENT') return;
+      if (!retryableCodes.has(code ?? '') || attempt === maximumAttempts) throw error;
+      await delay(5 * attempt);
+    }
+  }
 }
 
 function delay(milliseconds: number): Promise<void> {
