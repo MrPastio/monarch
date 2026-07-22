@@ -10,7 +10,7 @@ describe('Electron desktop lifecycle', () => {
     expect(shutdownBody).not.toContain('stopSecurityProtector');
     expect(source).not.toContain('async function stopSecurityProtector');
     expect(shutdownBody).toContain('stopOscarBackend');
-    expect(shutdownBody).toContain('if (!safeEntryQaMode && !safeLaunchMode)');
+    expect(shutdownBody).toContain('if (!safeEntryQaMode && !safeLaunchMode && !updateDemoMode)');
     expect(shutdownBody).toContain('stopRuntime');
   });
 
@@ -18,7 +18,7 @@ describe('Electron desktop lifecycle', () => {
     const source = readFileSync(path.resolve('desktop/electron/main.mjs'), 'utf8');
     const shutdownBody = source.match(/async function shutdownDesktop\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
 
-    expect(shutdownBody).toMatch(/if \(!safeEntryQaMode && !safeLaunchMode\) await stopOscarBackend\(\)/);
+    expect(shutdownBody).toMatch(/if \(!safeEntryQaMode && !safeLaunchMode && !updateDemoMode\) await stopOscarBackend\(\)/);
   });
 
   it('never lets the standalone Safe shortcut stop a production Oscar backend', () => {
@@ -27,6 +27,14 @@ describe('Electron desktop lifecycle', () => {
 
     expect(source).toContain("const safeLaunchMode = process.argv.includes('--safe')");
     expect(shutdownBody).toContain('!safeLaunchMode');
+  });
+
+  it('never lets the isolated updater demo stop a production Oscar backend', () => {
+    const source = readFileSync(path.resolve('desktop/electron/main.mjs'), 'utf8');
+    const shutdownBody = source.match(/async function shutdownDesktop\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
+
+    expect(source).toContain("const updateDemoMode = process.argv.includes('--update-demo') && !app.isPackaged");
+    expect(shutdownBody).toContain('!updateDemoMode');
   });
 
   it('keeps desktop STT activation lazy so Qwen owns cold-start commit first', () => {

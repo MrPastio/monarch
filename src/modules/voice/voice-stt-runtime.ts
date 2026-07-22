@@ -21,6 +21,7 @@ export interface VoiceSttPrepareResult {
 export interface VoiceSttTranscribeInput {
   audioPath: string;
   language: string;
+  durationMs?: number;
 }
 
 export interface VoiceSttTranscribeResult {
@@ -172,9 +173,10 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
 
   transcribe(input: VoiceSttTranscribeInput): Promise<VoiceSttTranscribeResult> {
     const normalized = normalizeTranscribeInput(input, this.audioRoot);
+    const timeoutMs = readTranscribeTimeout(input.durationMs, this.requestTimeoutMs);
     return this.enqueue(async () => {
       try {
-        const envelope = await this.sendRequest('transcribe', normalized, 'transcript');
+        const envelope = await this.sendRequest('transcribe', normalized, 'transcript', timeoutMs);
         const result = readTranscribeResult(envelope);
         this.markReady(result);
         return result;
@@ -290,6 +292,7 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
     type: 'prepare' | 'transcribe' | 'stream-start' | 'stream-push' | 'stream-finish' | 'stream-cancel',
     payload: Record<string, unknown>,
     expectedType: PendingRequest['expectedType'],
+    timeoutMs = this.requestTimeoutMs,
   ): Promise<Record<string, unknown>> {
     const child = await this.ensureProcess();
     const id = this.nextRequestId();
@@ -306,7 +309,7 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
         this.markFailed(error.code);
         child.kill();
         reject(error);
-      }, this.requestTimeoutMs);
+      }, timeoutMs);
       this.pending.set(id, { expectedType, resolve, reject, timer });
       if (!child.stdin.writable || child.stdin.writableEnded || child.stdin.destroyed) {
         clearTimeout(timer);
@@ -540,6 +543,13 @@ function normalizeTranscribeInput(
     );
   }
   return { audioPath, language };
+}
+
+function readTranscribeTimeout(durationMs: number | undefined, fallbackMs: number): number {
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs <= 0) {
+    return fallbackMs;
+  }
+  return Math.min(10 * 60_000 + 30_000, Math.max(fallbackMs, Math.floor(durationMs) + 30_000));
 }
 
 function normalizeStreamStartInput(input: VoiceSttStreamStartInput): Record<string, unknown> {

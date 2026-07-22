@@ -68,6 +68,12 @@ def test_search_planner_prefers_official_source_for_openai_product():
         "Предположи самый худший сценарий для OpenAI, продуктов и политики после IPO"
     ) == (True, "deep-research")
     assert should_auto_search("Объясни сортировку вставками") == (False, "not-needed")
+    assert should_auto_search(
+        "Найди и выведи мне топ 3 самых умных моделей LLM в диапазоне 2b данных"
+    ) == (True, "deep-research")
+    assert should_auto_search("Найди официальную документацию Pydantic") == (True, "explicit-request")
+    assert should_auto_search("Найди файл package.json") == (False, "not-needed")
+    assert should_auto_search("Find file package.json") == (False, "not-needed")
 
     ranked = rank_search_results([
         RawSearchResult(title="Introducing GPT-5", url="https://openai.com/index/introducing-gpt-5/"),

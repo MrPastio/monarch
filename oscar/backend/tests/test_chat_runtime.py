@@ -2096,6 +2096,23 @@ def test_web_search_auto_route_detects_fresh_public_model_info():
     assert main_module.effective_web_search(local) == (False, "not-needed")
 
 
+def test_route_preview_runs_external_model_ranking_as_deep_research():
+    request = ChatRequest(
+        messages=[ChatMessage(
+            role="user",
+            content="Найди и выведи мне топ 3 самых умных моделей LLM в диапазоне 2b данных",
+        )],
+        use_memory=True,
+    )
+
+    preview = main_module.preview_chat_route(request)
+
+    assert preview.web_search is True
+    assert preview.search_reason == "deep-research"
+    assert preview.research_mode == "deep"
+    assert preview.research_reason == "comparative-ranking"
+
+
 @pytest.mark.asyncio
 async def test_chat_endpoint_route_hint_floors_python_tier(monkeypatch):
     captured = {}
@@ -2629,8 +2646,14 @@ def test_mock_stream_splits_text_into_live_fragments():
     assert spaced_chunks == ["  ", "alpha ", "beta"]
 
 
-def test_model_load_fallback_hides_raw_exception_from_user(monkeypatch):
-    runtime = LocalModelRuntime(Settings(api_token="test", mock_fallback=True))
+def test_model_load_fallback_hides_raw_exception_from_user(monkeypatch, tmp_path: Path):
+    (tmp_path / "gemma-4-E2B-it-Q5_K_M.gguf").write_bytes(b"GGUF")
+    (tmp_path / "gemma-4-12B-it-Q4_K_M.gguf").write_bytes(b"GGUF")
+    runtime = LocalModelRuntime(Settings(
+        api_token="test",
+        gemma_models_dir=tmp_path,
+        mock_fallback=True,
+    ))
 
     def fail_load(_model_file, **_kwargs):
         raise RuntimeError("secret loader failure")

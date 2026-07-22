@@ -105,10 +105,23 @@ TRACKING_QUERY_KEYS = {
 }
 
 EXPLICIT_WEB_PATTERN = re.compile(
-    r"(?:\b(?:search|find|look\s*up|browse|google)\b|"
+    r"(?:^\s*(?:найди|поищи)\b|"
+    r"\b(?:search|find|look\s*up|browse|google)\b|"
     r"\b(?:web|online|internet)\b|"
     r"(?:найди|поищи|проверь|посмотри).{0,36}(?:в\s+сети|в\s+интернете|на\s+сайте|сайт|онлайн)|"
     r"(?:в\s+сети|в\s+интернете|на\s+сайте|веб[- ]?поиск|поищи|загугли))",
+    re.IGNORECASE,
+)
+WEB_LOCATION_PATTERN = re.compile(
+    r"(?:\b(?:web|online|internet|website|site)\b|"
+    r"в\s+сети|в\s+интернете|на\s+сайте|веб[- ]?поиск|онлайн)",
+    re.IGNORECASE,
+)
+LOCAL_SEARCH_TARGET_PATTERN = re.compile(
+    r"(?:\b(?:file|folder|project|repo(?:sitory)?|code|workspace|memory|conversation|"
+    r"chat\s+history|branch|process|installed)\b|"
+    r"файл|папк|проект|репозитор|код|workspace|памят|переписк|истори\w*\s+чат|"
+    r"ветк\w*\s+git|процесс|установлен|баг|ошибк|тест)",
     re.IGNORECASE,
 )
 PUBLIC_PRODUCT_PATTERN = re.compile(
@@ -684,8 +697,8 @@ def should_auto_search(query: str) -> tuple[bool, str]:
         return False, "empty-query"
     if extract_query_url_results(normalized, 1):
         return True, "direct-url"
-    if EXPLICIT_WEB_PATTERN.search(normalized):
-        return True, "explicit-request"
+    if LOCAL_SEARCH_TARGET_PATTERN.search(normalized) and not WEB_LOCATION_PATTERN.search(normalized):
+        return False, "not-needed"
     research = resolve_research_decision(normalized)
     if research.mode == "deep":
         return True, "deep-research"
@@ -693,6 +706,8 @@ def should_auto_search(query: str) -> tuple[bool, str]:
         return True, "freshness-required"
     if PUBLIC_PRODUCT_PATTERN.search(normalized):
         return True, "versioned-public-product"
+    if EXPLICIT_WEB_PATTERN.search(normalized):
+        return True, "explicit-request"
     return False, "not-needed"
 
 

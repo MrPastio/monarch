@@ -129,7 +129,11 @@ console.log(JSON.stringify({ text: \`локальный текст \${language}\
     });
     await runtime.kernel.start();
     try {
-      const result = await executeVoiceTranscribe(runtime.kernel, Buffer.from('voice-data').toString('base64'));
+      const result = await executeVoiceTranscribe(
+        runtime.kernel,
+        Buffer.from('voice-data').toString('base64'),
+        { durationMs: 31_000 },
+      );
 
       expect(result.ok).toBe(true);
       expect(result.summary).toBe('Voice input transcribed locally.');
@@ -137,6 +141,7 @@ console.log(JSON.stringify({ text: \`локальный текст \${language}\
         transcript: 'локальный текст ru-RU',
         mimeType: 'audio/webm',
         bytes: 'voice-data'.length,
+        durationMs: 31_000,
       });
     } finally {
       await runtime.kernel.stop().catch(() => undefined);
@@ -196,7 +201,7 @@ console.log('stderr: local decoder reached a limit');
     }
   });
 
-  it('rejects voice input that is too long for quick local recognition before spawning STT', async () => {
+  it('rejects voice input only after the long-form 10-minute safety envelope', async () => {
     process.env.MONARCH_STT_TRANSCRIBE_COMMAND = 'node runtime/should-not-run.js {audio} {language}';
 
     const runtime = createMonarchRuntime({
@@ -208,7 +213,7 @@ console.log('stderr: local decoder reached a limit');
       const result = await executeVoiceTranscribe(
         runtime.kernel,
         Buffer.from('voice-data').toString('base64'),
-        { durationMs: 31_000 }
+        { durationMs: 10 * 60_000 + 1 }
       );
 
       expect(result.ok).toBe(false);

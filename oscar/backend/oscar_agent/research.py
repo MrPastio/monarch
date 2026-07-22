@@ -40,6 +40,21 @@ EVIDENCE_PATTERN = re.compile(
     r"доказатель|источник|ссылк|проверь\s+факт|сверь|первоисточник|подтвержден)",
     re.IGNORECASE,
 )
+COMPARATIVE_RANKING_PATTERN = re.compile(
+    r"(?:\b(?:top\s*[- ]?\d+|best|smartest|fastest|most\s+(?:accurate|capable|efficient)|"
+    r"ranking|leaderboard|benchmark|compare)\b|"
+    r"топ\s*[- ]?\d+|лучш\w*|сам\w*\s+(?:умн|быстр|точн|мощн|эффективн)\w*|"
+    r"рейтинг|лидерборд|бенчмарк|сравни\w*)",
+    re.IGNORECASE,
+)
+EXTERNAL_BENCHMARK_SUBJECT_PATTERN = re.compile(
+    r"(?:\b(?:llm|slm|language\s+models?|ai\s+models?|models?|software|libraries?|frameworks?|"
+    r"products?|services?|devices?|laptops?|phones?|gpus?|cpus?)\b|"
+    r"(?:llm|slm|ai|ии|языков\w*)\s+модел|модел\w*\s+(?:llm|slm)|"
+    r"программ|библиотек|фреймворк|продукт|сервис|устройств|ноутбук|смартфон|"
+    r"видеокарт|процессор)",
+    re.IGNORECASE,
+)
 PUBLIC_SUBJECT_PATTERN = re.compile(
     r"(?:\b(?:company|corporation|organization|government|industry|market|ipo|policy|"
     r"openai|anthropic|google|microsoft|meta|apple|nvidia)\b|"
@@ -163,6 +178,11 @@ def resolve_research_decision(query: str, preference: str = RESEARCH_MODE_AUTO) 
     if EVIDENCE_PATTERN.search(text):
         features.append("evidence-request")
         score += 0.22
+    if COMPARATIVE_RANKING_PATTERN.search(text) and EXTERNAL_BENCHMARK_SUBJECT_PATTERN.search(text):
+        # A ranked external recommendation is not a stable fact: candidates,
+        # benchmarks, model cards, versions and constraints must be compared.
+        features.extend(("comparative-ranking", "external-benchmark-subject"))
+        score += 0.54
     if PUBLIC_SUBJECT_PATTERN.search(text):
         features.append("public-subject")
         score += 0.12
@@ -188,7 +208,20 @@ def fallback_research_queries(query: str, decision: ResearchDecision, limit: int
         return []
     is_ru = bool(re.search(r"[А-Яа-яЁё]", original))
     candidates = [original]
-    if "scenario-analysis" in decision.features:
+    if "comparative-ranking" in decision.features:
+        candidates.extend([
+            (
+                f"{original} независимые бенчмарки лидерборды официальные model cards"
+                if is_ru else
+                f"{original} independent benchmarks leaderboards official model cards"
+            ),
+            (
+                f"{original} методология ограничения лицензия требования к оборудованию"
+                if is_ru else
+                f"{original} methodology limitations license hardware requirements"
+            ),
+        ])
+    elif "scenario-analysis" in decision.features:
         candidates.extend([
             (
                 f"{original} текущие факты официальные источники управление рынок"
@@ -343,7 +376,13 @@ def research_finalization_prompt(query: str, draft: str, rounds: int, stop_reaso
 
 
 def _primary_reason(features: list[str]) -> str:
-    for reason in ("explicit-research", "scenario-analysis", "evidence-request", "multi-dimensional-impact"):
+    for reason in (
+        "explicit-research",
+        "comparative-ranking",
+        "scenario-analysis",
+        "evidence-request",
+        "multi-dimensional-impact",
+    ):
         if reason in features:
             return reason
     return features[0] if features else "adaptive-research"

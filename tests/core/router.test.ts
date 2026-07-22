@@ -254,6 +254,21 @@ describe('Router Mesh & Intent Classifier', () => {
     const publicSchedule = classifyIntentText('Расписание поездов Киев Львов');
     expect(publicSchedule.kind).toBe('search');
 
+    const externalRanking = classifyIntentText('Найди и выведи топ 3 самых умных моделей LLM в диапазоне 2B');
+    expect(externalRanking.kind).toBe('search');
+    expect(externalRanking.searchScope).toBe('web_required');
+    expect(externalRanking.signals).toContain('external comparative research');
+
+    const localTopList = classifyIntentText('Назови топ 3 причины регулярно делать перерывы');
+    expect(localTopList.kind).not.toBe('search');
+
+    const directExternalLookup = classifyIntentText('Найди официальную документацию Pydantic');
+    expect(directExternalLookup.kind).toBe('search');
+    expect(directExternalLookup.searchScope).toBe('web_required');
+
+    const directLocalLookup = classifyIntentText('Найди файл package.json');
+    expect(directLocalLookup.kind).toBe('file_operation');
+
     const telegramPost = classifyIntentText('Напиши пост для Telegram');
     expect(telegramPost.kind).toBe('text_generation');
     expect(telegramPost.riskHint).toBe('none');

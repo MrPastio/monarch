@@ -413,6 +413,7 @@ function defaultRedZoneRoots(workspaceRoot: string, protectWorkspaceInternals: b
       path.join(workspaceRoot, 'runtime', 'secrets'),
       path.join(workspaceRoot, 'runtime', 'tokens'),
       path.join(workspaceRoot, 'runtime', 'credentials'),
+      path.join(workspaceRoot, 'runtime', 'agent'),
       path.join(workspaceRoot, 'security', 'secrets'),
       path.join(workspaceRoot, 'security', 'keys'),
       path.join(workspaceRoot, 'security', 'data'),

@@ -93,7 +93,14 @@ export class AgentKernelExecutionAdapter {
   async executeApproved(input: ExecuteApprovedAgentActionInput): Promise<AgentActionGatewayResult> {
     // Re-preflight the exact durable proposal. The fresh challenge is kept only
     // in memory and consumed immediately; no confirmation token is persisted.
-    const prepared = await this.execute(input);
+    const canonical = await this.prepare(input);
+    if (canonical.canonicalHash !== input.expectedCanonicalHash) {
+      throw new AgentActionGatewayError(
+        'approval-target-mismatch',
+        'Stored approval no longer matches the canonical action proposal.',
+      );
+    }
+    const prepared = await this.execute({ ...input, proposal: canonical });
     if (prepared.proposal.canonicalHash !== input.expectedCanonicalHash) {
       throw new AgentActionGatewayError(
         'approval-target-mismatch',

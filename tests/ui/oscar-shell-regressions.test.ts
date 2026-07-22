@@ -37,8 +37,14 @@ describe('Oscar live shell regressions', () => {
     expect(appSource).toContain('closeComposerOptions();');
   });
 
-  it('keeps answer options away from the primary Voice action', () => {
-    expect(styles).toMatch(/\.composer-options-popover\s*\{[^}]*right:\s*48px;[^}]*z-index:\s*72;/s);
+  it('consolidates composer tools under plus and reveals model choice only through Intelligence', () => {
+    expect(indexSource).toContain('id="oscar-composer-menu"');
+    expect(indexSource).toContain('data-oscar-attach-photo');
+    expect(indexSource).toContain('id="oscar-intelligence-toggle"');
+    expect(indexSource.indexOf('id="oscar-model-dropdown-container"'))
+      .toBeLessThan(indexSource.indexOf('id="oscar-voice-input"'));
+    expect(appSource).toContain("modelContainer.hidden = !intelligenceEnabled");
+    expect(styles).toContain('#oscar-composer.intelligence-enabled .composer-input-row');
   });
 
   it('keeps the central mascot permanent until the first message and only then enables the movable mini-mascot', () => {

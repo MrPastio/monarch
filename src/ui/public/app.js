@@ -57,6 +57,7 @@ function render() {
 
 function renderActiveView(activeView) {
   if (activeView === 'oscar-section') {
+    syncOscarModelDropdowns();
     renderOscar();
     return;
   }
@@ -169,6 +170,15 @@ document.addEventListener('click', (event) => {
     const popover = document.querySelector('#oscar-model-popover');
     toggleDropdown(popover);
     closeOtherDropdowns(popover);
+    return;
+  }
+
+  const oscarIntelligenceToggle = event.target.closest('#oscar-intelligence-toggle');
+  if (oscarIntelligenceToggle) {
+    state.oscar = state.oscar || {};
+    state.oscar.intelligenceEnabled = state.oscar.intelligenceEnabled !== true;
+    syncOscarModelDropdowns();
+    renderOscar();
     return;
   }
 
@@ -1016,12 +1026,25 @@ function syncOscarModelDropdowns() {
   if (available && state.oscar?.deepThinking !== 'none' && available[state.oscar.deepThinking] === false) {
     state.oscar.deepThinking = 'none';
   }
+  const intelligenceEnabled = state.oscar?.intelligenceEnabled === true;
+  const modelContainer = document.querySelector('#oscar-model-dropdown-container');
+  const intelligenceToggle = document.querySelector('#oscar-intelligence-toggle');
+  const intelligenceState = intelligenceToggle?.querySelector('[data-intelligence-state]');
+  if (modelContainer) modelContainer.hidden = !intelligenceEnabled;
+  elements.oscarComposer?.classList.toggle('intelligence-enabled', intelligenceEnabled);
+  if (intelligenceToggle) {
+    intelligenceToggle.classList.toggle('is-active', intelligenceEnabled);
+    intelligenceToggle.setAttribute('aria-pressed', String(intelligenceEnabled));
+  }
+  if (intelligenceState) intelligenceState.textContent = intelligenceEnabled ? 'Вкл' : 'Выкл';
+  if (!intelligenceEnabled) closeDropdown(document.querySelector('#oscar-model-popover'));
   syncDropdown({
     button: document.querySelector('#oscar-model-dropdown-btn'),
     popover: document.querySelector('#oscar-model-popover'),
     value: (state.oscar && state.oscar.modelSelection) || 'none',
     prefix: 'Модель',
     separator: ' · ',
+    displayPrefix: false,
     labelPrefix: 'Выбрать модель Oscar',
     labels: {
       none: 'Авто',
@@ -1085,10 +1108,10 @@ function setActiveNavItem(activeItem) {
   });
 }
 
-function syncDropdown({ button, popover, value, prefix, labels, separator = ': ', labelPrefix }) {
+function syncDropdown({ button, popover, value, prefix, labels, separator = ': ', labelPrefix, displayPrefix = true }) {
   const selectedLabel = labels[value] || value;
   if (button) {
-    const buttonLabel = prefix + separator + selectedLabel;
+    const buttonLabel = displayPrefix ? prefix + separator + selectedLabel : selectedLabel;
     const accessibleLabel = (labelPrefix || `Выбрать ${prefix.toLowerCase()}`) + ': ' + selectedLabel;
     button.textContent = buttonLabel;
     button.setAttribute('aria-label', accessibleLabel);

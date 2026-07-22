@@ -51,6 +51,24 @@ describe('Action Protocol predicate verifier', () => {
     expect(observations[0]).toMatchObject({ ok: false, code: 'predicate-outside-scope' });
   });
 
+  it('applies filesystem red zones before reading predicate content', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-verifier-policy-'));
+    roots.push(root);
+    const protectedFile = path.join(root, 'runtime', 'secrets', 'synthetic.txt');
+    await mkdir(path.dirname(protectedFile), { recursive: true });
+    await writeFile(protectedFile, 'synthetic-marker-must-not-be-observed', 'utf8');
+
+    const observations = await verifyActionPredicates([
+      { kind: 'contains', target: protectedFile, value: 'synthetic-marker' },
+    ], { phase: 'precondition', workspaceRoot: root, allowedRoots: [root] });
+
+    expect(observations[0]).toMatchObject({
+      ok: false,
+      code: 'predicate-filesystem-policy-blocked',
+    });
+    expect(JSON.stringify(observations[0])).not.toContain('synthetic-marker-must-not-be-observed');
+  });
+
   it('fails closed when runtime callers bypass predicate value typing', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-verifier-'));
     roots.push(root);

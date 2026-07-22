@@ -61,4 +61,38 @@ describe('durable agency state', () => {
     expect(replay.status).toBe('replay');
     if (replay.status === 'replay') expect(replay.result.summary).toBe('written');
   });
+
+  it('does not re-run a durable action left executing across restart', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-agency-interrupted-'));
+    roots.push(root);
+    const file = path.join(root, 'ledger.json');
+    const request: MonarchExecutionRequest = {
+      id: 'exec-interrupted',
+      intentId: 'intent-interrupted',
+      moduleId: 'workspace',
+      capabilityId: 'workspace.files.write',
+      input: { path: 'non-idempotent.txt', content: 'once' },
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'unit',
+      idempotencyKey: 'action:interrupted',
+      proposalId: 'proposal-interrupted',
+      proposalHash: 'd'.repeat(64),
+      riskVector: {
+        effect: 'write',
+        scope: 'single-object',
+        reversibility: 'manual',
+        externality: 'local',
+        privilege: 'user',
+        data: 'workspace',
+        novelty: 'new-args',
+      },
+    };
+
+    expect(new MonarchActionLedger(10, file).begin(request).status).toBe('started');
+    const replay = new MonarchActionLedger(10, file).begin(request);
+    expect(replay.status).toBe('replay');
+    if (replay.status === 'replay') {
+      expect(replay.result).toMatchObject({ ok: false, error: 'interrupted-before-completion' });
+    }
+  });
 });

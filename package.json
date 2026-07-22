@@ -1,6 +1,6 @@
 {
   "name": "monarch",
-  "version": "0.2.3.2",
+  "version": "0.2.3.3",
   "private": true,
   "type": "module",
   "description": "Local-first AI ecosystem architecture kernel.",
@@ -11,6 +11,7 @@
     "node:exec": "scripts\\node-exec.cmd",
     "start": "npm run node:exec -- tsx src/main.ts serve",
     "desktop": "electron desktop/electron/main.mjs",
+    "desktop:update-demo": "electron desktop/electron/main.mjs --update-demo",
     "desktop:smoke": "electron desktop/electron/main.mjs --smoke",
     "safe:entry:qa": "electron desktop/electron/main.mjs --safe-entry-qa",
     "safe:qa": "electron desktop/safe/qa.mjs",

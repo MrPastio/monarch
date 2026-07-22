@@ -37,6 +37,7 @@ export const state = {
     web: null,
     reasoning: 'low',
     researchMode: 'auto',
+    intelligenceEnabled: false,
     modelSelection: 'none',
     deepThinking: 'none',
     gemmaTier: 'none',

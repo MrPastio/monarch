@@ -100,7 +100,7 @@ const DEFAULT_OPTIONS: Required<AgentContextCompilerOptions> = {
   maxDepth: 8,
 };
 
-const SECRET_KEY = /(?:^|[_-])(password|passwd|passphrase|secret|token|api[_-]?key|authorization|cookie|credential|private[_-]?key)(?:$|[_-])/i;
+const SECRET_KEY = /(?:^|[_-])(password|passwd|passphrase|secret|token|api[_-]?key|authorization|cookie|credential|credentials|private[_-]?key)(?:$|[_-])/i;
 const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   {
     pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gi,
@@ -132,6 +132,10 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   },
   {
     pattern: /\b(password|passwd|passphrase|secret|token|api[_-]?key)\s*[:=]\s*["']?[^\s"',;]+/gi,
+    replacement: '$1=[REDACTED]',
+  },
+  {
+    pattern: /\b(accessToken|refreshToken|idToken|apiKey|clientSecret|privateKey|authorizationHeader|cookieValue|credentials)\b["']?\s*[:=]\s*["']?[^\s"',;}\]]+/gi,
     replacement: '$1=[REDACTED]',
   },
 ];
@@ -239,7 +243,7 @@ function findSecretPath(value: unknown, path: string, seen: WeakSet<object>): st
   }
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     const childPath = `${path}.${key}`;
-    if (SECRET_KEY.test(key)) return childPath;
+    if (isSecretKey(key)) return childPath;
     const found = findSecretPath(entry, childPath, seen);
     if (found) return found;
   }
@@ -293,7 +297,7 @@ function visit(
   const output: Record<string, unknown> = {};
   for (const key of selectedKeys) {
     const childPath = path + '.' + key;
-    if (SECRET_KEY.test(key)) {
+    if (isSecretKey(key)) {
       output[key] = '[REDACTED]';
       redactions.push({ path: childPath, reason: 'secret-key' });
       continue;
@@ -329,6 +333,14 @@ function redactString(
     return result.slice(0, maxChars) + '[TRUNCATED]';
   }
   return result;
+}
+
+function isSecretKey(key: string): boolean {
+  const normalized = key
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .toLowerCase();
+  return SECRET_KEY.test(normalized);
 }
 
 function normalizeOptions(input: AgentContextCompilerOptions): Required<AgentContextCompilerOptions> {
