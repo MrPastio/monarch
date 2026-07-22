@@ -4,7 +4,7 @@ param(
   [string]$OutputDirectory = "",
   [string]$AppVersion = "0.2.3.2",
   [string]$RuntimeVersion = "2026.07.6",
-  [string]$BackendEnvironment = "backend-0.1.5-offline4",
+  [string]$BackendEnvironment = "backend-0.1.5-offline5",
   [switch]$Force
 )
 
@@ -446,6 +446,8 @@ try {
     -Target $commonSitePackages `
     -Arguments @(
       "--only-binary=:all:",
+      "--constraint",
+      (Join-Path $root "oscar\requirements-runtime-lock.txt"),
       "-r",
       (Join-Path $root "oscar\requirements-runtime.txt")
     ) `

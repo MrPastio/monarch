@@ -9,7 +9,7 @@
   "releaseNotesUrl": "https://github.com/MrPastio/monarch-releases/releases/tag/v0.2.3.2",
   "compatibility": {
     "runtimeVersion": "2026.07.6",
-    "backendEnvironment": "backend-0.1.5-offline4",
+    "backendEnvironment": "backend-0.1.5-offline5",
     "dataSchemaVersion": 1,
     "minimumReadableDataSchema": 1,
     "maximumReadableDataSchema": 1,
