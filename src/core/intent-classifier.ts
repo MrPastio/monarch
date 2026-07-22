@@ -62,12 +62,16 @@ export function classifyIntentText(text: string): MonarchIntentClassification {
   scores.chat = normalized ? 0.22 : 0;
 
   addIf(scores, signals, normalized, 'multimodal', 0.86, 'multimodal input', /(image|vision|picture|photo|screenshot|screen shot|audio|voice|изображ|картин|фото|скрин|визуал|аудио|голос)/i);
-  addIf(scores, signals, normalized, 'search', 0.78, 'fresh or web knowledge', /(latest|current|today|news|web|internet|online|search web|find online|актуаль|свеж|новост|сегодня|интернет|в сети|поищи|найди в интернете)/i);
+  addIf(scores, signals, normalized, 'search', 0.78, 'explicit web knowledge', /(?:web|internet|online|search web|find online|интернет|в сети|найди в интернете|поищи в интернете)/i);
   addIf(scores, signals, normalized, 'file_operation', 0.74, 'file operation', /(read|open|delete|remove|rename|move|copy|list files|scan files|find file|find in project|search project|search code|прочитай|прочитать|открой|открыть|удали|переименуй|перемести|скопируй|список файлов|найди файл|найди.+(?:в проекте|по проекту|в коде|в репозитории)|поиск.+(?:в проекте|по проекту|в коде|в репозитории))/i);
   addIf(scores, signals, normalized, 'file_generation', 0.76, 'file authoring', /(create|write|generate|draft|compose).{0,32}(file|doc|document|report|html|json|markdown|md)|(?:создай|сгенерируй|составь|напиши).{0,32}(файл|документ|отчет|html|json|md)/i);
-  addIf(scores, signals, normalized, 'system_action', 0.78, 'system action', /(run|execute|start|stop|restart|install|launch|terminal|powershell|command|shell|запусти|выполни|останови|перезапусти|установи|терминал|команд)/i);
+  addIf(scores, signals, normalized, 'system_action', 0.78, 'system action', /(?:\b(?:run|execute|start|stop|restart|install|launch)\b.{0,32}\b(?:command|script|process|service|terminal|shell|runtime|backend)\b|(?:запусти|выполни|останови|перезапусти|установи).{0,32}(?:команду|скрипт|процесс|сервис|терминал|рантайм|бэкенд))/i);
   addIf(scores, signals, normalized, 'tool_use', 0.66, 'tool request', /(tool|tools|grep|rg|script|automation|use tool|run script|what can you do|available actions|инструмент|инструменты|тул|скрипт|автоматизац|что ты умеешь|что можешь|какими инструментами|доступные действия)/i);
   addIf(scores, signals, normalized, 'code', 0.74, 'code work', /(code|debug|fix|refactor|implement|test|typescript|javascript|python|api|router|planner|executor|код|исправь|рефактор|реализуй|отлад|тест|роутер|маршрутизатор)/i);
+  if (hasFreshnessSignal(normalized)) {
+    scores.search += 0.78;
+    signals.push('time-sensitive external fact');
+  }
 
   if (responseFormat === 'json' || responseFormat === 'code') {
     scores.code += 0.12;
@@ -249,7 +253,21 @@ function isExplicitSystemAction(text: string): boolean {
 }
 
 function isExplicitWebSearch(text: string): boolean {
-  return /(найди|поищи|search|find).{0,32}(?:в интернете|в сети|online|web|internet)|(?:latest|current|today|news|новост|актуаль|свеж)/i.test(text);
+  return /(найди|поищи|search|find).{0,32}(?:в интернете|в сети|online|web|internet)/i.test(text)
+    || hasFreshnessSignal(text);
+}
+
+function hasFreshnessSignal(text: string): boolean {
+  const temporal = /\b(?:latest|current|today|recent|newest|now|this\s+(?:week|month|year))\b|актуальн|свеж|последн|сегодня|сейчас|на\s+данный\s+момент|в\s+этом\s+(?:году|месяце|неделе)/i;
+  const definitional = /^\s*(?:что\s+такое|что\s+означает|что\s+значит|объясни|поясни|what\s+is|what\s+does|explain)\b/i;
+  if (definitional.test(text) && !temporal.test(text)) return false;
+  const directSubject = /\b(?:news|weather|forecast|exchange rate|standings|sports?\s+score)\b|новост|погод|прогноз\s+погод|курс\s+(?:валют|доллар|евро|гривн|рубл)|турнирн\w*\s+таблиц|сч[её]т\s+матч|результат\w*\s+матч/i;
+  const liveValue = /\b(?:price|quote)\b.{0,32}\b(?:btc|bitcoin|eth|ethereum|stock|share|product|gas|oil|gold)\b|\b(?:btc|bitcoin|eth|ethereum|stock|share|product|gas|oil|gold)\b.{0,32}\b(?:price|quote)\b|цен[аы].{0,32}(?:btc|bitcoin|биткоин|ethereum|эфир|акци|товар|бензин|нефт|золот)|(?:btc|bitcoin|биткоин|ethereum|эфир|акци|товар|бензин|нефт|золот).{0,32}цен[аы]/i;
+  const liveSchedule = /\b(?:schedule|timetable)\b.{0,40}\b(?:flight|train|bus|match|game|event|concert|cinema)\b|\b(?:flight|train|bus|match|game|event|concert|cinema)\b.{0,40}\b(?:schedule|timetable)\b|расписан.{0,40}(?:рейс|поезд|автобус|матч|игр|турнир|концерт|кино)|(?:рейс|поезд|автобус|матч|игр|турнир|концерт|кино).{0,40}расписан/i;
+  const officeholder = /\b(?:who|current|name)\b.{0,32}\b(?:president|prime\s+minister|ceo)\b|\b(?:president|prime\s+minister|ceo)\b.{0,32}\b(?:who|current|name)\b|(?:кто|как\s+зовут|сейчас|нынешн|текущ).{0,32}(?:президент|премьер[- ]?министр|генеральн\w*\s+директор)|(?:президент|премьер[- ]?министр|генеральн\w*\s+директор).{0,32}(?:кто|как\s+зовут|сейчас|нынешн|текущ)/i;
+  if (directSubject.test(text) || liveValue.test(text) || liveSchedule.test(text) || officeholder.test(text)) return true;
+  const changingSubject = /\b(?:company|corporation|government|market|stock|product|software|library|framework|release|version|update|election|regulation|standard|api|openai|anthropic|google|microsoft|apple|nvidia|windows|android|ios|macos|python|node(?:\.js)?|react)\b|компан|корпорац|правительств|рынок|акци[ия]|продукт|программ|библиотек|фреймворк|релиз|верси|обновлен|выбор|регулирован|регламент|стандарт|openai|anthropic|google|microsoft|apple|nvidia|windows|android|ios|macos|python|react|(?:ai|llm|языков\w*)\s+модел/i;
+  return temporal.test(text) && changingSubject.test(text);
 }
 
 function isConcreteFileSearch(text: string): boolean {
@@ -275,7 +293,7 @@ function isExplicitWorkspaceBatch(text: string): boolean {
 }
 
 function isExplanationQuestion(text: string): boolean {
-  return /^(?:объясни|поясни|расскажи как|как\s+|почему\s+|что такое\s+|explain|how\s+|why\s+|what is\s+)/i.test(text);
+  return /^(?:объясни|поясни|расскажи как|как\s+|почему\s+|что такое\s+|что означает\s+|что значит\s+|explain|how\s+|why\s+|what is\s+|what does\s+.+\s+mean)/i.test(text);
 }
 
 function isGeneralTextGeneration(text: string): boolean {
@@ -480,7 +498,7 @@ function scoreAdaptiveModelRoute(
   const hasAction = hasActionSignal(normalized);
   const hasDomain = hasDomainSignal(normalized) || matchesTierKeyword(normalized, 'powerful');
   const hasKnowledge = hasMediumKnowledgeSignal(normalized) || matchesTierKeyword(normalized, 'medium');
-  const hasFreshness = /(интернет|в сети|новост|актуаль|свеж|web|online|latest|current|news)/i.test(normalized);
+  const hasFreshness = hasFreshnessSignal(normalized);
   const hasContext = /\b(this|that|previous|continue)\b|(?:это|этот|как выше|продолжи|сделай так|исправь это)/i.test(normalized);
   const multipart = (normalized.match(/[?;\n]|\bи\b|\band\b/g) || []).length >= 2;
   const structuredOutput = responseFormat !== 'plain' || /(json|schema|структур|таблиц|markdown|html|код|code block)/i.test(normalized);

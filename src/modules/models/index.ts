@@ -6,6 +6,7 @@ import type {
   MonarchModule,
   MonarchModulePackage,
   MonarchRouteDecision,
+  MonarchRoutingAnalysis,
 } from '../../core';
 import {
   createRouterPipeline,
@@ -55,7 +56,8 @@ export class ModelsModule implements MonarchModule {
 
   async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
     const text = intent.text.toLowerCase();
-    if (!mentionsModels(text)) {
+    const analysis = intent.context?.routingAnalysis as MonarchRoutingAnalysis | undefined;
+    if (!mentionsModels(text, analysis?.classification.kind)) {
       return null;
     }
 
@@ -330,8 +332,11 @@ export class ModelsModule implements MonarchModule {
   }
 }
 
-function mentionsModels(text: string): boolean {
-  return /(model|models|llm|gemma|router model|systemrouter|модел|роутер|изображ)/i.test(text);
+function mentionsModels(text: string, intentKind?: string): boolean {
+  if (intentKind === 'model_status_question') return true;
+  return /\b(?:llm|gemma|systemrouter|router model|local models?|language models?|ai models?)\b/i.test(text)
+    || /(?:локальн|языков|ai|ии|llm|gemma|загруж|активн|доступн|рантайм).{0,32}модел|модел.{0,32}(?:локальн|языков|ai|ии|llm|gemma|загруж|активн|доступн|рантайм|monarch|монарх)/i.test(text)
+    || /(?:покажи|список|выбери|запусти|останови).{0,24}модел/i.test(text);
 }
 
 function readStringInput(input: unknown, key: string): string {

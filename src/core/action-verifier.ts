@@ -5,6 +5,7 @@ import type {
   MonarchActionPredicate,
   MonarchExecutionResult,
 } from './contracts';
+import { actionPredicateValueError } from './action-predicate';
 
 const MAX_PREDICATE_FILE_BYTES = 1024 * 1024;
 
@@ -34,6 +35,10 @@ async function evaluatePredicate(
     result?: MonarchExecutionResult;
   },
 ): Promise<MonarchActionObservationV1> {
+  const valueError = actionPredicateValueError(predicate as unknown as Record<string, unknown>);
+  if (valueError) {
+    return observation(options.phase, predicate, false, undefined, 'predicate-value-invalid', valueError);
+  }
   if (predicate.target === 'result' || predicate.target.startsWith('result.')) {
     if (options.phase !== 'verification' || !options.result) {
       return observation(options.phase, predicate, false, undefined, 'predicate-result-unavailable', 'Result predicates are available only during verification.');
@@ -91,7 +96,7 @@ function compareObserved(
   else if (predicate.kind === 'equals' || predicate.kind === 'status') ok = deepEqual(observed, predicate.value);
   else if (predicate.kind === 'contains') {
     ok = typeof observed === 'string'
-      ? observed.includes(String(predicate.value ?? ''))
+      ? typeof predicate.value === 'string' && observed.includes(predicate.value)
       : Array.isArray(observed)
         ? observed.some((entry) => deepEqual(entry, predicate.value))
         : false;

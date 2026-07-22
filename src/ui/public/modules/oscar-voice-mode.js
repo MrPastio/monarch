@@ -255,14 +255,18 @@ export function initOscarVoiceMode(root = document) {
     resetVoiceLevel();
     document.body.classList.add('voice-mode-open');
     syncMuteControl();
-    setPhase('entering', { detail: 'Подготавливаю локальный Qwen-голос' });
-    live.textContent = 'Голосовой режим открыт. Проверяю готовность локального голоса.';
+    setPhase('entering', { detail: 'Подготавливаю локальное распознавание и голос' });
+    live.textContent = 'Голосовой режим открыт. Запускаю локальное распознавание.';
     closeButton?.focus({ preventScroll: true });
-    // Qwen TTS owns startup priority: loading Micro/Lite in parallel can push
-    // Windows over its commit limit and silently force every turn onto SAPI.
-    // The overlay stays responsive, while listening and CPU model preparation
-    // begin only after the bounded shared neural warmup has settled.
-    const continueAfterSpeechWarmup = ({ warmup } = {}) => {
+    // Streaming STT is lightweight and must never wait for the substantially
+    // heavier Qwen TTS warmup. Local LLMs stay lazy, so both preparations are
+    // safe to start independently without racing a Micro/Lite allocation.
+    void prepareVoiceModeModels().catch(() => {
+      // Direct MediaRecorder transcription remains the truthful fallback.
+    });
+    openTimer = window.setTimeout(startListening, reducedMotion?.matches ? 40 : 140);
+
+    const recordSpeechWarmup = ({ warmup } = {}) => {
       if (!isOpen || openingTurn !== turnId) return;
       const ready = warmup?.ok === true && warmup?.status === 'ready';
       surface.dataset.speechWarmup = ready ? 'ready' : 'failed';
@@ -276,25 +280,11 @@ export function initOscarVoiceMode(root = document) {
           summary: String(warmup?.summary || 'Qwen TTS не прогрелся.').slice(0, 300),
         };
         surface.dataset.speechLastError = lastError;
-        setPhase('error', {
-          kicker: 'Qwen TTS недоступен',
-          title: 'Голос не прогрелся',
-          detail: `${speechWarmupFailure.summary} · микрофон останется доступен`,
-        });
         live.textContent = `Qwen TTS не готов: ${lastError}. Продолжаю слушать, но аварийная Windows-озвучка явно отмечена.`;
       }
-      // This capability now prepares streaming STT only. Lite stays lazy and
-      // cannot race Qwen's allocation; a failed Qwen warmup never preloads it.
-      void prepareVoiceModeModels().catch(() => {
-        // Direct MediaRecorder transcription remains the truthful fallback.
-      });
-      openTimer = window.setTimeout(
-        startListening,
-        ready ? (reducedMotion?.matches ? 40 : 180) : 1_100,
-      );
     };
-    void warmVoiceModeSpeech(speech).then(continueAfterSpeechWarmup, (error) => {
-      continueAfterSpeechWarmup({
+    void warmVoiceModeSpeech(speech).then(recordSpeechWarmup, (error) => {
+      recordSpeechWarmup({
         warmup: {
           status: 'failed',
           ok: false,

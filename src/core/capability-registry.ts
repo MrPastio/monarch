@@ -1,4 +1,5 @@
 import type { MonarchCapability, MonarchModuleManifest } from './contracts';
+import { validateAgentCapabilityMetadata } from './capability-metadata';
 import { normalizeId, normalizeText } from './utils';
 
 export class MonarchCapabilityRegistry {
@@ -58,6 +59,8 @@ export class MonarchCapabilityRegistry {
     if (this.capabilities.has(id)) {
       throw new Error(`Capability already registered: ${id}`);
     }
+
+    validateAgentCapabilityMetadata(capability);
 
     this.capabilities.set(id, {
       ...capability,

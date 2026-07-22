@@ -710,6 +710,9 @@ export function summarizeOutput(output) {
   if (!output) {
     return '';
   }
+  if (typeof output.text === 'string' && output.text.trim()) {
+    return output.text.trim().slice(0, 1_200);
+  }
 
   const securityPayload = output?.payload && typeof output.payload === 'object' ? output.payload : output;
   if (typeof securityPayload?.running === 'boolean' || typeof securityPayload?.protection_state === 'string') {
@@ -1166,24 +1169,22 @@ export function renderOscarMessage(message) {
     `;
   } else {
     const visibleContent = String(message.content || '').trim();
-    const workTimerHtml = renderOscarWorkTimer(message);
+    const showDetailedThinking = Boolean(message.researchFlow || isOscarResearchOrSearchPhase(streamPhase));
+    const workTimerHtml = !message.pending || showDetailedThinking
+      ? renderOscarWorkTimer(message)
+      : '';
     const isThinkingOnly = message.pending
       && !visibleContent
       && !message.error
       && !message.action
       && !message.routeConsent
-      && !message.researchFlow;
+      && !showDetailedThinking;
     if (isThinkingOnly) {
       const thinkingLabel = formatOscarStreamPhase(streamPhase);
       return `
         <div class="oscar-message assistant pending thinking-only" data-message-id="${escapeHtml(message.id)}"${streamPhaseAttr}>
-          ${workTimerHtml}
           <div class="oscar-thinking-only" role="status" aria-label="${escapeHtml(thinkingLabel)}">
-            <span class="oscar-thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span class="oscar-thinking-copy">
-              <strong>${escapeHtml(thinkingLabel)}</strong>
-              <small>${escapeHtml(formatOscarStreamHint(streamPhase))}</small>
-            </span>
+            ${renderMonarchThinkingOrb(streamPhase)}
           </div>
         </div>
       `;
@@ -1199,14 +1200,14 @@ export function renderOscarMessage(message) {
          </div>`
       : '';
 
-    const reasoningHtml = message.showTrace && message.reasoning
+    const reasoningHtml = message.showTrace && message.reasoning && (!message.pending || showDetailedThinking)
       ? `<details class="oscar-reasoning-block" ${message.pending ? 'open' : ''}>
            <summary>Рассуждение модели</summary>
            <div class="oscar-reasoning-content" style="white-space: pre-wrap; font-size: 0.9em; opacity: 0.8; margin-top: 8px;">${escapeHtml(message.reasoning)}</div>
          </details>`
       : '';
 
-    const streamEventsHtml = message.showTrace && message.pending && Array.isArray(message.streamEvents) && message.streamEvents.length > 0
+    const streamEventsHtml = message.showTrace && message.pending && showDetailedThinking && Array.isArray(message.streamEvents) && message.streamEvents.length > 0
       ? `<div class="oscar-stream-trace" aria-label="Ход генерации">
            ${message.streamEvents.slice(-5).map((event) => {
              const label = event?.label || event?.kind || 'событие';
@@ -1284,12 +1285,20 @@ export function renderOscarMessage(message) {
 
 function renderOscarLiveStage(message, phase) {
   const label = formatOscarStreamPhase(phase);
+  const showDetails = Boolean(message.researchFlow || isOscarResearchOrSearchPhase(phase));
+  if (!showDetails) {
+    return `
+      <div class="oscar-orb-only-status" role="status" aria-label="${escapeHtml(label)}">
+        ${renderMonarchThinkingOrb(phase)}
+      </div>
+    `;
+  }
   const researchTimeline = message.researchFlow ? renderOscarResearchTimeline(phase) : '';
   return `
     <div class="oscar-research-activity">
       <div class="oscar-live-stage" data-phase="${escapeHtml(phase || 'route')}" aria-label="${escapeHtml(label)}" aria-live="polite">
         <span class="oscar-live-rail" aria-hidden="true">
-          ${Array.from({ length: 8 }).map(() => '<span></span>').join('')}
+          ${renderMonarchThinkingOrb(phase)}
         </span>
         <span class="oscar-live-copy">
           <strong>${escapeHtml(label)}</strong>
@@ -1310,6 +1319,11 @@ const OSCAR_RESEARCH_STEPS = [
   { label: 'Проверка', phases: ['research-reflect', 'research-verify', 'research-revise'] },
   { label: 'Итог', phases: ['research-finalize', 'write'] },
 ];
+
+function isOscarResearchOrSearchPhase(phase) {
+  const normalizedPhase = String(phase || '').toLowerCase();
+  return normalizedPhase === 'search' || normalizedPhase.startsWith('research-');
+}
 
 function renderOscarResearchTimeline(phase, options = {}) {
   const normalizedPhase = String(phase || 'route');
@@ -1355,7 +1369,7 @@ function renderOscarRouteConsent(consent) {
   return `
     <section class="oscar-inline-consent" data-consent-state="${state}" aria-label="${escapeHtml(webSearch ? 'Подтверждение исследования' : 'Выбор модели')}">
       <div class="oscar-inline-consent-heading">
-        <span class="oscar-thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        ${renderMonarchThinkingOrb(webSearch ? 'search' : 'route')}
         <span>
           <small>Oscar · ${webSearch ? 'исследование' : 'маршрут ответа'}</small>
           <strong>${escapeHtml(title)}</strong>
@@ -1378,6 +1392,28 @@ function renderOscarRouteConsent(consent) {
       `}
     </section>
   `;
+}
+
+const OSCAR_THINKING_ORB_PHASES = new Set([
+  'route',
+  'search',
+  'write',
+  'error',
+  'research-plan',
+  'research-search',
+  'research-read',
+  'research-reflect',
+  'research-synthesize',
+  'research-verify',
+  'research-revise',
+  'research-finalize',
+]);
+
+function renderMonarchThinkingOrb(phase) {
+  const normalizedPhase = OSCAR_THINKING_ORB_PHASES.has(String(phase || ''))
+    ? String(phase)
+    : 'route';
+  return `<span class="monarch-thinking-orb" data-orb-phase="${normalizedPhase}" aria-hidden="true"><span class="monarch-thinking-orb__core"></span></span>`;
 }
 
 function renderOscarModelNote(message, phase) {
@@ -1554,7 +1590,39 @@ export function shouldPreDispatchAgentAction(text) {
   if (!value) return false;
   if (/^\{[\s\S]*"(?:capability|capabilityId|name)"\s*:/i.test(value)) return true;
   const workspaceRootQuestion = /(?:где|какой|укажи|покажи|назови|дай|where|what).{0,80}(?:путь|адрес|находится|расположен|path|location|located).{0,80}(?:workspace|рабоч[^\s]*\s+пространств[^\s]*)|(?:workspace|рабоч[^\s]*\s+пространств[^\s]*).{0,80}(?:путь|адрес|находится|расположен|path|location|located)/i.test(value);
-  return workspaceRootQuestion || isAtomicWorkspaceMutation(value);
+  return workspaceRootQuestion || isAtomicWorkspaceMutation(value) || isDirectSystemAgentAction(value);
+}
+
+function isDirectSystemAgentAction(value) {
+  const source = String(value || '').toLowerCase().replace(/ё/g, 'е');
+  const clock = /(?:который\s+час|сколько\s+(?:сейчас\s+)?времени|текущее\s+время|точное\s+время|какая\s+сегодня\s+дата|какое\s+сегодня\s+число|what\s+time\s+is\s+it|current\s+(?:time|date))/i.test(source)
+    && !/(?:займет|занимает|осталось|прошло|потребуется)/i.test(source);
+  const appOrBrowser = /(?:^|\s)(?:открой|открыть|запусти|запустить|покажи|перейди|зайди|open|launch|browse)(?=\s|$).{0,100}(?:telegram|телеграм|youtube|ютуб|браузер|browser|chrome|хром|edge|firefox|калькулятор|calculator|блокнот|notepad|терминал|terminal|проводник|explorer|discord|steam|стим|vscode|приложение|программу|https?:|www\.|\.(?:com|org|net|io|ru|ua|dev|app))(?:\s|$|[.:/])/i.test(source);
+  const volume = /(?:громкост|звук|volume)/i.test(source)
+    && /(?:поставь|установи|измени|увеличь|уменьши|громче|тише|включи|выключи|какая|сколько|покажи|проверь|set|raise|lower|mute|unmute)/i.test(source);
+  const brightness = /(?:яркост|brightness|(?:экран|display|screen).{0,40}(?:ярче|темнее))/i.test(source)
+    && /(?:поставь|установи|измени|увеличь|уменьши|ярче|темнее|какая|сколько|покажи|проверь|set|raise|lower)/i.test(source);
+  return clock || appOrBrowser || volume || brightness;
+}
+
+export function canAutoConfirmDirectAgentAction(route, text, dispatchContext = {}) {
+  if (dispatchContext?.modelProposed === true || dispatchContext?.autoConfirmedDirectAction === true) return false;
+  if (Array.isArray(dispatchContext?.planCommands) && dispatchContext.planCommands.length > 1) return false;
+  if (route?.targetModuleId !== 'device') return false;
+  const capabilityId = String(route?.capabilityId || '');
+  const source = String(text || '').toLowerCase().replace(/ё/g, 'е');
+  if (capabilityId === 'device.app.open' || capabilityId === 'device.browser.open') {
+    return /(?:^|\s)(?:открой|открыть|запусти|запустить|покажи|перейди|зайди|open|launch|browse)(?=\s|$)/i.test(source);
+  }
+  if (capabilityId === 'device.volume.set') {
+    return /(?:громкост|звук|volume)/i.test(source)
+      && /(?:поставь|установи|измени|увеличь|уменьши|громче|тише|включи|выключи|set|raise|lower|mute|unmute)/i.test(source);
+  }
+  if (capabilityId === 'device.brightness.set') {
+    return /(?:яркост|brightness|экран|display|screen)/i.test(source)
+      && /(?:поставь|установи|измени|увеличь|уменьши|ярче|темнее|set|raise|lower)/i.test(source);
+  }
+  return false;
 }
 
 function isAtomicWorkspaceMutation(value) {
@@ -1575,6 +1643,7 @@ function isAtomicWorkspaceMutation(value) {
 
 export function executionNeedsAuthoritativeReceipt(execution) {
   if (execution?.ok !== true) return false;
+  if (execution?.output?.authoritative === true && execution?.output?.verified === true) return true;
   const effect = String(execution?.metadata?.policy?.riskVector?.effect || '').trim().toLowerCase();
   return Boolean(effect && effect !== 'none' && effect !== 'read');
 }

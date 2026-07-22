@@ -46,9 +46,22 @@ import {
   type MonarchAgentSystemProfile,
 } from './system-profile';
 import type { TelegramIntentDispatcher } from '../modules/telegram';
+import {
+  AgentKernelExecutionAdapter,
+  LocalAgentDecisionProvider,
+  LocalJsonAgentTaskStore,
+  MonarchAgentRuntime,
+  type AgentDecisionProvider,
+  type AgentTaskStore,
+  type CreateAgentTaskInput,
+} from '../agent';
 
 export interface MonarchApplicationOptions extends MonarchBootstrapOptions {
   workspaceRoot?: string;
+  enableAgentRuntimeV2?: boolean;
+  agentTaskStore?: AgentTaskStore;
+  agentDecisionProvider?: AgentDecisionProvider;
+  agentRuntimeAutoRun?: boolean;
 }
 
 export interface MonarchIntentSubmission {
@@ -109,6 +122,8 @@ export interface MonarchActionProposalSubmission {
   confirmationToken?: string;
   grantScope?: 'once' | 'task';
   leaseId?: string;
+  /** Internal-only cancellation signal. HTTP bodies never populate this field. */
+  signal?: AbortSignal;
 }
 
 export interface MonarchActionProposalResult {
@@ -173,6 +188,7 @@ interface CachedRuntimeState {
 export class MonarchApplication {
   readonly workspaceRoot: string;
   readonly runtime: MonarchRuntime;
+  readonly agentRuntime: MonarchAgentRuntime | null;
   private started = false;
   private startedAt: string | null = null;
   private modelCatalog: MonarchModelCatalog | null = null;
@@ -187,7 +203,14 @@ export class MonarchApplication {
   private static readonly STATE_CACHE_TTL_MS = 1500;
 
   constructor(options: MonarchApplicationOptions = {}) {
-    const { workspaceRoot = process.cwd(), ...bootstrapOptions } = options;
+    const {
+      workspaceRoot = process.cwd(),
+      enableAgentRuntimeV2,
+      agentTaskStore,
+      agentDecisionProvider,
+      agentRuntimeAutoRun,
+      ...bootstrapOptions
+    } = options;
     this.workspaceRoot = workspaceRoot;
     const permissionProfile = bootstrapOptions.permissionProfile
       || readStoredPermissionProfile(workspaceRoot);
@@ -208,6 +231,33 @@ export class MonarchApplication {
       const bridge = module as typeof module & { setIntentDispatcher?: (dispatcher: TelegramIntentDispatcher) => void };
       bridge.setIntentDispatcher?.(telegramDispatcher);
     }
+    const agentEnabled = enableAgentRuntimeV2 ?? readBooleanEnvironment('MONARCH_AGENT_RUNTIME_V2', false);
+    if (agentEnabled) {
+      const store = agentTaskStore || new LocalJsonAgentTaskStore(
+        path.join(workspaceRoot, 'runtime', 'agent', 'tasks.v2.json'),
+      );
+      const decisionProvider = agentDecisionProvider || new LocalAgentDecisionProvider({ workspaceRoot });
+      const executionAdapter = new AgentKernelExecutionAdapter(
+        (submission) => this.submitActionProposal(submission),
+        (submission) => this.prepareActionProposal(submission),
+      );
+      this.agentRuntime = new MonarchAgentRuntime({
+        store,
+        decisionProvider,
+        executionAdapter,
+        listCapabilities: () => this.runtime.kernel.listCapabilities(),
+        getPermissionProfile: () => this.runtime.kernel.getPermissionProfile(),
+        getModuleStates: () => Object.fromEntries(
+          this.runtime.kernel.getSnapshot().modules.map((record) => [
+            record.manifest.id,
+            record.status === 'registered' ? 'inactive' : record.status,
+          ]),
+        ),
+        ...(agentRuntimeAutoRun !== undefined ? { autoRun: agentRuntimeAutoRun } : {}),
+      });
+    } else {
+      this.agentRuntime = null;
+    }
   }
 
   get isStarted(): boolean {
@@ -221,6 +271,23 @@ export class MonarchApplication {
 
     this.modelCatalog = await readModelCatalog(this.workspaceRoot);
     await this.runtime.kernel.start();
+    try {
+      await this.agentRuntime?.start();
+    } catch (error) {
+      try {
+        await this.agentRuntime?.stop();
+      } catch {
+        // Preserve the startup failure; runtime cleanup is best-effort.
+      }
+      try {
+        await this.runtime.kernel.stop();
+      } catch {
+        // Preserve the startup failure; kernel cleanup is best-effort.
+      }
+      this.started = false;
+      this.startedAt = null;
+      throw error;
+    }
     this.started = true;
     this.startedAt = nowIso();
 
@@ -231,6 +298,7 @@ export class MonarchApplication {
       return;
     }
 
+    await this.agentRuntime?.stop();
     await this.runtime.kernel.stop();
     this.started = false;
   }
@@ -479,6 +547,7 @@ export class MonarchApplication {
         confirmed: true,
         securityOverrideConfirmed: pending.securityOverride === true,
         ...(lease ? { leaseId: lease.leaseId } : {}),
+        ...(submission.signal ? { signal: submission.signal } : {}),
       });
       return {
         proposal: executed.proposal,
@@ -493,6 +562,7 @@ export class MonarchApplication {
       ...(submission.model ? { model: submission.model } : {}),
       ...(submission.skillIds ? { skillIds: submission.skillIds } : {}),
       ...(submission.leaseId ? { leaseId: submission.leaseId } : {}),
+      ...(submission.signal ? { signal: submission.signal } : {}),
     });
     const result = withUserFacingExecutionResult(executed.result);
     if (result.error !== 'confirmation-required') return { proposal: executed.proposal, result };
@@ -523,6 +593,30 @@ export class MonarchApplication {
     });
     result.metadata = { ...(result.metadata || {}), confirmation };
     return { proposal: executed.proposal, result, confirmation };
+  }
+
+  async prepareActionProposal(submission: MonarchActionProposalSubmission): Promise<MonarchActionProposalV1> {
+    await this.ensureStarted();
+    const originatingUserText = String(submission.originatingUserText || '').trim().slice(0, 8_000);
+    const requestedBy = String(submission.requestedBy || 'agent-runtime').trim().slice(0, 200) || 'agent-runtime';
+    return this.runtime.kernel.prepareActionProposal(submission.proposal, {
+      originatingUserText,
+      requestedBy,
+      ...(submission.model ? { model: submission.model } : {}),
+      ...(submission.skillIds ? { skillIds: submission.skillIds } : {}),
+    });
+  }
+
+  get isAgentRuntimeV2Enabled(): boolean {
+    return this.agentRuntime !== null;
+  }
+
+  async createAgentTask(input: CreateAgentTaskInput) {
+    await this.ensureStarted();
+    if (!this.agentRuntime) {
+      throw new MonarchApplicationError(404, 'agent-runtime-disabled', 'Oscar Agent Runtime V2 is disabled.');
+    }
+    return this.agentRuntime.createTask(input);
   }
 
   listCapabilityLeases(activeOnly = false): MonarchCapabilityLeaseV1[] {
@@ -1189,4 +1283,10 @@ function isMonarchRisk(value: unknown): value is MonarchRisk {
     || value === 'money'
     || value === 'identity'
     || value === 'security-sensitive';
+}
+
+function readBooleanEnvironment(name: string, fallback: boolean): boolean {
+  const value = String(process.env[name] || '').trim().toLowerCase();
+  if (!value) return fallback;
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on';
 }

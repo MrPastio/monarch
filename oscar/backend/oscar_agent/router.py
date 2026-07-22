@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .meta_templates import detect_meta_intent
+from .research import has_freshness_signal
 
 TIER_ORDER = ["gemma4-fast", "gemma4-balanced", "gemma4-deepthinking"]
 TIER_RANK = {tier: index for index, tier in enumerate(TIER_ORDER)}
@@ -149,7 +150,7 @@ def _score_adaptive_model_route(text: str, intent_kind: str | None = None) -> di
     has_action = _has_action_signal(lowered)
     has_domain = _has_domain_signal(lowered) or _matches_tier_keywords(lowered, config, "powerful")
     has_medium_knowledge = _has_medium_knowledge_signal(lowered) or _matches_tier_keywords(lowered, config, "medium")
-    has_freshness = bool(re.search(r"(интернет|в сети|новост|актуаль|свеж|web|online|latest|current|news)", lowered))
+    has_freshness = has_freshness_signal(lowered)
     has_context = bool(re.search(r"\b(this|that|previous|continue)\b|(?:это|этот|как выше|продолжи|сделай так|исправь это)", lowered))
     multi_part = len(re.findall(r"[?;]|\n|\bи\b|\band\b", lowered)) >= 2
     output_structured = bool(re.search(r"(json|schema|структур|таблиц|markdown|html|код|code block)", lowered))

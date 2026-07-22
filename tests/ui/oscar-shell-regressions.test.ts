@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const oscarSource = readFileSync('src/ui/public/modules/oscar-pane.js', 'utf8');
+const utilsSource = readFileSync('src/ui/public/modules/utils.js', 'utf8');
 const styles = readFileSync('src/ui/public/styles-v2.css', 'utf8');
 const appSource = readFileSync('src/ui/public/app.js', 'utf8');
 const indexSource = readFileSync('src/ui/public/index.html', 'utf8');
@@ -48,6 +49,23 @@ describe('Oscar live shell regressions', () => {
     expect(oscarSource).toContain("event.type === 'research'");
     expect(styles).toContain('.oscar-live-stage[data-phase^="research-"]');
     expect(styles).toContain('@media (prefers-reduced-motion: reduce)');
+  });
+
+  it('replaces generic thinking dots with the Monarch-adapted ThinkingOrb states', () => {
+    expect(utilsSource).toContain('renderMonarchThinkingOrb(streamPhase)');
+    expect(utilsSource).toContain('renderMonarchThinkingOrb(phase)');
+    expect(utilsSource).not.toContain('class="oscar-thinking-dots"');
+    expect(styles).toContain('MIT-derived motion primitive: @illuma-ai/icons ThinkingOrb 2.7.0');
+    expect(styles).toContain('.monarch-thinking-orb[data-orb-phase="research-search"]');
+    expect(styles).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.monarch-thinking-orb__core/);
+  });
+
+  it('renders ordinary thinking as a bare orb without a status card or copy', () => {
+    expect(utilsSource).toContain('class="oscar-message assistant pending thinking-only"');
+    expect(utilsSource).toContain('class="oscar-orb-only-status"');
+    expect(utilsSource).not.toContain('class="oscar-thinking-copy"');
+    expect(styles).toContain('.oscar-orb-only-status');
+    expect(styles).toMatch(/\.oscar-thinking-only\s*\{[^}]*display:\s*inline-grid;[^}]*place-items:\s*center;/s);
   });
 
   it('keeps research confirmation in the answer card and morphs it into visible stages', () => {

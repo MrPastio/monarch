@@ -77,19 +77,19 @@ describe('adaptive voice activity detector', () => {
     expect(ended.silenceMs).toBeGreaterThanOrEqual(780);
   });
 
-  it('adapts trailing silence from 650ms for short speech toward 500ms for a stable phrase', () => {
+  it('adapts trailing silence from 560ms for short speech toward 420ms for a stable phrase', () => {
     const short = createAdaptiveVoiceActivityDetector({ startedAtMs: 0 });
     pushFrames(short, { from: 0, count: 3, rms: 0.09 });
     pushFrames(short, { from: 80, count: 10, rms: 0.07 });
     const shortPause = short.push({ atMs: 760, rms: 0.001 });
     expect(shortPause.type).toBe('none');
-    expect(shortPause.requiredSilenceMs).toBeGreaterThanOrEqual(600);
+    expect(shortPause.requiredSilenceMs).toBeGreaterThanOrEqual(520);
 
     const stable = createAdaptiveVoiceActivityDetector({ startedAtMs: 0 });
     pushFrames(stable, { from: 0, count: 3, rms: 0.09 });
     pushFrames(stable, { from: 80, count: 100, rms: 0.07 });
     const ended = stable.push({ atMs: 2_560, rms: 0.001 });
-    expect(ended.requiredSilenceMs).toBe(500);
+    expect(ended.requiredSilenceMs).toBe(420);
     expect(ended.type).toBe('speech-end');
   });
 
@@ -126,10 +126,10 @@ describe('adaptive voice activity detector', () => {
 
   it('keeps bounded defaults suitable for conversational turns', () => {
     expect(VOICE_ACTIVITY_DEFAULTS.onsetFrames).toBeGreaterThanOrEqual(2);
-    expect(VOICE_ACTIVITY_DEFAULTS.endSilenceMs).toBeGreaterThanOrEqual(650);
-    expect(VOICE_ACTIVITY_DEFAULTS.endSilenceMs).toBeLessThanOrEqual(900);
-    expect(VOICE_ACTIVITY_DEFAULTS.minimumEndSilenceMs).toBeGreaterThanOrEqual(450);
-    expect(VOICE_ACTIVITY_DEFAULTS.minimumEndSilenceMs).toBeLessThanOrEqual(550);
+    expect(VOICE_ACTIVITY_DEFAULTS.endSilenceMs).toBeGreaterThanOrEqual(520);
+    expect(VOICE_ACTIVITY_DEFAULTS.endSilenceMs).toBeLessThanOrEqual(650);
+    expect(VOICE_ACTIVITY_DEFAULTS.minimumEndSilenceMs).toBeGreaterThanOrEqual(400);
+    expect(VOICE_ACTIVITY_DEFAULTS.minimumEndSilenceMs).toBeLessThanOrEqual(480);
     expect(VOICE_ACTIVITY_DEFAULTS.noSpeechMs).toBeLessThanOrEqual(10_000);
   });
 

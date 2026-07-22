@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "monarch.agent-replay.v1",
+  "name": "workspace-report-recovery",
+  "decisions": [
+    {
+      "kind": "inspect",
+      "capabilityId": "workspace.files.list",
+      "input": { "path": "inputs", "recursive": false, "limit": 20 },
+      "reason": "List source files.",
+      "expectedEffect": "List source files."
+    },
+    {
+      "kind": "inspect",
+      "capabilityId": "workspace.files.read",
+      "input": { "path": "inputs/a.txt" },
+      "reason": "Read first source.",
+      "expectedEffect": "Read first source."
+    },
+    {
+      "kind": "inspect",
+      "capabilityId": "workspace.files.read",
+      "input": { "path": "inputs/missing.txt" },
+      "reason": "Try the referenced optional source.",
+      "expectedEffect": "Try the referenced optional source."
+    },
+    {
+      "kind": "inspect",
+      "capabilityId": "workspace.files.read",
+      "input": { "path": "inputs/b.txt" },
+      "reason": "Use the available alternative source.",
+      "expectedEffect": "Use the available alternative source."
+    },
+    {
+      "kind": "act",
+      "capabilityId": "workspace.files.write",
+      "input": {
+        "path": "runtime/report.md",
+        "content": "# Workspace report\n\n- Alpha evidence\n- Beta evidence\n",
+        "overwrite": false
+      },
+      "reason": "Write the report from inspected evidence.",
+      "expectedEffect": "runtime/report.md exists with both findings.",
+      "preconditions": [{ "kind": "not-exists", "target": "runtime/report.md" }],
+      "verification": [
+        { "kind": "exists", "target": "runtime/report.md" },
+        { "kind": "contains", "target": "runtime/report.md", "value": "Alpha evidence" },
+        { "kind": "contains", "target": "runtime/report.md", "value": "Beta evidence" }
+      ]
+    }
+  ],
+  "expectedObservations": [
+    { "capabilityId": "workspace.files.list", "status": "success" },
+    { "capabilityId": "workspace.files.read", "status": "success" },
+    { "capabilityId": "workspace.files.read", "status": "failed" },
+    { "capabilityId": "workspace.files.read", "status": "success" },
+    { "capabilityId": "workspace.files.write", "status": "success" }
+  ]
+}

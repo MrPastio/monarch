@@ -850,6 +850,19 @@ button:disabled {
   color: var(--text-base);
 }
 
+.message-row.assistant.thinking-orb-only {
+  min-height: 24px;
+  padding-left: 48px;
+  align-items: center;
+}
+
+.stream-orb-only {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+}
+
 .message-row.user {
   justify-content: flex-end;
   animation: userSendIn 0.48s cubic-bezier(0.18, 0.9, 0.18, 1);
@@ -993,13 +1006,79 @@ button:disabled {
   font-weight: 500;
 }
 
-.stream-dot {
-  width: 6px;
-  height: 6px;
+/* @illuma-ai/icons ThinkingOrb, recolored for Monarch's orange/yellow glass system. */
+.monarch-thinking-orb {
+  --orb-a: #fff7df;
+  --orb-b: #ffbd32;
+  --orb-c: #ed8615;
+  --orb-glow: rgba(255, 184, 24, .3);
+  position: relative;
+  display: inline-grid;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  place-items: center;
+  isolation: isolate;
+}
+
+.stream-live.orb-only {
+  min-width: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  line-height: 1;
+}
+
+.monarch-thinking-orb .monarch-thinking-orb__core {
+  width: 100% !important;
+  height: 100% !important;
+  background:
+    radial-gradient(circle at 32% 28%, rgba(255,255,255,.82) 0 12%, transparent 42%),
+    conic-gradient(from 18deg, var(--orb-b), var(--orb-c), var(--orb-a), var(--orb-b)) !important;
+  box-shadow: 0 0 8px var(--orb-glow), inset 0 0 0 1px rgba(255,255,255,.18) !important;
+}
+
+.monarch-thinking-orb[data-orb-phase="search"] {
+  --orb-a: #fff5bf;
+  --orb-b: #ffd35a;
+  --orb-c: #f59e0b;
+  --orb-glow: rgba(245, 158, 11, .25);
+}
+
+.monarch-thinking-orb[data-orb-phase="write"] {
+  --orb-a: #fffdf7;
+  --orb-b: #ffc84a;
+  --orb-c: #f0a21f;
+  --orb-glow: rgba(255, 200, 74, .2);
+}
+
+.monarch-thinking-orb[data-orb-phase="error"] {
+  --orb-a: #ffe1cc;
+  --orb-b: #e57933;
+  --orb-c: #a84d26;
+  --orb-glow: rgba(229, 121, 51, .2);
+}
+
+.monarch-thinking-orb[data-orb-phase="search"]::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  z-index: -1;
+  border: 1px solid color-mix(in srgb, var(--orb-b) 52%, transparent);
+  border-right-color: transparent;
   border-radius: 50%;
-  background: var(--accent);
-  animation: streamPulse 1.15s ease-in-out infinite;
+  animation: monarchThinkingOrbOrbit 4.8s linear infinite;
+}
+
+.monarch-thinking-orb[data-orb-phase="error"] .monarch-thinking-orb__core { animation: none !important; transform: scale(.92); }
+
+.illuma-thinking-orb {
+  display: inline-block;
   flex-shrink: 0;
+  border-radius: 50%;
+  animation: monarchThinkingOrbMorph 3.2s ease-in-out infinite, monarchThinkingOrbBreathe 2.4s ease-in-out infinite;
+  will-change: border-radius, transform;
 }
 
 .stream-trace {
@@ -1980,6 +2059,8 @@ button:disabled {
   .choice-group button.active::after,
   .message-row.user,
   .message-row.user .message-card::after,
+  .monarch-thinking-orb::after,
+  .monarch-thinking-orb__core,
   .stream-stage,
   .stream-stage::after,
   .stream-stage-rail span,
@@ -3019,6 +3100,21 @@ input[type="range"] {
   50% { opacity: 1; transform: scale(1); }
 }
 
+@keyframes monarchThinkingOrbOrbit {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes monarchThinkingOrbMorph {
+  0%,100% { border-radius:58% 42% 55% 45% / 52% 58% 42% 48%; }
+  33% { border-radius:45% 55% 42% 58% / 58% 42% 55% 45%; }
+  66% { border-radius:52% 48% 60% 40% / 45% 52% 48% 55%; }
+}
+
+@keyframes monarchThinkingOrbBreathe {
+  0%,100% { transform:scale(.93) rotate(0deg); }
+  50% { transform:scale(1.05) rotate(7deg); }
+}
+
 @keyframes streamCaret {
   0%, 45% { opacity: 1; }
   46%, 100% { opacity: 0; }
@@ -3696,7 +3792,6 @@ body {
   animation: none;
 }
 
-.stream-dot,
 .stream-trace.active .stream-trace-item:last-child .stream-trace-mark {
   animation: none;
   opacity: 0.62;

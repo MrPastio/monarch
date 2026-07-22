@@ -1,6 +1,7 @@
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
+  MonarchExecutionControl,
   MonarchKernelContext,
   MonarchPlan,
   MonarchPlanExecutionResult,
@@ -106,8 +107,10 @@ export class MonarchExecutionEngine {
 
   async execute(
     request: MonarchExecutionRequest,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    control: MonarchExecutionControl = {},
   ): Promise<MonarchExecutionResult> {
+    if (control.signal?.aborted) return cancelledExecutionResult(control.signal);
     const module = this.modules.getModule(request.moduleId);
     if (!module) {
       return {
@@ -143,6 +146,7 @@ export class MonarchExecutionEngine {
     }
 
     const effectiveRisk = await this.resolveEffectiveRisk(module, request, capability, context);
+    if (control.signal?.aborted) return cancelledExecutionResult(control.signal);
     const preflight = this.policy.preflight(request, capability, effectiveRisk, readPolicyRuntimeFacts(context));
     const permission = preflight.permission;
     await context.emit('permission.evaluated', 'permission-gate', {
@@ -201,6 +205,7 @@ export class MonarchExecutionEngine {
 
     if (policyDecision.requiresSecurityReview && request.moduleId !== 'security') {
       const secCheck = await this.runSecurityControllerCheck(request, context, effectiveRisk);
+      if (control.signal?.aborted) return cancelledExecutionResult(control.signal);
       policyDecision = this.policy.finalize(preflight, request, secCheck);
       if (policyDecision.securityOverride === true && policyDecision.outcome === 'allow') {
         await context.audit('security', 'User overrode a Security block for the exact confirmed request.', {
@@ -250,6 +255,7 @@ export class MonarchExecutionEngine {
       workspaceRoot: this.workspaceRoot,
       ...(request.actionScope?.roots ? { allowedRoots: request.actionScope.roots } : {}),
     });
+    if (control.signal?.aborted) return cancelledExecutionResult(control.signal);
     if (preconditionObservations.length > 0) {
       await context.emit('action.preconditions.checked', 'execution-engine', {
         requestId: request.id,
@@ -306,6 +312,13 @@ export class MonarchExecutionEngine {
       this.actionLedger.complete(ledger.record.idempotencyKey, blocked);
       return blocked;
     }
+    if (control.signal?.aborted) {
+      const cancelled = cancelledExecutionResult(control.signal, { permission, policy: policyDecision, ledger: ledger.record });
+      const rollback = await this.mutationJournal.finalize(ledger.record.ledgerId, request, cancelled);
+      if (rollback) this.actionLedger.setRollback(ledger.record.idempotencyKey, rollback);
+      this.actionLedger.complete(ledger.record.idempotencyKey, cancelled);
+      return cancelled;
+    }
 
     await context.emit('capability.execution.started', 'execution-engine', {
       requestId: request.id,
@@ -323,15 +336,17 @@ export class MonarchExecutionEngine {
 
     let result: MonarchExecutionResult;
     try {
-      result = await module.executeCapability(request, context);
+      result = await module.executeCapability(request, context, control);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      result = {
-        ok: false,
-        summary: `Capability execution failed for ${request.capabilityId}: ${message}`,
-        error: 'capability-execution-failed',
-        metadata: { thrownError: message },
-      };
+      result = control.signal?.aborted
+        ? cancelledExecutionResult(control.signal)
+        : {
+            ok: false,
+            summary: `Capability execution failed for ${request.capabilityId}: ${message}`,
+            error: 'capability-execution-failed',
+            metadata: { thrownError: message },
+          };
     }
 
     const rollback = await this.mutationJournal.finalize(ledger.record.ledgerId, request, result);
@@ -576,6 +591,24 @@ export class MonarchExecutionEngine {
       report: `${report} Action blocked.`,
     };
   }
+}
+
+function cancelledExecutionResult(
+  signal: AbortSignal,
+  metadata?: Record<string, unknown>,
+): MonarchExecutionResult {
+  return {
+    ok: false,
+    summary: 'Capability execution was cancelled before completion.',
+    error: 'cancelled',
+    metadata: {
+      ...(metadata || {}),
+      cancellation: {
+        requested: true,
+        reason: typeof signal.reason === 'string' ? signal.reason.slice(0, 200) : 'aborted',
+      },
+    },
+  };
 }
 
 interface SecurityControllerPayload {

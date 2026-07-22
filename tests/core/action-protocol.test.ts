@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import path from 'node:path';
 import { normalizeActionProposal, MonarchActionProtocolError } from '../../src/core/action-protocol';
-import type { MonarchCapability } from '../../src/core/contracts';
+import type { MonarchActionPredicate, MonarchCapability } from '../../src/core/contracts';
 
 const workspaceWrite: MonarchCapability = {
   id: 'workspace.files.write',
@@ -74,5 +74,23 @@ describe('Action Protocol v1', () => {
     }, { capability: workspaceWrite, workspaceRoot: 'E:\\Monarch', intentId: 'intent_same' });
     expect(changed.canonicalHash).not.toBe(base.canonicalHash);
     expect(changed.idempotencyKey).toBe(base.idempotencyKey);
+  });
+
+  it('rejects malformed predicates on the public proposal path', () => {
+    const malformed = [
+      { kind: 'contains', target: 'safe.txt' },
+      { kind: 'contains', target: 'safe.txt', value: '' },
+      { kind: 'equals', target: 'safe.txt' },
+      { kind: 'status', target: 'safe.txt', value: { state: 'file' } },
+      { kind: 'not-exists', target: 'safe.txt', value: undefined },
+    ];
+
+    for (const predicate of malformed) {
+      expect(() => normalizeActionProposal({
+        capabilityId: workspaceWrite.id,
+        args: { path: 'safe.txt', content: 'safe' },
+        verification: [predicate] as unknown as MonarchActionPredicate[],
+      }, { capability: workspaceWrite, workspaceRoot: 'E:\\Monarch' })).toThrowError(/predicate/i);
+    }
   });
 });

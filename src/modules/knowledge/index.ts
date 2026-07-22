@@ -40,7 +40,9 @@ export class KnowledgeModule implements MonarchModule {
 
   async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
     const text = intent.text.trim();
-    if (!/(knowledge policy|web policy|need web|should search|use web|latest|current|today|news)/i.test(text)) {
+    const classification = classifyIntentText(text);
+    const explicitPolicyQuestion = /\b(?:knowledge policy|web policy|need (?:the )?web|should (?:i|we|you) search|use (?:the )?web)\b/i.test(text);
+    if (!explicitPolicyQuestion && classification.kind !== 'search') {
       return null;
     }
 
@@ -97,9 +99,6 @@ export function evaluateKnowledgePolicy(
   if (classification.searchScope === 'web_required' || explicitWebRequest(normalized)) {
     return decision('web_required', estimateSearchDepth(normalized), 'explicit-or-fresh-web-request', 0.92, classification.searchScope);
   }
-  if (freshnessSensitive(normalized)) {
-    return decision('web_required', estimateSearchDepth(normalized), 'freshness-sensitive', 0.86, classification.searchScope);
-  }
   if (localOnly(normalized, classification.kind)) {
     return decision('local_only', 'quick', 'local-task', 0.9, classification.searchScope);
   }
@@ -111,15 +110,17 @@ export function evaluateKnowledgePolicy(
 }
 
 function explicitWebRequest(text: string): boolean {
-  return /(search|find|look up).{0,24}(web|internet|online|google)|\b(web|internet|online)\b/i.test(text);
-}
-
-function freshnessSensitive(text: string): boolean {
-  return /(latest|current|today|right now|news|weather|price|stock|release|version|schedule|score|breaking)/i.test(text);
+  return /(search|find|look up|check).{0,24}(web|internet|online|google)|\buse (?:the )?web\b/i.test(text);
 }
 
 function localOnly(text: string, kind: string): boolean {
   return kind === 'code'
+    || kind === 'explanation'
+    || kind === 'chat'
+    || kind === 'text_generation'
+    || kind === 'assistant_identity'
+    || kind === 'project_identity'
+    || kind === 'capabilities_question'
     || kind === 'file_generation'
     || kind === 'file_operation'
     || kind === 'system_action'

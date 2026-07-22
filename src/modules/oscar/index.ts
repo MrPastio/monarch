@@ -88,15 +88,16 @@ export class OscarModule implements MonarchModule {
     if (!mentionsOscar(lower)) {
       return null;
     }
+    const routedText = stripLeadingOscarAddress(text).toLowerCase();
 
     // Operational Security requests must be executed by the Security module itself.
     // Oscar remains the conversational surface, while Kernel keeps permission gates,
     // audit and dynamic risk resolution at the privileged capability boundary.
-    if (isOscarSecurityOperation(lower)) {
+    if (isOscarSecurityOperation(routedText)) {
       return null;
     }
 
-    if (isOscarWholeSystemInspection(lower)) {
+    if (isOscarWholeSystemInspection(routedText)) {
       return {
         intentId: intent.id,
         targetModuleId: 'diagnostics',
@@ -108,7 +109,7 @@ export class OscarModule implements MonarchModule {
       };
     }
 
-    if (/(cancel|abort|cancel generation|abort response|queue|отмени|прерви|сбрось очередь|очеред)/i.test(lower)) {
+    if (isOscarGenerationCancel(routedText)) {
       return {
         intentId: intent.id,
         targetModuleId: this.manifest.id,
@@ -120,11 +121,11 @@ export class OscarModule implements MonarchModule {
       };
     }
 
-    if (/(unload|free|release|stop model|stop backend|stop runtime|stop process|kill|clear memory|свобод|освобод|выгруз|останов|выключ|убей)/i.test(lower)) {
+    if (isOscarBackendStop(routedText) || isOscarModelUnload(routedText)) {
       return {
         intentId: intent.id,
         targetModuleId: this.manifest.id,
-        capabilityId: /(backend|server|process|runtime)/i.test(lower)
+        capabilityId: isOscarBackendStop(routedText)
           ? 'oscar.backend.stop'
           : 'oscar.model.unload',
         confidence: 0.96,
@@ -134,7 +135,7 @@ export class OscarModule implements MonarchModule {
       };
     }
 
-    if (/(?:\b(?:start|launch|boot|run)\b|запусти|включи|подними).*(backend|runtime|server|oscar|оскар)|(?:backend|runtime|server|oscar|оскар).*(?:\b(?:start|launch|boot|run)\b|запусти|включи|подними)/i.test(lower)) {
+    if (/(?:\b(?:start|launch|boot|run)\b|запусти|включи|подними).*(backend|runtime|server|oscar|оскар)|(?:backend|runtime|server|oscar|оскар).*(?:\b(?:start|launch|boot|run)\b|запусти|включи|подними)/i.test(routedText)) {
       return {
         intentId: intent.id,
         targetModuleId: this.manifest.id,
@@ -149,7 +150,7 @@ export class OscarModule implements MonarchModule {
       return null;
     }
 
-    if (/(status|health|model|статус|здоров|модель)/i.test(lower)) {
+    if (isOscarStatusQuery(routedText)) {
       return {
         intentId: intent.id,
         targetModuleId: this.manifest.id,
@@ -161,22 +162,7 @@ export class OscarModule implements MonarchModule {
       };
     }
 
-    if (/(memory|recall|памят|вспомни|найди)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'oscar.memory.search',
-        confidence: 0.9,
-        reason: 'User asks to search Oscar memory through Monarch.',
-        permissionMode: 'allow',
-        input: {
-          query: extractQuery(text),
-          limit: 6,
-        },
-      };
-    }
-
-    if (/(web search|search web|search|internet|веб|интернет|поиск)/i.test(lower)) {
+    if (isOscarWebSearch(routedText)) {
       return {
         intentId: intent.id,
         targetModuleId: this.manifest.id,
@@ -188,6 +174,21 @@ export class OscarModule implements MonarchModule {
           query: extractQuery(text),
           max_results: 5,
           fetch_pages: true,
+        },
+      };
+    }
+
+    if (isOscarMemorySearch(routedText)) {
+      return {
+        intentId: intent.id,
+        targetModuleId: this.manifest.id,
+        capabilityId: 'oscar.memory.search',
+        confidence: 0.9,
+        reason: 'User asks to search Oscar memory through Monarch.',
+        permissionMode: 'allow',
+        input: {
+          query: extractQuery(text),
+          limit: 6,
         },
       };
     }
@@ -611,7 +612,10 @@ export class OscarModule implements MonarchModule {
       source: skill.location,
       explicit: skill.explicit,
     }));
-    request.skills = [MONARCH_SECURITY_SKILL, ...activated];
+    request.skills = [
+      ...(mentionsOscarSecuritySubsystem(prompt) ? [MONARCH_SECURITY_SKILL] : []),
+      ...activated,
+    ];
     await context.emit('oscar.skills.activated', this.manifest.id, {
       skills: request.skills.map((skill) => skill.name),
       explicit: skills.filter((skill) => skill.explicit).map((skill) => skill.name),
@@ -880,6 +884,63 @@ function mentionsOscar(text: string): boolean {
   return /(oscar|оскар)/i.test(text);
 }
 
+function pairedOperationalMatch(text: string, action: RegExp, target: RegExp): boolean {
+  return action.test(text) && target.test(text);
+}
+
+function isOscarGenerationCancel(text: string): boolean {
+  return pairedOperationalMatch(
+    text,
+    /\b(?:cancel|abort)\b|отмени|прерви|сбрось/i,
+    /\b(?:generation|response|queue)\b|генерац|ответ|очеред/i,
+  );
+}
+
+function isOscarBackendStop(text: string): boolean {
+  return pairedOperationalMatch(
+    text,
+    /\b(?:stop|kill|shutdown|disable)\b|останови|выключи|убей/i,
+    /\b(?:backend|runtime|server|process|service)\b|бэкенд|рантайм|сервер|процесс|сервис/i,
+  );
+}
+
+function isOscarModelUnload(text: string): boolean {
+  return pairedOperationalMatch(
+    text,
+    /\b(?:unload|free|release|stop|clear)\b|свободи|освободи|выгрузи|останови|очисти/i,
+    /\b(?:model|vram|model memory)\b|модел|видеопамят|памят\w*\s+модел/i,
+  );
+}
+
+function isOscarStatusQuery(text: string): boolean {
+  return /^(?:status|health|статус|состояние)[.!? ]*$/i.test(text) || pairedOperationalMatch(
+    text,
+    /\b(?:status|health|state)\b|статус|состояни|здоров/i,
+    /\b(?:oscar|model|backend|runtime)\b|оскар|модел|бэкенд|рантайм/i,
+  ) || /(?:which|what|какая|какой).{0,24}(?:model|модель).{0,24}(?:loaded|active|загруж|активн)/i.test(text);
+}
+
+function isOscarMemorySearch(text: string): boolean {
+  return /\brecall\b|вспомни/i.test(text)
+    || pairedOperationalMatch(
+      text,
+      /\b(?:search|find|show|remember)\b|найди|поищи|покажи|что\s+ты\s+помнишь/i,
+      /\bmemory\b|памят/i,
+    );
+}
+
+function isOscarWebSearch(text: string): boolean {
+  if (/\bmemory\b|памят/i.test(text)) return false;
+  if (/\b(?:file|folder|project|repo(?:sitory)?|code|workspace)\b|файл|папк|проект|репозитор|код|workspace/i.test(text)) return false;
+  return /^(?:search|find|найди|поищи)\b/i.test(text)
+    || /\b(?:web\s+search|search\s+(?:the\s+)?web)\b|веб[- ]?поиск/i.test(text)
+    || pairedOperationalMatch(
+      text,
+      /\b(?:search|find|look\s+up|check)\b|найди|поищи|проверь|посмотри/i,
+      /\b(?:internet|online|web|site)\b|интернет|в\s+сети|сайт/i,
+    );
+}
+
 const MONARCH_SECURITY_SKILL: OscarAgentSkillContext = {
   name: 'monarch-security',
   description: 'Native knowledge and operating contract for the Monarch Security subsystem.',
@@ -896,14 +957,25 @@ const MONARCH_SECURITY_SKILL: OscarAgentSkillContext = {
 };
 
 function isOscarSecurityOperation(text: string): boolean {
-  const mentionsSubsystem = /security|monarch\s+security|безопасност|защит|антивирус|угроз|вирус|троян|rat(?:ка|ки)?|карантин|автозапуск|целостност|инцидент/i.test(text);
+  const mentionsSubsystem = mentionsOscarSecuritySubsystem(text);
   const requestsAction = /scan|check|status|start|stop|enable|disable|verify|inspect|list|show|report|audit|diagnos|quarantine|isolate|restore|block|approve|resolve|baseline|benchmark|скан|проверь|провер|статус|запуст|останов|включ|выключ|покаж|список|отч[её]т|аудит|диагност|карантин|изолир|восстанов|заблок|одобр|реши|норм|бенчмарк/i.test(text);
   return mentionsSubsystem && requestsAction;
 }
 
+function mentionsOscarSecuritySubsystem(text: string): boolean {
+  const strongTechnicalCue = /\b(?:security|monarch security|protector|defender|firewall|antivirus|malware|trojan|ransomware|quarantine|autorun|persistence|agent guard|usb)\b|монарх\s+security|модул[а-яё]*\s+безопасност|антивирус|троян|rat(?:ка|ки)?|карантин|автозапуск|фаервол|защитник\s+windows/i;
+  if (strongTechnicalCue.test(text)) return true;
+  if (/^(?:security|безопасность|проверь безопасность|статус защиты)[.!? ]*$/i.test(text)) return true;
+  const weakSecurityCue = /\b(?:security|protect|virus|threat|incident|emergency|audit|integrity|scan)\b|безопас|защит|вирус|угроз|инцидент|экстрен|скан|аудит|целост/i;
+  const technicalTarget = /\b(?:monarch|oscar|windows|computer|host|system|file|process|network|port|device|code|repo(?:sitory)?)\b|монарх|оскар|windows|компьютер|хост|систем|файл|процесс|сеть|порт|устройств|код|репозитор/i;
+  return weakSecurityCue.test(text) && technicalTarget.test(text);
+}
+
 function isOscarWholeSystemInspection(text: string): boolean {
-  return /\b(?:check|inspect|diagnose|audit|self[- ]?check)\b.{0,40}\b(?:all|whole|entire|full)?\s*(?:monarch|system|modules?)\b/i.test(text)
-    || /(?:проверь|проверить|диагност|самопровер|проаудит).{0,40}(?:всю|весь|целиком|полностью)?\s*(?:систем|monarch|монарх|модул)/i.test(text);
+  return /\b(?:check|inspect|diagnose|audit|self[- ]?check)\b.{0,48}\b(?:monarch|all\s+modules?|whole\s+system|entire\s+system|full\s+system)\b/i.test(text)
+    || /(?:проверь|проверить|диагност|самопровер|проаудит).{0,48}(?:monarch|монарх|все\s+модул|всю\s+систем|систем\w*\s+целиком)/i.test(text)
+    || /^(?:check|inspect|diagnose)\s+(?:the\s+)?(?:whole\s+|entire\s+|full\s+)?system[.!? ]*$/i.test(text)
+    || /^(?:проверь|диагностируй)\s+(?:всю\s+|полностью\s+)?систему[.!? ]*$/i.test(text);
 }
 
 function extractQuery(text: string): string {
@@ -1006,6 +1078,7 @@ function subsystemName(moduleId: string): string {
   const names: Record<string, string> = {
     astra: 'Monarch Skills',
     diagnostics: 'Monarch Diagnostics',
+    device: 'Monarch Device',
     memory: 'Monarch Memory',
     models: 'Monarch Models',
     plugins: 'Monarch Extensions',
@@ -1041,8 +1114,14 @@ function shouldKeepOscarQueryLocal(text: string): boolean {
 }
 
 function isMonarchSystemAwarenessQuery(text: string): boolean {
-  return /\b(?:monarch|system|modules?|capabilities|latest|newest|new|safe|sharing)\b/i.test(text)
-    || /(?:монарх|систем|модул|возможност|самопровер|нов(?:ые|ое|ого|ей)|последн|актуальн|safe|sharing)/i.test(text);
+  return hasExplicitMonarchScope(text)
+    || /\b(?:safe|sharing)\b/i.test(text);
+}
+
+function hasExplicitMonarchScope(text: string): boolean {
+  return /\bmonarch\b|монарх/i.test(text)
+    || /(?:\bmodule\b|модул[а-яё]*)\s+(?:oscar|оскар|safe|sharing|security|безопасност|memory|памят|models?|модел|voice|голос|astra|studio|coder|telegram)/i.test(text)
+    || /(?:oscar|оскар|safe|sharing|security|безопасност|memory|памят|models?|модел|voice|голос|astra|studio|coder|telegram)\s+(?:\bmodule\b|модул[а-яё]*)/i.test(text);
 }
 
 function applyMonarchRegistryRouteFloor(
@@ -1074,8 +1153,8 @@ function strongerOscarRouteTier(current: string | undefined, floor: string): str
 }
 
 function isWholeMonarchSystemQuery(text: string): boolean {
-  return /\b(?:all|whole|entire|latest|newest|new)\b.{0,48}\b(?:monarch|system|modules?|safe|sharing)\b|\b(?:monarch|system|modules?)\b.{0,48}\b(?:status|health|check|inspect|latest|newest|new)\b/i.test(text)
-    || /(?:всю|весь|полностью|целиком|нов(?:ые|ое|ого|ей)|последн|актуальн).{0,48}(?:систем|монарх|модул|safe|sharing)|(?:систем|монарх|модул).{0,48}(?:статус|здоров|провер|нов|последн|актуальн)/i.test(text);
+  if (!/\bmonarch\b|монарх/i.test(text)) return false;
+  return /\b(?:all|whole|entire|latest|newest|new|system|modules?)\b|(?:всю|весь|полностью|целиком|нов(?:ые|ое|ого|ей)|последн|актуальн|систем|модул)/i.test(text);
 }
 
 function modulePromptScore(
@@ -1086,15 +1165,22 @@ function modulePromptScore(
   const terms = new Set(normalizedPrompt.split(' ').filter(Boolean));
   const ignored = new Set(['monarch', 'монарх', 'module', 'modules', 'модуль', 'модули', 'system', 'система']);
   const id = normalizeModulePhrase(manifest.id);
-  let score = id.length >= 3 && !ignored.has(id) && terms.has(id) ? 100 : 0;
   const shortName = normalizeModulePhrase(manifest.name).replace(/^monarch\s+/, '');
+  const scoped = hasExplicitMonarchScope(prompt);
+  const unscopedDistinctiveIds = new Set(['safe', 'sharing', 'astra', 'studio', 'coder', 'telegram']);
+  if (!scoped && !unscopedDistinctiveIds.has(id) && !unscopedDistinctiveIds.has(shortName)) {
+    return 0;
+  }
+  let score = id.length >= 3 && !ignored.has(id) && terms.has(id) ? 100 : 0;
   if (shortName.length >= 3 && !ignored.has(shortName) && includesModulePhrase(normalizedPrompt, shortName)) {
     score += 80;
   }
-  for (const owner of manifest.owns) {
-    const alias = normalizeModulePhrase(owner).replace(/^monarch\s+/, '');
-    if (alias.length >= 4 && !ignored.has(alias) && includesModulePhrase(normalizedPrompt, alias)) {
-      score += 20;
+  if (scoped) {
+    for (const owner of manifest.owns) {
+      const alias = normalizeModulePhrase(owner).replace(/^monarch\s+/, '');
+      if (alias.length >= 4 && !ignored.has(alias) && includesModulePhrase(normalizedPrompt, alias)) {
+        score += 20;
+      }
     }
   }
   return score;
@@ -1109,11 +1195,18 @@ function includesModulePhrase(prompt: string, phrase: string): boolean {
 }
 
 function capabilityPromptScore(
-  capability: { id: string; moduleId: string; title: string; description?: string },
+  capability: {
+    id: string;
+    moduleId: string;
+    title: string;
+    description?: string;
+    routing?: { aliases?: string[]; keywords?: string[]; examples?: string[]; intentKinds?: string[] };
+  },
   prompt: string,
 ): number {
   const priorities: Record<string, number> = {
     coder: 110,
+    device: 95,
     workspace: 90,
     models: 80,
     diagnostics: 75,
@@ -1130,13 +1223,29 @@ function capabilityPromptScore(
     artifacts: 25,
     oscar: 20,
   };
-  const haystack = `${capability.id} ${capability.moduleId} ${capability.title} ${capability.description || ''}`.toLowerCase();
+  const routing = capability.routing;
+  const haystack = [
+    capability.id,
+    capability.moduleId,
+    capability.title,
+    capability.description || '',
+    ...(routing?.aliases || []),
+    ...(routing?.keywords || []),
+    ...(routing?.examples || []),
+    ...(routing?.intentKinds || []),
+  ].join(' ').toLowerCase();
   const terms = prompt.toLowerCase().split(/[^\p{L}\p{N}._]+/u).filter(term => term.length >= 3);
   const relevance = terms.reduce((score, term) => score + (haystack.includes(term) ? 50 : 0), 0);
   return relevance + (priorities[capability.moduleId] || 0);
 }
 
-function selectCapabilityCatalog<T extends { id: string; moduleId: string; title: string; description?: string }>(
+function selectCapabilityCatalog<T extends {
+  id: string;
+  moduleId: string;
+  title: string;
+  description?: string;
+  routing?: { aliases?: string[]; keywords?: string[]; examples?: string[]; intentKinds?: string[] };
+}>(
   capabilities: readonly T[],
   prompt: string,
 ): T[] {
@@ -1160,7 +1269,7 @@ function selectCapabilityCatalog<T extends { id: string; moduleId: string; title
       seen.add(capability.id);
     }
   }
-  const systemOrder = ['coder', 'workspace', 'models', 'diagnostics', 'memory', 'astra', 'security', 'sharing', 'safe', 'voice', 'telegram'];
+  const systemOrder = ['coder', 'device', 'workspace', 'models', 'diagnostics', 'memory', 'astra', 'security', 'sharing', 'safe', 'voice', 'telegram'];
 
   for (const moduleId of systemOrder) {
     for (const capability of ranked.filter(entry => entry.moduleId === moduleId).slice(0, 1)) {

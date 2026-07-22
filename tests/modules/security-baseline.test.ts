@@ -18,6 +18,17 @@ class FakeBaselineClient {
 }
 
 describe('Security persistence baseline approval', () => {
+  it.each([
+    'Проверь вирус гриппа и объясни симптомы',
+    'Как защитить растения от вредителей?',
+    'Объясни целостность личности',
+    'Проведи аудит маркетинговой кампании',
+  ])('ignores non-technical uses of security vocabulary: %s', async (text) => {
+    const security = new SecurityModule(new FakeBaselineClient() as any);
+
+    expect(await security.handleIntent({ id: 'semantic-security', text } as any)).toBeNull();
+  });
+
   let kernel: MonarchKernel | null = null;
   afterEach(async () => { await kernel?.stop(); kernel = null; });
 

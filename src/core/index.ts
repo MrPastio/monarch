@@ -1,6 +1,7 @@
 export * from './audit-log';
 export * from './contracts';
 export * from './capability-registry';
+export * from './capability-metadata';
 export * from './event-bus';
 export * from './execution-engine';
 export * from './filesystem-policy';

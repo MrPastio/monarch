@@ -426,6 +426,13 @@ export class TelegramModule implements MonarchModule {
           allowed_updates: ['message', 'callback_query'],
         }, signal);
         this.lastError = '';
+        // A mock, proxy, or degraded Bot API may return an empty long-poll
+        // immediately instead of holding it. Yield cooperatively so the retry
+        // loop cannot starve other routing work.
+        if (updates.length === 0) {
+          await delay(25);
+          continue;
+        }
         for (const update of updates) {
           await this.refreshState();
           if (update.update_id < this.state.offset) continue;
@@ -1151,17 +1158,30 @@ export class TelegramModule implements MonarchModule {
   private async callApi<T = unknown>(method: string, parameters: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
     if (!this.token) throw new Error('Telegram bot token is not configured.');
     assertTelegramBotApiMethodName(method);
-    const response = await fetch(`${this.apiBase}/bot${this.token}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(parameters),
-      ...(signal ? { signal } : {}),
-    });
-    const payload = await response.json() as TelegramApiResponse<T>;
-    if (!response.ok || !payload.ok) {
-      throw new Error(`Telegram Bot API ${method} failed (${payload.error_code || response.status}): ${payload.description || 'unknown error'}`);
+    // Undici keeps an abort listener on a reused signal after a successful
+    // fetch. Long polling can therefore leak listeners indefinitely. Give each
+    // request its own signal and detach the forwarding listener in all cases.
+    const requestController = signal ? new AbortController() : null;
+    const forwardAbort = (): void => requestController?.abort(signal?.reason);
+    if (signal) {
+      if (signal.aborted) forwardAbort();
+      else signal.addEventListener('abort', forwardAbort, { once: true });
     }
-    return payload.result as T;
+    try {
+      const response = await fetch(`${this.apiBase}/bot${this.token}/${method}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parameters),
+        ...(requestController ? { signal: requestController.signal } : {}),
+      });
+      const payload = await response.json() as TelegramApiResponse<T>;
+      if (!response.ok || !payload.ok) {
+        throw new Error(`Telegram Bot API ${method} failed (${payload.error_code || response.status}): ${payload.description || 'unknown error'}`);
+      }
+      return payload.result as T;
+    } finally {
+      signal?.removeEventListener('abort', forwardAbort);
+    }
   }
 
   private isPaired(chatId: number, userId: number): boolean {

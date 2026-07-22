@@ -32,6 +32,8 @@ QUALITY_PENALTIES = {
     "false_citation": 25,
     "unverified_web_claim": 20,
     "identity_confusion": 16,
+    "stale_answer_repeat": 18,
+    "irrelevant_identity_fallback": 18,
     "capability_denial": 16,
     "language_drift": 10,
     "blank_answer": 10,

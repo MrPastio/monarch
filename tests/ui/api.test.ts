@@ -388,6 +388,53 @@ describe('static UI API errors', () => {
     expect(bodies[1]).toMatchObject({ confirmed: true, confirmationToken: 'voice-app-token' });
   });
 
+  it('uses the same Device clock and verified volume capabilities as ordinary chat', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      if (body.capabilityId === 'device.system.time.get') {
+        return {
+          ok: true,
+          json: async () => ({ result: { ok: true, output: { text: 'Сейчас 23:34.', verified: true, authoritative: true } } }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => body.confirmed
+          ? { result: { ok: true, output: { text: 'Громкость установлена на 45%.', verified: true, authoritative: true } } }
+          : { result: { ok: false, error: 'confirmation-required', metadata: { confirmation: { token: 'volume-token' } } } },
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(executeVoiceModeAction({
+      actionId: 'time.query',
+      slots: { query: 'local-clock' },
+    }, 'сколько времени')).resolves.toMatchObject({ ok: true, text: 'Сейчас 23:34.' });
+    await expect(executeVoiceModeAction({
+      actionId: 'device.volume',
+      slots: { operation: 'set', value: '45' },
+    }, 'поставь громкость на 45 процентов')).resolves.toMatchObject({
+      ok: true,
+      text: 'Громкость установлена на 45%.',
+    });
+
+    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)));
+    expect(bodies).toHaveLength(3);
+    expect(bodies[0]).toMatchObject({
+      moduleId: 'device',
+      capabilityId: 'device.system.time.get',
+      input: { kind: 'time' },
+      confirmed: false,
+    });
+    expect(bodies[1]).toMatchObject({
+      moduleId: 'device',
+      capabilityId: 'device.volume.set',
+      input: { action: 'set', value: 45 },
+      confirmed: false,
+    });
+    expect(bodies[2]).toMatchObject({ confirmed: true, confirmationToken: 'volume-token' });
+  });
+
   it('reads brightness directly and confirms only the exact mutating brightness request', async () => {
     const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body));

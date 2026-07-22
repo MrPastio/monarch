@@ -3,6 +3,23 @@ import { MonarchKernel, type MonarchExecutionResult, type MonarchModule } from '
 import { DiagnosticsModule } from '../../src/modules/diagnostics';
 
 describe('Diagnostics Module', () => {
+  it.each([
+    'Расскажи про новую систему образования',
+    'Проверь статус системы кровообращения и объясни результат',
+    'Объясни логическую операцию',
+    'Объясни медицинскую диагностику заболевания',
+    'Что означает диагностика математической модели?',
+  ])('ignores unrelated semantic uses of diagnostic vocabulary: %s', async (text) => {
+    const module = new DiagnosticsModule();
+
+    expect(await module.handleIntent({
+      id: 'semantic-diagnostics-counterexample',
+      source: 'desktop',
+      text,
+      createdAt: new Date(0).toISOString(),
+    })).toBeNull();
+  });
+
   it('routes project diagnostics to a structured read-only report', async () => {
     const kernel = new MonarchKernel();
     kernel.registerModule(new DiagnosticsModule());

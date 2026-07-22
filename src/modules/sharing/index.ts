@@ -97,8 +97,8 @@ export class SharingModule implements MonarchModule {
 }
 
 function mentionsSharing(text: string): boolean {
-  return /\b(monarch sharing|sharing|shared model|local (?:ai|model) api|openai compatible|api server)\b/i.test(text)
-    || /(шаринг|расшар|подключить.{0,24}(?:модел|нейрон)|локальн.{0,12}api|api.{0,12}модел)/i.test(text);
+  return /\b(monarch sharing|sharing (?:api|server|models?|status|endpoint)|shared model|local (?:ai|model) api|openai compatible|api server)\b/i.test(text)
+    || /(monarch\s+sharing|расшар|шаринг.{0,24}(?:api|сервер|модел|статус|подключ)|подключить.{0,24}(?:модел|нейрон)|локальн.{0,12}api|api.{0,12}модел)/i.test(text);
 }
 
 function decision(

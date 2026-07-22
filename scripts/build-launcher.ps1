@@ -20,6 +20,7 @@ if (-not (Test-Path $compiler)) {
   /win32icon:"$(Join-Path $root 'assets\icon.ico')" `
   /reference:System.dll `
   /reference:System.Drawing.dll `
+  /reference:System.Web.Extensions.dll `
   /reference:System.Windows.Forms.dll `
   $source
 

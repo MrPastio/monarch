@@ -18,7 +18,10 @@ await build({
   platform: 'node',
   format: 'esm',
   target: 'node22',
-  packages: 'external',
+  // Native Node addons cannot be embedded into a single JavaScript bundle.
+  // The offline payload copies canvas beside the bundle so Node can load its
+  // platform-specific binary at runtime.
+  external: ['canvas'],
   legalComments: 'none',
   sourcemap: false,
   logLevel: 'warning',

@@ -51,7 +51,7 @@ export class ProfileModule implements MonarchModule {
 
   async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
     const text = intent.text.trim();
-    if (!/(profile|preference|style rule|boundary|identity)/i.test(text)) {
+    if (!/(?:\b(?:monarch|user|my|assistant) profile\b|\bprofile (?:settings|preferences|rules)\b|\b(?:set|update|save|remember|show|read) (?:my )?(?:profile|preference|style rule|boundary)\b)/i.test(text)) {
       return null;
     }
 

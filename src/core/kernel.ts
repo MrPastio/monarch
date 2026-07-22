@@ -336,8 +336,11 @@ export class MonarchKernel {
     return this.modules.getModule(moduleId);
   }
 
-  async execute(request: MonarchExecutionRequest): Promise<MonarchExecutionResult> {
-    return this.execution.execute(request, this.createContext());
+  async execute(
+    request: MonarchExecutionRequest,
+    control: import('./contracts').MonarchExecutionControl = {},
+  ): Promise<MonarchExecutionResult> {
+    return this.execution.execute(request, this.createContext(), control);
   }
 
   async executeActionProposal(
@@ -353,6 +356,7 @@ export class MonarchKernel {
       leaseId?: string;
       executionMode?: 'coder';
       permissionProfileOverride?: MonarchPermissionProfile;
+      signal?: AbortSignal;
     } = {},
   ): Promise<{ proposal: MonarchActionProposalV1; result: MonarchExecutionResult }> {
     const proposal = this.prepareActionProposal(input, options);
@@ -389,7 +393,7 @@ export class MonarchKernel {
       ...(options.leaseId ? { leaseId: options.leaseId } : {}),
       ...(options.executionMode ? { executionMode: options.executionMode } : {}),
       ...(options.permissionProfileOverride ? { permissionProfileOverride: options.permissionProfileOverride } : {}),
-    }, context);
+    }, context, options.signal ? { signal: options.signal } : {});
     return { proposal, result };
   }
 

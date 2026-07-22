@@ -412,14 +412,22 @@ export class DiagnosticsModule implements MonarchModule {
 }
 
 function mentionsDiagnostics(text: string): boolean {
-  return /\b(diagnostic|diagnostics|status|system|kernel|module|modules|capability|capabilities|tool|tools|event|events|audit)\b/i.test(text)
-    || /(лог|ядр|систем|статус|модул|диагност|состояни|событи|аудит)/i.test(text)
-    || mentionsCapabilityRequest(text);
+  return /^(?:diagnostics?|диагностика|kernel|ядро)[.!? ]*$/i.test(text)
+    || /(?:\b(?:diagnostic|diagnostics|kernel)\b|диагност|ядр).{0,40}(?:\b(?:monarch|system|modules?|project|repo|workspace|runtime|backend|computer|host|code|tests?)\b|монарх|систем|модул|проект|репозитор|workspace|рантайм|бэкенд|компьютер|хост|код|тест)/i.test(text)
+    || /(?:\b(?:monarch|system|modules?|project|repo|workspace|runtime|backend|computer|host|code|tests?)\b|монарх|систем|модул|проект|репозитор|workspace|рантайм|бэкенд|компьютер|хост|код|тест).{0,40}(?:\b(?:diagnostic|diagnostics|kernel)\b|диагност|ядр)/i.test(text)
+    || mentionsWholeSystemInspection(text)
+    || mentionsProjectDiagnostics(text)
+    || mentionsCapabilityRequest(text)
+    || /^(?:status|health|статус|состояние)(?:\s+(?:monarch|монарх))?[.!? ]*$/i.test(text)
+    || /^(?:(?:show|check|покажи|проверь)\s+)?(?:system\s+(?:status|health)|(?:status|health)\s+(?:of\s+the\s+)?system|(?:статус|состояние|здоровье)\s+системы)[.!? ]*$/i.test(text)
+    || /(?:\b(?:show|list|check|inspect|status|health)\b|покажи|проверь|список|статус|состояние).{0,40}(?:\b(?:monarch|kernel|modules?|runtime|backend|workspace|project)\b|монарх|ядр|модул|рантайм|бэкенд|проект|workspace)/i.test(text)
+    || /(?:\b(?:audit|events?|logs?)\b|аудит|событи|логи)(?=.{0,40}(?:\b(?:monarch|kernel|modules?)\b|монарх|ядр|модул))/i.test(text);
 }
 
 function mentionsWholeSystemInspection(text: string): boolean {
-  return /\b(?:all|whole|entire|full)\b.{0,32}\b(?:system|monarch|modules?)\b|\b(?:system|monarch|modules?)\b.{0,32}\b(?:check|inspect|health|self[- ]?check)\b/i.test(text)
-    || /(?:всю|весь|полностью|целиком).{0,32}(?:систем|monarch|монарх|модул)|(?:самопровер|комплексн\w*\s+проверк|проверь).{0,32}(?:систем|monarch|монарх)/i.test(text);
+  return /(?:monarch|монарх).{0,48}(?:system|modules?|check|inspect|health|status|систем|модул|провер|статус|здоров)|(?:system|modules?|check|inspect|health|status|систем|модул|провер|статус|здоров).{0,48}(?:monarch|монарх)/i.test(text)
+    || /^(?:check|inspect|diagnose)\s+(?:the\s+)?(?:whole\s+|entire\s+|full\s+)?system[.!? ]*$/i.test(text)
+    || /^(?:проверь|диагностируй)\s+(?:всю\s+|полностью\s+)?систему[.!? ]*$/i.test(text);
 }
 
 function mentionsForeignModuleScope(text: string): boolean {
@@ -435,7 +443,7 @@ function mentionsExplicitDiagnosticsScope(text: string): boolean {
 function mentionsProjectDiagnostics(text: string): boolean {
   return (
     /\b(project|repo|workspace|runtime|diff|tests?|logs?|anomal(?:y|ies)|problem|proactive|self[- ]?check)\b/i.test(text)
-    || /(проект|репозитор|рабоч|рантайм|дифф|тест|лог|аномал|проблем|самопровер|проверь)/i.test(text)
+    || /(проект|репозитор|рабоч\w*\s+пространств|рантайм|дифф|тест|лог|аномал|проблем|самопровер)/i.test(text)
   ) && (
     /\b(diagnostic|diagnostics|diagnose|health|audit|check)\b/i.test(text)
     || /(диагност|провер|аудит|здоров)/i.test(text)
@@ -443,9 +451,9 @@ function mentionsProjectDiagnostics(text: string): boolean {
 }
 
 function mentionsCapabilityRequest(text: string): boolean {
-  return /\b(capabilit(?:y|ies)?|tools?|actions?|commands?|what can you do|available actions)\b/i.test(text)
-    || /(инструмент|возможност|способност|умеешь|команд|действи)/i.test(text)
-    || /(?:что|какими|какие|какой|чем)\s+(?:ты\s+)?(?:можешь|умеешь)/i.test(text)
+  return /\b(?:what can you do|available (?:capabilities|tools|actions|commands)|(?:show|list) (?:capabilities|tools|actions|commands))\b/i.test(text)
+    || /(?:покажи|перечисли|какие|какими|доступн\w*|что\s+ты\s+умеешь).{0,36}(?:инструмент|возможност|способност|команд|действи)/i.test(text)
+    || /(?:что|какими|какие|какой|чем)\s+(?:ты\s+)?(?:можешь|умеешь)(?:\s+делать|\s+пользоваться)?/i.test(text)
     || /(?:можешь|умеешь)\s+(?:делать|использовать|пользоваться|управлять)/i.test(text);
 }
 

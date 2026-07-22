@@ -1,5 +1,5 @@
-import { classifyVoiceVolumeIntent } from './voice-device-volume';
-import { classifyVoiceBrightnessIntent } from './voice-device-brightness';
+import { classifyVoiceVolumeIntent } from '../device/device-volume';
+import { classifyVoiceBrightnessIntent } from '../device/device-brightness';
 
 export type VoiceModeActionId =
   | 'listen.continue'
@@ -105,6 +105,15 @@ const VOICE_LOCAL_REPLIES: ReadonlyMap<string, string> = new Map([
   ['как ты', 'Всё нормально.'],
   ['спасибо', 'Пожалуйста.'],
   ['благодарю', 'Пожалуйста.'],
+  ['да', 'Да.'],
+  ['угу', 'Да.'],
+  ['ага', 'Да.'],
+  ['нет', 'Нет.'],
+  ['неа', 'Нет.'],
+  ['ок', 'Хорошо.'],
+  ['окей', 'Хорошо.'],
+  ['ладно', 'Хорошо.'],
+  ['хорошо', 'Хорошо.'],
   ['пока', 'До встречи.'],
   ['до встречи', 'До встречи.'],
   ['привет как дела', 'Привет. Всё нормально.'],
@@ -215,11 +224,6 @@ const VOICE_MODE_RULES: VoiceModeRule[] = [
   },
 ];
 
-const LITE_LANE_PATTERNS = [
-  /^(?:перефразируй|скажи иначе|сформулируй короче)\s*:?\s+.{1,96}$/iu,
-  /^(?:иначе|сократи|укороти|исправь фразу)(?:\s+.{1,120})$/iu,
-  /^объясни(?:\s+это)?\s+(?:коротко|кратко)(?:\s+.{1,120})?$/iu,
-];
 const BLOCKED_LENGTH = 620;
 
 export function normalizeVoiceCommandText(value: string): string {
@@ -397,26 +401,21 @@ export function classifyVoiceModeCommand(value: string): VoiceModeCommandCandida
   }
 
   const blocked = normalizedText.length > BLOCKED_LENGTH;
-  const lite = !blocked
-    && normalizedText.length <= 160
-    && LITE_LANE_PATTERNS.some((pattern) => pattern.test(normalizedText));
 
   return {
     actionId: 'assistant.fallback',
     normalizedText,
-    score: blocked ? 0.2 : lite ? 0.78 : 0.72,
+    score: blocked ? 0.2 : 0.72,
     risk: 'read',
-    lane: blocked ? 'blocked' : lite ? 'voice-lite' : 'fast-llm',
-    modelRoute: blocked ? 'none' : lite ? 'qwen3-1.7b' : 'gemma4-fast',
-    maxNewTokens: blocked ? 0 : lite ? 96 : 192,
+    lane: blocked ? 'blocked' : 'fast-llm',
+    modelRoute: blocked ? 'none' : 'gemma4-fast',
+    maxNewTokens: blocked ? 0 : 192,
     requiresConfirmation: false,
     usesLlm: !blocked,
     requiresRealtime: false,
     reason: blocked
       ? 'The request is too large for a latency-bounded voice turn.'
-      : lite
-        ? 'A bounded non-factual transformation can use the local Lite voice model.'
-        : 'Unrecognized or factual content is routed to Fast so tiny voice models cannot invent knowledge.',
+      : 'Every non-scripted voice request is routed to Fast; exact primitive replies remain model-free.',
     slots: {},
   };
 }
@@ -459,13 +458,14 @@ function extractClockQuerySlots(text: string, source: string): Record<string, st
     || /(?:^|\s)(?:длительность|таймер|секунд\p{L}*|минут\p{L}*|часов|срок)(?=\s|$)/u.test(text);
   if (duration) return null;
 
-  const canonical = /(?:^|\s)котор(?:ый|ого)\s+час(?=\s|$)/u.test(text)
-    || /(?:^|\s)сколько(?:\s+сейчас)?\s+врем\p{L}*(?=\s|$)/u.test(text)
+  const canonical = /(?:^|\s)котор(?:ый|ого|ое)\s+час(?=\s|$)/u.test(text)
+    || /(?:^|\s)сколько(?:\s+сейчас)?\s+врем(?:я|ени|енем|ена|енах|ен)?(?=\s|$)/u.test(text)
+    || /^(?:что|как)\s+(?:там\s+)?(?:по\s+)?(?:врем(?:я|ени|енем|ена|енах|ен)?|час(?:у|ам)?)(?=\s|$)/u.test(text)
     || /(?:^|\s)what\s+time(?=\s|$)/u.test(text);
-  const hasClockNoun = /(?:^|\s)(?:время|времени|час|часах|time)(?=\s|$)/u.test(text);
-  const clockQualifier = /(?:^|\s)(?:сейчас|текущее|точное|местное|который|какое|сколько|часах|now|current)(?=\s|$)/u.test(text);
-  const rawRequest = /(?:^|\s)(?:скажи|подскажи|покажи|назови|сообщи|tell|show)(?=\s|$)/u.test(normalizedSource);
-  const bareClock = /^(?:время|времени|который\s+час|time)$/u.test(text);
+  const hasClockNoun = /(?:^|\s)(?:врем(?:я|ени|енем|ена|енах|ен)?|час(?:а|у|е|ом|ы|ах|ики?)?|time)(?=\s|$)/u.test(text);
+  const clockQualifier = /(?:^|\s)(?:сейчас|текущ\p{L}*|точн\p{L}*|местн\p{L}*|реальн\p{L}*|котор\p{L}*|како\p{L}*|сколько|часах|now|current|exact|local)(?=\s|$)/u.test(text);
+  const rawRequest = /(?:^|\s)(?:скажи|подскажи|покажи|назови|сообщи|узнай|проверь|ответь|tell|show)(?=\s|$)/u.test(normalizedSource);
+  const bareClock = /^(?:(?:текущ\p{L}*|точн\p{L}*|местн\p{L}*|реальн\p{L}*)\s+)*(?:врем(?:я|ени|енем|ена|енах|ен)?|час(?:а|у|е|ом|ы|ах|ики?)?|time)$/u.test(text);
   if (!canonical && !(hasClockNoun && (clockQualifier || rawRequest || bareClock))) return null;
   return { query: 'local-clock', timeZone: 'system' };
 }

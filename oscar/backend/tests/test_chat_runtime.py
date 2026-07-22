@@ -1946,6 +1946,20 @@ def test_new_short_topic_does_not_inherit_previous_research_subject():
     assert main_module.preview_chat_route(request).research_mode != "deep"
 
 
+def test_pronoun_followup_keeps_previous_subject_but_new_topic_does_not():
+    assert main_module.is_context_dependent_followup("Как к нему относишься?") is True
+    assert main_module.is_context_dependent_followup("Почему он так сделал?") is True
+    assert main_module.is_context_dependent_followup("Проверка гипотезы — это что?") is False
+    assert main_module.is_context_dependent_followup("Что такое память человека?") is False
+
+    request = ChatRequest(messages=[
+        ChatMessage(role="user", content="Кто твой создатель?"),
+        ChatMessage(role="assistant", content="Меня создал MrPastio."),
+        ChatMessage(role="user", content="Как к нему относишься?"),
+    ])
+    assert "Кто твой создатель?" in main_module.contextual_user_query(request)
+
+
 def test_route_preview_hydrates_saved_topic_for_elliptical_followup(monkeypatch, tmp_path: Path):
     store = MemoryStore(make_settings(tmp_path))
     store.append_conversation_message(
@@ -2204,7 +2218,7 @@ def test_prompt_builder_uses_russian_only_base_prompt():
     )
     system = messages[0].content
 
-    assert '<oscar_agent_policy version="3.0" language="ru">' in system
+    assert '<oscar_agent_policy version="3.1" language="ru">' in system
     assert "Тебя зовут Oscar" in system
     assert "Тебя и Monarch создал MrPastio" in system
     assert "Codex создан OpenAI" in system
@@ -2224,7 +2238,7 @@ def test_prompt_builder_uses_english_only_base_prompt():
     )
     system = messages[0].content
 
-    assert '<oscar_agent_policy version="3.0" language="en">' in system
+    assert '<oscar_agent_policy version="3.1" language="en">' in system
     assert "Your name is Oscar" in system
     assert "MrPastio created you and Monarch" in system
     assert "Codex was created by OpenAI" in system
@@ -2339,6 +2353,47 @@ def test_quality_gate_allows_valid_russian_answer():
     )
 
     assert flags == []
+
+
+def test_quality_gate_detects_creator_repeat_and_irrelevant_identity_fallback():
+    request = ChatRequest(messages=[
+        ChatMessage(role="user", content="Кто твой создатель?"),
+        ChatMessage(role="assistant", content="Меня создал MrPastio."),
+        ChatMessage(role="user", content="Как к нему относишься?"),
+    ])
+
+    flags = main_module.detect_quality_flags("Меня создал MrPastio.", "ru", request)
+
+    assert "stale_answer_repeat" in flags
+    assert "irrelevant_identity_fallback" in flags
+    assert main_module.quality_regeneration_enabled(request, flags) is True
+
+
+def test_quality_gate_allows_creator_fact_for_direct_authorship_question():
+    request = ChatRequest(messages=[ChatMessage(role="user", content="Кто твой создатель?")])
+
+    assert "irrelevant_identity_fallback" not in main_module.detect_quality_flags(
+        "Меня создал MrPastio.",
+        "ru",
+        request,
+    )
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "росскажи историю твоего создания",
+        "Как ты был создан?",
+        "Tell me your origin story",
+    ],
+)
+def test_quality_gate_allows_identity_fact_for_creation_history_request(prompt: str):
+    request = ChatRequest(messages=[ChatMessage(role="user", content=prompt)])
+
+    flags = main_module.detect_quality_flags("Меня создал MrPastio.", "ru", request)
+
+    assert main_module.is_direct_identity_request(prompt) is True
+    assert "irrelevant_identity_fallback" not in flags
 
 
 def test_unexecuted_tool_promise_is_never_presented_as_a_result():
@@ -3222,6 +3277,74 @@ def test_runtime_compacts_history_skills_and_capabilities_before_generation():
     assert runtime.last_context_window["input_tokens"] <= runtime.last_context_window["input_limit"]
     assert captured["max_tokens"] <= 128
     assert captured["messages"][-1]["content"] == "последний вопрос должен сохраниться"
+
+
+def test_compaction_trims_oversized_system_before_short_recent_dialogue():
+    class TokenCounter:
+        def tokenize(self, value, **_kwargs):
+            text = value.decode("utf-8")
+            return list(range(max(1, len(text) // 4)))
+
+    runtime = LocalModelRuntime(Settings(api_token="test", mock_fallback=False))
+    runtime._llama_model = TokenCounter()
+    dialogue = [
+        runtime_module.PromptMessage(role="user", content="Кто твой создатель?"),
+        runtime_module.PromptMessage(role="assistant", content="Меня создал MrPastio."),
+        runtime_module.PromptMessage(role="user", content="Как к нему относишься?"),
+        runtime_module.PromptMessage(role="assistant", content="Я ценю его работу над Monarch."),
+        runtime_module.PromptMessage(role="user", content="Расскажи подробнее."),
+    ]
+    messages = [runtime_module.PromptMessage(role="system", content="policy context " * 3000), *dialogue]
+
+    compacted, dropped, trimmed = runtime._compact_prompt_messages(messages, 1200)
+
+    assert trimmed is True
+    assert dropped == 0
+    assert [message.content for message in compacted[1:]] == [message.content for message in dialogue]
+    assert runtime._count_chat_tokens(compacted) <= 1200
+
+
+@pytest.mark.parametrize("query", [
+    "Кто твой создатель?",
+    "Как ты относишься к своему создателю?",
+    "Расскажи историю создания Monarch",
+    "Почему изменение климата опасно?",
+    "Что означает командная работа?",
+    "Проверка гипотезы — это что?",
+    "Что такое память человека?",
+])
+def test_semantic_questions_do_not_receive_agent_action_contract(query):
+    assert runtime_module.prompt_needs_agent_context(query) is False
+
+
+@pytest.mark.parametrize("query", [
+    "Создай файл notes.txt",
+    "Проверь проект и исправь баг",
+    "Какими инструментами ты можешь пользоваться?",
+])
+def test_real_agent_requests_still_receive_action_contract(query):
+    assert runtime_module.prompt_needs_agent_context(query) is True
+
+
+@pytest.mark.parametrize("query", [
+    "Объясни квадратный корень",
+    "Каков путь героя в романе?",
+    "Опиши окружение персонажа",
+    "Что означает статус-кво?",
+    "Установленная традиция",
+    "Расскажи про Python",
+])
+def test_ordinary_semantics_do_not_receive_environment_dump(query):
+    assert runtime_module.prompt_needs_environment_context(query) is False
+
+
+@pytest.mark.parametrize("query", [
+    "Где находится корень workspace?",
+    "Проверь runtime Oscar",
+    "Сколько оперативной памяти доступно?",
+])
+def test_real_environment_queries_still_receive_environment_context(query):
+    assert runtime_module.prompt_needs_environment_context(query) is True
 
 
 def test_runtime_compacts_internal_system_prompt_beyond_external_message_limit():

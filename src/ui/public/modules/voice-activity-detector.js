@@ -10,8 +10,8 @@ export const VOICE_ACTIVITY_DEFAULTS = Object.freeze({
   releaseThresholdMargin: 0.004,
   minimumReleaseLevel: 0.012,
   minSpeechMs: 320,
-  endSilenceMs: 650,
-  minimumEndSilenceMs: 500,
+  endSilenceMs: 560,
+  minimumEndSilenceMs: 420,
   noSpeechMs: 8_000,
   maxSpeechMs: 15_000,
 });

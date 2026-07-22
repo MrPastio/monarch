@@ -43,6 +43,10 @@ describe('voice mode scaffold', () => {
     'Время сейчас сколько',
     'Назови мне точное время',
     'Оскар, какое у нас сейчас время?',
+    'Оскар, узнай время',
+    'Оскар, которое сейчас время?',
+    'Точного времени',
+    'Что там по времени?',
     'what time is it',
   ])('recognizes the order-independent local clock intent: %s', (text) => {
     expect(classifyVoiceModeCommand(text)).toMatchObject({
@@ -60,6 +64,8 @@ describe('voice mode scaffold', () => {
     'Через сколько времени закончится установка?',
     'Покажи время выполнения задачи',
     'Сколько времени прошло после запуска?',
+    'Покажи временный файл',
+    'Сколько временных файлов создано?',
   ])('does not confuse a duration with the wall clock: %s', (text) => {
     const candidate = classifyVoiceModeCommand(text);
     expect(candidate.actionId).not.toBe('time.query');
@@ -240,11 +246,11 @@ describe('voice mode scaffold', () => {
     });
   });
 
-  it('keeps a bounded non-factual rewrite on lazy Lite even with spoken punctuation', () => {
+  it('keeps a bounded non-factual rewrite on the fixed Fast voice model', () => {
     expect(classifyVoiceModeCommand('Перефразируй: проверка завершена')).toMatchObject({
       actionId: 'assistant.fallback',
-      lane: 'voice-lite',
-      modelRoute: 'qwen3-1.7b',
+      lane: 'fast-llm',
+      modelRoute: 'gemma4-fast',
     });
   });
 
@@ -329,7 +335,7 @@ describe('voice mode scaffold', () => {
     });
   });
 
-  it('keeps social replies scripted, transformations in Lite, and knowledge in Fast', () => {
+  it('keeps primitive replies model-free and every substantive fallback in Fast', () => {
     const socialReply = classifyVoiceModeCommand('Оскар, привет, как дела?');
     const shortFallback = classifyVoiceModeCommand('монарх объясни это коротко');
     const simpleKnowledge = classifyVoiceModeCommand('Почему небо голубое?');
@@ -347,13 +353,14 @@ describe('voice mode scaffold', () => {
 
     expect(shortFallback).toMatchObject({
       actionId: 'assistant.fallback',
-      lane: 'voice-lite',
-      modelRoute: 'qwen3-1.7b',
-      maxNewTokens: 96,
+      lane: 'fast-llm',
+      modelRoute: 'gemma4-fast',
+      maxNewTokens: 192,
       usesLlm: true,
     });
     expect(shouldUseVoiceModeLlm(shortFallback)).toBe(true);
-    expect(voiceModeLocalProfile(shortFallback)).toBe('lite');
+    expect(shouldUseVoiceModeFastLlm(shortFallback)).toBe(true);
+    expect(voiceModeLocalProfile(shortFallback)).toBeNull();
     expect(simpleKnowledge).toMatchObject({ lane: 'fast-llm', modelRoute: 'gemma4-fast' });
 
     expect(complexFallback).toMatchObject({
@@ -372,5 +379,21 @@ describe('voice mode scaffold', () => {
       usesLlm: false,
     });
     expect(shouldUseVoiceModeLlm(oversizedFallback)).toBe(false);
+  });
+
+  it.each([
+    ['да', 'Да.'],
+    ['угу', 'Да.'],
+    ['нет', 'Нет.'],
+    ['окей', 'Хорошо.'],
+    ['пока', 'До встречи.'],
+  ])('answers the primitive phrase %s without allocating any model', (text, acknowledgement) => {
+    expect(classifyVoiceModeCommand(text)).toMatchObject({
+      actionId: 'listen.continue',
+      lane: 'scripted',
+      modelRoute: 'none',
+      usesLlm: false,
+      slots: { acknowledgement },
+    });
   });
 });

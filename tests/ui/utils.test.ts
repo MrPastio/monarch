@@ -12,6 +12,7 @@ import {
   summarizeOutput,
   looksLikeAgentAction,
   shouldPreDispatchAgentAction,
+  canAutoConfirmDirectAgentAction,
   executionNeedsAuthoritativeReceipt,
   looksLikeProtectedAgentAction,
   resolveContextualAgentAction,
@@ -85,6 +86,26 @@ describe('Oscar UI utils', () => {
       expect(shouldPreDispatchAgentAction('{"capability":"workspace.files.mkdir","parameters":{"path":"demo"}}')).toBe(true);
     });
 
+    it('pre-dispatches direct device commands and auto-confirms only explicit bounded Device actions', () => {
+      expect(shouldPreDispatchAgentAction('Оскар, открой Телеграм')).toBe(true);
+      expect(shouldPreDispatchAgentAction('Оскар, открой YouTube')).toBe(true);
+      expect(shouldPreDispatchAgentAction('Оскар, скажи, сколько сейчас времени')).toBe(true);
+      expect(shouldPreDispatchAgentAction('поставь громкость на 40 процентов')).toBe(true);
+      expect(shouldPreDispatchAgentAction('Расскажи историю Telegram')).toBe(false);
+
+      const appRoute = { targetModuleId: 'device', capabilityId: 'device.app.open' };
+      expect(canAutoConfirmDirectAgentAction(appRoute, 'открой Телеграм')).toBe(true);
+      expect(canAutoConfirmDirectAgentAction(appRoute, 'открой Телеграм', { modelProposed: true })).toBe(false);
+      expect(canAutoConfirmDirectAgentAction(
+        { targetModuleId: 'workspace', capabilityId: 'workspace.files.delete' },
+        'удали файл',
+      )).toBe(false);
+      expect(canAutoConfirmDirectAgentAction(
+        { targetModuleId: 'safe', capabilityId: 'safe.vault.open' },
+        'открой Safe',
+      )).toBe(false);
+    });
+
     it('reserves mutation completion text for the verified Kernel receipt', () => {
       expect(executionNeedsAuthoritativeReceipt({
         ok: true,
@@ -94,6 +115,11 @@ describe('Oscar UI utils', () => {
         ok: true,
         metadata: { policy: { riskVector: { effect: 'read' } } },
       })).toBe(false);
+      expect(executionNeedsAuthoritativeReceipt({
+        ok: true,
+        output: { authoritative: true, verified: true, text: 'Сейчас 23:34.' },
+        metadata: { policy: { riskVector: { effect: 'read' } } },
+      })).toBe(true);
       expect(executionNeedsAuthoritativeReceipt({
         ok: false,
         metadata: { policy: { riskVector: { effect: 'write' } } },
@@ -435,6 +461,8 @@ describe('Oscar UI utils', () => {
     it('renders pending stream events safely', () => {
       const msg = createOscarMessage('assistant', 'Жду ответ', 'test', {
         pending: true,
+        researchFlow: true,
+        streamPhase: 'research-search',
         showTrace: true,
         streamEvents: [
           {
@@ -453,6 +481,42 @@ describe('Oscar UI utils', () => {
       expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
       expect(html).not.toContain('<img src=x');
       expect(html).not.toContain('onmouseover="alert(1)');
+    });
+
+    it('shows only the bare orb during ordinary thinking', () => {
+      const html = renderOscarMessage(createOscarMessage('assistant', '', 'Fast', {
+        pending: true,
+        streamPhase: 'route',
+      }));
+
+      expect(html).toContain('assistant pending thinking-only');
+      expect(html).toContain('class="monarch-thinking-orb"');
+      expect(html).toContain('data-orb-phase="route"');
+      expect(html).not.toContain('oscar-work-timer');
+      expect(html).not.toContain('oscar-thinking-copy');
+      expect(html).not.toContain('<strong>Подбираю маршрут</strong>');
+      expect(html).not.toContain('Выбираю лучший путь ответа');
+    });
+
+    it('keeps status copy only for search and research activity', () => {
+      const ordinary = renderOscarMessage(createOscarMessage('assistant', 'П', 'Fast', {
+        pending: true,
+        streamPhase: 'write',
+        showTrace: true,
+        streamEvents: [{ kind: 'status', label: 'Пишу ответ' }],
+      }));
+      const search = renderOscarMessage(createOscarMessage('assistant', '', 'Fast', {
+        pending: true,
+        streamPhase: 'search',
+      }));
+
+      expect(ordinary).toContain('oscar-orb-only-status');
+      expect(ordinary).not.toContain('oscar-live-copy');
+      expect(ordinary).not.toContain('oscar-stream-trace');
+      expect(ordinary).not.toContain('data-oscar-work-timer');
+      expect(search).toContain('oscar-live-copy');
+      expect(search).toContain('Ищу источники');
+      expect(search).toContain('data-oscar-work-timer');
     });
 
     it('renders bounded deep-research phases as visible activity, not hidden reasoning', () => {
@@ -474,6 +538,8 @@ describe('Oscar UI utils', () => {
           streamEvents: [{ kind: streamPhase, label }],
         }));
         expect(html).toContain(`data-stream-phase="${streamPhase}"`);
+        expect(html).toContain('class="monarch-thinking-orb"');
+        expect(html).toContain(`data-orb-phase="${streamPhase}"`);
         expect(html).toContain(label);
         expect(html).toContain(hint);
         expect(html).not.toContain('oscar-reasoning-block');
@@ -498,6 +564,8 @@ describe('Oscar UI utils', () => {
 
       expect(html).toContain('route-consent research-flow');
       expect(html).toContain('oscar-inline-consent');
+      expect(html).toContain('class="monarch-thinking-orb"');
+      expect(html).toContain('data-orb-phase="search"');
       expect(html).toContain('data-oscar-route-decision="deny"');
       expect(html).toContain('data-oscar-route-decision="allow"');
       expect(html).toContain('aria-label="Этапы исследования"');

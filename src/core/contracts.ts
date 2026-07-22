@@ -85,6 +85,88 @@ export interface MonarchJsonSchema {
   [key: string]: unknown;
 }
 
+export type MonarchAgentCapabilityIdempotency = 'idempotent' | 'conditional' | 'non-idempotent';
+export type MonarchAgentCapabilityReversibility = 'automatic' | 'manual' | 'irreversible';
+export type MonarchAgentCapabilityCancellation = 'supported' | 'best-effort' | 'unsupported';
+export type MonarchAgentCapabilityLatency = 'instant' | 'short' | 'long' | 'unbounded';
+export type MonarchAgentCapabilityComputeClass = 'light' | 'medium' | 'heavy';
+export type MonarchAgentCapabilitySource = MonarchIntentSource | 'coder';
+export type MonarchAgentRuntimeState =
+  | 'registered'
+  | 'configured'
+  | 'reachable'
+  | 'starting'
+  | 'running'
+  | 'degraded'
+  | 'stopping'
+  | 'stopped'
+  | 'unavailable';
+
+export interface MonarchAgentCapabilityPrecondition {
+  kind: string;
+  description: string;
+}
+
+export interface MonarchAgentCapabilityEffect {
+  kind: string;
+  description: string;
+  targetScope?: MonarchCapabilityEffectProfile['targetScope'];
+}
+
+export interface MonarchAgentCapabilityVerificationDescriptor {
+  kind: 'predicate' | 'read-after-write' | 'schema' | 'runtime-status' | 'external-receipt';
+  description: string;
+  required?: boolean;
+}
+
+export interface MonarchCapabilityEffectProfile {
+  mutation: 'none' | 'temporary' | 'persistent';
+  targetScope: 'agent-state' | 'workspace' | 'project' | 'application' | 'device' | 'external-service';
+  reversibility: MonarchAgentCapabilityReversibility;
+  privilege: 'normal' | 'elevated' | 'security-critical';
+  dataSensitivity: 'public' | 'private' | 'secret';
+  communication: 'none' | 'loopback' | 'lan' | 'internet' | 'third-party';
+  financialImpact: boolean;
+  identityImpact: boolean;
+  securityImpact: boolean;
+}
+
+/** Optional manifest input. Missing fields receive conservative legacy-risk defaults. */
+export interface MonarchAgentCapabilityMetadataInput {
+  tags?: string[];
+  preconditions?: MonarchAgentCapabilityPrecondition[];
+  effects?: MonarchAgentCapabilityEffect[];
+  idempotency?: MonarchAgentCapabilityIdempotency;
+  reversibility?: MonarchAgentCapabilityReversibility;
+  effectProfile?: Partial<MonarchCapabilityEffectProfile>;
+  requiredRuntime?: string[];
+  requiredCredentials?: string[];
+  supportedSources?: MonarchAgentCapabilitySource[];
+  estimatedLatency?: MonarchAgentCapabilityLatency;
+  computeClass?: MonarchAgentCapabilityComputeClass;
+  cancellation?: MonarchAgentCapabilityCancellation;
+  verification?: MonarchAgentCapabilityVerificationDescriptor[];
+  examples?: unknown[];
+}
+
+export interface MonarchResolvedAgentCapabilityMetadata {
+  tags: string[];
+  preconditions: MonarchAgentCapabilityPrecondition[];
+  effects: MonarchAgentCapabilityEffect[];
+  idempotency: MonarchAgentCapabilityIdempotency;
+  reversibility: MonarchAgentCapabilityReversibility;
+  effectProfile: MonarchCapabilityEffectProfile;
+  requiredRuntime: string[];
+  requiredCredentials: string[];
+  supportedSources: MonarchAgentCapabilitySource[];
+  estimatedLatency: MonarchAgentCapabilityLatency;
+  computeClass: MonarchAgentCapabilityComputeClass;
+  cancellation: MonarchAgentCapabilityCancellation;
+  verification: MonarchAgentCapabilityVerificationDescriptor[];
+  examples: unknown[];
+  source: 'explicit' | 'legacy-default';
+}
+
 export interface MonarchCapability {
   id: string;
   moduleId: string;
@@ -95,6 +177,7 @@ export interface MonarchCapability {
   outputSchema?: MonarchJsonSchema;
   examples?: unknown[];
   routing?: MonarchCapabilityRoutingMetadata;
+  agent?: MonarchAgentCapabilityMetadataInput;
 }
 
 export interface MonarchCapabilityRoutingMetadata {
@@ -430,11 +513,19 @@ export interface MonarchRiskVector {
   novelty: MonarchActionNovelty;
 }
 
-export interface MonarchActionPredicate {
-  kind: 'exists' | 'not-exists' | 'equals' | 'contains' | 'status';
-  target: string;
-  value?: unknown;
-}
+export type MonarchActionPredicateJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | MonarchActionPredicateJsonValue[]
+  | { [key: string]: MonarchActionPredicateJsonValue };
+
+export type MonarchActionPredicate =
+  | { kind: 'exists' | 'not-exists'; target: string; value?: never }
+  | { kind: 'equals'; target: string; value: MonarchActionPredicateJsonValue }
+  | { kind: 'contains'; target: string; value: MonarchActionPredicateJsonValue }
+  | { kind: 'status'; target: string; value: string | number | boolean };
 
 export interface MonarchActionProposalProvenance {
   model: string;
@@ -680,6 +771,14 @@ export interface MonarchExecutionRequest {
   permissionProfileOverride?: MonarchPermissionProfile;
 }
 
+/**
+ * Ephemeral execution control. This object is never part of the durable request,
+ * action proposal, ledger, journal, audit payload, or model context.
+ */
+export interface MonarchExecutionControl {
+  signal?: AbortSignal;
+}
+
 export interface MonarchExecutionResult {
   ok: boolean;
   summary: string;
@@ -761,6 +860,7 @@ export interface MonarchModule {
   ): Promise<MonarchRouteDecision | null>;
   executeCapability?(
     request: MonarchExecutionRequest,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    control?: MonarchExecutionControl,
   ): Promise<MonarchExecutionResult>;
 }

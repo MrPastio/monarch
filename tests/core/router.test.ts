@@ -238,6 +238,22 @@ describe('Router Mesh & Intent Classifier', () => {
     expect(explanation.kind).toBe('explanation');
     expect(explanation.riskHint).toBe('none');
 
+    const teamwork = classifyIntentText('Что означает командная работа?');
+    expect(teamwork.kind).toBe('explanation');
+    expect(teamwork.riskHint).toBe('none');
+
+    const electricalCurrent = classifyIntentText('Объясни current в электричестве');
+    expect(electricalCurrent.kind).toBe('explanation');
+
+    const currentCode = classifyIntentText('Что сейчас происходит в моем коде?');
+    expect(currentCode.kind).not.toBe('search');
+
+    const personalSchedule = classifyIntentText('Составь расписание тренировок');
+    expect(personalSchedule.kind).not.toBe('search');
+
+    const publicSchedule = classifyIntentText('Расписание поездов Киев Львов');
+    expect(publicSchedule.kind).toBe('search');
+
     const telegramPost = classifyIntentText('Напиши пост для Telegram');
     expect(telegramPost.kind).toBe('text_generation');
     expect(telegramPost.riskHint).toBe('none');
@@ -311,6 +327,39 @@ describe('Router Mesh & Intent Classifier', () => {
     expect(diagnostics.route?.targetModuleId).toBe('diagnostics');
     expect(diagnostics.route?.capabilityId).toBe('diagnostics.capabilities.list');
     expect(diagnostics.execution?.ok).toBe(true);
+  });
+
+  it.each([
+    'Что такое память человека?',
+    'Как работает интернет?',
+    'Что означает статус-кво?',
+    'Объясни модель поведения человека',
+  ])('keeps semantic subsystem vocabulary in ordinary assistant chat: %s', async (text) => {
+    const assistant = new AssistantModule();
+
+    const route = await assistant.handleIntent(createSmokeIntent('semantic-chat', text));
+
+    expect(route?.targetModuleId).toBe('assistant');
+    expect(route?.capabilityId).toBe('assistant.reply');
+  });
+
+  it.each([
+    'Расскажи про новую систему образования',
+    'Что означает статус системы кровообращения?',
+    'Объясни модель поведения человека',
+    'Что такое математическая модель?',
+  ])('does not let Diagnostics or Models steal semantic chat: %s', async (text) => {
+    const kernel = createMonarchKernel({
+      enabledModules: ['assistant', 'diagnostics', 'models'],
+      enableLocalSystemRouter: false,
+    });
+
+    await kernel.start();
+    const route = await kernel.routeIntent(createSmokeIntent('semantic-module-competition', text));
+    await kernel.stop();
+
+    expect(route?.targetModuleId).toBe('assistant');
+    expect(route?.capabilityId).toBe('assistant.reply');
   });
 
   it('does not mistake independence questions for Astra bridge requests', async () => {

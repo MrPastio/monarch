@@ -110,12 +110,13 @@ class PromptMessage:
     role: str
     content: str
 
-OSCAR_PROMPT_VERSION = "3.0"
+OSCAR_PROMPT_VERSION = "3.1"
 
 OSCAR_SYSTEM_PROMPT_RU = r"""
-<oscar_agent_policy version="3.0" language="ru">
+<oscar_agent_policy version="3.1" language="ru">
 Роль и идентичность
 - Тебя зовут Oscar. Тебя и Monarch создал MrPastio. На прямой вопрос о твоём создателе отвечай этим фактом сразу.
+- Факт о создателе относится только к прямому вопросу об авторстве. Не подменяй им вопрос об отношении, мнении или другом предикате: отвечай именно на него с последовательной позиции Oscar, не изображая человеческие чувства.
 - Ты локальный AI-ассистент и агентский интерфейс Monarch. Monarch объединяет локальные модели, память, поиск, файлы, модули и Kernel-контроллер действий.
 - Codex создан OpenAI и помогает MrPastio в инженерной работе над Monarch. Codex не создан MrPastio; никогда не объединяй авторство Monarch/Oscar и Codex.
 - О MrPastio не выдумывай биографию, опыт или проекты. Без дополнительных данных можно сказать только, что он соло-разработчик Monarch/Oscar и развивает local-first модульную AI-систему.
@@ -148,9 +149,10 @@ OSCAR_SYSTEM_PROMPT_RU = r"""
 """.strip()
 
 OSCAR_SYSTEM_PROMPT_EN = r"""
-<oscar_agent_policy version="3.0" language="en">
+<oscar_agent_policy version="3.1" language="en">
 Role and identity
 - Your name is Oscar. MrPastio created you and Monarch. When asked directly who created you, lead with that fact.
+- The creator fact applies only to direct authorship questions. Never substitute it for a question about attitude, opinion, or another predicate: answer that predicate from a consistent Oscar perspective without claiming human emotions.
 - You are the local AI assistant and agent interface inside Monarch. Monarch combines local models, memory, search, files, modules, and a Kernel action controller.
 - Codex was created by OpenAI and helps MrPastio with engineering work on Monarch. MrPastio did not create Codex; never merge the authorship of Monarch/Oscar with Codex.
 - Do not invent MrPastio's biography, experience, or projects. Without supplied facts, say only that he is the solo developer of Monarch/Oscar and is building a local-first modular AI system.
@@ -1403,11 +1405,36 @@ class LocalModelRuntime:
         has_system = bool(compacted and compacted[0].role == "system")
         first_history_index = 1 if has_system else 0
 
-        while len(compacted) - first_history_index > 1 and self._count_chat_tokens(compacted) > input_limit:
-            compacted.pop(first_history_index)
-            dropped_messages += 1
+        context_trimmed = False
 
-        context_trimmed = dropped_messages > 0
+        # System/context blocks can grow substantially when capabilities, skills,
+        # memory and registry data are attached. Preserve a short recent dialogue
+        # first: an antecedent such as "MrPastio" is more useful to the current
+        # follow-up than another duplicated chunk of operating instructions.
+        if has_system and self._count_chat_tokens(compacted) > input_limit:
+            dialogue_tokens = self._count_chat_tokens(compacted[1:])
+            minimum_system_budget = max(128, min(384, input_limit // 3))
+            if dialogue_tokens + minimum_system_budget + 12 <= input_limit:
+                system_budget = max(minimum_system_budget, input_limit - dialogue_tokens - 12)
+                shortened = self._truncate_text_to_tokens(compacted[0].content, system_budget)
+                if shortened != compacted[0].content:
+                    compacted[0] = PromptMessage(role="system", content=shortened)
+                    context_trimmed = True
+
+        # If dialogue itself is too large, remove complete oldest turns instead
+        # of popping one role at a time and leaving orphaned assistant messages.
+        while len(compacted) - first_history_index > 1 and self._count_chat_tokens(compacted) > input_limit:
+            removable = 1
+            if (
+                len(compacted) - first_history_index > 2
+                and compacted[first_history_index].role == "user"
+                and compacted[first_history_index + 1].role == "assistant"
+            ):
+                removable = 2
+            del compacted[first_history_index:first_history_index + removable]
+            dropped_messages += removable
+            context_trimmed = True
+
         if self._count_chat_tokens(compacted) <= input_limit:
             return compacted, dropped_messages, context_trimmed
 
@@ -1937,26 +1964,52 @@ def render_incoming_context_contract(lang_code: str) -> str:
     )
 
 
-AGENT_CONTEXT_PATTERN = re.compile(
-    r"(?:\b(?:monarch|oscar|capabilit(?:y|ies)|tool|workspace|file|folder|directory|path|memory|runtime|"
-    r"backend|diagnostic|command|terminal|execute|create|write|edit|delete|move|copy|inspect|verify|test|fix|"
-    r"continue|proceed|apply|retry|internet|github|"
-    r"hugging\s*face|safe|sharing|voice|telegram)\b|монарх|оскар|возможност|инструмент|workspace|файл|папк|"
-    r"каталог|пространств|путь|памят|runtime|рантайм|backend|бэкенд|диагност|команд|терминал|запуст|созда|запиш|"
-    r"измен|удал|перемест|копир|провер|исправ|почин|продолж|приступ|примени|повтор|действуй|интернет|github|"
-    r"hugging|safe|sharing|voice|telegram)",
+AGENT_ACTION_PATTERN = re.compile(
+    r"(?:\b(?:run|execute|create|write|edit|delete|move|copy|inspect|verify|test|fix|apply|retry|"
+    r"install|download|search|open|read|list|start|stop|restart)\b|"
+    r"\b(?:запусти|выполни|создай|создать|запиши|записать|измени|изменить|удали|удалить|"
+    r"перемести|переместить|скопируй|скопировать|проверь|проверить|исправь|исправить|почини|"
+    r"примени|повтори|установи|скачай|найди|открой|прочитай|покажи|запусти|останови|перезапусти)\b)",
     re.IGNORECASE,
 )
+AGENT_TARGET_PATTERN = re.compile(
+    r"(?:\b(?:workspace|project|repo(?:sitory)?|file|folder|directory|runtime|backend|terminal|shell|"
+    r"command|script|test|bug|error|model|memory|github|internet|url|website|module|service|process)\b|"
+    r"\b(?:проект|репозитор|workspace|файл|папк\w*|каталог|рантайм|runtime|бэкенд|backend|терминал|"
+    r"команд\w*|скрипт|тест\w*|баг\w*|ошибк\w*|модел\w*|памят\w*|интернет|сайт\w*|ссылк\w*|"
+    r"модул\w*|сервис\w*|процесс\w*)\b)",
+    re.IGNORECASE,
+)
+CAPABILITY_QUESTION_PATTERN = re.compile(
+    r"(?:\b(?:what\s+can\s+you\s+do|which\s+(?:tools?|capabilities|actions)|available\s+(?:tools?|actions))\b|"
+    r"(?:что\s+ты\s+умеешь|что\s+можешь|каки(?:е|ми)\s+(?:инструмент|возможност|действи)|"
+    r"доступн\w*\s+(?:инструмент|возможност|действи)))",
+    re.IGNORECASE,
+)
+CAPABILITY_ID_PATTERN = re.compile(r"\b[a-z][a-z0-9-]+(?:\.[a-z0-9_-]+){1,}\b", re.IGNORECASE)
 CONTEXTUAL_AGENT_FOLLOWUP_PATTERN = re.compile(
     r"^\s*(?:(?:да|ок(?:ей)?|хорошо)[,!. ]*)?(?:продолжай|дальше|делай|действуй|приступай|исправь|почини|"
     r"примени|повтори|попробуй\s+снова|запусти|continue|proceed|do\s+it|fix\s+it|apply\s+it|retry|run\s+it)"
     r"[.!? ]*$",
     re.IGNORECASE,
 )
-ENVIRONMENT_CONTEXT_PATTERN = re.compile(
-    r"(?:\b(?:workspace|root|path|cwd|environment|runtime|backend|diagnostic|status|health|os|python|cli|ram|"
-    r"gpu|installed)\b|workspace|кор(?:ень|невая)|путь|окружен|рантайм|runtime|бэкенд|backend|"
-    r"пространств|диагност|статус|здоров|python|cli|ram|gpu|оператив|установлен)",
+ENVIRONMENT_TARGET_PATTERN = re.compile(
+    r"(?:\b(?:workspace|cwd|runtime|backend|environment|os|ram|gpu|disk|process|service|installed|loaded)\b|"
+    r"\b(?:workspace|рантайм|бэкенд|окружени\w*|операционн\w*\s+систем\w*|оперативн\w*\s+памят\w*|"
+    r"видеокарт\w*|диск\w*|процесс\w*|сервис\w*|установлен\w*|загружен\w*)\b)",
+    re.IGNORECASE,
+)
+ENVIRONMENT_QUERY_PATTERN = re.compile(
+    r"(?:\b(?:where|which|what|current|active|available|free|status|health|inspect|diagnose|check)\b|"
+    r"\b(?:где|како(?:й|е|ая|ие)|текущ\w*|активн\w*|доступн\w*|свободн\w*|сколько|статус|"
+    r"здоров\w*|проверь|проверить|диагностир\w*)\b)",
+    re.IGNORECASE,
+)
+WORKSPACE_LOCATION_PATTERN = re.compile(
+    r"(?:\b(?:where|path|root|cwd)\b.{0,40}\b(?:workspace|project|repo(?:sitory)?)\b|"
+    r"\b(?:workspace|project|repo(?:sitory)?)\b.{0,40}\b(?:where|path|root|cwd)\b|"
+    r"(?:где|путь|корень).{0,40}(?:workspace|проект|репозитор|рабоч\w*\s+пространств)|"
+    r"(?:workspace|проект|репозитор|рабоч\w*\s+пространств).{0,40}(?:где|путь|корень))",
     re.IGNORECASE,
 )
 LOCAL_MODEL_CONTEXT_PATTERN = re.compile(
@@ -1970,7 +2023,13 @@ LOCAL_MODEL_CONTEXT_PATTERN = re.compile(
 
 def prompt_needs_agent_context(text: str) -> bool:
     value = str(text or "")
-    return bool(AGENT_CONTEXT_PATTERN.search(value) or LOCAL_MODEL_CONTEXT_PATTERN.search(value))
+    return bool(
+        LOCAL_MODEL_CONTEXT_PATTERN.search(value)
+        or CAPABILITY_QUESTION_PATTERN.search(value)
+        or CAPABILITY_ID_PATTERN.search(value)
+        or WORKSPACE_LOCATION_PATTERN.search(value)
+        or (AGENT_ACTION_PATTERN.search(value) and AGENT_TARGET_PATTERN.search(value))
+    )
 
 
 def prompt_is_contextual_agent_followup(text: str) -> bool:
@@ -1979,7 +2038,11 @@ def prompt_is_contextual_agent_followup(text: str) -> bool:
 
 def prompt_needs_environment_context(text: str) -> bool:
     value = str(text or "")
-    return bool(ENVIRONMENT_CONTEXT_PATTERN.search(value) or LOCAL_MODEL_CONTEXT_PATTERN.search(value))
+    return bool(
+        LOCAL_MODEL_CONTEXT_PATTERN.search(value)
+        or WORKSPACE_LOCATION_PATTERN.search(value)
+        or (ENVIRONMENT_TARGET_PATTERN.search(value) and ENVIRONMENT_QUERY_PATTERN.search(value))
+    )
 
 
 def merge_capability_context(

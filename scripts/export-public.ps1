@@ -102,6 +102,16 @@ try {
     'xox[baprs]-[A-Za-z0-9-]{20,}',
     '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----'
   )
+  $allowedFixtureContent = @{
+    'tests/agent/agent-loop-regressions.test.ts' = @(
+      ('E:' + '/Monarch/nested/requested.txt'),
+      ('E:' + '/Monarch/requested.txt'),
+      ('github' + '_pat_1234567890abcdef1234')
+    )
+    'tests/agent/context-compiler.test.ts' = @(
+      ('gh' + 'p_abcdefghijklmnopqrstuvwxyz')
+    )
+  }
   $violations = New-Object System.Collections.Generic.List[string]
 
   Get-ChildItem -LiteralPath $staging -Recurse -Force -File | ForEach-Object {
@@ -115,6 +125,11 @@ try {
       return
     }
     $content = Get-Content -LiteralPath $_.FullName -Raw
+    if ($allowedFixtureContent.ContainsKey($relative)) {
+      foreach ($fixture in $allowedFixtureContent[$relative]) {
+        $content = $content.Replace($fixture, '')
+      }
+    }
     foreach ($pattern in $forbiddenContent) {
       if ($content -match $pattern) {
         $violations.Add("${relative}: matched forbidden content pattern $pattern")

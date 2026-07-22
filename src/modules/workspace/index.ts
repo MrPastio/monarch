@@ -3,6 +3,7 @@ import type { Stats } from 'node:fs';
 import path from 'node:path';
 import type {
   MonarchExecutionRequest,
+  MonarchExecutionControl,
   MonarchExecutionResult,
   MonarchIntent,
   MonarchKernelContext,
@@ -187,7 +188,8 @@ export class WorkspaceModule implements MonarchModule {
 
   async executeCapability(
     request: MonarchExecutionRequest,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    control: MonarchExecutionControl = {},
   ): Promise<MonarchExecutionResult> {
     switch (request.capabilityId) {
     case 'workspace.root.get':
@@ -199,7 +201,7 @@ export class WorkspaceModule implements MonarchModule {
     case 'workspace.files.search':
       return this.searchFiles(request.input, context);
     case 'workspace.files.write':
-      return this.writeFileCapability(request.input, context);
+      return this.writeFileCapability(request.input, context, control.signal);
     case 'workspace.files.append':
       return this.appendFileCapability(request.input, context);
     case 'workspace.files.mkdir':
@@ -392,8 +394,10 @@ export class WorkspaceModule implements MonarchModule {
 
   private async writeFileCapability(
     input: unknown,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
   ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const evaluation = this.evaluate(readStringInput(input, 'path'), 'write', context);
     if (!evaluation.allowed) {
       return blockedResult(evaluation.message, evaluation);
@@ -432,8 +436,11 @@ export class WorkspaceModule implements MonarchModule {
       };
     }
 
+    signal?.throwIfAborted();
     await mkdir(path.dirname(evaluation.resolvedPath), { recursive: true });
-    await writeFile(evaluation.resolvedPath, content, 'utf8');
+    signal?.throwIfAborted();
+    await writeFile(evaluation.resolvedPath, content, { encoding: 'utf8', signal });
+    signal?.throwIfAborted();
     await context.emit('workspace.file.written', this.manifest.id, {
       path: evaluation.resolvedPath,
       bytes,

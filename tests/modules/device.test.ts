@@ -5,6 +5,7 @@ import {
   normalizeApplicationRequest,
   normalizeBrightnessRequest,
   normalizeBrowserRequest,
+  normalizeVolumeRequest,
 } from '../../src/modules/device';
 
 describe('Device Module', () => {
@@ -48,10 +49,43 @@ describe('Device Module', () => {
     try {
       const app = await kernel.submitIntent('открой калькулятор', 'voice');
       const browser = await kernel.submitIntent('открой сайт example.com', 'voice');
-      expect(app.route).toMatchObject({ capabilityId: 'device.app.open', input: { app: 'калькулятор' } });
+      expect(app.route).toMatchObject({ capabilityId: 'device.app.open', input: { app: 'calculator' } });
       expect(browser.route).toMatchObject({ capabilityId: 'device.browser.open' });
       expect(app.execution?.error).toBe('confirmation-required');
       expect(browser.execution?.error).toBe('confirmation-required');
+    } finally {
+      await kernel.stop();
+    }
+  });
+
+  it('routes Telegram, YouTube, volume, brightness, and the real clock through Device', async () => {
+    const now = new Date('2026-07-21T20:34:00.000Z');
+    const kernel = new MonarchKernel();
+    kernel.registerModule(new DeviceModule(undefined, () => now));
+    await kernel.start();
+
+    try {
+      const telegram = await kernel.submitIntent('Оскар, открой Телеграм', 'desktop');
+      const youtube = await kernel.submitIntent('Оскар, открой YouTube', 'desktop');
+      const volume = await kernel.submitIntent('поставь громкость на 45 процентов', 'desktop');
+      const brightness = await kernel.submitIntent('поставь яркость на 55 процентов', 'desktop');
+      const clock = await kernel.submitIntent('Оскар, скажи, сколько сейчас времени', 'desktop');
+
+      expect(telegram.route).toMatchObject({ capabilityId: 'device.app.open', input: { app: 'telegram' } });
+      expect(youtube.route).toMatchObject({
+        capabilityId: 'device.browser.open',
+        input: { provider: 'youtube', browser: 'default' },
+      });
+      expect(volume.route).toMatchObject({ capabilityId: 'device.volume.set', input: { action: 'set', value: 45 } });
+      expect(brightness.route).toMatchObject({ capabilityId: 'device.brightness.set', input: { operation: 'set', value: 55 } });
+      expect(clock.execution).toMatchObject({
+        ok: true,
+        output: { observedAt: now.toISOString(), verified: true, authoritative: true, source: 'system-clock' },
+      });
+      expect(telegram.execution?.error).toBe('confirmation-required');
+      expect(youtube.execution?.error).toBe('confirmation-required');
+      expect(volume.execution?.error).toBe('confirmation-required');
+      expect(brightness.execution?.error).toBe('confirmation-required');
     } finally {
       await kernel.stop();
     }
@@ -154,16 +188,25 @@ describe('Device Module', () => {
   });
 
   it('normalizes only safe app names and HTTP browser targets', () => {
-    expect(normalizeApplicationRequest('  Visual Studio Code  ')).toBe('Visual Studio Code');
+    expect(normalizeApplicationRequest('  Visual Studio Code  ')).toBe('vscode');
+    expect(normalizeApplicationRequest('Телеграм')).toBe('telegram');
     expect(() => normalizeApplicationRequest('cmd.exe /c calc')).toThrow();
     expect(normalizeBrowserRequest({ query: 'Monarch voice', provider: 'google' })).toMatchObject({
       target: 'https://www.google.com/search?q=Monarch%20voice',
       browser: 'default',
+    });
+    expect(normalizeBrowserRequest({ provider: 'youtube' })).toMatchObject({
+      target: 'https://www.youtube.com/',
+      browser: 'default',
+      provider: 'youtube',
     });
     expect(() => normalizeBrowserRequest({ url: 'file:///C:/Windows/System32/calc.exe' })).toThrow();
     expect(normalizeBrightnessRequest({ operation: 'set', value: 55 }, true)).toEqual({ operation: 'set', value: 55 });
     expect(normalizeBrightnessRequest({ operation: 'change', delta: -10 }, true)).toEqual({ operation: 'change', delta: -10 });
     expect(normalizeBrightnessRequest({}, false)).toEqual({ operation: 'get' });
     expect(() => normalizeBrightnessRequest({ operation: 'set', value: 101 }, true)).toThrow();
+    expect(normalizeVolumeRequest({ action: 'set', value: 45 })).toEqual({ action: 'set', value: 45 });
+    expect(normalizeVolumeRequest({ action: 'mute' })).toEqual({ action: 'mute' });
+    expect(() => normalizeVolumeRequest({ action: 'set', value: 101 })).toThrow();
   });
 });
