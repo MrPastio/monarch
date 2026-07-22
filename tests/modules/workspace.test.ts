@@ -91,6 +91,36 @@ describe('Workspace Module', () => {
     }
   });
 
+  it('keeps the authoritative AgentTask store outside ordinary workspace file access', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-workspace-agent-store-'));
+    const storePath = path.join(root, 'runtime', 'agent', 'tasks.v2.json');
+    await mkdir(path.dirname(storePath), { recursive: true });
+    await writeFile(storePath, '{"synthetic":"agent-store-marker"}', 'utf8');
+
+    const kernel = new MonarchKernel({
+      workspaceRoot: root,
+      permissionProfile: {
+        sandboxMode: 'danger-full-access',
+        approvalPolicy: 'never',
+        autonomyMode: 'full-local',
+      },
+    });
+    kernel.registerModule(new WorkspaceModule({ workspaceRoot: root }));
+    await kernel.start();
+    try {
+      const blocked = await executeWorkspace(kernel, 'workspace.files.read', { path: storePath });
+      expect(blocked).toMatchObject({
+        ok: false,
+        error: 'filesystem-policy-blocked',
+        metadata: { evaluation: { reason: 'red-zone-read-blocked' } },
+      });
+      expect(JSON.stringify(blocked)).not.toContain('agent-store-marker');
+    } finally {
+      await kernel.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('allows bounded local user read roots and desktop mkdir without file writes there', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-workspace-local-root-'));
     const userHome = await mkdtemp(path.join(tmpdir(), 'monarch-workspace-user-home-'));

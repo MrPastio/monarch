@@ -7,7 +7,10 @@ import {
 
 const PCM_BATCH_MS = 120;
 const MAX_QUEUED_PCM_BYTES = 512 * 1024;
-const MAX_TOTAL_PCM_BYTES = 3 * 1024 * 1024;
+// 48 kHz mono PCM16 is about 57.6 MiB for ten minutes. The transport keeps
+// only a bounded in-flight queue; this counter prevents runaway capture while
+// allowing long-form composer dictation without the former 12-second cutoff.
+const MAX_TOTAL_PCM_BYTES = 64 * 1024 * 1024;
 const FLUSH_TIMEOUT_MS = 80;
 
 export function canUseDirectVoicePcm(win = typeof window !== 'undefined' ? window : null) {

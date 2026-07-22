@@ -94,6 +94,40 @@ console.log(JSON.stringify({
       await runtime.shutdown();
     }
   });
+
+  it('refreshes the isolated worker expiry while long-form PCM is active', async () => {
+    const fixture = await writeFakeNativeWorkerFixture();
+    process.env.MONARCH_SHERPA_MODEL_DIR = fixture.modelDir;
+    process.env.MONARCH_STT_STREAM_TTL_MS = '100';
+    const runtime = new SherpaVoiceSttRuntime({
+      workspaceRoot: process.cwd(),
+      workerScriptPath: fixture.workerPath,
+      requestTimeoutMs: 2_000,
+    });
+    try {
+      await runtime.startStream({ streamId: 'stream_active_12345', language: 'ru-RU', sampleRate: 16_000 });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      await expect(runtime.pushStream({
+        streamId: 'stream_active_12345',
+        sequence: 0,
+        pcmBase64: Buffer.alloc(320).toString('base64'),
+      })).resolves.toMatchObject({ sequence: 0 });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      await expect(runtime.pushStream({
+        streamId: 'stream_active_12345',
+        sequence: 1,
+        pcmBase64: Buffer.alloc(320).toString('base64'),
+      })).resolves.toMatchObject({ sequence: 1 });
+      await new Promise((resolve) => setTimeout(resolve, 130));
+      await expect(runtime.pushStream({
+        streamId: 'stream_active_12345',
+        sequence: 2,
+        pcmBase64: Buffer.alloc(320).toString('base64'),
+      })).rejects.toMatchObject({ code: 'voice-stt-stream-not-found' });
+    } finally {
+      await runtime.shutdown();
+    }
+  });
 });
 
 async function writeProtocolWorker(body: string): Promise<string> {

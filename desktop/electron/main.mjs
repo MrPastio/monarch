@@ -43,6 +43,7 @@ import {
   createWindowsSpeechOutput,
 } from './speech-output.mjs';
 import { MONARCH_RELEASE_PUBLIC_KEYS, createMonarchUpdateEndpoints } from './update-config.mjs';
+import { createUpdateDemoRuntime } from './update-demo.mjs';
 import { MonarchUpdateService } from './update-service.mjs';
 import { createTransactionalInstallerCoordinator } from './installer-coordinator.mjs';
 import {
@@ -55,6 +56,7 @@ import { cleanupRetainedUpdateComponents } from './retention-cleanup.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(__dirname, '..', '..');
+const workspacePackage = readJsonFileIfPresent(path.join(workspaceRoot, 'package.json'));
 const configuredInstallRoot = process.env.MONARCH_INSTALL_ROOT && path.isAbsolute(process.env.MONARCH_INSTALL_ROOT)
   ? path.resolve(process.env.MONARCH_INSTALL_ROOT)
   : null;
@@ -65,8 +67,11 @@ const installedLayout = configuredInstallRoot
 const installedLauncher = configuredInstallRoot
   ? readJsonFileIfPresent(path.join(configuredInstallRoot, 'launcher-version.json'))
   : null;
-const currentAppVersion = /^\d+\.\d+\.\d+(?:\.\d+)?$/.test(String(installedDescriptor?.appVersion || ''))
-  ? installedDescriptor.appVersion
+const sourceAppVersion = installedDescriptor?.appVersion
+  || (!app.isPackaged ? workspacePackage?.version : null)
+  || app.getVersion();
+const currentAppVersion = /^\d+\.\d+\.\d+(?:\.\d+)?$/.test(String(sourceAppVersion || ''))
+  ? sourceAppVersion
   : app.getVersion();
 const currentLauncherVersion = /^\d+\.\d+\.\d+$/.test(String(installedLauncher?.version || ''))
   ? installedLauncher.version
@@ -79,15 +84,20 @@ const updateRoot = configuredPayloadRoot
   : path.join(workspaceRoot, 'runtime', 'updates');
 const preloadPath = path.join(__dirname, 'preload.mjs');
 const safeEntryQaMode = process.argv.includes('--safe-entry-qa');
+const updateDemoMode = process.argv.includes('--update-demo') && !app.isPackaged;
 const safeEntryQaProfile = safeEntryQaMode
   ? mkdtempSync(path.join(os.tmpdir(), 'monarch-safe-entry-qa-'))
   : null;
-if (safeEntryQaProfile) app.setPath('userData', safeEntryQaProfile);
-const safeRoot = installedLayout?.configRoot && path.isAbsolute(installedLayout.configRoot)
+const updateDemoProfile = updateDemoMode
+  ? mkdtempSync(path.join(os.tmpdir(), 'monarch-update-demo-'))
+  : null;
+const isolatedUserDataRoot = safeEntryQaProfile || updateDemoProfile;
+if (isolatedUserDataRoot) app.setPath('userData', isolatedUserDataRoot);
+const safeRoot = !updateDemoMode && installedLayout?.configRoot && path.isAbsolute(installedLayout.configRoot)
   ? path.join(path.resolve(installedLayout.configRoot), 'Safe', 'safe-v1')
   : resolveSafeStorageRoot({
     workspaceRoot,
-    qaUserDataRoot: safeEntryQaProfile ? app.getPath('userData') : null,
+    qaUserDataRoot: isolatedUserDataRoot ? app.getPath('userData') : null,
   });
 const safeUiRoot = path.join(workspaceRoot, 'desktop', 'safe');
 const safePreloadPath = path.join(safeUiRoot, 'preload.cjs');
@@ -98,27 +108,30 @@ const safeAuthorizationPreloadPath = path.join(safeUiRoot, 'authorization-preloa
 const safeIconPath = path.join(workspaceRoot, 'assets', 'safe', 'monarch-safe.ico');
 const smokeMode = process.argv.includes('--smoke');
 const safeLaunchMode = process.argv.includes('--safe') && !safeEntryQaMode;
-const appName = 'Monarch';
+const appName = updateDemoMode ? 'Monarch · безопасная демонстрация обновления' : 'Monarch';
 let mainWindow = null;
 let installerCoordinator = null;
 let postUpdateTrial = null;
+const updateDemo = updateDemoMode ? createUpdateDemoRuntime() : null;
 const updateService = new MonarchUpdateService({
   currentVersion: currentAppVersion,
   updaterVersion: currentAppVersion,
   launcherVersion: currentLauncherVersion,
-  endpoints: createMonarchUpdateEndpoints({
+  endpoints: updateDemo?.endpoints || createMonarchUpdateEndpoints({
     sitesOrigin: process.env.MONARCH_UPDATE_SITES_ORIGIN || undefined,
   }),
-  publicKeys: MONARCH_RELEASE_PUBLIC_KEYS,
-  updateRoot,
-  launchInstaller: async (context) => {
+  publicKeys: updateDemo?.publicKeys || MONARCH_RELEASE_PUBLIC_KEYS,
+  updateRoot: updateDemoProfile ? path.join(updateDemoProfile, 'updates') : updateRoot,
+  fetchImpl: updateDemo?.fetchImpl || globalThis.fetch,
+  diskReserveBytes: updateDemoMode ? 0 : undefined,
+  launchInstaller: updateDemo?.launchInstaller || (async (context) => {
     if (!installerCoordinator) {
       const error = new Error('Transactional installer coordination is unavailable outside an installed Monarch layout.');
       error.code = 'installer-coordinator-unavailable';
       throw error;
     }
     return installerCoordinator(context);
-  },
+  }),
 });
 updateService.on('state', (snapshot) => {
   if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
@@ -159,7 +172,7 @@ const configuredSafeSessions = new WeakSet();
 const safeEntryQaEvents = [];
 let safeSecurityPolicy = normalizeSafeSecurityPolicy(null);
 
-if (configuredInstallRoot && configuredPayloadRoot) {
+if (!updateDemoMode && configuredInstallRoot && configuredPayloadRoot) {
   installerCoordinator = createTransactionalInstallerCoordinator({
     installRoot: configuredInstallRoot,
     updateRoot,
@@ -173,17 +186,17 @@ if (configuredInstallRoot && configuredPayloadRoot) {
   });
 }
 
-if (!safeEntryQaMode && !app.requestSingleInstanceLock()) {
+if (!safeEntryQaMode && !updateDemoMode && !app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  if (!safeEntryQaMode) {
+  if (!safeEntryQaMode && !updateDemoMode) {
     app.on('second-instance', (_event, commandLine) => {
       if (commandLine.includes('--safe')) void showSafeWindow();
       else void showMainWindow();
     });
   }
 
-  app.setAppUserModelId(safeLaunchMode ? 'Monarch.Safe' : 'Monarch.App');
+  app.setAppUserModelId(safeLaunchMode ? 'Monarch.Safe' : updateDemoMode ? 'Monarch.UpdateDemo' : 'Monarch.App');
 
   app.whenReady()
     .then(startDesktopApp)
@@ -194,6 +207,10 @@ if (!safeEntryQaMode && !app.requestSingleInstanceLock()) {
 }
 
 app.on('window-all-closed', () => {
+  if (updateDemoMode) {
+    app.quit();
+    return;
+  }
   // Monarch intentionally stays alive in the system tray.
 });
 
@@ -285,7 +302,7 @@ ipcMain.handle('monarch:speech-warmup', (event, value = {}) => {
   if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
     return { status: 'failed', ok: false, error: 'untrusted-renderer', summary: 'Недоверенный renderer не может запускать TTS.' };
   }
-  if (smokeMode || safeEntryQaMode) {
+  if (smokeMode || safeEntryQaMode || updateDemoMode) {
     return { status: 'unavailable', ok: false, error: 'speech-warmup-disabled', summary: 'Прогрев TTS отключён для служебного запуска.' };
   }
   return value?.retry === true ? speechWarmup.retry() : speechWarmup.start();
@@ -475,34 +492,36 @@ ipcMain.on('monarch-safe:sealed', (event) => {
 });
 
 async function startDesktopApp() {
-  postUpdateTrial = await preparePostUpdateTrial().catch((error) => {
-    if (process.argv.some((value) => value.startsWith('--post-update='))) throw error;
-    return null;
-  });
-  await prepareRollback().catch((error) => {
-    if (process.argv.some((value) => value.startsWith('--rollback-update='))) throw error;
-  });
-  if (
-    configuredInstallRoot
-    && configuredPayloadRoot
-    && !process.argv.some((value) => value.startsWith('--post-update=') || value.startsWith('--rollback-update='))
-  ) {
-    await cleanupRetainedUpdateComponents({
-      installRoot: configuredInstallRoot,
-      payloadRoot: configuredPayloadRoot,
+  if (!updateDemoMode) {
+    postUpdateTrial = await preparePostUpdateTrial().catch((error) => {
+      if (process.argv.some((value) => value.startsWith('--post-update='))) throw error;
+      return null;
     });
-  }
-  if (installedLayout?.configRoot) {
-    await migrateLegacySecretsForCurrentUser({
-      migrationRoot: path.join(installedLayout.configRoot, 'migration', 'secrets'),
-      safeRoot,
-      safeStorage,
+    await prepareRollback().catch((error) => {
+      if (process.argv.some((value) => value.startsWith('--rollback-update='))) throw error;
     });
+    if (
+      configuredInstallRoot
+      && configuredPayloadRoot
+      && !process.argv.some((value) => value.startsWith('--post-update=') || value.startsWith('--rollback-update='))
+    ) {
+      await cleanupRetainedUpdateComponents({
+        installRoot: configuredInstallRoot,
+        payloadRoot: configuredPayloadRoot,
+      });
+    }
+    if (installedLayout?.configRoot) {
+      await migrateLegacySecretsForCurrentUser({
+        migrationRoot: path.join(installedLayout.configRoot, 'migration', 'secrets'),
+        safeRoot,
+        safeStorage,
+      });
+    }
   }
   await mkdir(path.join(workspaceRoot, 'runtime'), { recursive: true });
   // Spawn the Qwen worker synchronously before the runtime can prewarm other
   // local models. Renderer callers await this exact shared promise via IPC.
-  if (!smokeMode && !safeEntryQaMode && !safeLaunchMode) void speechWarmup.start();
+  if (!smokeMode && !safeEntryQaMode && !safeLaunchMode && !updateDemoMode) void speechWarmup.start();
   runtimeUrl = await startRuntime();
 
   if (smokeMode) {
@@ -528,7 +547,7 @@ async function startDesktopApp() {
   Menu.setApplicationMenu(createApplicationMenu());
   powerMonitor.on('lock-screen', () => closeSafeForSystemBoundary());
   powerMonitor.on('suspend', () => closeSafeForSystemBoundary());
-  if (!safeEntryQaMode && !safeLaunchMode) createTray();
+  if (!safeEntryQaMode && !safeLaunchMode && !updateDemoMode) createTray();
   if (safeLaunchMode) {
     await showSafeWindow();
   } else {
@@ -582,7 +601,7 @@ async function createMainWindow() {
   }
 
   mainWindow.on('close', (event) => {
-    if (!shouldHideToTrayOnClose({ smokeMode, shuttingDown, quitRequested })) {
+    if (!shouldHideToTrayOnClose({ smokeMode: smokeMode || updateDemoMode, shuttingDown, quitRequested })) {
       return;
     }
     event.preventDefault();
@@ -602,6 +621,7 @@ async function createMainWindow() {
   configureMainWindowSecurity(mainWindow, runtimeUrl);
 
   await mainWindow.loadURL(runtimeUrl);
+  if (updateDemoMode) mainWindow.setTitle(appName);
   await readyToShow;
 }
 
@@ -618,6 +638,7 @@ async function showMainWindow() {
 }
 
 async function showSafeWindow() {
+  if (updateDemoMode) throw new Error('Monarch Safe is disabled in the isolated update demonstration.');
   if (shuttingDown || quitRequested) throw new Error('Monarch is shutting down.');
   if (safeWindow && !safeWindow.isDestroyed()) {
     if (safeWindow.isMinimized()) safeWindow.restore();
@@ -1540,7 +1561,7 @@ async function shutdownDesktop() {
   // It must never shut down a runtime owned by the real Desktop instance.
   // A standalone Safe window is a client of the already-running Monarch services.
   // Closing that shortcut must never tear down Oscar for the main Monarch app.
-  if (!safeEntryQaMode && !safeLaunchMode) await stopOscarBackend().catch(() => undefined);
+  if (!safeEntryQaMode && !safeLaunchMode && !updateDemoMode) await stopOscarBackend().catch(() => undefined);
   stopRuntime();
 }
 

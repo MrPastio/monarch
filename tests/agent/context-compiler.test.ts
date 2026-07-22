@@ -54,9 +54,28 @@ describe('agent context compiler', () => {
 
   it('redacts credential-shaped object keys recursively', () => {
     expect(redactAgentContextValue({
-      nested: { password: 'do-not-leak', normal: 'keep' },
+      nested: {
+        password: 'do-not-leak',
+        accessToken: 'opaque-access-value',
+        clientSecret: 'opaque-client-value',
+        normal: 'keep',
+      },
     }).value).toEqual({
-      nested: { normal: 'keep', password: '[REDACTED]' },
+      nested: {
+        normal: 'keep',
+        password: '[REDACTED]',
+        accessToken: '[REDACTED]',
+        clientSecret: '[REDACTED]',
+      },
     });
+  });
+
+  it('redacts camelCase credential fields embedded in workspace text', () => {
+    const redacted = redactAgentContextValue(
+      '{"accessToken":"opaque-access-value","clientSecret":"opaque-client-value","normal":"keep"}',
+    );
+    expect(JSON.stringify(redacted.value)).not.toContain('opaque-access-value');
+    expect(JSON.stringify(redacted.value)).not.toContain('opaque-client-value');
+    expect(JSON.stringify(redacted.value)).toContain('keep');
   });
 });

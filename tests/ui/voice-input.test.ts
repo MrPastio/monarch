@@ -288,10 +288,28 @@ describe('voice input helpers', () => {
     expect(selectVoiceInputMode({ SpeechRecognition: SpeechRecognitionMock })).toBeNull();
   });
 
-  it('keeps voice recordings bounded for quick local STT', () => {
+  it('allows long-form local dictation while retaining a resource safety envelope', () => {
     expect(VOICE_RECORDING_LIMITS.minMs).toBeGreaterThanOrEqual(400);
-    expect(VOICE_RECORDING_LIMITS.maxMs).toBeLessThanOrEqual(12_000);
-    expect(VOICE_RECORDING_LIMITS.maxBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect(VOICE_RECORDING_LIMITS.maxMs).toBe(10 * 60_000);
+    expect(VOICE_RECORDING_LIMITS.maxBytes).toBe(32 * 1024 * 1024);
+  });
+
+  it('does not stop composer dictation at the former 12-second boundary', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const harness = createCompletingHarness(vi.fn(async () => 'длинная диктовка'));
+
+    harness.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(12_500);
+
+    expect(CompletingMediaRecorderMock.instances[0]?.stopCalls).toBe(0);
+    expect(harness.controller?.isListening()).toBe(true);
+    expect(harness.statusPreview.textContent).toContain('нажми микрофон');
+
+    await vi.advanceTimersByTimeAsync(VOICE_RECORDING_LIMITS.maxMs - 12_500);
+    await flushPromises();
+    expect(CompletingMediaRecorderMock.instances[0]?.stopCalls).toBe(1);
   });
 
   it('maps technical local STT failures to short visible messages', () => {

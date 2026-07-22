@@ -122,6 +122,33 @@ describe('VoiceModule direct PCM sessions', () => {
     await voice.deactivate(context as any);
   });
 
+  it('treats the server TTL as inactivity and accepts PCM beyond 30 seconds', async () => {
+    vi.useFakeTimers();
+    const runtime = createStreamingRuntime();
+    const voice = new VoiceModule(createVoiceModels() as any, runtime as any);
+    const context = createContext();
+    const start = await execute(voice, context, 'voice.transcribe.stream.start', {
+      language: 'ru-RU', sampleRate: 16_000,
+    }, 'ui:voice:long-form');
+    const sessionId = (start.output as any).sessionId;
+
+    for (let sequence = 0; sequence < 16; sequence += 1) {
+      const pushed = await execute(voice, context, 'voice.transcribe.stream.push', {
+        sessionId,
+        sequence,
+        pcmBase64: Buffer.alloc(62_000).toString('base64'),
+      }, 'ui:voice:long-form');
+      expect(pushed.ok).toBe(true);
+      await vi.advanceTimersByTimeAsync(3_000);
+    }
+
+    expect(runtime.pushStream).toHaveBeenCalledTimes(16);
+    expect(runtime.cancelStream).not.toHaveBeenCalledWith(sessionId);
+    await vi.advanceTimersByTimeAsync(45_001);
+    expect(runtime.cancelStream).toHaveBeenCalledWith(sessionId);
+    await voice.deactivate(context as any);
+  });
+
   it('best-effort cancels and forgets a session when remote finalization fails', async () => {
     const runtime = createStreamingRuntime();
     runtime.finishStream.mockRejectedValueOnce(new Error('worker crashed'));

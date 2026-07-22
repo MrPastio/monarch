@@ -5,9 +5,9 @@ import { canUseDirectVoicePcm, createVoicePcmStream } from './voice-pcm-stream.j
 const VOICE_DONE_HIDE_DELAY_MS = 1800;
 const VOICE_ERROR_HIDE_DELAY_MS = 8000;
 const MIN_RECORDING_MS = 500;
-const MAX_RECORDING_MS = 12_000;
+const MAX_RECORDING_MS = 10 * 60_000;
 const RECORDING_CHUNK_MS = 500;
-const MAX_RECORDING_BYTES = 8 * 1024 * 1024;
+const MAX_RECORDING_BYTES = 32 * 1024 * 1024;
 const FALLBACK_RECORDING_MIME_TYPES = [
   'audio/webm;codecs=opus',
   'audio/webm',
@@ -255,7 +255,7 @@ export function attachVoiceInput(options) {
       button.title = 'Остановить локальную запись';
       showStatus({
         title: 'Записываю локально',
-        preview: 'Короткая команда до 12 сек',
+        preview: 'Говори свободно · нажми микрофон, когда закончишь',
         state: 'listening',
         cancelVisible: true,
       });
@@ -764,6 +764,9 @@ export function formatVoiceInputError(error) {
   const code = String(error?.code || error?.result?.error || '').toLowerCase();
   const message = String(error?.message || error || '');
   const value = `${code} ${message}`.toLowerCase();
+  if (/voice-audio-too-long|voice-stt-stream-too-long/.test(code)) {
+    return 'Запись превысила 10 минут. Заверши диктовку раньше.';
+  }
   if (/voice-stt-timeout|timeout|timed out|превысила лимит|не успел/.test(value)) {
     return 'Распознавание заняло слишком долго. Скажи короче.';
   }

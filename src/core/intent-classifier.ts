@@ -139,6 +139,10 @@ function classifyOrderedIntent(
     return buildDeterministicClassification('system_action', text, responseFormat, 0.9, 'explicit system action');
   }
 
+  if (isExternalComparativeResearch(text)) {
+    return buildDeterministicClassification('search', text, responseFormat, 0.9, 'external comparative research');
+  }
+
   if (isExplicitWebSearch(text)) {
     return buildDeterministicClassification('search', text, responseFormat, 0.88, 'explicit web search');
   }
@@ -254,7 +258,21 @@ function isExplicitSystemAction(text: string): boolean {
 
 function isExplicitWebSearch(text: string): boolean {
   return /(найди|поищи|search|find).{0,32}(?:в интернете|в сети|online|web|internet)/i.test(text)
+    || isBareExternalLookup(text)
     || hasFreshnessSignal(text);
+}
+
+function isBareExternalLookup(text: string): boolean {
+  if (!/^\s*(?:найди|поищи)(?:\s|$)/i.test(text)) return false;
+  const webLocation = /(?:\b(?:web|online|internet|website|site)\b|в\s+сети|в\s+интернете|на\s+сайте|веб[- ]?поиск|онлайн)/i;
+  const localTarget = /\b(?:file|folder|project|repo(?:sitory)?|code|workspace|memory|conversation|chat\s+history|branch|process|installed)\b|файл|папк|проект|репозитор|код|workspace|памят|переписк|истори\w*\s+чат|ветк\w*\s+git|процесс|установлен|баг|ошибк|тест/i;
+  return webLocation.test(text) || !localTarget.test(text);
+}
+
+function isExternalComparativeResearch(text: string): boolean {
+  const ranking = /\b(?:top\s*[- ]?\d+|best|smartest|fastest|most\s+(?:accurate|capable|efficient)|ranking|leaderboard|benchmark|compare)\b|топ\s*[- ]?\d+|лучш\w*|сам\w*\s+(?:умн|быстр|точн|мощн|эффективн)\w*|рейтинг|лидерборд|бенчмарк|сравни\w*/i;
+  const externalSubject = /\b(?:llm|slm|language\s+models?|ai\s+models?|models?|software|libraries?|frameworks?|products?|services?|devices?|laptops?|phones?|gpus?|cpus?)\b|(?:llm|slm|ai|ии|языков\w*)\s+модел|модел\w*\s+(?:llm|slm)|программ|библиотек|фреймворк|продукт|сервис|устройств|ноутбук|смартфон|видеокарт|процессор/i;
+  return ranking.test(text) && externalSubject.test(text);
 }
 
 function hasFreshnessSignal(text: string): boolean {
@@ -411,6 +429,12 @@ function detectSearchScope(
     return 'none';
   }
   if (/(latest|current|today|news|актуаль|свеж|новост|сегодня)/i.test(text)) {
+    return 'web_required';
+  }
+  if (isExternalComparativeResearch(text)) {
+    return 'web_required';
+  }
+  if (isBareExternalLookup(text)) {
     return 'web_required';
   }
   if (/(web|internet|online|интернет|в сети)/i.test(text)) {

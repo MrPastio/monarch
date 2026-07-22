@@ -42,12 +42,13 @@ import {
 } from './voice-session';
 
 type VoiceBridgeKind = 'stt' | 'tts';
-const MAX_TRANSCRIBE_AUDIO_BYTES = 12 * 1024 * 1024;
-const MAX_TRANSCRIBE_AUDIO_MS = 30_000;
-const TRANSCRIBE_TIMEOUT_MS = 45_000;
-const MAX_STREAMING_PCM_BYTES = 3 * 1024 * 1024;
+const MAX_TRANSCRIBE_AUDIO_BYTES = 32 * 1024 * 1024;
+const MAX_TRANSCRIBE_AUDIO_MS = 10 * 60_000;
+const TRANSCRIBE_BASE_TIMEOUT_MS = 45_000;
+const MAX_TRANSCRIBE_TIMEOUT_MS = MAX_TRANSCRIBE_AUDIO_MS + 30_000;
+const MAX_STREAMING_PCM_BYTES = 64 * 1024 * 1024;
 const MAX_STREAMING_BATCH_BYTES = 64 * 1024;
-const MAX_STREAMING_DURATION_MS = 30_000;
+const MAX_STREAMING_DURATION_MS = 10 * 60_000;
 const MAX_STREAMING_SESSIONS = 4;
 const STREAMING_SESSION_TTL_MS = 45_000;
 
@@ -72,7 +73,7 @@ interface VoiceSttSession {
   frames: number;
   createdAt: number;
   lastPartialAt: number | null;
-  timer: NodeJS.Timeout;
+  timer: NodeJS.Timeout | null;
 }
 
 export class VoiceModule implements MonarchModule {
@@ -546,11 +547,6 @@ export class VoiceModule implements MonarchModule {
     }
 
     const sessionId = randomBytes(24).toString('base64url');
-    const timer = setTimeout(() => {
-      const session = this.sttSessions.get(sessionId);
-      if (session) void this.closeSttSession(session, true);
-    }, STREAMING_SESSION_TTL_MS);
-    timer.unref?.();
     const session: VoiceSttSession = {
       id: sessionId,
       clientKey,
@@ -561,8 +557,9 @@ export class VoiceModule implements MonarchModule {
       frames: 0,
       createdAt: Date.now(),
       lastPartialAt: null,
-      timer,
+      timer: null,
     };
+    this.refreshSttSessionExpiry(session);
     // Reserve before loading the model so concurrent starts cannot bypass the
     // one-session-per-client/global limits.
     this.sttSessions.set(sessionId, session);
@@ -621,13 +618,14 @@ export class VoiceModule implements MonarchModule {
       await this.closeSttSession(session, true);
       return {
         ok: false,
-        summary: 'PCM stream превысил 30 секунд.',
+        summary: 'PCM stream превысил 10-минутный защитный предел.',
         error: 'voice-stt-stream-too-long',
       };
     }
     session.nextSequence += 1;
     session.bytes = nextBytes;
     session.frames = nextFrames;
+    this.refreshSttSessionExpiry(session);
     try {
       const result = await this.sttRuntime.pushStream({
         streamId: session.id,
@@ -740,11 +738,22 @@ export class VoiceModule implements MonarchModule {
   }
 
   private detachSttSession(session: VoiceSttSession): void {
-    clearTimeout(session.timer);
+    if (session.timer) clearTimeout(session.timer);
+    session.timer = null;
     if (this.sttSessions.get(session.id) === session) this.sttSessions.delete(session.id);
     if (this.sttSessionByClient.get(session.clientKey) === session.id) {
       this.sttSessionByClient.delete(session.clientKey);
     }
+  }
+
+  private refreshSttSessionExpiry(session: VoiceSttSession): void {
+    if (session.timer) clearTimeout(session.timer);
+    session.timer = setTimeout(() => {
+      if (this.sttSessions.get(session.id) === session) {
+        void this.closeSttSession(session, true);
+      }
+    }, STREAMING_SESSION_TTL_MS);
+    session.timer.unref?.();
   }
 
   private async closeSttSession(session: VoiceSttSession, cancelRuntime: boolean): Promise<void> {
@@ -782,8 +791,17 @@ export class VoiceModule implements MonarchModule {
     try {
       await writeFile(audioPath, audio.buffer);
       const result = usesDefaultVoskWorker()
-        ? await this.sttRuntime.transcribe({ audioPath, language: audio.language })
-        : await runConfiguredTranscriber(command, audioPath, audio.language);
+        ? await this.sttRuntime.transcribe({
+          audioPath,
+          language: audio.language,
+          ...(audio.durationMs === null ? {} : { durationMs: audio.durationMs }),
+        })
+        : await runConfiguredTranscriber(
+          command,
+          audioPath,
+          audio.language,
+          transcribeTimeoutMs(audio.durationMs),
+        );
       const transcript = 'text' in result
         ? result.text
         : readTranscriptFromOutput(result.stdout);
@@ -1257,7 +1275,7 @@ function readTranscribeAudioInput(input: unknown): TranscribeAudioInput | Invali
   }
   const durationMs = readOptionalPositiveNumber(record.durationMs);
   if (durationMs !== null && durationMs > MAX_TRANSCRIBE_AUDIO_MS) {
-    return { ok: false, summary: 'Запись слишком длинная для быстрого локального распознавания.', error: 'voice-audio-too-long' };
+    return { ok: false, summary: 'Запись превысила 10-минутный защитный предел локального распознавания.', error: 'voice-audio-too-long' };
   }
   const language = normalizeSpeechLanguage(record.language);
   if (!language) {
@@ -1333,7 +1351,8 @@ function withAudioCommandArgs(args: string[], audioPath: string, language: strin
 function runTranscribeCommand(
   executable: string,
   args: string[],
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  timeoutMs = TRANSCRIBE_BASE_TIMEOUT_MS,
 ): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -1362,10 +1381,10 @@ function runTranscribeCommand(
       child.kill();
       fail(new TranscribeCommandError(
         'voice-stt-timeout',
-        'Локальная STT-команда не успела завершиться за 45 секунд.',
+        'Локальная STT-команда не успела завершить распознавание за отведённое время.',
         { stderr }
       ));
-    }, TRANSCRIBE_TIMEOUT_MS);
+    }, timeoutMs);
     child.stdout.on('data', (chunk: Buffer) => {
       stdout += chunk.toString('utf8');
       if (stdout.length > 64_000) stdout = stdout.slice(-64_000);
@@ -1396,10 +1415,19 @@ async function runConfiguredTranscriber(
   command: string,
   audioPath: string,
   language: string,
+  timeoutMs: number,
 ): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
   const parsed = parseAndValidateCommand(command, process.cwd());
   const args = withAudioCommandArgs(parsed.args, audioPath, language);
-  return runTranscribeCommand(parsed.executable, args, process.env);
+  return runTranscribeCommand(parsed.executable, args, process.env, timeoutMs);
+}
+
+function transcribeTimeoutMs(durationMs: number | null): number {
+  if (durationMs === null) return TRANSCRIBE_BASE_TIMEOUT_MS;
+  return Math.min(
+    MAX_TRANSCRIBE_TIMEOUT_MS,
+    Math.max(TRANSCRIBE_BASE_TIMEOUT_MS, durationMs + 30_000),
+  );
 }
 
 function classifyTranscribeProcessFailure(stderr: string): { code: string; summary: string } | null {

@@ -5,8 +5,8 @@ const path = require('node:path');
 const readline = require('node:readline');
 
 const MAX_STREAMS = 4;
-const MAX_PCM_BYTES = 3 * 1024 * 1024;
-const MAX_DURATION_SECONDS = 30;
+const MAX_PCM_BYTES = 64 * 1024 * 1024;
+const MAX_DURATION_SECONDS = 10 * 60;
 const MAX_BATCH_BYTES = 64 * 1024;
 const FINAL_SILENCE_MS = 320;
 const STREAM_TTL_MS = readBoundedInteger(process.env.MONARCH_STT_STREAM_TTL_MS, 45_000, 100, 120_000);
@@ -96,13 +96,9 @@ function startStream(request) {
   const sampleRate = readSampleRate(request.sampleRate);
   const loadMs = ensureRecognizer(request.language);
   const stream = recognizer.createStream();
-  const timer = setTimeout(() => {
-    streams.delete(streamId);
-  }, STREAM_TTL_MS);
-  timer.unref();
-  streams.set(streamId, {
+  const state = {
     stream,
-    timer,
+    timer: null,
     sampleRate,
     sequence: 0,
     bytes: 0,
@@ -111,7 +107,9 @@ function startStream(request) {
     startedAt: performance.now(),
     lastPartialAt: null,
     partial: '',
-  });
+  };
+  streams.set(streamId, state);
+  refreshStreamExpiry(streamId, state);
   return {
     engine: 'sherpa-onnx-t-one',
     model: path.basename(modelDir),
@@ -149,6 +147,7 @@ function pushStream(request) {
   state.decodeMs += processingMs;
   state.partial = partial;
   if (partial) state.lastPartialAt = performance.now();
+  refreshStreamExpiry(streamId, state);
   return {
     engine: 'sherpa-onnx-t-one',
     sequence,
@@ -157,6 +156,14 @@ function pushStream(request) {
     audioMs: Math.round(nextFrames * 1000 / state.sampleRate),
     pid: process.pid,
   };
+}
+
+function refreshStreamExpiry(streamId, state) {
+  clearTimeout(state.timer);
+  state.timer = setTimeout(() => {
+    if (streams.get(streamId) === state) streams.delete(streamId);
+  }, STREAM_TTL_MS);
+  state.timer.unref();
 }
 
 function finishStream(request) {

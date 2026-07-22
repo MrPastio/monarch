@@ -6,6 +6,7 @@ import type {
   MonarchExecutionResult,
 } from './contracts';
 import { actionPredicateValueError } from './action-predicate';
+import { evaluateFilesystemAccess } from './filesystem-policy';
 
 const MAX_PREDICATE_FILE_BYTES = 1024 * 1024;
 
@@ -51,6 +52,23 @@ async function evaluatePredicate(
   const allowedRoots = (options.allowedRoots?.length ? options.allowedRoots : [options.workspaceRoot]).map((root) => path.resolve(root));
   if (!allowedRoots.some((root) => isPathInside(targetPath, root))) {
     return observation(options.phase, predicate, false, targetPath, 'predicate-outside-scope', 'Predicate target is outside the canonical action scope.');
+  }
+  const filesystemAccess = evaluateFilesystemAccess(targetPath, 'read', {
+    workspaceRoot: options.workspaceRoot,
+    sandboxRoot: options.workspaceRoot,
+    fallbackRoot: options.workspaceRoot,
+    allowedRoots,
+    protectWorkspaceInternals: true,
+  });
+  if (!filesystemAccess.allowed) {
+    return observation(
+      options.phase,
+      predicate,
+      false,
+      targetPath,
+      'predicate-filesystem-policy-blocked',
+      filesystemAccess.message,
+    );
   }
   if (!(await hasSafeExistingAncestor(targetPath, allowedRoots))) {
     return observation(options.phase, predicate, false, targetPath, 'predicate-symlink-escape', 'Predicate target resolves through an ancestor outside the canonical action scope.');

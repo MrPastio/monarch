@@ -29,6 +29,7 @@ import {
 import { hasSentOscarMessage, setMascotState } from './mascot-controller.js';
 import { createOscarSpeechController } from './oscar-speech.js';
 import { resolveOscarComposerPrimaryAction } from './voice-mode-state.js';
+import { resolveOscarRequestedModel } from './oscar-composer-policy.js';
 
 const MAX_OSCAR_NEW_TOKENS = 65_536;
 const MAX_OSCAR_ATTACHMENTS = 3;
@@ -48,6 +49,7 @@ const elements = {
   oscarComposer: document.querySelector('#oscar-composer'),
   oscarInput: document.querySelector('#oscar-input'),
   oscarImageUpload: document.querySelector('#oscar-image-upload'),
+  oscarAttachPhoto: document.querySelector('[data-oscar-attach-photo]'),
   oscarAttachmentsPreview: document.querySelector('#oscar-attachments-preview'),
   oscarEditingBanner: document.querySelector('#oscar-editing-banner'),
   oscarEditingCancel: document.querySelector('#oscar-editing-cancel'),
@@ -196,6 +198,10 @@ export function initOscarPane(appRenderCallback) {
 
   elements.oscarImageUpload?.addEventListener('change', () => {
     void addOscarImageAttachments(elements.oscarImageUpload.files);
+  });
+  elements.oscarAttachPhoto?.addEventListener('click', () => {
+    elements.oscarAttachPhoto.closest('details')?.removeAttribute('open');
+    elements.oscarImageUpload?.click();
   });
   elements.oscarAttachmentsPreview?.addEventListener('click', (event) => {
     const button = event.target.closest('[data-attachment-remove]');
@@ -1592,15 +1598,11 @@ async function deleteOscarMemoryItem(itemId) {
 }
 
 function readOscarRequestedModel() {
-  const deepThinking = state.oscar.deepThinking;
-  if (deepThinking && deepThinking !== 'none') {
-    return deepThinking;
-  }
-  const tier = state.oscar.modelSelection;
-  if (tier && tier !== 'none' && tier !== 'auto') {
-    return tier;
-  }
-  return '';
+  return resolveOscarRequestedModel({
+    intelligenceEnabled: state.oscar.intelligenceEnabled,
+    modelSelection: state.oscar.modelSelection,
+    deepThinking: state.oscar.deepThinking,
+  });
 }
 
 function syncOscarControls() {

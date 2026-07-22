@@ -31,6 +31,26 @@ def test_simple_hypothetical_does_not_trigger_expensive_research():
     assert decision.score < 0.52
 
 
+def test_external_model_ranking_selects_deep_research_with_benchmark_branches():
+    prompt = "Найди и выведи мне топ 3 самых умных моделей LLM в диапазоне 2b данных"
+
+    decision = resolve_research_decision(prompt)
+    queries = fallback_research_queries(prompt, decision)
+
+    assert decision.mode == "deep"
+    assert decision.reason == "comparative-ranking"
+    assert {"comparative-ranking", "external-benchmark-subject"}.issubset(decision.features)
+    assert "независимые бенчмарки" in queries[1]
+    assert "методология ограничения" in queries[2]
+
+
+def test_non_external_top_list_does_not_trigger_expensive_research():
+    decision = resolve_research_decision("Назови топ 3 причины регулярно делать перерывы")
+
+    assert decision.mode == "standard"
+    assert "comparative-ranking" not in decision.features
+
+
 @pytest.mark.parametrize(
     "prompt",
     [

@@ -535,9 +535,67 @@
                 <input type="file" id="oscar-image-upload" accept="image/png, image/jpeg, image/webp" style="display: none;" multiple>
                 <div id="oscar-attachments-preview" class="attachments-preview hidden"></div>
                 <div class="composer-input-row">
-                  <button class="claude-attach-btn" type="button" aria-label="Прикрепить изображение" title="Прикрепить изображение" onclick="document.getElementById('oscar-image-upload').click()">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
-                  </button>
+                  <details class="composer-options oscar-composer-menu" id="oscar-composer-menu">
+                    <summary class="claude-attach-btn" aria-label="Открыть меню добавления и режимов" title="Добавить и настроить" aria-controls="oscar-composer-menu-popover">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+                    </summary>
+                    <div class="composer-options-popover" id="oscar-composer-menu-popover">
+                      <button class="composer-menu-action" type="button" data-oscar-attach-photo>
+                        <span class="composer-menu-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"></rect><circle cx="9" cy="10" r="2"></circle><path d="m5 17 4-4 3 3 2-2 5 5"></path></svg>
+                        </span>
+                        <span class="composer-menu-copy"><strong>Прикрепить фото</strong><small>PNG, JPG или WebP</small></span>
+                      </button>
+                      <button class="composer-menu-action composer-intelligence-toggle" type="button" id="oscar-intelligence-toggle" aria-pressed="false">
+                        <span class="composer-menu-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24"><path d="M12 3v3"></path><path d="M12 18v3"></path><path d="M3 12h3"></path><path d="M18 12h3"></path><path d="m5.6 5.6 2.1 2.1"></path><path d="m16.3 16.3 2.1 2.1"></path><path d="m18.4 5.6-2.1 2.1"></path><path d="m7.7 16.3-2.1 2.1"></path><circle cx="12" cy="12" r="4"></circle></svg>
+                        </span>
+                        <span class="composer-menu-copy"><strong>Интеллект</strong><small>Показывает ручной выбор модели</small></span>
+                        <span class="composer-option-state" data-intelligence-state>Выкл</span>
+                      </button>
+                      <div class="composer-menu-divider" aria-hidden="true"></div>
+
+                      <div class="custom-dropdown" id="oscar-reasoning-dropdown-container">
+                        <button class="mode-chip dropdown-trigger" type="button" id="oscar-reasoning-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-reasoning-popover" aria-label="Выбрать Deep Thinking Oscar: выкл" title="Выбрать Deep Thinking Oscar: выкл">
+                          Deep Thinking · выкл
+                        </button>
+                        <div class="dropdown-popover hidden" id="oscar-reasoning-popover" role="listbox" aria-labelledby="oscar-reasoning-dropdown-btn" aria-hidden="true">
+                          <div class="dropdown-item active" data-value="none" role="option" aria-selected="true" tabindex="0">
+                            <div class="item-title">Выкл <span class="checkmark">✓</span></div>
+                            <div class="item-sub">Обычный режим ответа</div>
+                          </div>
+                          <div class="dropdown-item" data-value="gemma4-deepthinking" role="option" aria-selected="false" tabindex="-1">
+                            <div class="item-title">Pro <span class="checkmark">✓</span></div>
+                            <div class="item-sub">Сложный анализ и разработка</div>
+                          </div>
+                          <div class="dropdown-item" data-value="gemma4-31b" role="option" aria-selected="false" tabindex="-1">
+                            <div class="item-title">Extra <span class="checkmark">✓</span></div>
+                            <div class="item-sub">Максимальная глубина для редких задач</div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div class="custom-dropdown" id="oscar-research-dropdown-container">
+                        <button class="mode-chip dropdown-trigger" type="button" id="oscar-research-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-research-popover" aria-label="Выбрать исследование Oscar: Авто" title="Выбрать исследование Oscar: Авто">
+                          Исследование · Авто
+                        </button>
+                        <div class="dropdown-popover hidden" id="oscar-research-popover" role="listbox" aria-labelledby="oscar-research-dropdown-btn" aria-hidden="true">
+                          <div class="dropdown-item active" data-value="auto" role="option" aria-selected="true" tabindex="0">
+                            <div class="item-title">Авто <span class="checkmark">✓</span></div>
+                            <div class="item-sub">Oscar сам распознаёт сложное исследование</div>
+                          </div>
+                          <div class="dropdown-item" data-value="off" role="option" aria-selected="false" tabindex="-1">
+                            <div class="item-title">Выкл <span class="checkmark">✓</span></div>
+                            <div class="item-sub">Ответ без автоматического deep research</div>
+                          </div>
+                          <div class="dropdown-item" data-value="deep" role="option" aria-selected="false" tabindex="-1">
+                            <div class="item-title">Глубокое <span class="checkmark">✓</span></div>
+                            <div class="item-sub">План, несколько веток поиска и проверка</div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </details>
                   <textarea
                     id="oscar-input"
                     data-testid="oscar-input"
@@ -547,6 +605,25 @@
                     placeholder="Сообщение Oscar..."
                     aria-label="Сообщение Oscar"
                   ></textarea>
+                  <div class="custom-dropdown oscar-inline-model" id="oscar-model-dropdown-container" hidden>
+                    <button class="mode-chip dropdown-trigger" type="button" id="oscar-model-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-model-popover" aria-label="Выбрать модель Oscar: Авто" title="Выбрать модель Oscar: Авто">
+                      Авто
+                    </button>
+                    <div class="dropdown-popover hidden" id="oscar-model-popover" role="listbox" aria-labelledby="oscar-model-dropdown-btn" aria-hidden="true">
+                      <div class="dropdown-item active" data-value="none" role="option" aria-selected="true" tabindex="0">
+                        <div class="item-title">Авто <span class="checkmark">✓</span></div>
+                        <div class="item-sub">Умный выбор модели</div>
+                      </div>
+                      <div class="dropdown-item" data-value="gemma4-fast" role="option" aria-selected="false" tabindex="-1">
+                        <div class="item-title">Fast <span class="checkmark">✓</span></div>
+                        <div class="item-sub">Быстрые повседневные ответы</div>
+                      </div>
+                      <div class="dropdown-item" data-value="gemma4-balanced" role="option" aria-selected="false" tabindex="-1">
+                        <div class="item-title">Medium <span class="checkmark">✓</span></div>
+                        <div class="item-sub">Баланс скорости и качества</div>
+                      </div>
+                    </div>
+                  </div>
                   <button class="claude-voice-btn" id="oscar-voice-input" type="button" aria-label="Голосовой ввод" aria-pressed="false" title="Голосовой ввод">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"></path><path d="M19 11a7 7 0 0 1-14 0"></path><path d="M12 18v3"></path><path d="M8 21h8"></path></svg>
                   </button>
@@ -569,74 +646,6 @@
                   </button>
                 </div>
                 <div id="oscar-skill-radar" class="skill-radar hidden" aria-live="polite"></div>
-              </div>
-              <div class="composer-mode-chips">
-                <details class="composer-options">
-                  <summary aria-label="Параметры ответа" title="Параметры ответа">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10"></path><path d="M18 7h2"></path><circle cx="16" cy="7" r="2"></circle><path d="M4 17h2"></path><path d="M10 17h10"></path><circle cx="8" cy="17" r="2"></circle></svg>
-                  </summary>
-                  <div class="composer-options-popover">
-                    <div class="custom-dropdown" id="oscar-model-dropdown-container">
-                  <button class="mode-chip dropdown-trigger" type="button" id="oscar-model-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-model-popover" aria-label="Выбрать модель Oscar: Авто" title="Выбрать модель Oscar: Авто">
-                    Модель · Авто
-                  </button>
-                  <div class="dropdown-popover hidden" id="oscar-model-popover" role="listbox" aria-labelledby="oscar-model-dropdown-btn" aria-hidden="true">
-                    <div class="dropdown-item active" data-value="none" role="option" aria-selected="true" tabindex="0">
-                      <div class="item-title">Авто <span class="checkmark">✓</span></div>
-                      <div class="item-sub">Умный выбор модели</div>
-                    </div>
-                    <div class="dropdown-item" data-value="gemma4-fast" role="option" aria-selected="false" tabindex="-1">
-                      <div class="item-title">Fast <span class="checkmark">✓</span></div>
-                      <div class="item-sub">Быстрые повседневные ответы</div>
-                    </div>
-                    <div class="dropdown-item" data-value="gemma4-balanced" role="option" aria-selected="false" tabindex="-1">
-                      <div class="item-title">Medium <span class="checkmark">✓</span></div>
-                      <div class="item-sub">Баланс скорости и качества</div>
-                    </div>
-                  </div>
-                    </div>
-
-                    <div class="custom-dropdown" id="oscar-reasoning-dropdown-container">
-                  <button class="mode-chip dropdown-trigger" type="button" id="oscar-reasoning-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-reasoning-popover" aria-label="Выбрать Deep Thinking Oscar: выкл" title="Выбрать Deep Thinking Oscar: выкл">
-                    Deep Thinking · выкл
-                  </button>
-                  <div class="dropdown-popover hidden" id="oscar-reasoning-popover" role="listbox" aria-labelledby="oscar-reasoning-dropdown-btn" aria-hidden="true">
-                    <div class="dropdown-item active" data-value="none" role="option" aria-selected="true" tabindex="0">
-                      <div class="item-title">Выкл <span class="checkmark">✓</span></div>
-                      <div class="item-sub">Обычный режим ответа</div>
-                    </div>
-                    <div class="dropdown-item" data-value="gemma4-deepthinking" role="option" aria-selected="false" tabindex="-1">
-                      <div class="item-title">Pro <span class="checkmark">✓</span></div>
-                      <div class="item-sub">Сложный анализ и разработка</div>
-                    </div>
-                    <div class="dropdown-item" data-value="gemma4-31b" role="option" aria-selected="false" tabindex="-1">
-                      <div class="item-title">Extra <span class="checkmark">✓</span></div>
-                      <div class="item-sub">Максимальная глубина для редких задач</div>
-                    </div>
-                  </div>
-                    </div>
-
-                    <div class="custom-dropdown" id="oscar-research-dropdown-container">
-                  <button class="mode-chip dropdown-trigger" type="button" id="oscar-research-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-research-popover" aria-label="Выбрать исследование Oscar: Авто" title="Выбрать исследование Oscar: Авто">
-                    Исследование · Авто
-                  </button>
-                  <div class="dropdown-popover hidden" id="oscar-research-popover" role="listbox" aria-labelledby="oscar-research-dropdown-btn" aria-hidden="true">
-                    <div class="dropdown-item active" data-value="auto" role="option" aria-selected="true" tabindex="0">
-                      <div class="item-title">Авто <span class="checkmark">✓</span></div>
-                      <div class="item-sub">Oscar сам распознаёт сложное исследование</div>
-                    </div>
-                    <div class="dropdown-item" data-value="off" role="option" aria-selected="false" tabindex="-1">
-                      <div class="item-title">Выкл <span class="checkmark">✓</span></div>
-                      <div class="item-sub">Ответ без автоматического deep research</div>
-                    </div>
-                    <div class="dropdown-item" data-value="deep" role="option" aria-selected="false" tabindex="-1">
-                      <div class="item-title">Глубокое <span class="checkmark">✓</span></div>
-                      <div class="item-sub">План, несколько веток поиска и проверка</div>
-                    </div>
-                  </div>
-                    </div>
-                  </div>
-                </details>
               </div>
             </form>
           </div>
