@@ -10,6 +10,8 @@ describe('Windows installer and public snapshot boundary', () => {
   it('assembles a versioned offline runtime on the build machine', () => {
     const builder = read('installer/build-offline-payload.ps1');
     expect(builder).toContain('requirements-runtime.txt');
+    expect(builder).toContain('requirements-runtime-lock.txt');
+    expect(builder).toContain('"--constraint"');
     expect(builder).toContain('node_modules\\electron\\dist');
     expect(builder).toContain('node_modules\\canvas');
     expect(builder).toContain('build\\Release\\canvas.node');
@@ -40,7 +42,7 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(payloadContract.runtime.version).toBe('2026.07.6');
     expect(payloadContract.runtime.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(payloadContract.environment.version).toBe(
-      'backend-0.1.5-offline4',
+      'backend-0.1.5-offline5',
     );
     expect(payloadContract.environment.sha256).toMatch(/^[a-f0-9]{64}$/);
 
@@ -50,6 +52,11 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(requirements).not.toContain('torch');
     expect(requirements).not.toContain('transformers');
     expect(requirements).not.toContain('triton');
+    const runtimeLock = read('oscar/requirements-runtime-lock.txt');
+    expect(runtimeLock).toContain('certifi==2026.7.22');
+    expect(runtimeLock).toContain('starlette==1.3.1');
+    expect(runtimeLock).toContain('websockets==16.1.1');
+    expect(runtimeLock).not.toContain('torch');
 
     const finalizer = read('installer/finalize-offline-install.ps1');
     expect(finalizer).toContain('installationMode = "offline"');
