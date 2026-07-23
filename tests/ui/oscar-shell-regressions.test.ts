@@ -51,12 +51,16 @@ describe('Oscar live shell regressions', () => {
     expect(indexSource).toContain('data-active-mode="chat"');
     expect(indexSource).toContain('id="chat-mode-coder" type="button" role="tab" aria-selected="false">Coder</button>');
     expect(coderSource).toContain("setAttribute('data-active-mode', active ? 'coder' : 'chat')");
+    expect(coderSource).toContain("dispatchEvent(new Event('monarch:mascot-surface-changed'))");
     expect(coderStyles).toContain('.chat-mode-switch::before');
     expect(coderStyles).toContain('--chat-mode-indicator-x: 100%');
     expect(coderStyles).toContain('transform .42s cubic-bezier(.22, 1, .36, 1)');
     expect(coderStyles).toContain('.chat-mode-switch::before,');
     expect(coderStyles).toMatch(/#oscar-section\.coder-mode-active \.oscar-topbar\s*\{[^}]*display:\s*grid !important;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto;[^}]*z-index:\s*40;[^}]*visibility:\s*visible;/s);
     expect(coderStyles).toContain('#oscar-section.coder-mode-active .chat-mode-switch { justify-self: end; }');
+    expect(coderStyles).toContain('.app-shell.coder-workspace-active #inspector');
+    expect(appSource).toContain("const coderActive = shell?.classList.contains('coder-workspace-active') === true;");
+    expect(appSource).toContain("const surfaceVisible = !coderActive && (emptyHome || (dialogActive && !isCollapsed));");
   });
 
   it('does not render the local Oscar status label beside the mode switch', () => {
@@ -223,7 +227,7 @@ describe('Oscar live shell regressions', () => {
     expect(indexSource).toContain('id="coder-run-summary"');
     expect(coderStyles).toContain('.coder-explorer.is-mobile-open');
     expect(coderStyles).toContain('.coder-context-panel.is-mobile-open');
-    expect(coderStyles).toContain('.app-shell.coder-workspace-active .inspector');
+    expect(coderStyles).toContain('.app-shell.coder-workspace-active #inspector');
   });
 
   it('renders durable Code history as a searchable cross-project workspace instead of a select placeholder', () => {

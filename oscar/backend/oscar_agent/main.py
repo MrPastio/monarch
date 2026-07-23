@@ -2578,21 +2578,25 @@ def should_auto_continue(
     *,
     allow_deep_research: bool = False,
 ) -> bool:
-    """Continue only long-form answers that show concrete truncation signals."""
+    """Continue any non-empty answer that reached a concrete generation boundary."""
     return bool(
         continuation_count < MAX_ADAPTIVE_GENERATION_MULTIPLIER - 1
         and answer.strip()
-        and (
-            (allow_deep_research and deep_research_enabled(request))
-            or is_expansive_generation_task(latest_user_text(request))
-        )
         and usage.get("likely_truncated")
         and not model_runtime.generation_cancelled()
+        and (
+            not deep_research_enabled(request)
+            or allow_deep_research
+            or is_expansive_generation_task(latest_user_text(request))
+        )
     )
 
 
 def automatic_continuation_messages(request: ChatRequest, answer: str) -> list[ChatMessage]:
-    instruction = continuation_instruction(expected_request_language(request))
+    instruction = continuation_instruction(
+        expected_request_language(request),
+        code=is_expansive_generation_task(latest_user_text(request)) or looks_like_code_answer(answer),
+    )
     # The tail is enough to preserve the cut point while leaving room for the
     # original request, retrieved context, and a generous continuation budget.
     return request.messages + [
@@ -2673,12 +2677,24 @@ def apply_explicit_code_continuation(request: ChatRequest, previous_answer: str)
     language = expected_response_language(original)
     messages[user_index] = ChatMessage(
         role="user",
-        content=f"{original}\n\n{continuation_instruction(language)}",
+        content=f"{original}\n\n{continuation_instruction(language, code=True)}",
     )
     request.messages = messages
 
 
-def continuation_instruction(language: str) -> str:
+def continuation_instruction(language: str, *, code: bool = False) -> str:
+    if not code:
+        if language == "ru":
+            return (
+                "Продолжи предыдущий ответ ровно с оборванного места. Не повторяй уже написанное, "
+                "не добавляй новое вступление и не начинай ответ заново. Выведи только продолжение "
+                "и полностью закончи ответ."
+            )
+        return (
+            "Continue the previous response from the exact cutoff. Do not repeat existing text, "
+            "add a new introduction, or restart the response. Output only the continuation and "
+            "finish the response completely."
+        )
     if language == "ru":
         return (
             "Продолжи код ровно с последнего символа предыдущего ответа. Не повторяй ни строку, "
@@ -2756,8 +2772,13 @@ def estimate_continuation_usage(
 
 def correct_truncation_signal(usage: dict, boundary_text: str) -> None:
     generation_limit = int(usage.get("max_new_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or 0)
+    reached_generation_boundary = bool(
+        generation_limit >= 32
+        and max(32, generation_limit - 8) <= output_tokens <= generation_limit + 8
+    )
     usage["likely_truncated"] = bool(
-        int(usage.get("output_tokens") or 0) >= max(32, generation_limit - 8)
+        reached_generation_boundary
         or boundary_text.count("```") % 2
     )
 

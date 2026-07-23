@@ -83,8 +83,12 @@
   display: none !important;
 }
 
-.app-shell.coder-workspace-active .inspector,
+.app-shell.coder-workspace-active #inspector,
 .app-shell.coder-workspace-active .sidebar-memory-summary { display: none !important; }
+.app-shell.coder-workspace-active #inspector {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
 .app-shell.coder-workspace-active .main-canvas { grid-column: 2 / -1; }
 
 #oscar-section.coder-mode-active .oscar-topbar {
@@ -434,7 +438,7 @@
 @media (max-width: 760px) {
   #oscar-section.coder-mode-active .oscar-topbar { grid-template-columns: 1fr auto; }
   #oscar-section.coder-mode-active .oscar-breadcrumb { display: none; }
-  .app-shell.coder-workspace-active .inspector { display: none !important; visibility: hidden !important; pointer-events: none !important; }
+  .app-shell.coder-workspace-active #inspector { display: none !important; visibility: hidden !important; pointer-events: none !important; }
   .coder-mode-root { bottom: calc(74px + env(safe-area-inset-bottom, 0px)); }
   .coder-workspace-bar { min-height: 94px; padding: 8px 10px; display: grid; align-content: center; gap: 7px; }
   .coder-project-identity { width: 100%; }
