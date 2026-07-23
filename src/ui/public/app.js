@@ -1,4 +1,5 @@
 import { MonarchStartup } from '/startup/monarch-startup.js';
+import { mountMonarchLogo3D } from '/startup/monarch-logo-3d.js';
 import { state, updateState, subscribeState } from './modules/state.js';
 import { fetchState, revokeCapabilityLease, rollbackAction, updateAutonomyMode } from './modules/api.js';
 import './modules/test-suite.js';
@@ -29,6 +30,8 @@ const elements = {
   densitySelect: document.querySelector('#density-select'),
   inspectorDefaultSelect: document.querySelector('#inspector-default-select'),
   startupAnimationSelect: document.querySelector('#startup-animation-select'),
+  startupAnimationPreview: document.querySelector('#startup-animation-preview'),
+  startupAnimationStatus: document.querySelector('#startup-animation-status'),
   oscarDiagnostics: document.querySelector('#oscar-diagnostics'),
   oscarDiagnosticsToggle: document.querySelector('#oscar-diagnostics-toggle'),
   modelDropdownBtn: document.querySelector('#model-dropdown-btn'),
@@ -41,6 +44,21 @@ const elements = {
   actionLedgerList: document.querySelector('#action-ledger-list'),
   revokeAllLeases: document.querySelector('#revoke-all-leases'),
 };
+
+const STARTUP_TYPE_LABELS = Object.freeze({
+  classic: 'Классическая',
+  generated: 'Generated 3D',
+  model: 'Полная 3D-модель',
+  test: 'Системная',
+  disabled: 'Отключена',
+});
+const STARTUP_DURATIONS = Object.freeze({
+  classic: 2380,
+  generated: 2700,
+  model: 3040,
+});
+const startupMotionTemplate = document.querySelector('#startup-motion')?.cloneNode(true) || null;
+let activeStartupPreviewCleanup = null;
 
 const preferences = readPreferences();
 const reducedMotionMedia = window.matchMedia?.('(prefers-reduced-motion: reduce)');
@@ -538,12 +556,18 @@ elements.revokeAllLeases?.addEventListener('click', () => {
 });
 
 if (elements.startupAnimationSelect) {
-  elements.startupAnimationSelect.value = localStorage.getItem('monarch.startup.type') || 'original';
+  elements.startupAnimationSelect.value = readStartupType();
+  syncStartupPreferenceControls();
   elements.startupAnimationSelect.addEventListener('change', () => {
-    localStorage.setItem('monarch.startup.type', elements.startupAnimationSelect.value);
-    document.documentElement.dataset.startupType = elements.startupAnimationSelect.value;
+    const startupType = persistStartupType(elements.startupAnimationSelect.value);
+    elements.startupAnimationSelect.value = startupType;
+    syncStartupPreferenceControls();
   });
 }
+
+elements.startupAnimationPreview?.addEventListener('click', () => {
+  previewStartupMotion(elements.startupAnimationSelect?.value);
+});
 
 // Load global state from server
 async function loadState() {
@@ -599,12 +623,12 @@ function init() {
 init();
 
 function initStartupMotion() {
-  const startupType = localStorage.getItem('monarch.startup.type') || 'original';
+  const startupType = readStartupType();
   const forceReplay = new URLSearchParams(window.location.search).get('intro') === '1';
   let alreadyPlayed = false;
   try {
-    alreadyPlayed = sessionStorage.getItem('monarch.startup-motion.v4') === 'played';
-    if (!alreadyPlayed || forceReplay) sessionStorage.setItem('monarch.startup-motion.v4', 'played');
+    alreadyPlayed = sessionStorage.getItem('monarch.startup-motion.v8') === 'played';
+    if (!alreadyPlayed || forceReplay) sessionStorage.setItem('monarch.startup-motion.v8', 'played');
   } catch {
     // Storage is optional
   }
@@ -618,37 +642,177 @@ function initStartupMotion() {
     return;
   }
 
-  if (startupType === 'original') {
-    const duration = reducedMotionMedia?.matches ? 240 : 2380;
-    window.setTimeout(() => {
-      originalDOM?.classList.add('is-exiting');
-      shell?.classList.add('startup-complete');
-    }, duration);
-    window.setTimeout(() => originalDOM?.remove(), duration + (reducedMotionMedia?.matches ? 120 : 520));
+  if (startupType === 'classic' || startupType === 'generated' || startupType === 'model') {
+    playDomStartupMotion(originalDOM, startupType, {
+      completeShell: true,
+    });
     return;
   }
 
   if (startupType === 'test') {
     if (originalDOM) originalDOM.remove();
-    const startup = new MonarchStartup({
-      title: "MONARCH",
-      subtitle: "Local Intelligence Environment",
-      initialStatus: "Пробуждение системы",
-      minimumVisibleTime: reducedMotionMedia?.matches ? 500 : 1800,
+    playSystemStartupMotion({
+      completeShell: true,
     });
-
-    startup.mount();
-
-    // Simulate progress
-    setTimeout(() => { startup.setStatus("Запуск Oscar"); startup.setProgress(0.45); }, 600);
-    setTimeout(() => { startup.setStatus("Проверка Security"); startup.setProgress(0.8); }, 1200);
-
-    // Complete after simulation
-    setTimeout(async () => {
-      await startup.complete("Система готова");
-      shell?.classList.add('startup-complete');
-    }, 1800);
   }
+}
+
+function normalizeStartupType(value) {
+  if (value === 'original') return 'generated';
+  return Object.hasOwn(STARTUP_TYPE_LABELS, value) ? value : 'generated';
+}
+
+function readStartupType() {
+  let stored = '';
+  try {
+    stored = localStorage.getItem('monarch.startup.type') || '';
+  } catch {
+    // Storage is optional.
+  }
+  const startupType = normalizeStartupType(stored);
+  if (stored !== startupType) {
+    try {
+      localStorage.setItem('monarch.startup.type', startupType);
+    } catch {
+      // Storage is optional.
+    }
+  }
+  document.documentElement.dataset.startupType = startupType;
+  return startupType;
+}
+
+function persistStartupType(value) {
+  const startupType = normalizeStartupType(value);
+  try {
+    localStorage.setItem('monarch.startup.type', startupType);
+  } catch {
+    // Storage is optional.
+  }
+  document.documentElement.dataset.startupType = startupType;
+  return startupType;
+}
+
+function syncStartupPreferenceControls({ previewing = false } = {}) {
+  const startupType = normalizeStartupType(elements.startupAnimationSelect?.value);
+  if (elements.startupAnimationPreview) {
+    elements.startupAnimationPreview.disabled = previewing || startupType === 'disabled';
+    elements.startupAnimationPreview.textContent = previewing ? 'Показываю…' : 'Предпросмотр';
+  }
+  if (elements.startupAnimationStatus && !previewing) {
+    elements.startupAnimationStatus.textContent = startupType === 'disabled'
+      ? 'Стартовая анимация отключена'
+      : `По умолчанию: ${STARTUP_TYPE_LABELS[startupType]}`;
+  }
+}
+
+function playDomStartupMotion(root, startupType, options = {}) {
+  if (!(root instanceof HTMLElement)) return () => {};
+  root.dataset.startupVariant = startupType;
+  root.classList.remove('is-exiting');
+
+  const logo3D = startupType === 'model'
+    ? mountMonarchLogo3D(root.querySelector('[data-monarch-logo-3d]'))
+    : null;
+  const duration = reducedMotionMedia?.matches
+    ? 240
+    : STARTUP_DURATIONS[startupType];
+  const exitDelay = reducedMotionMedia?.matches ? 120 : 520;
+  const timers = [];
+  let finished = false;
+
+  timers.push(window.setTimeout(() => {
+    root.classList.add('is-exiting');
+    if (options.completeShell) elements.shell?.classList.add('startup-complete');
+  }, duration));
+  timers.push(window.setTimeout(() => {
+    if (finished) return;
+    finished = true;
+    logo3D?.dispose();
+    root.remove();
+    options.onComplete?.();
+  }, duration + exitDelay));
+
+  return () => {
+    if (finished) return;
+    finished = true;
+    timers.forEach((timer) => window.clearTimeout(timer));
+    logo3D?.dispose();
+    root.remove();
+  };
+}
+
+function playSystemStartupMotion(options = {}) {
+  const startup = new MonarchStartup({
+    title: 'MONARCH',
+    subtitle: 'Local Intelligence Environment',
+    initialStatus: 'Пробуждение системы',
+    minimumVisibleTime: reducedMotionMedia?.matches ? 500 : 1800,
+  });
+  const timers = [];
+  let finished = false;
+  startup.mount();
+
+  timers.push(window.setTimeout(() => {
+    startup.setStatus('Запуск Oscar');
+    startup.setProgress(0.45);
+  }, 600));
+  timers.push(window.setTimeout(() => {
+    startup.setStatus('Проверка Security');
+    startup.setProgress(0.8);
+  }, 1200));
+  timers.push(window.setTimeout(async () => {
+    await startup.complete('Система готова');
+    if (finished) return;
+    finished = true;
+    if (options.completeShell) elements.shell?.classList.add('startup-complete');
+    options.onComplete?.();
+  }, 1800));
+
+  return () => {
+    if (finished) return;
+    finished = true;
+    timers.forEach((timer) => window.clearTimeout(timer));
+    startup.destroy();
+  };
+}
+
+function previewStartupMotion(value) {
+  const startupType = normalizeStartupType(value);
+  if (startupType === 'disabled') {
+    syncStartupPreferenceControls();
+    return;
+  }
+
+  activeStartupPreviewCleanup?.();
+  document.querySelector('#startup-motion')?.remove();
+  document.querySelector('#monarch-startup')?.remove();
+  syncStartupPreferenceControls({ previewing: true });
+  if (elements.startupAnimationStatus) {
+    elements.startupAnimationStatus.textContent =
+      `Предпросмотр: ${STARTUP_TYPE_LABELS[startupType]}`;
+  }
+
+  let cleanup = null;
+  const finish = () => {
+    if (activeStartupPreviewCleanup === cleanup) activeStartupPreviewCleanup = null;
+    syncStartupPreferenceControls();
+  };
+
+  if (startupType === 'test') {
+    cleanup = playSystemStartupMotion({ onComplete: finish });
+  } else if (startupMotionTemplate instanceof HTMLElement && elements.shell) {
+    const previewRoot = startupMotionTemplate.cloneNode(true);
+    previewRoot.dataset.startupVariant = startupType;
+    elements.shell.before(previewRoot);
+    cleanup = playDomStartupMotion(previewRoot, startupType, {
+      onComplete: finish,
+    });
+  } else {
+    syncStartupPreferenceControls();
+    return;
+  }
+
+  activeStartupPreviewCleanup = cleanup;
 }
 
 function initMotionSystem() {
@@ -757,9 +921,12 @@ function updateInspectorToggleControls(isCollapsed) {
   const shell = elements.shell || document.getElementById('app-shell');
   const emptyHome = shell?.classList.contains('mascot-empty-home') === true;
   const dialogActive = shell?.classList.contains('mascot-dialog-active') === true;
-  const surfaceVisible = emptyHome || (dialogActive && !isCollapsed);
+  const coderActive = shell?.classList.contains('coder-workspace-active') === true;
+  const surfaceVisible = !coderActive && (emptyHome || (dialogActive && !isCollapsed));
   document.querySelectorAll('#toggle-inspector-btn, [data-inspector-toggle], [data-monarch-brand-cycle]').forEach((button) => {
-    const label = emptyHome
+    const label = coderActive
+      ? 'Маскот Oscar скрыт в Coder'
+      : emptyHome
       ? 'Центральный маскот Oscar всегда видим до первого сообщения'
       : isCollapsed ? 'Показать мини-маскота Oscar' : 'Скрыть мини-маскота Oscar';
     const textLabel = button.querySelector('span:not([aria-hidden="true"])');
@@ -767,7 +934,7 @@ function updateInspectorToggleControls(isCollapsed) {
     button.title = label;
     button.setAttribute('aria-label', label);
     button.setAttribute('aria-expanded', String(surfaceVisible));
-    button.setAttribute('aria-disabled', String(emptyHome));
+    button.setAttribute('aria-disabled', String(coderActive || emptyHome));
     if (button.matches('[data-monarch-brand-cycle]')) button.setAttribute('aria-pressed', String(dialogActive && !isCollapsed));
   });
   const inspector = document.getElementById('inspector');

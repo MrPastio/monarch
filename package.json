@@ -1,6 +1,6 @@
 {
   "name": "monarch",
-  "version": "0.2.3.6",
+  "version": "0.2.3.7",
   "private": true,
   "type": "module",
   "description": "Local-first AI ecosystem architecture kernel.",

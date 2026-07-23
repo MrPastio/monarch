@@ -2,7 +2,7 @@ param(
   [Parameter(Mandatory = $true)][string]$SourceRoot,
   [string]$BuildRuntimeRoot = "",
   [string]$OutputDirectory = "",
-  [string]$AppVersion = "0.2.3.6",
+  [string]$AppVersion = "0.2.3.7",
   [string]$RuntimeVersion = "2026.07.6",
   [string]$BackendEnvironment = "backend-0.1.5-offline5",
   [switch]$Force

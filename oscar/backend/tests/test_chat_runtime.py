@@ -622,6 +622,55 @@ async def test_stream_automatically_continues_truncated_code(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_stream_automatically_continues_truncated_general_answer(monkeypatch, tmp_path: Path):
+    store = MemoryStore(make_settings(tmp_path))
+    calls = []
+
+    def stream_chat(_tier, messages, *_args, **_kwargs):
+        calls.append(messages)
+        if len(calls) == 1:
+            return iter(["Доступны следующие действия:\n* Первый пункт\n* "])
+        return iter(["Второй пункт."])
+
+    def estimate_chat_usage(_messages, _sources, _reasoning, answer, *_args, **_kwargs):
+        output_tokens = 32 if answer.endswith("* ") else 5
+        return {
+            "input_tokens": 10,
+            "output_tokens": output_tokens,
+            "total_tokens": 10 + output_tokens,
+            "estimated": True,
+            "context_trimmed": False,
+            "dropped_messages": 0,
+            "max_new_tokens": 32,
+            "likely_truncated": output_tokens >= 24,
+        }
+
+    monkeypatch.setattr(main_module, "memory", store)
+    monkeypatch.setattr(main_module.model_runtime, "stream_chat", stream_chat)
+    monkeypatch.setattr(main_module.model_runtime, "estimate_chat_usage", estimate_chat_usage)
+    monkeypatch.setattr(main_module.model_runtime, "unload", lambda: None)
+
+    response = await main_module.chat_stream(ChatRequest(
+        conversation_id="continued-general-answer",
+        messages=[ChatMessage(role="user", content="Какие действия доступны в сфере безопасности?")],
+        use_memory=False,
+        allow_tools=False,
+        requested_model="gemma",
+        max_new_tokens=32,
+    ))
+    body = await collect_stream_body(response)
+    conversation = store.get_conversation("continued-general-answer")
+
+    assert len(calls) == 2
+    assert calls[1][-1].content.startswith("Продолжи предыдущий ответ ровно с оборванного места")
+    assert conversation["messages"][-1]["content"] == (
+        "Доступны следующие действия:\n* Первый пункт\n* Второй пункт."
+    )
+    assert '"auto_continued": true' in body
+    assert '"likely_truncated": false' in body
+
+
+@pytest.mark.asyncio
 async def test_stream_expands_truncated_code_budget_up_to_four_passes(monkeypatch, tmp_path: Path):
     store = MemoryStore(make_settings(tmp_path))
     calls = []

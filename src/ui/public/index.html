@@ -11,22 +11,68 @@
     <link rel="stylesheet" href="/studio.css">
     <link rel="stylesheet" href="/startup/monarch-startup.css">
     <script>
-      const startupType = localStorage.getItem('monarch.startup.type') || 'original';
+      const startupTypes = new Set(['classic', 'generated', 'model', 'test', 'disabled']);
+      let startupType = 'generated';
+      try {
+        const savedStartupType = localStorage.getItem('monarch.startup.type');
+        startupType = savedStartupType === 'original'
+          ? 'generated'
+          : startupTypes.has(savedStartupType)
+            ? savedStartupType
+            : 'generated';
+      } catch {
+        // Storage is optional.
+      }
       document.documentElement.dataset.startupType = startupType;
     </script>
   </head>
   <body data-theme="dark">
     <div class="startup-motion" id="startup-motion" aria-hidden="true">
       <div class="startup-stage">
-        <div class="startup-mark" aria-hidden="true">
-          <span class="startup-crown"><img src="/assets/brand/monarch-icon.png" alt=""></span>
-          <span class="startup-shield"><img src="/assets/brand/monarch-icon.png" alt=""></span>
-          <span class="startup-shimmer"></span>
+        <div class="startup-variant startup-variant--classic">
+          <div class="startup-mark" aria-hidden="true">
+            <span class="startup-crown">
+              <img src="/assets/brand/monarch-icon.png" alt="">
+            </span>
+            <span class="startup-shield">
+              <img src="/assets/brand/monarch-icon.png" alt="">
+            </span>
+            <span class="startup-shimmer"></span>
+          </div>
+          <span class="startup-wordmark">MONARCH</span>
+          <span class="startup-caption">local intelligence</span>
         </div>
-        <span class="startup-wordmark">MONARCH</span>
-        <span class="startup-caption">local intelligence</span>
+
+        <div class="startup-variant startup-variant--generated">
+          <div class="startup-generated-scene" aria-hidden="true">
+            <span class="startup-generated-shadow">
+              <img src="/assets/brand/monarch-startup-3d.png" alt="">
+            </span>
+            <span class="startup-generated-echo">
+              <img src="/assets/brand/monarch-startup-3d.png" alt="">
+            </span>
+            <span class="startup-generated-reveal">
+              <img src="/assets/brand/monarch-startup-3d.png" alt="">
+            </span>
+            <span class="startup-generated-light"></span>
+          </div>
+        </div>
+
+        <div class="startup-variant startup-variant--model">
+          <div class="startup-logo-scene" aria-hidden="true">
+            <div class="startup-logo-webgl" data-monarch-logo-3d></div>
+            <img
+              class="startup-logo-fallback"
+              src="/assets/brand/monarch-startup-3d.png"
+              alt=""
+            >
+          </div>
+        </div>
       </div>
     </div>
+    <script>
+      document.getElementById('startup-motion').dataset.startupVariant = startupType;
+    </script>
     <div class="app-shell mascot-empty-home" id="app-shell">
       
       <!-- 1. Minimal Left Sidebar -->
@@ -1546,13 +1592,27 @@
                         <option value="open">Показан</option>
                       </select>
                     </div>
-                    <div class="preference-card">
+                    <div class="preference-card preference-card--startup">
                       <label for="startup-animation-select">Запуск</label>
-                      <select id="startup-animation-select">
-                        <option value="original">Оригинальная</option>
-                        <option value="test">Тестовая</option>
-                        <option value="disabled">Отключена</option>
-                      </select>
+                      <div class="startup-preference-control">
+                        <select id="startup-animation-select">
+                          <option value="classic">Классическая</option>
+                          <option value="generated">Generated 3D — по умолчанию</option>
+                          <option value="model">Полная 3D-модель</option>
+                          <option value="test">Системная</option>
+                          <option value="disabled">Отключена</option>
+                        </select>
+                        <button
+                          id="startup-animation-preview"
+                          class="startup-preview-button"
+                          type="button"
+                        >
+                          Предпросмотр
+                        </button>
+                      </div>
+                      <small id="startup-animation-status" aria-live="polite">
+                        Используется при следующем запуске
+                      </small>
                     </div>
                   </div>
                   <div class="setting-row">

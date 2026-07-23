@@ -188,7 +188,9 @@ function setCoderMode(mode, options = {}) {
   elements.chatTab?.setAttribute('aria-selected', String(!active));
   elements.coderTab?.setAttribute('aria-selected', String(active));
   elements.chatTab?.closest('.chat-mode-switch')?.setAttribute('data-active-mode', active ? 'coder' : 'chat');
-  document.querySelector('#app-shell')?.classList.toggle('coder-workspace-active', active);
+  const shell = document.querySelector('#app-shell');
+  shell?.classList.toggle('coder-workspace-active', active);
+  shell?.dispatchEvent(new Event('monarch:mascot-surface-changed'));
   if (options.persist !== false) localStorage.setItem('monarch.oscar.mode', active ? 'coder' : 'chat');
   if (active) void loadCoderOverview();
   else {
