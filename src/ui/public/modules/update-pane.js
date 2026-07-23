@@ -69,7 +69,11 @@ export function primaryIntentForState(state) {
 
 export function shouldShowUpdateNotice(value) {
   const state = String(value?.state || 'idle');
-  return Boolean(value?.release && !NOTICE_HIDDEN_STATES.has(state));
+  return Boolean(
+    value?.installation?.canInstall !== false
+    && value?.release
+    && !NOTICE_HIDDEN_STATES.has(state),
+  );
 }
 
 async function runPrimaryIntent(updates) {
@@ -141,6 +145,15 @@ function renderGlobalNotice(next, state, statusCopy, actionCopy) {
 }
 
 function updateMessage(value) {
+  if (value.reason === 'development-workspace') {
+    return 'Режим разработки: release-updater отключён, поэтому установщик не скачивается и не предлагается.';
+  }
+  if (value.error?.code === 'installed-version-mismatch') {
+    return 'Launcher и запущенные файлы указывают на разные версии. Запусти Monarch через Monarch.exe или repair installer.';
+  }
+  if (value.error?.code === 'installed-layout-missing') {
+    return 'Установка не содержит доверенного launcher-layout. Обновление остановлено до repair installer.';
+  }
   if (value.error?.code === 'launcher-version-unsupported') {
     return 'Нужен ручной bootstrap/repair installer: текущий launcher не поддерживает этот layout.';
   }

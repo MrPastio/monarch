@@ -7,6 +7,7 @@ import {
   formatVoiceTranscript,
   formatVoiceInputError,
   initVoiceInput,
+  normalizeDictatedTechnicalTerms,
   normalizeSpeechLanguage,
   normalizeTranscript,
   preferredRecordingMimeType,
@@ -227,6 +228,18 @@ describe('voice input helpers', () => {
     expect(formatVoiceTranscript('это важно восклицательный знак', 'ru-RU')).toBe('Это важно!');
     expect(formatVoiceTranscript('привет точка как дела вопросительный знак', 'ru-RU')).toBe('Привет. Как дела?');
     expect(formatVoiceTranscript('это готовое предложение', 'ru-RU')).toBe('Это готовое предложение.');
+  });
+
+  it('repairs Russian IT dictation without rewriting a real request to walk away', () => {
+    expect(formatVoiceTranscript(
+      'объясни человеку далёкому отойти чем ты можешь быть полезен',
+      'ru-RU',
+    )).toBe('Объясни человеку далёкому от IT чем ты можешь быть полезен.');
+    expect(formatVoiceTranscript('я работаю в ай ти', 'ru-RU')).toBe('Я работаю в IT.');
+    expect(normalizeDictatedTechnicalTerms('мне нужно отойти от компьютера', 'ru-RU'))
+      .toBe('мне нужно отойти от компьютера');
+    expect(normalizeDictatedTechnicalTerms('далеко отойти от дома', 'ru-RU'))
+      .toBe('далеко отойти от дома');
   });
 
   it('does not alter URLs, file names, or decimal numbers', () => {

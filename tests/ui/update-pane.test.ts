@@ -19,5 +19,10 @@ describe('Monarch update pane', () => {
     expect(shouldShowUpdateNotice({ state: 'downloading', release })).toBe(true);
     expect(shouldShowUpdateNotice({ state: 'up-to-date', release })).toBe(false);
     expect(shouldShowUpdateNotice({ state: 'failed', release: null })).toBe(false);
+    expect(shouldShowUpdateNotice({
+      state: 'update-available',
+      release,
+      installation: { canInstall: false },
+    })).toBe(false);
   });
 });

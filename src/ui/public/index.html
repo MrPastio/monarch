@@ -92,6 +92,15 @@
           </button>
         </nav>
 
+        <aside id="monarch-update-notice" class="monarch-update-notice" role="status" aria-live="polite" hidden>
+          <span class="monarch-update-notice-mark" aria-hidden="true">↑</span>
+          <span class="monarch-update-notice-copy">
+            <strong id="monarch-update-notice-title">Доступно обновление</strong>
+            <small id="monarch-update-notice-detail"></small>
+          </span>
+          <button id="monarch-update-notice-action" type="button">Обновить и перезапустить</button>
+        </aside>
+
         <div class="sidebar-bottom">
           <button class="claude-ghost-btn" type="button" id="toggle-inspector-btn" title="Показать помощника Oscar" aria-label="Показать помощника Oscar">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"></path><line x1="15" y1="3" x2="15" y2="21"></line></svg>
@@ -134,15 +143,6 @@
           </span>
           <button id="safe-launch-feedback-close" type="button" aria-label="Закрыть уведомление Monarch Safe">×</button>
         </aside>
-        <aside id="monarch-update-notice" class="monarch-update-notice" role="status" aria-live="polite" hidden>
-          <span class="monarch-update-notice-mark" aria-hidden="true">↑</span>
-          <span class="monarch-update-notice-copy">
-            <strong id="monarch-update-notice-title">Доступно обновление</strong>
-            <small id="monarch-update-notice-detail"></small>
-          </span>
-          <button id="monarch-update-notice-action" type="button">Обновить и перезапустить</button>
-        </aside>
-
         <!-- A. HOME / COMMAND CENTER -->
         <section class="hidden" id="command-center" aria-hidden="true">
           <div class="claude-chat-feed">
@@ -251,27 +251,11 @@
                 </span>
                 <span>Новый чат</span>
               </div>
-              <div class="chat-mode-switch" role="tablist" aria-label="Режим Oscar">
+              <div class="chat-mode-switch" role="tablist" aria-label="Режим Oscar" data-active-mode="chat">
                 <button id="chat-mode-standard" type="button" role="tab" aria-selected="true">Чат</button>
-                <button id="chat-mode-coder" type="button" role="tab" aria-selected="false">Код</button>
+                <button id="chat-mode-coder" type="button" role="tab" aria-selected="false">Coder</button>
               </div>
               <div id="oscar-status-pills" class="status-pills"></div>
-              <details class="oscar-stats-panel" id="oscar-diagnostics" aria-label="Статус Oscar">
-                <summary id="oscar-diagnostics-toggle" aria-controls="oscar-diagnostics-content" aria-expanded="false" aria-label="Открыть статус Oscar" title="Открыть статус Oscar">
-                  <span>Локально ·</span>
-                  <span id="oscar-diagnostics-state">ожидание</span>
-                </summary>
-                <div class="oscar-stats-content" id="oscar-diagnostics-content" role="region" aria-labelledby="oscar-diagnostics-toggle">
-                  <section>
-                    <span id="oscar-backend-label" class="status-text pending">ожидание</span>
-                    <div id="oscar-backend"><div class="empty-state compact">Статус Oscar ещё не загружен.</div></div>
-                  </section>
-                  <section>
-                    <span id="oscar-context-label" class="status-text pending">ожидание</span>
-                    <div id="oscar-context"><div class="empty-state compact">Контекст появится после ответа Oscar.</div></div>
-                  </section>
-                </div>
-              </details>
               <div class="topbar-actions" aria-label="Действия Oscar">
                 <button class="topbar-icon-button" id="oscar-refresh" type="button" aria-label="Обновить статус" title="Обновить статус">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.1 6.6"></path><path d="M3 12A9 9 0 0 1 18.1 5.4"></path><path d="M3 18v-5h5"></path><path d="M21 6v5h-5"></path></svg>

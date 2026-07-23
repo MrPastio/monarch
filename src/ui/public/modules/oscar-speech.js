@@ -320,6 +320,22 @@ export function createOscarSpeechController({
   };
   const prewarm = () => requestWarmup(false);
   const retryWarmup = () => requestWarmup(true);
+  const markNeuralReleased = () => {
+    warmupPromise = null;
+    publish({ warmup: normalizeSpeechWarmupResult({ status: 'idle' }) });
+  };
+  const releaseForInference = async () => {
+    if (typeof desktop?.releaseSpeechOutput !== 'function') {
+      return { ok: true, released: false };
+    }
+    const result = await desktop.releaseSpeechOutput();
+    if (result?.ok !== false) markNeuralReleased();
+    return result;
+  };
+  const restoreAfterInference = () => {
+    markNeuralReleased();
+    return prewarm();
+  };
 
   return {
     toggle,
@@ -327,6 +343,8 @@ export function createOscarSpeechController({
     prewarm,
     awaitWarmup: prewarm,
     retryWarmup,
+    releaseForInference,
+    restoreAfterInference,
     dispose: () => {
       removeTelemetryListener();
       removeTelemetryListener = () => {};

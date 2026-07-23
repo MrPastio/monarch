@@ -1241,10 +1241,14 @@ def test_recycle_waits_for_response_flush_and_skips_native_unload(monkeypatch):
             self.callback = callback
             self.daemon = False
             self.started = False
+            self.cancelled = False
             timers.append(self)
 
         def start(self):
             self.started = True
+
+        def cancel(self):
+            self.cancelled = True
 
     monkeypatch.setattr(main_module.settings, "auto_unload_after_generation", True)
     monkeypatch.setattr(main_module.settings, "recycle_backend_after_generation", True)
@@ -1259,6 +1263,53 @@ def test_recycle_waits_for_response_flush_and_skips_native_unload(monkeypatch):
     assert timers[0].delay == 5.0
     assert timers[0].daemon is True
     assert timers[0].started is True
+    main_module.cancel_pending_backend_recycle()
+
+
+@pytest.mark.asyncio
+async def test_new_inference_cancels_stale_backend_recycle(monkeypatch):
+    timers = []
+    stops = []
+
+    class FakeTimer:
+        def __init__(self, delay, callback):
+            self.delay = delay
+            self.callback = callback
+            self.daemon = False
+            self.started = False
+            self.cancelled = False
+            timers.append(self)
+
+        def start(self):
+            self.started = True
+
+        def cancel(self):
+            self.cancelled = True
+
+    monkeypatch.setattr(main_module.settings, "auto_unload_after_generation", True)
+    monkeypatch.setattr(main_module.settings, "recycle_backend_after_generation", True)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setattr(main_module.threading, "Timer", FakeTimer)
+    monkeypatch.setattr(main_module, "stop_process_tree", lambda: stops.append(True))
+
+    main_module.unload_after_generation()
+    stale_timer = timers[-1]
+    lease = await main_module.acquire_inference_slot()
+
+    assert lease is not None
+    assert stale_timer.cancelled is True
+    stale_timer.callback()
+    assert stops == []
+
+    main_module.unload_after_generation()
+    active_timer = timers[-1]
+    active_timer.callback()
+    assert stops == []
+
+    lease.release()
+    active_timer.callback()
+    assert stops == [True]
+    main_module.cancel_pending_backend_recycle()
 
 
 @pytest.mark.asyncio
@@ -2235,9 +2286,10 @@ def test_prompt_builder_uses_russian_only_base_prompt():
     )
     system = messages[0].content
 
-    assert '<oscar_agent_policy version="3.1" language="ru">' in system
+    assert '<oscar_agent_policy version="3.2" language="ru">' in system
     assert "Тебя зовут Oscar" in system
     assert "Тебя и Monarch создал MrPastio" in system
+    assert "Никогда не представляйся языковой моделью Google" in system
     assert "Codex создан OpenAI" in system
     assert "создавший Monarch и Codex" not in system
     assert "Главная цель" in system
@@ -2255,9 +2307,10 @@ def test_prompt_builder_uses_english_only_base_prompt():
     )
     system = messages[0].content
 
-    assert '<oscar_agent_policy version="3.1" language="en">' in system
+    assert '<oscar_agent_policy version="3.2" language="en">' in system
     assert "Your name is Oscar" in system
     assert "MrPastio created you and Monarch" in system
+    assert "Never introduce yourself as a Google language model" in system
     assert "Codex was created by OpenAI" in system
     assert "MrPastio created Monarch and Codex" not in system
     assert "Primary objective" in system
@@ -2343,6 +2396,34 @@ def test_quality_gate_flags_broken_identity_answer():
     )
 
     assert "identity_confusion" in flags
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Я — большая языковая модель, разработанная Google.",
+        "Это возможно в рамках моих возможностей как большой языковой модели.",
+        "I am a large language model developed by Google.",
+    ],
+)
+def test_quality_gate_regenerates_provider_identity_leaks(answer: str):
+    request = ChatRequest(messages=[
+        ChatMessage(role="user", content="Кто ты и чем можешь быть полезен?"),
+    ])
+
+    flags = main_module.detect_quality_flags(answer, "ru", request)
+
+    assert "provider_identity_leak" in flags
+    assert main_module.quality_regeneration_enabled(request, flags) is True
+
+
+def test_quality_gate_allows_oscar_identity_with_internal_model_fact():
+    answer = (
+        "Я — Oscar, локальный агент Monarch. "
+        "Для генерации текста Monarch может использовать локальную модель Gemma от Google."
+    )
+
+    assert "provider_identity_leak" not in main_module.detect_quality_flags(answer, "ru")
 
 
 def test_quality_gate_flags_false_codex_creator_attribution():
@@ -3344,6 +3425,9 @@ def test_semantic_questions_do_not_receive_agent_action_contract(query):
     "Создай файл notes.txt",
     "Проверь проект и исправь баг",
     "Какими инструментами ты можешь пользоваться?",
+    "Чем ты можешь быть полезен?",
+    "Можешь выполнять агентские функции?",
+    "Can you act as an agent?",
 ])
 def test_real_agent_requests_still_receive_action_contract(query):
     assert runtime_module.prompt_needs_agent_context(query) is True

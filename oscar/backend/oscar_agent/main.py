@@ -113,6 +113,10 @@ sharing_qwen_runtime = QwenSharingRuntime(settings)
 sharing_tts_runtime = QwenTtsSharingRuntime(settings)
 model_quality = ModelQualityLedger(settings.data_dir / "model_quality.json")
 inference_lock = asyncio.Lock()
+_backend_recycle_state_lock = threading.Lock()
+_backend_recycle_timer: threading.Timer | None = None
+_backend_recycle_epoch = 0
+_active_inference_slots = 0
 workspace = WorkspaceService(settings)
 environment = EnvironmentScanner(settings)
 
@@ -164,6 +168,48 @@ CONTEXTUAL_GENERIC_TOKEN_PATTERN = re.compile(
 )
 
 
+class InferenceSlotLease:
+    """Own one acquired inference lock and expose an idempotent release."""
+
+    def __init__(self, lock: asyncio.Lock):
+        self._lock = lock
+        self._released = False
+
+    def locked(self) -> bool:
+        return not self._released and self._lock.locked()
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        if self._lock.locked():
+            self._lock.release()
+        finish_inference_activity()
+
+
+def cancel_pending_backend_recycle() -> None:
+    global _backend_recycle_timer, _backend_recycle_epoch
+    with _backend_recycle_state_lock:
+        _backend_recycle_epoch += 1
+        timer = _backend_recycle_timer
+        _backend_recycle_timer = None
+    if timer is not None:
+        timer.cancel()
+
+
+def begin_inference_activity() -> None:
+    global _active_inference_slots
+    cancel_pending_backend_recycle()
+    with _backend_recycle_state_lock:
+        _active_inference_slots += 1
+
+
+def finish_inference_activity() -> None:
+    global _active_inference_slots
+    with _backend_recycle_state_lock:
+        _active_inference_slots = max(0, _active_inference_slots - 1)
+
+
 def get_inference_lock() -> asyncio.Lock:
     global inference_lock
     running_loop = asyncio.get_running_loop()
@@ -173,7 +219,7 @@ def get_inference_lock() -> asyncio.Lock:
     return inference_lock
 
 
-async def acquire_inference_slot() -> asyncio.Lock | None:
+async def acquire_inference_slot() -> InferenceSlotLease | None:
     lock = get_inference_lock()
     timeout_seconds = max(settings.inference_queue_timeout_seconds, 0.0)
     if timeout_seconds <= 0 and lock.locked():
@@ -181,7 +227,8 @@ async def acquire_inference_slot() -> asyncio.Lock | None:
 
     try:
         await asyncio.wait_for(lock.acquire(), timeout=max(timeout_seconds, 0.001))
-        return lock
+        begin_inference_activity()
+        return InferenceSlotLease(lock)
     except asyncio.TimeoutError:
         return None
 
@@ -1594,6 +1641,29 @@ def extract_tool_result_action_proposals(results: list[WorkspaceToolResult], req
     return extract_action_proposals(envelope, request)[1]
 
 
+def run_scheduled_backend_recycle(epoch: int) -> None:
+    global _backend_recycle_timer
+    with _backend_recycle_state_lock:
+        if epoch != _backend_recycle_epoch or _active_inference_slots:
+            return
+        _backend_recycle_timer = None
+    stop_process_tree()
+
+
+def schedule_backend_recycle(delay_seconds: float = 5.0) -> None:
+    global _backend_recycle_timer, _backend_recycle_epoch
+    with _backend_recycle_state_lock:
+        previous_timer = _backend_recycle_timer
+        _backend_recycle_epoch += 1
+        epoch = _backend_recycle_epoch
+        timer = threading.Timer(delay_seconds, lambda: run_scheduled_backend_recycle(epoch))
+        timer.daemon = True
+        _backend_recycle_timer = timer
+    if previous_timer is not None:
+        previous_timer.cancel()
+    timer.start()
+
+
 def unload_after_generation() -> None:
     if not settings.auto_unload_after_generation:
         return
@@ -1603,9 +1673,7 @@ def unload_after_generation() -> None:
         # tears down llama.cpp/CUDA. Closing a large hybrid model in-process can
         # terminate the native runtime before the final bytes reach the client;
         # recycling the process releases the same RAM without that race.
-        timer = threading.Timer(5.0, stop_process_tree)
-        timer.daemon = True
-        timer.start()
+        schedule_backend_recycle()
         return
     try:
         model_runtime.unload()
@@ -3349,7 +3417,11 @@ async def maybe_regenerate_for_quality(
         return full_answer, quality_flags, False
 
 
-CRITICAL_QUALITY_FLAGS = {"stale_answer_repeat", "irrelevant_identity_fallback"}
+CRITICAL_QUALITY_FLAGS = {
+    "stale_answer_repeat",
+    "irrelevant_identity_fallback",
+    "provider_identity_leak",
+}
 
 DIRECT_IDENTITY_QUESTION_PATTERN = re.compile(
     r"(?:кто\s+(?:тебя|вас|oscar|оскара)\s+создал|кто\s+тво[йя]\s+создател|"
@@ -3411,6 +3483,14 @@ def detect_quality_flags(
         r"интегрированн\w*\s+ai[- ]?приложен",
     ]) or len(re.findall(r"\bя\s*[-—]", answer, flags=re.IGNORECASE)) >= 3:
         flags.append("identity_confusion")
+
+    if re_search_any(lowered, [
+        r"(?:^|[.!?]\s*)я\s*(?:[-—]\s*)?(?:это\s+)?(?:больш\w*\s+)?(?:языков\w+\s+модел\w*|language\s+model)",
+        r"\bмо\w*\s+возможност\w*.{0,48}\bкак\s+(?:больш\w*\s+)?языков\w+\s+модел\w*",
+        r"\bi(?:'m|\s+am)\s+(?:an?\s+)?(?:large\s+)?(?:ai\s+)?language\s+model\b",
+        r"\bmy\s+capabilit\w*.{0,48}\bas\s+(?:an?\s+)?(?:large\s+)?(?:ai\s+)?language\s+model\b",
+    ]):
+        flags.append("provider_identity_leak")
 
     if re_search_any(lowered, [
         r"mrpastio.{0,100}(?:создал|создавш\w*|создател\w*|стоит\s+за\s+созданием)\s+monarch\s+(?:и|&)\s+codex",

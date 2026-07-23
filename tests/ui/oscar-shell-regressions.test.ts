@@ -47,6 +47,37 @@ describe('Oscar live shell regressions', () => {
     expect(styles).toContain('#oscar-composer.intelligence-enabled .composer-input-row');
   });
 
+  it('keeps the Chat and Coder mode switch explicit and animates its active indicator', () => {
+    expect(indexSource).toContain('data-active-mode="chat"');
+    expect(indexSource).toContain('id="chat-mode-coder" type="button" role="tab" aria-selected="false">Coder</button>');
+    expect(coderSource).toContain("setAttribute('data-active-mode', active ? 'coder' : 'chat')");
+    expect(coderStyles).toContain('.chat-mode-switch::before');
+    expect(coderStyles).toContain('--chat-mode-indicator-x: 100%');
+    expect(coderStyles).toContain('transform .42s cubic-bezier(.22, 1, .36, 1)');
+    expect(coderStyles).toContain('.chat-mode-switch::before,');
+    expect(coderStyles).toMatch(/#oscar-section\.coder-mode-active \.oscar-topbar\s*\{[^}]*display:\s*grid !important;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto;[^}]*z-index:\s*40;[^}]*visibility:\s*visible;/s);
+    expect(coderStyles).toContain('#oscar-section.coder-mode-active .chat-mode-switch { justify-self: end; }');
+  });
+
+  it('does not render the local Oscar status label beside the mode switch', () => {
+    const topbar = indexSource.slice(
+      indexSource.indexOf('<div class="oscar-topbar"'),
+      indexSource.indexOf('<section id="coder-mode-root"'),
+    );
+    expect(topbar).not.toContain('id="oscar-diagnostics"');
+    expect(topbar).not.toContain('Локально ·');
+  });
+
+  it('keeps update actions in the lower-left rail instead of overlaying the mode switch', () => {
+    const noticeIndex = indexSource.indexOf('id="monarch-update-notice"');
+    const sidebarBottomIndex = indexSource.indexOf('class="sidebar-bottom"');
+    const mainCanvasIndex = indexSource.indexOf('class="main-canvas"');
+    expect(noticeIndex).toBeGreaterThan(indexSource.indexOf('class="nav-stack"'));
+    expect(noticeIndex).toBeLessThan(sidebarBottomIndex);
+    expect(sidebarBottomIndex).toBeLessThan(mainCanvasIndex);
+    expect(styles).toMatch(/\.monarch-update-notice\s*\{[^}]*position:\s*relative;[^}]*grid-template-columns:\s*32px minmax\(0,\s*1fr\);[^}]*margin-top:\s*auto;/s);
+  });
+
   it('keeps the central mascot permanent until the first message and only then enables the movable mini-mascot', () => {
     expect(indexSource).toContain('data-monarch-brand-cycle');
     expect(indexSource).toContain('data-mascot-resize');
@@ -157,10 +188,11 @@ describe('Oscar live shell regressions', () => {
   });
 
   it('releases the idle neural voice model before a desktop Oscar model route starts', () => {
-    expect(oscarSource).toContain("typeof window.monarchDesktop?.releaseSpeechOutput === 'function'");
-    expect(oscarSource).toContain('await window.monarchDesktop.releaseSpeechOutput()');
-    expect(oscarSource.indexOf('await window.monarchDesktop.releaseSpeechOutput()'))
+    expect(oscarSource).toContain('oscarSpeechController?.releaseForInference');
+    expect(oscarSource).toContain('await oscarSpeechController.releaseForInference()');
+    expect(oscarSource.indexOf('await oscarSpeechController.releaseForInference()'))
       .toBeLessThan(oscarSource.indexOf("executeOscarCapabilityAction('oscar.chat.route'"));
+    expect(oscarSource).toContain('void oscarSpeechController?.restoreAfterInference()');
   });
 
   it('keeps the exact Coder launch folder visible and separates model switching from failures', () => {

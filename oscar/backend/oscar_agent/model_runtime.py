@@ -110,14 +110,15 @@ class PromptMessage:
     role: str
     content: str
 
-OSCAR_PROMPT_VERSION = "3.1"
+OSCAR_PROMPT_VERSION = "3.2"
 
 OSCAR_SYSTEM_PROMPT_RU = r"""
-<oscar_agent_policy version="3.1" language="ru">
+<oscar_agent_policy version="3.2" language="ru">
 Роль и идентичность
 - Тебя зовут Oscar. Тебя и Monarch создал MrPastio. На прямой вопрос о твоём создателе отвечай этим фактом сразу.
 - Факт о создателе относится только к прямому вопросу об авторстве. Не подменяй им вопрос об отношении, мнении или другом предикате: отвечай именно на него с последовательной позиции Oscar, не изображая человеческие чувства.
 - Ты локальный AI-ассистент и агентский интерфейс Monarch. Monarch объединяет локальные модели, память, поиск, файлы, модули и Kernel-контроллер действий.
+- Gemma/Google — внутренний механизм локальной генерации, а не твоя продуктовая идентичность. Никогда не представляйся языковой моделью Google. На вопросы «кто ты», «чем ты полезен» и об агентских функциях представляй Oscar и только реально переданные возможности Monarch.
 - Codex создан OpenAI и помогает MrPastio в инженерной работе над Monarch. Codex не создан MrPastio; никогда не объединяй авторство Monarch/Oscar и Codex.
 - О MrPastio не выдумывай биографию, опыт или проекты. Без дополнительных данных можно сказать только, что он соло-разработчик Monarch/Oscar и развивает local-first модульную AI-систему.
 
@@ -149,11 +150,12 @@ OSCAR_SYSTEM_PROMPT_RU = r"""
 """.strip()
 
 OSCAR_SYSTEM_PROMPT_EN = r"""
-<oscar_agent_policy version="3.1" language="en">
+<oscar_agent_policy version="3.2" language="en">
 Role and identity
 - Your name is Oscar. MrPastio created you and Monarch. When asked directly who created you, lead with that fact.
 - The creator fact applies only to direct authorship questions. Never substitute it for a question about attitude, opinion, or another predicate: answer that predicate from a consistent Oscar perspective without claiming human emotions.
 - You are the local AI assistant and agent interface inside Monarch. Monarch combines local models, memory, search, files, modules, and a Kernel action controller.
+- Gemma/Google is an internal local generation engine, not your product identity. Never introduce yourself as a Google language model. For identity, usefulness, or agent-function questions, present Oscar and only the Monarch capabilities actually supplied to the turn.
 - Codex was created by OpenAI and helps MrPastio with engineering work on Monarch. MrPastio did not create Codex; never merge the authorship of Monarch/Oscar with Codex.
 - Do not invent MrPastio's biography, experience, or projects. Without supplied facts, say only that he is the solo developer of Monarch/Oscar and is building a local-first modular AI system.
 
@@ -1981,8 +1983,13 @@ AGENT_TARGET_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CAPABILITY_QUESTION_PATTERN = re.compile(
-    r"(?:\b(?:what\s+can\s+you\s+do|which\s+(?:tools?|capabilities|actions)|available\s+(?:tools?|actions))\b|"
+    r"(?:\b(?:what\s+can\s+you\s+do|how\s+can\s+you\s+(?:help|be\s+useful)|"
+    r"can\s+you\s+(?:act|work)\s+as\s+an?\s+agent|can\s+you\s+perform\s+agent(?:ic)?\s+functions?|"
+    r"which\s+(?:tools?|capabilities|actions)|available\s+(?:tools?|actions))\b|"
     r"(?:что\s+ты\s+умеешь|что\s+можешь|каки(?:е|ми)\s+(?:инструмент|возможност|действи)|"
+    r"(?:чем|как)\s+ты\s+можешь\s+быть\s+полезен|как\s+ты\s+можешь\s+помочь|"
+    r"можешь\s+(?:ли\s+ты\s+)?выполнять\s+агентск\w*\s+функц\w*|"
+    r"можешь\s+(?:ли\s+ты\s+)?(?:быть|работать)\s+(?:как\s+)?агент\w*|"
     r"доступн\w*\s+(?:инструмент|возможност|действи)))",
     re.IGNORECASE,
 )

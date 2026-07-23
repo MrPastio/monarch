@@ -45,6 +45,7 @@ import {
 import { MONARCH_RELEASE_PUBLIC_KEYS, createMonarchUpdateEndpoints } from './update-config.mjs';
 import { createUpdateDemoRuntime } from './update-demo.mjs';
 import { MonarchUpdateService } from './update-service.mjs';
+import { resolveDesktopUpdatePolicy } from './update-policy.mjs';
 import { createTransactionalInstallerCoordinator } from './installer-coordinator.mjs';
 import {
   preparePostUpdateTrial,
@@ -57,6 +58,8 @@ import { cleanupRetainedUpdateComponents } from './retention-cleanup.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(__dirname, '..', '..');
 const workspacePackage = readJsonFileIfPresent(path.join(workspaceRoot, 'package.json'));
+const safeEntryQaMode = process.argv.includes('--safe-entry-qa');
+const updateDemoMode = process.argv.includes('--update-demo') && !app.isPackaged;
 const configuredInstallRoot = process.env.MONARCH_INSTALL_ROOT && path.isAbsolute(process.env.MONARCH_INSTALL_ROOT)
   ? path.resolve(process.env.MONARCH_INSTALL_ROOT)
   : null;
@@ -64,27 +67,33 @@ const installedDescriptor = readJsonFileIfPresent(path.join(workspaceRoot, 'vers
 const installedLayout = configuredInstallRoot
   ? readJsonFileIfPresent(path.join(configuredInstallRoot, 'install-layout.json'))
   : null;
+const installedPointer = configuredInstallRoot
+  ? readJsonFileIfPresent(path.join(configuredInstallRoot, 'current.json'))
+  : null;
 const installedLauncher = configuredInstallRoot
   ? readJsonFileIfPresent(path.join(configuredInstallRoot, 'launcher-version.json'))
   : null;
-const sourceAppVersion = installedDescriptor?.appVersion
-  || (!app.isPackaged ? workspacePackage?.version : null)
-  || app.getVersion();
-const currentAppVersion = /^\d+\.\d+\.\d+(?:\.\d+)?$/.test(String(sourceAppVersion || ''))
-  ? sourceAppVersion
-  : app.getVersion();
-const currentLauncherVersion = /^\d+\.\d+\.\d+$/.test(String(installedLauncher?.version || ''))
-  ? installedLauncher.version
-  : '1.0.0';
 const configuredPayloadRoot = process.env.MONARCH_PAYLOAD_ROOT && path.isAbsolute(process.env.MONARCH_PAYLOAD_ROOT)
   ? path.resolve(process.env.MONARCH_PAYLOAD_ROOT)
   : null;
+const updatePolicy = resolveDesktopUpdatePolicy({
+  isPackaged: app.isPackaged,
+  demoMode: updateDemoMode,
+  fallbackVersion: !app.isPackaged ? workspacePackage?.version : app.getVersion(),
+  installRoot: configuredInstallRoot,
+  payloadRoot: configuredPayloadRoot,
+  installedDescriptor,
+  installedPointer,
+  installedLayout,
+});
+const currentAppVersion = updatePolicy.currentVersion;
+const currentLauncherVersion = /^\d+\.\d+\.\d+$/.test(String(installedLauncher?.version || ''))
+  ? installedLauncher.version
+  : '1.0.0';
 const updateRoot = configuredPayloadRoot
   ? path.join(configuredPayloadRoot, 'updates')
   : path.join(workspaceRoot, 'runtime', 'updates');
 const preloadPath = path.join(__dirname, 'preload.mjs');
-const safeEntryQaMode = process.argv.includes('--safe-entry-qa');
-const updateDemoMode = process.argv.includes('--update-demo') && !app.isPackaged;
 const safeEntryQaProfile = safeEntryQaMode
   ? mkdtempSync(path.join(os.tmpdir(), 'monarch-safe-entry-qa-'))
   : null;
@@ -124,6 +133,7 @@ const updateService = new MonarchUpdateService({
   updateRoot: updateDemoProfile ? path.join(updateDemoProfile, 'updates') : updateRoot,
   fetchImpl: updateDemo?.fetchImpl || globalThis.fetch,
   diskReserveBytes: updateDemoMode ? 0 : undefined,
+  installationPolicy: updatePolicy,
   launchInstaller: updateDemo?.launchInstaller || (async (context) => {
     if (!installerCoordinator) {
       const error = new Error('Transactional installer coordination is unavailable outside an installed Monarch layout.');
