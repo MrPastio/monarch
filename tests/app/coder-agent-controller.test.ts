@@ -47,7 +47,7 @@ describe('CoderAgentController', () => {
       }) as typeof app.executeCapability;
 
       const started = controller.start('Создай src/ready.ts.', snapshot.project.id);
-      const completed = await waitForTerminal(controller, started.id);
+      const completed = await controller.waitForTerminal(started.id);
 
       expect(completed.status).toBe('completed');
       expect(completed.answer).toContain('Готово');
@@ -99,7 +99,7 @@ describe('CoderAgentController', () => {
       }) as typeof app.executeCapability;
 
       const started = controller.start('Update value.txt and verify the persisted result.', snapshot.project.id);
-      const completed = await waitForTerminal(controller, started.id);
+      const completed = await controller.waitForTerminal(started.id);
 
       expect(completed.status).toBe('completed');
       expect(completed.events.filter((event) => event.capabilityId === 'coder.files.read' && event.ok)).toHaveLength(2);
@@ -161,7 +161,7 @@ describe('CoderAgentController', () => {
       }) as typeof app.executeCapability;
 
       const started = controller.start('Создай файл verify.js и запусти Node для проверки.', snapshot.project.id);
-      const completed = await waitForTerminal(controller, started.id);
+      const completed = await controller.waitForTerminal(started.id);
 
       expect(completed.status).toBe('completed');
       expect(completed.context).toMatchObject({ modelCalls: 4, modelTotalTokens: 100 });
@@ -221,7 +221,7 @@ describe('CoderAgentController', () => {
       }) as typeof app.executeCapability;
 
       const started = controller.start('Проведи аудит проекта и что нужно исправить и улучшить.', snapshot.project.id);
-      const completed = await waitForTerminal(controller, started.id);
+      const completed = await controller.waitForTerminal(started.id);
 
       expect(completed.status).toBe('completed');
       expect(completed.events.some((event) => event.error === 'terminal-receipts-missing')).toBe(false);
@@ -312,7 +312,7 @@ describe('CoderAgentController', () => {
       }) as typeof app.executeCapability;
 
       const started = controller.start('Проведи аудит проекта и перечисли приоритетные улучшения.', snapshot.project.id);
-      const completed = await waitForTerminal(controller, started.id);
+      const completed = await controller.waitForTerminal(started.id);
 
       expect(completed.status).toBe('completed');
       expect(completed.error).toBe('');
@@ -390,7 +390,7 @@ describe('CoderAgentController', () => {
       }) as typeof app.executeCapability;
 
       const started = controller.start('Проведи аудит проекта и перечисли приоритетные улучшения.', snapshot.project.id);
-      const completed = await waitForTerminal(controller, started.id);
+      const completed = await controller.waitForTerminal(started.id);
 
       expect(completed.status).toBe('completed');
       expect(completed.events.some((event) => event.error === 'terminal-receipts-missing'
@@ -468,7 +468,7 @@ describe('CoderAgentController', () => {
       }) as typeof app.executeCapability;
 
       const started = controller.start('Проведи аудит проекта и перечисли приоритетные улучшения.', snapshot.project.id);
-      const completed = await waitForTerminal(controller, started.id);
+      const completed = await controller.waitForTerminal(started.id);
 
       expect(completed.status).toBe('completed');
       expect(completed.events.filter((event) => event.error === 'terminal-receipts-missing')).toHaveLength(3);
@@ -524,7 +524,7 @@ describe('CoderAgentController', () => {
       }) as typeof app.executeCapability;
 
       const started = controller.start('Прочитай файлы a.txt, b.txt и c.txt.', snapshot.project.id);
-      const completed = await waitForTerminal(controller, started.id);
+      const completed = await controller.waitForTerminal(started.id);
       const receiptPrompt = String((modelMessages[1] as any[])?.at(-1)?.content || '');
 
       expect(completed.status).toBe('completed');
@@ -580,7 +580,7 @@ describe('CoderAgentController', () => {
       }) as typeof app.executeCapability;
 
       const started = controller.start('Проведи аудит проекта и перечисли приоритетные улучшения.', snapshot.project.id);
-      const completed = await waitForTerminal(controller, started.id);
+      const completed = await controller.waitForTerminal(started.id);
 
       expect(completed.status).toBe('failed');
       expect(completed.events.some((event) => event.capabilityId === 'coder.projects.list' && event.ok)).toBe(true);
@@ -645,7 +645,7 @@ describe('CoderAgentController', () => {
       }) as typeof app.executeCapability;
 
       const started = controller.start('Прочитай README.md и проведи аудит проекта.', snapshot.project.id);
-      const completed = await waitForTerminal(controller, started.id);
+      const completed = await controller.waitForTerminal(started.id);
 
       expect(completed.status).toBe('completed');
       expect(completed.events.some((event) => event.capabilityId === 'coder.files.read' && event.ok)).toBe(true);
@@ -703,7 +703,7 @@ describe('CoderAgentController', () => {
       }) as typeof app.executeCapability;
 
       const started = controller.start('Проанализируй проект и исправь файл value.txt.', snapshot.project.id);
-      const completed = await waitForTerminal(controller, started.id);
+      const completed = await controller.waitForTerminal(started.id);
 
       expect(completed.status).toBe('completed');
       expect(completed.events.some((event) => event.error === 'terminal-receipts-missing')).toBe(true);
@@ -749,7 +749,7 @@ describe('CoderAgentController', () => {
       }) as typeof app.executeCapability;
 
       const started = controller.start('Создай файл pinned.txt.', selected.project.id);
-      const completed = await waitForTerminal(controller, started.id);
+      const completed = await controller.waitForTerminal(started.id);
 
       expect(completed.status).toBe('completed');
       expect(completed.projectId).toBe(selected.project.id);
@@ -802,7 +802,7 @@ describe('CoderAgentController', () => {
       await modelStarted;
       const requested = await controller.cancel(started.id);
       const repeated = await controller.cancel(started.id);
-      const cancelled = await waitForTerminal(controller, started.id);
+      const cancelled = await controller.waitForTerminal(started.id);
 
       expect(requested.cancelled).toBe(true);
       expect(repeated.cancelled).toBe(true);
@@ -816,12 +816,3 @@ describe('CoderAgentController', () => {
     }
   }, CONTROLLER_TEST_TIMEOUT_MS);
 });
-
-async function waitForTerminal(controller: CoderAgentController, runId: string) {
-  for (let attempt = 0; attempt < 1_000; attempt += 1) {
-    const run = controller.runs.require(runId);
-    if (['completed', 'failed', 'cancelled'].includes(run.status)) return run;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error('Coder run did not reach a terminal state.');
-}
