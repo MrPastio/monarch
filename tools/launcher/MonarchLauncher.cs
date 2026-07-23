@@ -10,7 +10,7 @@ namespace MonarchLauncher
 {
     internal static class Program
     {
-        private const string LauncherVersion = "1.0.0";
+        private const string LauncherVersion = "1.0.1";
         private const int HealthTimeoutSeconds = 120;
         private const int MaximumCandidateAttempts = 2;
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
@@ -52,7 +52,19 @@ namespace MonarchLauncher
                 var pendingPath = Path.Combine(transactionsRoot, "pending-update.json");
                 if (File.Exists(pendingPath))
                 {
-                    return RunCandidateTrial(installRoot, layout, pendingPath);
+                    var pending = ReadJson(pendingPath);
+                    RequireInteger(pending, "schemaVersion", 1);
+                    var phase = RequireString(pending, "phase");
+                    if (String.Equals(phase, "staged", StringComparison.Ordinal)
+                        || String.Equals(phase, "trial", StringComparison.Ordinal))
+                    {
+                        return RunCandidateTrial(installRoot, layout, pendingPath);
+                    }
+                    if (!String.Equals(phase, "committed", StringComparison.Ordinal)
+                        && !String.Equals(phase, "rollback-required", StringComparison.Ordinal))
+                    {
+                        throw new InvalidDataException("Pending update phase is invalid.");
+                    }
                 }
 
                 var pointer = ReadJson(currentPath);

@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)][string]$InstallRoot,
-  [string]$LauncherVersion = "1.0.0"
+  [string]$LauncherVersion = "1.0.1"
 )
 
 $ErrorActionPreference = "Stop"
