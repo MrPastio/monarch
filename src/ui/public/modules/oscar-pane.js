@@ -488,6 +488,7 @@ async function submitOscarMessage(appRenderCallback) {
   const encryptedAtSubmission = state.oscar.encrypted === true;
   const encryptedSessionActive = () => !encryptedAtSubmission
     || (state.oscar.encrypted === true && state.oscar.conversationId === conversationId && state.oscar.safeUnlocked === true);
+  let speechReleasedForInference = false;
 
   syncOscarControls();
   const showDebugTrace = /(?:debug|отлад|ревью|review|trace|трассиров|диагностик)/i.test(text);
@@ -547,11 +548,12 @@ async function submitOscarMessage(appRenderCallback) {
       return;
     }
 
-    if (typeof window.monarchDesktop?.releaseSpeechOutput === 'function') {
-      const released = await window.monarchDesktop.releaseSpeechOutput();
+    if (oscarSpeechController?.releaseForInference) {
+      const released = await oscarSpeechController.releaseForInference();
       if (released?.ok === false) {
         throw new Error(released.summary || 'Не удалось освободить память голосовой модели перед запуском Oscar.');
       }
+      speechReleasedForInference = true;
     }
 
     const capabilityIdFallback = 'oscar.chat.local';
@@ -928,6 +930,9 @@ async function submitOscarMessage(appRenderCallback) {
     oscarSubmitInFlight = false;
     setOscarBusy(false);
     appRenderCallback();
+    if (speechReleasedForInference) {
+      void oscarSpeechController?.restoreAfterInference();
+    }
   }
 }
 

@@ -187,6 +187,7 @@ function setCoderMode(mode, options = {}) {
   if (elements.root) elements.root.hidden = !active;
   elements.chatTab?.setAttribute('aria-selected', String(!active));
   elements.coderTab?.setAttribute('aria-selected', String(active));
+  elements.chatTab?.closest('.chat-mode-switch')?.setAttribute('data-active-mode', active ? 'coder' : 'chat');
   document.querySelector('#app-shell')?.classList.toggle('coder-workspace-active', active);
   if (options.persist !== false) localStorage.setItem('monarch.oscar.mode', active ? 'coder' : 'chat');
   if (active) void loadCoderOverview();

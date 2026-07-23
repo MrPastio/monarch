@@ -23,12 +23,13 @@
 7. Coder policy is owned by the trusted Oscar runtime; the controller supplies project/context data without duplicating policy prose.
 8. Voice policies stay short enough for small local models and never imply memory, web, tools or device control where those lanes lack them.
 9. Coder is a closed project-scoped prompt lane: general Oscar profile, memory, live Monarch registry, global skills, and synthetic receipt-language inference cannot enter it.
+10. A base model or provider is an internal inference implementation, never Oscar's product identity. Identity and capability questions must describe Oscar and only the live Monarch capabilities supplied to that turn.
 
 ## Current budgets and measured effect
 
-- Oscar RU base: `3630 -> 1639` characters.
-- Oscar EN base: `3098 -> 1566` characters.
-- Minimal Russian chat system context: `11542 -> 1949` characters (`-83%`).
+- Oscar RU base v3.2: `4478` characters.
+- Oscar EN base v3.2: `4388` characters.
+- Minimal Russian chat system context with current turn metadata: about `5065` characters.
 - Voice Fast: `786 -> 513` characters.
 - Voice Realtime: `812 -> 520` characters.
 - Capability transport: at most 48 ranked entries, eight candidate schemas, valid JSON capped near 12,000 characters; schemas/entries are removed as complete objects rather than truncating JSON text.

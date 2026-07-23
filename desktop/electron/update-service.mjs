@@ -72,6 +72,7 @@ export class MonarchUpdateService extends EventEmitter {
     requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
     stallTimeoutMs = DEFAULT_STALL_TIMEOUT_MS,
     diskReserveBytes = 256 * 1024 * 1024,
+    installationPolicy = { mode: 'installed', canInstall: true, reason: null },
   }) {
     super();
     if (!parseSemver(currentVersion)) {
@@ -106,6 +107,7 @@ export class MonarchUpdateService extends EventEmitter {
     this.requestTimeoutMs = requestTimeoutMs;
     this.stallTimeoutMs = stallTimeoutMs;
     this.diskReserveBytes = diskReserveBytes;
+    this.installationPolicy = normalizeInstallationPolicy(installationPolicy);
 
     this.statePath = path.join(this.updateRoot, 'update-state.json');
     this.checkpointPath = path.join(this.updateRoot, 'download-checkpoint.json');
@@ -166,6 +168,7 @@ export class MonarchUpdateService extends EventEmitter {
       reason: this.reason,
       error: this.error ? Object.freeze({ ...this.error }) : null,
       sources: Object.freeze(this.sourceStatus.map((entry) => Object.freeze({ ...entry }))),
+      installation: this.installationPolicy,
       canPause: this.state === 'downloading',
       canResume: this.state === 'paused',
       canCancel: CANCELLABLE_STATES.has(this.state),
@@ -176,6 +179,9 @@ export class MonarchUpdateService extends EventEmitter {
   async check() {
     return this.#runExclusive('check', async () => {
       await this.initialize();
+      if (!this.installationPolicy.canInstall) {
+        return this.#blockUnavailableInstallation();
+      }
       this.stopIntent = null;
       this.#transition('checking', {
         release: null,
@@ -334,6 +340,10 @@ export class MonarchUpdateService extends EventEmitter {
   }
 
   async resume() {
+    await this.initialize();
+    if (!this.installationPolicy.canInstall) {
+      return this.#blockUnavailableInstallation();
+    }
     if (this.state !== 'paused' && this.state !== 'cancelled') {
       return this.#invalidIntent('resume');
     }
@@ -377,6 +387,10 @@ export class MonarchUpdateService extends EventEmitter {
   }
 
   async install() {
+    await this.initialize();
+    if (!this.installationPolicy.canInstall) {
+      return this.#blockUnavailableInstallation();
+    }
     if (this.state === 'update-available') {
       await this.download();
     } else if (this.state === 'paused' || this.state === 'cancelled') {
@@ -432,6 +446,9 @@ export class MonarchUpdateService extends EventEmitter {
 
   async #downloadImpl(allowResume) {
     await this.initialize();
+    if (!this.installationPolicy.canInstall) {
+      return this.#blockUnavailableInstallation();
+    }
     if (!this.release?.asset || !this.manifestDigest) {
       return this.#invalidIntent(allowResume ? 'resume' : 'download');
     }
@@ -742,6 +759,34 @@ export class MonarchUpdateService extends EventEmitter {
     });
   }
 
+  #blockUnavailableInstallation() {
+    const reason = this.installationPolicy.reason;
+    const cleared = {
+      release: null,
+      manifestBytes: null,
+      manifestDigest: null,
+      readyInstallerPath: null,
+      progress: null,
+      reason,
+      sourceStatus: [],
+    };
+    if (this.installationPolicy.mode === 'development') {
+      return this.#transition('up-to-date', {
+        ...cleared,
+        error: null,
+      });
+    }
+    return this.#transition('failed', {
+      ...cleared,
+      error: {
+        code: reason || 'update-installation-unavailable',
+        message: reason === 'installed-version-mismatch'
+          ? 'Running Monarch version does not match the launcher current-version pointer.'
+          : 'Monarch update installation requires a valid installed launcher layout.',
+      },
+    });
+  }
+
   #invalidIntent(intent, code = 'invalid-update-state') {
     return Object.freeze({
       ...this.snapshot(),
@@ -856,6 +901,18 @@ export function isAllowedAssetRedirect(initialUrl, currentUrl, nextUrl) {
     ].includes(nextUrl.hostname);
   }
   return false;
+}
+
+function normalizeInstallationPolicy(value) {
+  const policy = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const mode = ['installed', 'development', 'unsupported', 'demo'].includes(policy.mode)
+    ? policy.mode
+    : 'installed';
+  return Object.freeze({
+    mode,
+    canInstall: policy.canInstall !== false,
+    reason: policy.reason ? String(policy.reason).slice(0, 120) : null,
+  });
 }
 
 function normalizeEndpoint(value) {

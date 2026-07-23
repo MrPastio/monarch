@@ -646,6 +646,7 @@ export function formatVoiceTranscript(value, language = 'ru-RU', options = {}) {
   let text = normalizeTranscript(value);
   if (!text) return '';
 
+  text = normalizeDictatedTechnicalTerms(text, locale);
   text = replaceSpokenPunctuation(text, SPOKEN_PUNCTUATION[primary] || []);
   text = text
     .replace(/\s+([,.;:!?])/g, '$1')
@@ -661,6 +662,19 @@ export function formatVoiceTranscript(value, language = 'ru-RU', options = {}) {
     }
   }
   return text;
+}
+
+export function normalizeDictatedTechnicalTerms(value, language = 'ru-RU') {
+  if (normalizeSpeechLanguage(language) !== 'ru-RU') return String(value || '');
+  return String(value || '')
+    .replace(
+      /(^|[^\p{L}\p{N}_])ай[\s-]?ти(?=$|[^\p{L}\p{N}_])/giu,
+      '$1IT',
+    )
+    .replace(
+      /(^|[^\p{L}\p{N}_])(дал[её]к(?:ий|ая|ое|ие|ого|ой|ому|им|их|ими|ую)?)\s+отойти(?=$|[^\p{L}\p{N}_])/giu,
+      (_match, boundary, distanceWord) => `${boundary}${distanceWord} от IT`,
+    );
 }
 
 function shouldAppendSentencePeriod(value) {

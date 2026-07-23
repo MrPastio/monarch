@@ -5,7 +5,7 @@ import readline from 'node:readline';
 import { normalizeRussianSpeechText } from './russian-speech-normalizer.mjs';
 
 export const MAX_SPEECH_TEXT_CHARS = 64_000;
-const DEFAULT_NEURAL_READY_TIMEOUT_MS = 45_000;
+const DEFAULT_NEURAL_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_NEURAL_START_TIMEOUT_MS = 6_000;
 const DEFAULT_NEURAL_COMPLETION_TIMEOUT_MS = 120_000;
 const DEFAULT_NEURAL_QUARANTINE_TIMEOUT_MS = 1_500;
@@ -271,7 +271,7 @@ export function createWindowsSpeechOutput({
       if (neural === state) neural = null;
     });
     state.timer = setTimeout(() => {
-      failNeuralWorker(state, 'neural-tts-ready-timeout', 'Нейросетевой TTS не успел прогреться за 45 секунд.');
+      failNeuralWorker(state, 'neural-tts-ready-timeout', 'Нейросетевой TTS не успел прогреться за 120 секунд.');
     }, Math.max(1_000, Number(neuralReadyTimeoutMs) || DEFAULT_NEURAL_READY_TIMEOUT_MS));
     state.timer.unref?.();
     return readyPromise;

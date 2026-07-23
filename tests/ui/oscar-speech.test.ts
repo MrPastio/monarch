@@ -134,6 +134,30 @@ const ready = true;
     expect(desktop.warmSpeechOutput).toHaveBeenNthCalledWith(2, { retry: true });
   });
 
+  it('releases Qwen for inference and deliberately warms it again afterwards', async () => {
+    const desktop = {
+      warmSpeechOutput: vi.fn()
+        .mockResolvedValue({ status: 'ready', ok: true, engine: 'qwen3-tts-cuda-graph' }),
+      releaseSpeechOutput: vi.fn()
+        .mockResolvedValue({ ok: true, released: true }),
+    };
+    const controller = createOscarSpeechController({
+      desktop,
+      speechSynthesis: null,
+      Utterance: undefined,
+    });
+
+    await expect(controller.prewarm()).resolves.toMatchObject({ status: 'ready' });
+    await expect(controller.releaseForInference()).resolves.toEqual({ ok: true, released: true });
+    expect(controller.getState().warmup).toMatchObject({ status: 'idle' });
+    await expect(controller.restoreAfterInference()).resolves.toMatchObject({
+      status: 'ready',
+      engine: 'qwen3-tts-cuda-graph',
+    });
+    expect(desktop.warmSpeechOutput).toHaveBeenCalledTimes(2);
+    expect(desktop.releaseSpeechOutput).toHaveBeenCalledTimes(1);
+  });
+
   it('normalizes failed warmup diagnostics without leaking unbounded fields', () => {
     expect(normalizeSpeechWarmupResult({
       status: 'failed',

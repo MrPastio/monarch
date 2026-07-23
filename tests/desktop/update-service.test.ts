@@ -105,6 +105,85 @@ describe('Monarch UpdateService signed manifest boundary', () => {
     }).version).toBe('0.2.3.2');
   });
 
+  it('does not offer a release that is already installed', async () => {
+    const root = await tempRoot();
+    const payload = signed(manifest(3, '0.2.3.4'));
+    const service = new MonarchUpdateService({
+      currentVersion: '0.2.3.4',
+      updaterVersion: '0.2.3.4',
+      endpoints: endpoints(),
+      publicKeys: PUBLIC_KEYS,
+      updateRoot: root,
+      now: () => NOW,
+      fetchImpl: metadataFetch({ github: payload, sites: payload }),
+    });
+
+    await expect(service.check()).resolves.toMatchObject({
+      state: 'up-to-date',
+      currentVersion: '0.2.3.4',
+      reason: 'latest-version-installed',
+    });
+  });
+
+  it('does not query or install the stable channel from a development workspace', async () => {
+    const root = await tempRoot();
+    let fetchCalls = 0;
+    const service = new MonarchUpdateService({
+      currentVersion: '0.2.3.2',
+      endpoints: endpoints(),
+      publicKeys: PUBLIC_KEYS,
+      updateRoot: root,
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        throw new Error('development must not contact the release channel');
+      },
+      installationPolicy: {
+        mode: 'development',
+        canInstall: false,
+        reason: 'development-workspace',
+      },
+    });
+
+    await expect(service.check()).resolves.toMatchObject({
+      state: 'up-to-date',
+      reason: 'development-workspace',
+      release: null,
+      installation: { mode: 'development', canInstall: false },
+    });
+    expect(fetchCalls).toBe(0);
+  });
+
+  it('blocks a stale ready installer when the current process is a development workspace', async () => {
+    const root = await tempRoot();
+    let installerLaunches = 0;
+    const service = new MonarchUpdateService({
+      currentVersion: '0.2.3.2',
+      endpoints: endpoints(),
+      publicKeys: PUBLIC_KEYS,
+      updateRoot: root,
+      launchInstaller: async () => {
+        installerLaunches += 1;
+        return { launched: true };
+      },
+      installationPolicy: {
+        mode: 'development',
+        canInstall: false,
+        reason: 'development-workspace',
+      },
+    });
+    await service.initialize();
+    service.state = 'ready-to-install';
+    service.release = manifest(3, '0.2.3.4');
+    service.readyInstallerPath = path.join(root, 'Monarch-Setup-0.2.3.4.exe');
+
+    await expect(service.install()).resolves.toMatchObject({
+      state: 'up-to-date',
+      reason: 'development-workspace',
+      release: null,
+    });
+    expect(installerLaunches).toBe(0);
+  });
+
   it('verifies the exact manifest bytes and rejects reserialized or changed bytes', () => {
     const release = manifest();
     const payload = signed(release, 2);
