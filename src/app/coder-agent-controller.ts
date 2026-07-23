@@ -90,6 +90,16 @@ export class CoderAgentController {
     return run;
   }
 
+  async waitForTerminal(runId: string): Promise<CoderRun> {
+    const execution = this.running.get(runId);
+    if (execution) await execution;
+    const run = this.runs.require(runId);
+    if (!['completed', 'failed', 'cancelled'].includes(run.status)) {
+      throw new Error(`Coder run ${runId} is not active and has not reached a terminal state.`);
+    }
+    return run;
+  }
+
   async cancel(runId: string): Promise<CoderRun> {
     const previous = this.runs.require(runId);
     const firstRequest = !previous.cancelled && !['completed', 'failed', 'cancelled'].includes(previous.status);
