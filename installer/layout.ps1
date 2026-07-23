@@ -312,7 +312,7 @@ function New-MonarchPendingUpdate {
     previousVersion = $PreviousVersion
     candidateVersion = $CandidateVersion
     previousLauncherVersion = $previousLauncherVersion
-    candidateLauncherVersion = "1.0.0"
+    candidateLauncherVersion = "1.0.1"
     previousRuntimeVersion = [string]$previousDescriptor.runtimeVersion
     expectedRuntimeVersion = $CandidateRuntimeVersion
     previousBackendEnvironment = [string]$previousDescriptor.backendEnvironment

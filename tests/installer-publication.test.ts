@@ -136,8 +136,18 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(definition).toContain('AfterInstall: FinalizeOfflinePayload');
     expect(definition).toContain('Monarch.next.exe');
     expect(definition).toContain('GetLauncherSwapParameters');
+    expect(definition).toContain('-LauncherVersion "1.0.1"');
     expect(definition).toContain('versions\\{#AppVersion}');
     expect(definition).toContain('CloseApplications=no');
+    expect(read('tools/launcher/MonarchLauncher.cs')).toContain(
+      'private const string LauncherVersion = "1.0.1"',
+    );
+    expect(read('installer/layout.ps1')).toContain(
+      'candidateLauncherVersion = "1.0.1"',
+    );
+    expect(read('installer/swap-launcher.ps1')).toContain(
+      '[string]$LauncherVersion = "1.0.1"',
+    );
   });
 
   it('refuses to package private development history', () => {

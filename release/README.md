@@ -40,9 +40,9 @@ No production private key or invented public key is committed here. Until a real
 
 The key generator refuses to overwrite files. Keep the private key off `C:` and outside source, distribution, public snapshots, logs, artifacts, and command output.
 
-## Publishing v0.2.3.5
+## Publishing v0.2.3.6
 
-`release/stable-release-spec.json` contains the accepted immutable runtime/environment IDs and an armed `available: true` stable release. Publish only from the exact reviewed commit by running `Stable release` with version `0.2.3.5`.
+`release/stable-release-spec.json` contains the accepted immutable runtime/environment IDs and an armed `available: true` stable release. Publish only from the exact reviewed commit by running `Stable release` with version `0.2.3.6`.
 
 The workflow builds from a clean tracked snapshot, signs exact manifest bytes, uploads to a draft release, downloads every asset back, verifies bytes/hash/signature, publishes the release, and only then fast-forwards the stable channel.
 
