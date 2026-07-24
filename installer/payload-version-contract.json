@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "runtime": {
-    "version": "2026.07.6",
-    "sha256": "ca949d81b8cda263c2494f2aadf74bf3f9823e0b7e0b16439b65f23d2f8b8931",
-    "files": 959,
-    "size": 520758338
+    "version": "2026.07.7",
+    "sha256": "7cccc4ffc86675056cd301b48ab8b797b8309224d3f65742f06b636698f64502",
+    "files": 957,
+    "size": 494438306
   },
   "environment": {
     "version": "backend-0.1.5-offline5",

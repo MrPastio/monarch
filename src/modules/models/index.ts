@@ -24,9 +24,14 @@ import {
 
 export class ModelsModule implements MonarchModule {
   readonly manifest = modelsManifest;
+  private readonly workspaceRoot: string;
+
+  constructor(workspaceRoot = process.cwd()) {
+    this.workspaceRoot = workspaceRoot;
+  }
 
   async activate(context: MonarchKernelContext): Promise<void> {
-    const catalog = await readModelCatalog(process.cwd());
+    const catalog = await readModelCatalog(this.workspaceRoot);
     await context.emit('models.activated', this.manifest.id, {
       root: catalog.root,
       models: catalog.models.length,
@@ -35,7 +40,7 @@ export class ModelsModule implements MonarchModule {
   }
 
   async health(): Promise<MonarchExecutionResult> {
-    const catalog = await readModelCatalog(process.cwd());
+    const catalog = await readModelCatalog(this.workspaceRoot);
     const runtimeReport = createModelRuntimeReport(catalog);
     const available = catalog.models.filter((model) => model.status === 'available').length;
     const runnable = runtimeReport.entries.filter((entry) => entry.canInfer).length;
@@ -161,7 +166,7 @@ export class ModelsModule implements MonarchModule {
   }
 
   private async listCatalog(): Promise<MonarchExecutionResult> {
-    const catalog = await readModelCatalog(process.cwd());
+    const catalog = await readModelCatalog(this.workspaceRoot);
     return {
       ok: true,
       summary: `Models catalog listed ${catalog.models.length} model groups.`,
@@ -170,7 +175,7 @@ export class ModelsModule implements MonarchModule {
   }
 
   private async runtimeStatus(): Promise<MonarchExecutionResult> {
-    const catalog = await readModelCatalog(process.cwd());
+    const catalog = await readModelCatalog(this.workspaceRoot);
     const runtimeReport = createModelRuntimeReport(catalog);
     const runnable = runtimeReport.entries.filter((entry) => entry.canInfer).length;
     return {
@@ -182,7 +187,7 @@ export class ModelsModule implements MonarchModule {
 
   private async selectChatModel(input: unknown): Promise<MonarchExecutionResult> {
     const text = readStringInput(input, 'text');
-    const catalog = await readModelCatalog(process.cwd());
+    const catalog = await readModelCatalog(this.workspaceRoot);
     const selectedModel = await selectModelForInputAsync(text, catalog);
 
     let loadDetail = 'No automatic loading was triggered.';
@@ -213,7 +218,7 @@ export class ModelsModule implements MonarchModule {
 
   private async describeRouterPipeline(input: unknown): Promise<MonarchExecutionResult> {
     const text = readStringInput(input, 'text');
-    const catalog = await readModelCatalog(process.cwd());
+    const catalog = await readModelCatalog(this.workspaceRoot);
     const runtimeReport = createModelRuntimeReport(catalog);
     const pipeline = createRouterPipeline(text, catalog, runtimeReport);
     return {
@@ -233,7 +238,7 @@ export class ModelsModule implements MonarchModule {
       };
     }
 
-    const catalog = await readModelCatalog(process.cwd());
+    const catalog = await readModelCatalog(this.workspaceRoot);
     const requestedRole = readModelRole(input, 'role') || (await selectModelForInputAsync(text, catalog)).role;
     const system = readStringInput(input, 'system');
     const messages = [
@@ -289,7 +294,7 @@ export class ModelsModule implements MonarchModule {
       };
     }
 
-    const catalog = await readModelCatalog(process.cwd());
+    const catalog = await readModelCatalog(this.workspaceRoot);
     const result = await startModelRuntime(
       catalog,
       role,
@@ -408,8 +413,8 @@ function extractCompletionText(text: string): string {
     .trim() || text;
 }
 
-export function createModelsModule(): MonarchModule {
-  return new ModelsModule();
+export function createModelsModule(workspaceRoot = process.cwd()): MonarchModule {
+  return new ModelsModule(workspaceRoot);
 }
 
 export const modelsModulePackage: MonarchModulePackage = {
@@ -420,5 +425,5 @@ export const modelsModulePackage: MonarchModulePackage = {
   core: {
     minVersion: '0.1.0',
   },
-  factory: createModelsModule,
+  factory: (context) => createModelsModule(context?.workspaceRoot),
 };

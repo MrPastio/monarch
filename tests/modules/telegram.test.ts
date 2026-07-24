@@ -814,20 +814,18 @@ describe('Telegram Module', () => {
     const kernel = new MonarchKernel();
     kernel.registerModule(module);
     await kernel.start();
+    const handleUpdate = (update: unknown) => (
+      module as unknown as { handleUpdate: (value: unknown) => Promise<void> }
+    ).handleUpdate(update);
 
     try {
-      await kernel.execute({
-        id: 'exec_api_input_start', intentId: 'intent_api_input_start', moduleId: 'telegram', capabilityId: 'telegram.bot.start',
-        input: {}, requestedBy: 'smoke', confirmed: true, createdAt: new Date(0).toISOString(),
-      });
       mock.apiCalls.length = 0;
       mock.sentMessages.length = 0;
-      mock.updates.push({
+      await handleUpdate({
         update_id: 1,
         message: { message_id: 1, chat: { id: 1001, type: 'private' }, from: { id: 2002, username: 'tester' }, text: '/api sendMessage {"text":' },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Не понял /api')), 5_000);
       const response = String(mock.sentMessages.find((message) => String(message.text).includes('Не понял /api'))?.text || '');
       expect(response).toContain('параметры должны быть валидным JSON-объектом');
       expect(response).toContain('Формат: /api METHOD');
@@ -836,7 +834,7 @@ describe('Telegram Module', () => {
 
       mock.apiCalls.length = 0;
       mock.sentMessages.length = 0;
-      mock.updates.push({
+      await handleUpdate({
         update_id: 2,
         message: {
           message_id: 2,
@@ -846,13 +844,12 @@ describe('Telegram Module', () => {
         },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('chat_id')), 5_000);
       expect(mock.sentMessages.some((message) => String(message.text).includes('только для текущего chat_id'))).toBe(true);
       expect(mock.apiCalls.some((call) => String(call.text).includes('изменит состояние Telegram'))).toBe(false);
 
       mock.apiCalls.length = 0;
       mock.sentMessages.length = 0;
-      mock.updates.push({
+      await handleUpdate({
         update_id: 3,
         message: {
           message_id: 3,
@@ -862,7 +859,7 @@ describe('Telegram Module', () => {
         },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('параметры слишком большие')), 15_000);
+      expect(mock.sentMessages.some((message) => String(message.text).includes('параметры слишком большие'))).toBe(true);
       expect(mock.apiCalls.some((call) => String(call.text).includes('изменит состояние Telegram'))).toBe(false);
     } finally {
       await kernel.stop();

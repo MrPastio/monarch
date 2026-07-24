@@ -11,7 +11,12 @@ import type {
   MonarchModulePackage,
   MonarchRouteDecision,
 } from '../../core';
-import { evaluateFilesystemAccess, isPathWithinRoot, permissionModeForRisk } from '../../core';
+import {
+  evaluateFilesystemAccess,
+  isPathWithinRoot,
+  permissionModeForRisk,
+  resolveMonarchRuntimePaths,
+} from '../../core';
 import { applyStudioEdit, stepStudioHistory } from './editor';
 import { studioManifest } from './manifest';
 import {
@@ -35,11 +40,14 @@ export class StudioModule implements MonarchModule {
 
   constructor(options: StudioModuleOptions = {}) {
     this.workspaceRoot = path.resolve(options.workspaceRoot || process.cwd());
+    const runtimePaths = options.projectsRoot && options.exportsRoot
+      ? null
+      : resolveMonarchRuntimePaths(this.workspaceRoot);
     this.projectsRoot = path.resolve(
-      options.projectsRoot || path.join(this.workspaceRoot, 'artifacts', 'studio', 'projects')
+      options.projectsRoot || path.join(runtimePaths!.generatedRoot, 'studio', 'projects')
     );
     this.exportsRoot = path.resolve(
-      options.exportsRoot || path.join(this.workspaceRoot, 'artifacts', 'studio', 'exports')
+      options.exportsRoot || path.join(runtimePaths!.generatedRoot, 'studio', 'exports')
     );
   }
 
@@ -768,7 +776,15 @@ export const studioModulePackage: MonarchModulePackage = {
   version: studioManifest.version,
   description: studioManifest.description,
   core: { minVersion: '0.1.0' },
-  factory: createStudioModule,
+  factory: (context) => createStudioModule({
+    ...((context?.userWorkspaceRoot || context?.workspaceRoot)
+      ? { workspaceRoot: context.userWorkspaceRoot || context.workspaceRoot! }
+      : {}),
+    ...(context?.runtimePaths?.generatedRoot ? {
+      projectsRoot: path.join(context.runtimePaths.generatedRoot, 'studio', 'projects'),
+      exportsRoot: path.join(context.runtimePaths.generatedRoot, 'studio', 'exports'),
+    } : {}),
+  }),
 };
 
 export * from './editor';

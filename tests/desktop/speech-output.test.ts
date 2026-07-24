@@ -11,11 +11,18 @@ import {
   normalizeSpeechRequest,
   normalizeSpeechTelemetry,
   resolveNeuralCompletionTimeoutMs,
+  resolveSpeechPythonPath,
   resolveWindowsPowerShell,
 } from '../../desktop/electron/speech-output.mjs';
 import { normalizeRussianSpeechText } from '../../desktop/electron/russian-speech-normalizer.mjs';
 
 describe('Electron Windows speech output', () => {
+  it('uses the packaged runtime Python directly without a version-root junction', () => {
+    const packagedPython = path.resolve('payload/runtimes/runtime-test/python/python.exe');
+    expect(resolveSpeechPythonPath(path.resolve('versions/0.2.3.8'), packagedPython))
+      .toBe(packagedPython);
+  });
+
   it('scales the neural completion budget with long answers instead of capping it at two minutes', () => {
     expect(resolveNeuralCompletionTimeoutMs(100, 120_000)).toBe(120_000);
     expect(resolveNeuralCompletionTimeoutMs(1_000, 120_000)).toBe(400_000);

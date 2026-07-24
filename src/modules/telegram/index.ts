@@ -12,7 +12,7 @@ import type {
   MonarchModulePackage,
   MonarchRouteDecision,
 } from '../../core';
-import { permissionModeForRisk } from '../../core';
+import { permissionModeForRisk, resolveMonarchRuntimePaths } from '../../core';
 import {
   assertTelegramBotApiMethodAllowed,
   assertTelegramBotApiMethodName,
@@ -144,6 +144,8 @@ export type TelegramIntentDispatcher = (
 
 export interface TelegramModuleOptions {
   projectRoot?: string;
+  stateRoot?: string;
+  secretsRoot?: string;
   apiBase?: string;
   token?: string;
   autoStart?: boolean;
@@ -185,12 +187,15 @@ export class TelegramModule implements MonarchModule {
 
   constructor(options: TelegramModuleOptions = {}) {
     this.projectRoot = path.resolve(options.projectRoot || process.cwd());
-    this.statePath = path.join(this.projectRoot, 'data', 'local', 'telegram-state.json');
-    this.stateLockPath = path.join(this.projectRoot, 'data', 'local', 'telegram-state.lock');
-    this.pairingPath = path.join(this.projectRoot, 'data', 'local', 'telegram-pairing.json');
-    this.pairingLockPath = path.join(this.projectRoot, 'data', 'local', 'telegram-pairing.lock');
-    this.pollingLockPath = path.join(this.projectRoot, 'data', 'local', 'telegram-polling.lock');
-    this.tokenPath = path.join(this.projectRoot, 'secrets', 'telegram_bot_token.txt');
+    const runtimePaths = resolveMonarchRuntimePaths(this.projectRoot);
+    const stateRoot = path.resolve(options.stateRoot || runtimePaths.dataRoot);
+    const secretsRoot = path.resolve(options.secretsRoot || runtimePaths.secretsRoot);
+    this.statePath = path.join(stateRoot, 'telegram-state.json');
+    this.stateLockPath = path.join(stateRoot, 'telegram-state.lock');
+    this.pairingPath = path.join(stateRoot, 'telegram-pairing.json');
+    this.pairingLockPath = path.join(stateRoot, 'telegram-pairing.lock');
+    this.pollingLockPath = path.join(stateRoot, 'telegram-polling.lock');
+    this.tokenPath = path.join(secretsRoot, 'telegram_bot_token.txt');
     this.apiBase = normalizeApiBase(options.apiBase || process.env.MONARCH_TELEGRAM_API_BASE || DEFAULT_API_BASE);
     this.token = String(options.token || '').trim();
     this.autoStart = options.autoStart ?? process.env.MONARCH_TELEGRAM_AUTO_START !== '0';
@@ -1899,8 +1904,8 @@ function trimOldestMapEntries<K, V>(map: Map<K, V>, limit: number): void {
   }
 }
 
-export function createTelegramModule(): MonarchModule {
-  return new TelegramModule();
+export function createTelegramModule(options: TelegramModuleOptions = {}): MonarchModule {
+  return new TelegramModule(options);
 }
 
 export const telegramModulePackage: MonarchModulePackage = {
@@ -1909,5 +1914,7 @@ export const telegramModulePackage: MonarchModulePackage = {
   version: telegramManifest.version,
   description: telegramManifest.description,
   core: { minVersion: '0.1.0' },
-  factory: createTelegramModule,
+  factory: (context) => createTelegramModule(
+    context?.workspaceRoot ? { projectRoot: context.workspaceRoot } : {},
+  ),
 };

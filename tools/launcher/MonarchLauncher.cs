@@ -10,7 +10,7 @@ namespace MonarchLauncher
 {
     internal static class Program
     {
-        private const string LauncherVersion = "1.0.1";
+        private const string LauncherVersion = "1.0.2";
         private const int HealthTimeoutSeconds = 120;
         private const int MaximumCandidateAttempts = 2;
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
@@ -224,6 +224,33 @@ namespace MonarchLauncher
                     RequireSafeIdentifier(descriptor, "backendEnvironment")
                 )
             );
+            var payloadRoot = Path.GetFullPath(RequireString(layout, "payloadRoot"));
+            var dataRoot = Path.GetFullPath(RequireString(layout, "dataRoot"));
+            var logsRoot = Path.GetFullPath(RequireString(layout, "logsRoot"));
+            var configRoot = Path.GetFullPath(RequireString(layout, "configRoot"));
+            var modelsRoot = Path.Combine(payloadRoot, "models");
+            var generatedRoot = Path.Combine(payloadRoot, "generated");
+            var secretsRoot = Path.Combine(installRoot, "secrets");
+            var stateRoot = Path.Combine(dataRoot, "runtime");
+            var workspaceDataRoot = Path.Combine(payloadRoot, "workspaces", "default");
+            var coderWorkspaceRoot = Path.Combine(payloadRoot, "workspaces", "coder");
+            var coderSandboxRoot = Path.Combine(payloadRoot, "coder-sandbox");
+
+            foreach (var writablePath in new[] {
+                dataRoot,
+                logsRoot,
+                generatedRoot,
+                modelsRoot,
+                secretsRoot,
+                stateRoot,
+                workspaceDataRoot,
+                coderWorkspaceRoot,
+                coderSandboxRoot,
+            })
+            {
+                RequireOutsideVersionRoot(writablePath, versionRoot);
+                EnsureWritableDirectory(writablePath);
+            }
             ValidateReadableDataSchema(installRoot, descriptor);
 
             var electronExe = Path.Combine(runtimeRoot, "electron", "electron.exe");
@@ -256,21 +283,50 @@ namespace MonarchLauncher
             startInfo.EnvironmentVariables["MONARCH_DESKTOP_LAUNCHED_BY"] = "Monarch.exe";
             startInfo.EnvironmentVariables["MONARCH_INSTALL_ROOT"] = installRoot;
             startInfo.EnvironmentVariables["MONARCH_VERSION_ROOT"] = versionRoot;
-            startInfo.EnvironmentVariables["MONARCH_PAYLOAD_ROOT"] = RequireString(layout, "payloadRoot");
+            startInfo.EnvironmentVariables["MONARCH_PAYLOAD_ROOT"] = payloadRoot;
             startInfo.EnvironmentVariables["MONARCH_RUNTIME_ROOT"] = runtimeRoot;
             startInfo.EnvironmentVariables["MONARCH_BACKEND_ENVIRONMENT_ROOT"] = environmentRoot;
             startInfo.EnvironmentVariables["MONARCH_NODE_PATH"] = nodeExe;
             startInfo.EnvironmentVariables["OSCAR_PYTHON"] = pythonExe;
             startInfo.EnvironmentVariables["OSCAR_PROJECT_ROOT"] = Path.Combine(versionRoot, "oscar");
             startInfo.EnvironmentVariables["MONARCH_SECURITY_PYTHON"] = pythonExe;
+            startInfo.EnvironmentVariables["MONARCH_STT_PYTHON"] = pythonExe;
+            startInfo.EnvironmentVariables["MONARCH_VOICE_LITE_PYTHON"] = pythonExe;
             startInfo.EnvironmentVariables["MONARCH_SECURITY_ROOT"] = Path.Combine(versionRoot, "security");
             startInfo.EnvironmentVariables["MONARCH_SECURITY_SITE_PACKAGES"] =
                 Path.Combine(environmentRoot, "security", "site-packages");
             startInfo.EnvironmentVariables["PYTHONDONTWRITEBYTECODE"] = "1";
             startInfo.EnvironmentVariables["MONARCH_TRANSACTION_ROOT"] = RequireString(layout, "transactionsRoot");
-            startInfo.EnvironmentVariables["MONARCH_CONFIG_ROOT"] = RequireString(layout, "configRoot");
-            startInfo.EnvironmentVariables["MONARCH_DATA_ROOT"] = RequireString(layout, "dataRoot");
-            startInfo.EnvironmentVariables["MONARCH_LOGS_ROOT"] = RequireString(layout, "logsRoot");
+            startInfo.EnvironmentVariables["MONARCH_CONFIG_ROOT"] = configRoot;
+            startInfo.EnvironmentVariables["MONARCH_DATA_ROOT"] = dataRoot;
+            startInfo.EnvironmentVariables["MONARCH_LOGS_ROOT"] = logsRoot;
+            startInfo.EnvironmentVariables["MONARCH_GENERATED_ROOT"] = generatedRoot;
+            startInfo.EnvironmentVariables["MONARCH_MODELS_ROOT"] = modelsRoot;
+            startInfo.EnvironmentVariables["MONARCH_SECRETS_ROOT"] = secretsRoot;
+            startInfo.EnvironmentVariables["MONARCH_STATE_ROOT"] = stateRoot;
+            startInfo.EnvironmentVariables["MONARCH_WORKSPACE_ROOT"] = workspaceDataRoot;
+            startInfo.EnvironmentVariables["MONARCH_CODER_WORKSPACE_ROOT"] = coderWorkspaceRoot;
+            startInfo.EnvironmentVariables["MONARCH_CODER_SANDBOX_ROOT"] = coderSandboxRoot;
+            startInfo.EnvironmentVariables["MONARCH_SHERPA_MODEL_DIR"] = Path.Combine(
+                modelsRoot,
+                "voice",
+                "sherpa-onnx-streaming-t-one-russian-2025-09-08"
+            );
+            startInfo.EnvironmentVariables["MONARCH_SECURITY_DATA_ROOT"] = Path.Combine(dataRoot, "security");
+            startInfo.EnvironmentVariables["MONARCH_SECURITY_LOGS_ROOT"] = Path.Combine(logsRoot, "security");
+            startInfo.EnvironmentVariables["OSCAR_DATA_DIR"] = Path.Combine(dataRoot, "oscar");
+            startInfo.EnvironmentVariables["OSCAR_DB_PATH"] =
+                Path.Combine(dataRoot, "oscar", "memory", "oscar_memory.sqlite3");
+            startInfo.EnvironmentVariables["OSCAR_OFFLOAD_DIR"] = Path.Combine(dataRoot, "oscar", "offload");
+            startInfo.EnvironmentVariables["OSCAR_GEMMA_MODELS_DIR"] = Path.Combine(modelsRoot, "gemma_models");
+            startInfo.EnvironmentVariables["OSCAR_CODER_MODELS_DIR"] = Path.Combine(modelsRoot, "coder");
+            startInfo.EnvironmentVariables["OSCAR_SHARING_QWEN_MODELS_DIR"] =
+                Path.Combine(modelsRoot, "voice", "voice-lite");
+            startInfo.EnvironmentVariables["OSCAR_SHARING_TTS_MODELS_DIR"] =
+                Path.Combine(modelsRoot, "voice");
+            startInfo.EnvironmentVariables["OSCAR_SHARING_TTS_PYTHON"] = pythonExe;
+            startInfo.EnvironmentVariables["OSCAR_WORKSPACE_ROOT"] = workspaceDataRoot;
+            startInfo.EnvironmentVariables["OSCAR_WORKSPACE_GENERATED_DIR"] = generatedRoot;
             var process = Process.Start(startInfo);
             if (process == null)
             {
@@ -366,6 +422,53 @@ namespace MonarchLauncher
                 throw new DirectoryNotFoundException("A versioned Monarch runtime component is missing.");
             }
             return canonical;
+        }
+
+        private static void RequireOutsideVersionRoot(string candidate, string versionRoot)
+        {
+            var version = Path.GetFullPath(versionRoot).TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar
+            );
+            var target = Path.GetFullPath(candidate).TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar
+            );
+            if (target.Equals(version, StringComparison.OrdinalIgnoreCase)
+                || target.StartsWith(
+                    version + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase
+                ))
+            {
+                throw new InvalidDataException(
+                    "A writable Monarch path resolved inside the immutable version directory."
+                );
+            }
+        }
+
+        private static void EnsureWritableDirectory(string directory)
+        {
+            var canonical = Path.GetFullPath(directory);
+            var probe = Path.Combine(canonical, ".monarch-write-probe-" + Guid.NewGuid().ToString("N"));
+            var moved = probe + ".ok";
+            try
+            {
+                Directory.CreateDirectory(canonical);
+                File.WriteAllText(probe, "ok", new System.Text.UTF8Encoding(false));
+                File.Move(probe, moved);
+            }
+            catch (Exception error)
+            {
+                throw new IOException(
+                    "Monarch writable storage is unavailable: " + canonical + ". " + error.Message,
+                    error
+                );
+            }
+            finally
+            {
+                DeleteIfExists(probe);
+                DeleteIfExists(moved);
+            }
         }
 
         private static void ValidateReadableDataSchema(

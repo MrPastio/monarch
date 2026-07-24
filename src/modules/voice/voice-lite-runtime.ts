@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { resolveMonarchRuntimePaths } from '../../core/runtime-paths';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const WORKER_RETIRE_TIMEOUT_MS = 1_500;
@@ -515,10 +516,13 @@ export class VoiceProfileRuntime implements VoiceProfileRuntimePort {
   }
 
   private modelPath(): string {
-    const allowedRoot = path.resolve(this.workspaceRoot, 'runtime', 'voice', 'models', 'voice-lite');
+    const runtimePaths = resolveMonarchRuntimePaths(this.workspaceRoot);
+    const allowedRoot = runtimePaths.mode === 'installed'
+      ? path.join(runtimePaths.modelsRoot, 'voice', 'voice-lite')
+      : path.resolve(this.workspaceRoot, 'runtime', 'voice', 'models', 'voice-lite');
     const configured = this.options.modelPath;
     const candidate = configured
-      ? path.resolve(this.workspaceRoot, configured)
+      ? resolveConfiguredVoiceLiteModel(this.workspaceRoot, allowedRoot, configured, runtimePaths.mode === 'installed')
       : path.join(allowedRoot, VOICE_MODE_PROFILE_MODEL_NAMES[this.profile]);
     if (!isPathInside(allowedRoot, candidate) || path.extname(candidate).toLowerCase() !== '.gguf') {
       throw new VoiceModeRuntimeError(
@@ -544,7 +548,9 @@ export class VoiceProfileRuntime implements VoiceProfileRuntimePort {
   }
 
   private executablePath(): string {
-    const explicit = this.options.executable || process.env.MONARCH_VOICE_LITE_PYTHON;
+    const explicit = this.options.executable
+      || process.env.MONARCH_VOICE_LITE_PYTHON
+      || process.env.OSCAR_PYTHON;
     if (explicit) return explicit;
     const bundled = path.join(this.workspaceRoot, 'oscar', '.venv', 'Scripts', 'python.exe');
     return existsSync(bundled) ? bundled : 'python';
@@ -554,6 +560,22 @@ export class VoiceProfileRuntime implements VoiceProfileRuntimePort {
     const diagnostic = this.stderr.trim().slice(-1_000);
     return diagnostic ? { stderr: diagnostic } : {};
   }
+}
+
+function resolveConfiguredVoiceLiteModel(
+  workspaceRoot: string,
+  allowedRoot: string,
+  configured: string,
+  installed: boolean,
+): string {
+  if (path.isAbsolute(configured)) return path.resolve(configured);
+  if (!installed) return path.resolve(workspaceRoot, configured);
+  const normalized = configured.replaceAll('\\', '/');
+  const legacyPrefix = 'runtime/voice/models/voice-lite/';
+  return path.resolve(
+    allowedRoot,
+    normalized.startsWith(legacyPrefix) ? normalized.slice(legacyPrefix.length) : normalized,
+  );
 }
 
 function normalizeRespondInput(input: VoiceProfileRespondInput): NormalizedRespondInput {

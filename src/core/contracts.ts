@@ -1,3 +1,5 @@
+import type { MonarchRuntimePaths } from './runtime-paths';
+
 export type MonarchModuleKind =
   | 'suite'
   | 'system'
@@ -43,6 +45,8 @@ export type MonarchIntentSource = 'desktop' | 'voice' | 'telegram' | 'api' | 'sy
 
 export interface MonarchModuleFactoryContext {
   workspaceRoot?: string;
+  userWorkspaceRoot?: string;
+  runtimePaths?: MonarchRuntimePaths;
 }
 
 export type MonarchModuleFactory = (context?: MonarchModuleFactoryContext) => MonarchModule;

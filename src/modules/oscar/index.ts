@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
@@ -1367,8 +1368,20 @@ function readOptionalInteger(value: unknown, minimum: number, maximum: number): 
   return Math.max(minimum, Math.min(maximum, Math.trunc(value)));
 }
 
-export function createOscarModule(): MonarchModule {
-  return new OscarModule();
+export interface OscarModuleOptions {
+  workspaceRoot?: string;
+  logsRoot?: string;
+  secretsRoot?: string;
+}
+
+export function createOscarModule(options: OscarModuleOptions = {}): MonarchModule {
+  const workspaceRoot = options.workspaceRoot || process.cwd();
+  return new OscarModule(new OscarClient({
+    workspaceRoot,
+    projectRoot: path.join(workspaceRoot, 'oscar'),
+    ...(options.logsRoot ? { logsRoot: options.logsRoot } : {}),
+    ...(options.secretsRoot ? { secretsRoot: options.secretsRoot } : {}),
+  }));
 }
 
 export const oscarModulePackage: MonarchModulePackage = {
@@ -1379,5 +1392,9 @@ export const oscarModulePackage: MonarchModulePackage = {
   core: {
     minVersion: '0.1.0',
   },
-  factory: createOscarModule,
+  factory: (context) => createOscarModule({
+    ...(context?.workspaceRoot ? { workspaceRoot: context.workspaceRoot } : {}),
+    ...(context?.runtimePaths?.logsRoot ? { logsRoot: context.runtimePaths.logsRoot } : {}),
+    ...(context?.runtimePaths?.secretsRoot ? { secretsRoot: context.runtimePaths.secretsRoot } : {}),
+  }),
 };

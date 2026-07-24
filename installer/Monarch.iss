@@ -7,10 +7,10 @@
 
 #define AppName "Monarch"
 #ifndef AppVersion
-  #define AppVersion "0.2.3.7"
+  #define AppVersion "0.2.3.8"
 #endif
 #ifndef RuntimeVersion
-#define RuntimeVersion "2026.07.6"
+#define RuntimeVersion "2026.07.7"
 #endif
 #ifndef BackendEnvironment
 #define BackendEnvironment "backend-0.1.5-offline5"
@@ -86,7 +86,7 @@ begin
     '-NoProfile -ExecutionPolicy Bypass -File "' +
     ExpandConstant('{app}\versions\{#AppVersion}\installer\swap-launcher.ps1') +
     '" -InstallRoot "' + ExpandConstant('{app}') +
-    '" -LauncherVersion "1.0.1"';
+    '" -LauncherVersion "1.0.2"';
 end;
 
 function GetFinalizeParameters(Param: String): String;

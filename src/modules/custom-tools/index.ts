@@ -16,6 +16,7 @@ import type {
   MonarchRisk,
   MonarchRouteDecision,
 } from '../../core';
+import { resolveMonarchRuntimePaths } from '../../core';
 import { readModelCatalog } from '../models/model-catalog';
 import { completeWithModelRole } from '../models/runtime-client';
 import { customToolsManifest } from './manifest';
@@ -97,13 +98,21 @@ const BUILT_IN_TOOLS: CustomTool[] = [
   },
 ];
 
+export interface CustomToolsModuleOptions {
+  storePath?: string;
+  workspaceRoot?: string;
+}
+
 export class CustomToolsModule implements MonarchModule {
   readonly manifest = customToolsManifest;
   private readonly tools = new Map<string, CustomTool>();
   private readonly storePath: string;
 
-  constructor(storePath?: string) {
-    this.storePath = storePath || path.join(process.cwd(), 'data', 'local', 'custom-tools.json');
+  constructor(options: CustomToolsModuleOptions | string = {}) {
+    const normalized = typeof options === 'string' ? { storePath: options } : options;
+    const workspaceRoot = path.resolve(normalized.workspaceRoot || process.cwd());
+    this.storePath = normalized.storePath
+      || path.join(resolveMonarchRuntimePaths(workspaceRoot).dataRoot, 'custom-tools.json');
   }
 
   async activate(context: MonarchKernelContext): Promise<void> {
@@ -787,8 +796,8 @@ function timeoutPromise<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
-export function createCustomToolsModule(): MonarchModule {
-  return new CustomToolsModule();
+export function createCustomToolsModule(options: CustomToolsModuleOptions = {}): MonarchModule {
+  return new CustomToolsModule(options);
 }
 
 export const customToolsModulePackage: MonarchModulePackage = {

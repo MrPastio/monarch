@@ -22,6 +22,14 @@ export function resolveNeuralCompletionTimeoutMs(textLength, configuredTimeoutMs
   return Math.max(configured, adaptive);
 }
 
+export function resolveSpeechPythonPath(workspaceRoot, configuredPython) {
+  const configured = String(configuredPython || '').trim();
+  if (configured && path.isAbsolute(configured)) {
+    return path.resolve(configured);
+  }
+  return path.join(String(workspaceRoot || ''), 'runtime', 'voice', '.venv', 'Scripts', 'python.exe');
+}
+
 export function createWindowsSpeechOutput({
   workspaceRoot,
   platform = process.platform,
@@ -37,13 +45,22 @@ export function createWindowsSpeechOutput({
   neuralQuarantineTimeoutMs = DEFAULT_NEURAL_QUARANTINE_TIMEOUT_MS,
   fallbackTimeoutMs = DEFAULT_FALLBACK_TIMEOUT_MS,
   onTelemetry = () => {},
+  pythonPath = process.env.MONARCH_VOICE_LITE_PYTHON || process.env.OSCAR_PYTHON,
+  modelsRoot = process.env.MONARCH_MODELS_ROOT,
+  payloadRoot = process.env.MONARCH_PAYLOAD_ROOT,
 } = {}) {
   const root = String(workspaceRoot || '');
-  const neuralPythonPath = path.join(root, 'runtime', 'voice', '.venv', 'Scripts', 'python.exe');
+  const packagedModelsRoot = String(modelsRoot || '').trim();
+  const packagedPayloadRoot = String(payloadRoot || '').trim();
+  const neuralPythonPath = resolveSpeechPythonPath(root, pythonPath);
   const neuralWorkerPath = path.join(root, 'tools', 'local-neural-tts.py');
-  const neuralModelPath = path.join(root, 'runtime', 'voice', 'models', 'qwen3-tts-0.6b-base');
+  const neuralModelPath = packagedModelsRoot && path.isAbsolute(packagedModelsRoot)
+    ? path.join(packagedModelsRoot, 'voice', 'qwen3-tts-0.6b-base')
+    : path.join(root, 'runtime', 'voice', 'models', 'qwen3-tts-0.6b-base');
   const neuralReferencePath = path.join(root, 'assets', 'voice', 'oscar-reference.wav');
-  const neuralCachePath = path.join(root, 'runtime', 'voice', 'hf-cache');
+  const neuralCachePath = packagedPayloadRoot && path.isAbsolute(packagedPayloadRoot)
+    ? path.join(packagedPayloadRoot, 'cache', 'voice', 'hf')
+    : path.join(root, 'runtime', 'voice', 'hf-cache');
   const fallbackWorkerPath = path.join(root, 'tools', 'local-windows-tts.ps1');
 
   let neural = null;

@@ -4,6 +4,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
+import { resolveMonarchRuntimePaths } from '../../core';
 
 const DEFAULT_OSCAR_API_TIMEOUT_MS = 30000;
 const DEFAULT_OSCAR_CHAT_TIMEOUT_MS = 300000;
@@ -140,6 +141,9 @@ export function resolveOscarChatTimeoutMs(
 export interface OscarClientOptions {
   apiBase?: string;
   projectRoot?: string;
+  workspaceRoot?: string;
+  logsRoot?: string;
+  secretsRoot?: string;
   timeoutMs?: number;
   chatTimeoutMs?: number;
   deepResearchTimeoutMs?: number;
@@ -149,6 +153,7 @@ export interface OscarClientOptions {
 export interface OscarBridgeConfig {
   apiBase: string;
   projectRoot: string;
+  logsRoot: string;
   timeoutMs: number;
   chatTimeoutMs: number;
   deepResearchTimeoutMs: number;
@@ -156,8 +161,7 @@ export interface OscarBridgeConfig {
   apiToken: string;
 }
 
-function getOrCreateOscarToken(): string {
-  const secretsDir = path.join(process.cwd(), 'secrets');
+function getOrCreateOscarToken(secretsDir: string): string {
   const tokenFile = path.join(secretsDir, 'oscar_token.txt');
 
   if (existsSync(tokenFile)) {
@@ -207,11 +211,14 @@ export class OscarClient {
   constructor(options: OscarClientOptions = {}) {
     const configuredApiBase = options.apiBase || process.env.OSCAR_API_BASE;
     const projectRoot = path.resolve(options.projectRoot || process.env.OSCAR_PROJECT_ROOT || defaultOscarProjectRoot());
-    const apiToken = getOrCreateOscarToken();
+    const workspaceRoot = path.resolve(options.workspaceRoot || path.dirname(projectRoot));
+    const runtimePaths = resolveMonarchRuntimePaths(workspaceRoot);
+    const apiToken = getOrCreateOscarToken(path.resolve(options.secretsRoot || runtimePaths.secretsRoot));
 
     this.config = {
       apiBase: normalizeApiBase(configuredApiBase || 'http://127.0.0.1:7861'),
       projectRoot,
+      logsRoot: path.resolve(options.logsRoot || runtimePaths.logsRoot),
       timeoutMs: readConfiguredTimeout(options.timeoutMs, 'OSCAR_API_TIMEOUT_MS', DEFAULT_OSCAR_API_TIMEOUT_MS),
       chatTimeoutMs: readConfiguredTimeout(options.chatTimeoutMs, 'OSCAR_CHAT_TIMEOUT_MS', DEFAULT_OSCAR_CHAT_TIMEOUT_MS),
       deepResearchTimeoutMs: readConfiguredTimeout(
@@ -1007,7 +1014,7 @@ async function doStartManagedOscarBackend(config: OscarBridgeConfig): Promise<vo
     throw new Error(`Oscar backend is missing: ${backendMain}`);
   }
 
-  const runtimeDir = path.join(projectRoot, 'runtime');
+  const runtimeDir = path.join(config.logsRoot, 'oscar');
   await mkdir(runtimeDir, { recursive: true });
   const packagedEnvironment = resolvePackagedOscarEnvironment(projectRoot);
 

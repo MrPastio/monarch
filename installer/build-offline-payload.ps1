@@ -2,8 +2,8 @@ param(
   [Parameter(Mandatory = $true)][string]$SourceRoot,
   [string]$BuildRuntimeRoot = "",
   [string]$OutputDirectory = "",
-  [string]$AppVersion = "0.2.3.7",
-  [string]$RuntimeVersion = "2026.07.6",
+  [string]$AppVersion = "0.2.3.8",
+  [string]$RuntimeVersion = "2026.07.7",
   [string]$BackendEnvironment = "backend-0.1.5-offline5",
   [switch]$Force
 )
@@ -219,18 +219,89 @@ function Install-PythonTarget {
     [Parameter(Mandatory = $true)][string]$Python,
     [Parameter(Mandatory = $true)][string]$Target,
     [Parameter(Mandatory = $true)][string[]]$Arguments,
-    [Parameter(Mandatory = $true)][string]$Operation
+    [Parameter(Mandatory = $true)][string]$Operation,
+    [ValidateRange(1, 6)][int]$MaxAttempts = 3
   )
 
   New-Item -ItemType Directory -Path $Target -Force | Out-Null
-  & $Python -m pip install `
-    --disable-pip-version-check `
-    --no-input `
-    --no-compile `
-    --upgrade `
-    --target $Target `
-    @Arguments
-  Assert-NativeSuccess $Operation
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt += 1) {
+    & $Python -m pip install `
+      --disable-pip-version-check `
+      --no-input `
+      --no-compile `
+      --retries 10 `
+      --timeout 120 `
+      --upgrade `
+      --target $Target `
+      @Arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0) {
+      return
+    }
+    if ($attempt -eq $MaxAttempts) {
+      throw "$Operation failed with exit code $exitCode after $MaxAttempts attempts."
+    }
+    $retryDelaySeconds = [int][Math]::Min(30, 5 * [Math]::Pow(2, $attempt - 1))
+    Write-Warning (
+      "$Operation failed with exit code $exitCode on attempt $attempt/$MaxAttempts. " +
+      "Retrying in $retryDelaySeconds seconds using the persistent build cache."
+    )
+    Start-Sleep -Seconds $retryDelaySeconds
+  }
+}
+
+function Resolve-PinnedPythonWheel {
+  param(
+    [Parameter(Mandatory = $true)][string]$Python,
+    [Parameter(Mandatory = $true)][string]$CacheDirectory,
+    [Parameter(Mandatory = $true)][string]$FileName,
+    [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+    [Parameter(Mandatory = $true)][string]$IndexUrl,
+    [Parameter(Mandatory = $true)][string]$Requirement,
+    [Parameter(Mandatory = $true)][string]$Operation,
+    [ValidateRange(1, 6)][int]$MaxAttempts = 3
+  )
+
+  New-Item -ItemType Directory -Path $CacheDirectory -Force | Out-Null
+  $wheelPath = Join-Path $CacheDirectory $FileName
+  if (Test-Path -LiteralPath $wheelPath -PathType Leaf) {
+    $cachedHash = Get-Sha256Hex -Path $wheelPath
+    if ($cachedHash -ne $ExpectedSha256.ToLowerInvariant()) {
+      throw "$Operation cached wheel hash mismatch at $wheelPath."
+    }
+    Write-Host "[offline] Using cached pinned wheel: $wheelPath"
+    return $wheelPath
+  }
+
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt += 1) {
+    & $Python -m pip download `
+      --disable-pip-version-check `
+      --no-input `
+      --no-deps `
+      --only-binary=:all: `
+      --retries 10 `
+      --timeout 120 `
+      --dest $CacheDirectory `
+      --index-url $IndexUrl `
+      $Requirement | Out-Host
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0 -and (Test-Path -LiteralPath $wheelPath -PathType Leaf)) {
+      $downloadedHash = Get-Sha256Hex -Path $wheelPath
+      if ($downloadedHash -ne $ExpectedSha256.ToLowerInvariant()) {
+        throw "$Operation downloaded wheel hash mismatch at $wheelPath."
+      }
+      return $wheelPath
+    }
+    if ($attempt -eq $MaxAttempts) {
+      throw "$Operation download failed with exit code $exitCode after $MaxAttempts attempts."
+    }
+    $retryDelaySeconds = [int][Math]::Min(30, 5 * [Math]::Pow(2, $attempt - 1))
+    Write-Warning (
+      "$Operation download failed with exit code $exitCode on attempt $attempt/$MaxAttempts. " +
+      "Retrying in $retryDelaySeconds seconds."
+    )
+    Start-Sleep -Seconds $retryDelaySeconds
+  }
 }
 
 function Remove-PythonBytecode {
@@ -282,8 +353,11 @@ function Remove-GeneratedPythonInstallNoise {
     }
   }
 
-  Get-ChildItem -LiteralPath $EnvironmentRoot -Recurse -Force -File -Filter "RECORD" |
-    Where-Object { $_.Directory.Name -like "*.dist-info" } |
+  Get-ChildItem -LiteralPath $EnvironmentRoot -Recurse -Force -File |
+    Where-Object {
+      $_.Directory.Name -like "*.dist-info" -and
+      $_.Name -in @("RECORD", "direct_url.json")
+    } |
     ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
 }
 
@@ -333,7 +407,8 @@ New-Item -ItemType Directory -Path $output -Force | Out-Null
 $buildCacheRoot = Join-Path (Split-Path -Parent $output) ".offline-build-cache"
 $buildTempRoot = Join-Path $buildCacheRoot "temp"
 $pipCacheRoot = Join-Path $buildCacheRoot "pip"
-New-Item -ItemType Directory -Path $buildTempRoot,$pipCacheRoot -Force | Out-Null
+$wheelCacheRoot = Join-Path $buildCacheRoot "wheels"
+New-Item -ItemType Directory -Path $buildTempRoot,$pipCacheRoot,$wheelCacheRoot -Force | Out-Null
 $previousTemp = $env:TEMP
 $previousTmp = $env:TMP
 $previousPipCache = $env:PIP_CACHE_DIR
@@ -454,28 +529,38 @@ try {
     -Operation "Oscar common runtime installation"
 
   Write-Host "[offline] Resolving llama.cpp CPU profile"
+  $cpuLlamaWheel = Resolve-PinnedPythonWheel `
+    -Python $python `
+    -CacheDirectory (Join-Path $wheelCacheRoot "llama-cpp-python-0.3.30-cpu") `
+    -FileName "llama_cpp_python-0.3.30-py3-none-win_amd64.whl" `
+    -ExpectedSha256 "8f238e24ed335ad05acf48648d0855714dfeb0ed341d1ff15d8b8cc06bd51d6a" `
+    -IndexUrl "https://abetlen.github.io/llama-cpp-python/whl/cpu" `
+    -Requirement "llama-cpp-python==0.3.30" `
+    -Operation "Oscar CPU llama.cpp wheel"
   Install-PythonTarget `
     -Python $python `
     -Target $cpuSitePackages `
     -Arguments @(
       "--no-deps",
-      "--only-binary=llama-cpp-python",
-      "--index-url",
-      "https://abetlen.github.io/llama-cpp-python/whl/cpu",
-      "llama-cpp-python==0.3.30"
+      $cpuLlamaWheel
     ) `
     -Operation "Oscar CPU llama.cpp installation"
 
   Write-Host "[offline] Resolving llama.cpp CUDA profile"
+  $cudaLlamaWheel = Resolve-PinnedPythonWheel `
+    -Python $python `
+    -CacheDirectory (Join-Path $wheelCacheRoot "llama-cpp-python-0.3.30-cu125") `
+    -FileName "llama_cpp_python-0.3.30-py3-none-win_amd64.whl" `
+    -ExpectedSha256 "90bffd9957b68e801db6f7781a786523e22f431738c260c42666d7f9413e3a8e" `
+    -IndexUrl "https://abetlen.github.io/llama-cpp-python/whl/cu125" `
+    -Requirement "llama-cpp-python==0.3.30" `
+    -Operation "Oscar CUDA llama.cpp wheel"
   Install-PythonTarget `
     -Python $python `
     -Target $cudaSitePackages `
     -Arguments @(
       "--no-deps",
-      "--only-binary=llama-cpp-python",
-      "--index-url",
-      "https://abetlen.github.io/llama-cpp-python/whl/cu125",
-      "llama-cpp-python==0.3.30"
+      $cudaLlamaWheel
     ) `
     -Operation "Oscar CUDA llama.cpp installation"
   Install-PythonTarget `

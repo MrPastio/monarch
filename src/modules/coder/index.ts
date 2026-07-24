@@ -12,7 +12,7 @@ import type {
   MonarchModulePackage,
   MonarchRouteDecision,
 } from '../../core';
-import { isPathWithinRoot, permissionModeForRisk } from '../../core';
+import { isPathWithinRoot, permissionModeForRisk, resolveMonarchRuntimePaths } from '../../core';
 import { safeFetch } from '../custom-tools';
 import { coderManifest } from './manifest';
 import { CoderProjectStore } from './project-store';
@@ -31,6 +31,9 @@ export interface CoderModuleOptions {
   monarchRoot?: string;
   sandboxRunner?: CoderSandboxRunner;
   huggingFaceExecutable?: string;
+  registryPath?: string;
+  workspaceCoderRoot?: string;
+  sandboxRoot?: string;
 }
 
 interface ProcessResult {
@@ -51,10 +54,22 @@ export class CoderModule implements MonarchModule {
 
   constructor(options: CoderModuleOptions = {}) {
     this.monarchRoot = path.resolve(options.monarchRoot || process.cwd());
-    this.projects = new CoderProjectStore({ monarchRoot: this.monarchRoot });
-    this.sandbox = options.sandboxRunner || new CoderSandboxRunner({ monarchRoot: this.monarchRoot });
+    const runtimePaths = resolveMonarchRuntimePaths(this.monarchRoot);
+    this.projects = new CoderProjectStore({
+      monarchRoot: this.monarchRoot,
+      registryPath: options.registryPath || path.join(runtimePaths.stateRoot, 'coder', 'projects.json'),
+      workspaceCoderRoot: options.workspaceCoderRoot || runtimePaths.coderWorkspaceRoot,
+    });
+    this.sandbox = options.sandboxRunner || new CoderSandboxRunner({
+      monarchRoot: this.monarchRoot,
+      runtimeRoot: options.sandboxRoot || runtimePaths.coderSandboxRoot,
+    });
+    const packagedEnvironmentRoot = String(process.env.MONARCH_BACKEND_ENVIRONMENT_ROOT || '').trim();
     this.huggingFaceExecutablePath = path.resolve(
-      options.huggingFaceExecutable || path.join(this.monarchRoot, 'oscar', '.venv', 'Scripts', 'hf.exe'),
+      options.huggingFaceExecutable
+      || (path.isAbsolute(packagedEnvironmentRoot)
+        ? path.join(packagedEnvironmentRoot, 'oscar', 'Scripts', 'hf.exe')
+        : path.join(this.monarchRoot, 'oscar', '.venv', 'Scripts', 'hf.exe')),
     );
   }
 

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { lstat, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -28,6 +28,10 @@ New-Item -ItemType Directory -Path $v1, $v2 -Force | Out-Null
 $layout1 = Initialize-MonarchInstallLayout -InstallRoot $install -VersionRoot $v1 -AppVersion "0.1.5" -RuntimeVersion "2026.07.1" -BackendEnvironment "backend-0.1.5" -PayloadRoot $payload
 Write-MonarchVersionDescriptor -VersionRoot $v1 -AppVersion "0.1.5" -RuntimeVersion "2026.07.1" -BackendEnvironment "backend-0.1.5" | Out-Null
 Set-MonarchCurrentVersion -InstallRoot $install -CurrentVersion "0.1.5"
+$wrongGenerated = Join-Path ${quotePs(root)} "wrong-generated"
+New-Item -ItemType Directory -Path $wrongGenerated -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $v2 "artifacts") -Force | Out-Null
+New-Item -ItemType Junction -Path (Join-Path $v2 "artifacts\\generated") -Target $wrongGenerated | Out-Null
 $layout2 = Initialize-MonarchInstallLayout -InstallRoot $install -VersionRoot $v2 -AppVersion "0.2.0" -RuntimeVersion "2026.08.0" -BackendEnvironment "backend-0.2.0" -PayloadRoot $payload
 Write-MonarchVersionDescriptor -VersionRoot $v2 -AppVersion "0.2.0" -RuntimeVersion "2026.08.0" -BackendEnvironment "backend-0.2.0" | Out-Null
 New-MonarchPendingUpdate -InstallRoot $install -Layout $layout2 -PreviousVersion "0.1.5" -CandidateVersion "0.2.0" -CandidateRuntimeVersion "2026.08.0" -CandidateBackendEnvironment "backend-0.2.0" | Out-Null
@@ -44,6 +48,7 @@ New-MonarchPendingUpdate -InstallRoot $install -Layout $layout2 -PreviousVersion
     const current = JSON.parse(await readFile(path.join(root, 'install', 'current.json'), 'utf8'));
     const pending = JSON.parse(await readFile(path.join(root, 'payload', 'transactions', 'pending-update.json'), 'utf8'));
     const descriptor = JSON.parse(await readFile(path.join(root, 'install', 'versions', '0.2.0', 'version.json'), 'utf8'));
+    const installLayout = JSON.parse(await readFile(path.join(root, 'install', 'install-layout.json'), 'utf8'));
     expect(current).toMatchObject({ currentVersion: '0.1.5', previousVersion: null });
     expect(pending).toMatchObject({
       previousVersion: '0.1.5',
@@ -57,17 +62,25 @@ New-MonarchPendingUpdate -InstallRoot $install -Layout $layout2 -PreviousVersion
       runtimeVersion: '2026.08.0',
       backendEnvironment: 'backend-0.2.0',
     });
-    for (const [relativePath, target] of [
-      ['oscar/data', path.join(root, 'local', 'Monarch', 'data', 'oscar')],
-      ['security/data', path.join(root, 'local', 'Monarch', 'data', 'security')],
-      ['security/logs', path.join(root, 'local', 'Monarch', 'logs', 'security')],
+    for (const relativePath of [
+      'artifacts/generated',
+      'oscar/data',
+      'security/data',
+      'security/logs',
     ]) {
-      const linkedPath = path.join(root, 'install', 'versions', '0.2.0', relativePath);
-      expect((await lstat(linkedPath)).isSymbolicLink()).toBe(true);
-      expect((await realpath(linkedPath)).toLowerCase()).toBe(
-        (await realpath(target)).toLowerCase(),
-      );
+      const legacyPath = path.join(root, 'install', 'versions', '0.2.0', relativePath);
+      await expect(lstat(legacyPath)).rejects.toMatchObject({ code: 'ENOENT' });
     }
+    expect(installLayout).toMatchObject({
+      generatedRoot: path.join(root, 'payload', 'generated'),
+      workspaceRoot: path.join(root, 'payload', 'workspaces', 'default'),
+      dataRoot: path.join(root, 'local', 'Monarch', 'data'),
+      logsRoot: path.join(root, 'local', 'Monarch', 'logs'),
+      securityDataRoot: path.join(root, 'local', 'Monarch', 'data', 'security'),
+      securityLogsRoot: path.join(root, 'local', 'Monarch', 'logs', 'security'),
+    });
+    await expect(lstat(installLayout.securityDataRoot)).resolves.toMatchObject({ isDirectory: expect.any(Function) });
+    await expect(lstat(installLayout.securityLogsRoot)).resolves.toMatchObject({ isDirectory: expect.any(Function) });
   }, 15_000);
 });
 

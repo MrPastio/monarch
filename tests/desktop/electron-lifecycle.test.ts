@@ -74,7 +74,7 @@ describe('Electron desktop lifecycle', () => {
     expect(source).toContain("ipcMain.handle('monarch:speech-release'");
     expect(source).toContain('await speechOutput.releaseNeural()');
     expect(source).toContain('speechWarmup.reset()');
-    expect(source).toContain("runtime', 'electron-speech.log'");
+    expect(source).toContain("path.join(desktopLogsRoot, 'electron-speech.log')");
     expect(source).toContain('appendFile(speechDiagnosticsPath');
     expect(source).toContain("logSpeechDiagnostic('playback-requested'");
     expect(source.indexOf("logSpeechDiagnostic('playback-requested'"))

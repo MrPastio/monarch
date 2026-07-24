@@ -418,6 +418,13 @@ function canUseOscarBridge(_role: MonarchModelRole, env: NodeJS.ProcessEnv): boo
   }
   const projectRoot = path.resolve(env.OSCAR_PROJECT_ROOT || path.join(process.cwd(), 'oscar'));
   const backendMain = path.join(projectRoot, 'backend', 'oscar_agent', 'main.py');
-  const venvPython = path.join(projectRoot, '.venv', 'Scripts', 'python.exe');
-  return existsSync(backendMain) && existsSync(venvPython);
+  const configuredPython = normalizeEnv(env.OSCAR_PYTHON)
+    || normalizeEnv(env.MONARCH_VOICE_LITE_PYTHON)
+    || (
+      normalizeEnv(env.MONARCH_RUNTIME_ROOT)
+        ? path.join(normalizeEnv(env.MONARCH_RUNTIME_ROOT), 'python', 'python.exe')
+        : ''
+    );
+  const python = configuredPython || path.join(projectRoot, '.venv', 'Scripts', 'python.exe');
+  return existsSync(backendMain) && existsSync(python);
 }
