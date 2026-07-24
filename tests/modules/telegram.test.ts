@@ -921,22 +921,15 @@ describe('Telegram Module', () => {
     const kernel = new MonarchKernel();
     kernel.registerModule(module);
     await kernel.start();
+    const handleUpdate = (update: unknown) => (
+      module as unknown as { handleUpdate: (value: unknown) => Promise<void> }
+    ).handleUpdate(update);
 
     try {
-      await kernel.execute({
-        id: 'exec_api_pending_cap_start',
-        intentId: 'intent_api_pending_cap_start',
-        moduleId: 'telegram',
-        capabilityId: 'telegram.bot.start',
-        input: {},
-        requestedBy: 'smoke',
-        confirmed: true,
-        createdAt: new Date(0).toISOString(),
-      });
       mock.sentMessages.length = 0;
       mock.apiCalls.length = 0;
       for (let index = 1; index <= 9; index += 1) {
-        mock.updates.push({
+        await handleUpdate({
           update_id: index,
           message: {
             message_id: index,
@@ -947,7 +940,7 @@ describe('Telegram Module', () => {
         });
       }
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Слишком много ожидающих подтверждений')), 8_000);
+      expect(mock.sentMessages.some((message) => String(message.text).includes('Слишком много ожидающих подтверждений'))).toBe(true);
       const prompts = mock.sentMessages.filter((message) => String(message.text).includes('Bot API sendMessage изменит состояние Telegram'));
       expect(prompts).toHaveLength(8);
       expect(internals.pendingConfirmations.size).toBe(8);
@@ -1253,6 +1246,9 @@ describe('Telegram Module', () => {
     const kernel = new MonarchKernel();
     kernel.registerModule(module);
     await kernel.start();
+    const handleUpdate = (update: unknown) => (
+      module as unknown as { handleUpdate: (value: unknown) => Promise<void> }
+    ).handleUpdate(update);
 
     try {
       const started = await kernel.execute({
@@ -1261,17 +1257,17 @@ describe('Telegram Module', () => {
       });
       const validCode = String((started.output as { pairingCode: string }).pairingCode);
       for (let index = 1; index <= 5; index += 1) {
-        mock.updates.push({
+        await handleUpdate({
           update_id: index,
           message: { message_id: index, chat: { id: 701, type: 'private' }, from: { id: 901, username: 'attacker' }, text: '000000' },
         });
       }
-      mock.updates.push({
+      await handleUpdate({
         update_id: 6,
         message: { message_id: 6, chat: { id: 701, type: 'private' }, from: { id: 901, username: 'attacker' }, text: validCode },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Слишком много неверных попыток')), 5_000);
+      expect(mock.sentMessages.some((message) => String(message.text).includes('Слишком много неверных попыток'))).toBe(true);
       const persisted = JSON.parse(await readFile(path.join(root, 'data', 'local', 'telegram-state.json'), 'utf8')) as { pairings: unknown[] };
       expect(persisted.pairings).toEqual([]);
       expect(mock.sentMessages.some((message) => String(message.text).includes('Готово — связал этот чат'))).toBe(false);
@@ -1291,6 +1287,9 @@ describe('Telegram Module', () => {
 
     try {
       const firstModule = new TelegramModule({ projectRoot: root, apiBase: mock.apiBase, token: 'test-token', autoStart: false });
+      const firstHandleUpdate = (update: unknown) => (
+        firstModule as unknown as { handleUpdate: (value: unknown) => Promise<void> }
+      ).handleUpdate(update);
       firstKernel = new MonarchKernel();
       firstKernel.registerModule(firstModule);
       await firstKernel.start();
@@ -1300,13 +1299,13 @@ describe('Telegram Module', () => {
       });
       const validCode = String((started.output as { pairingCode: string }).pairingCode);
       for (let index = 1; index <= 5; index += 1) {
-        mock.updates.push({
+        await firstHandleUpdate({
           update_id: index,
           message: { message_id: index, chat: { id: 702, type: 'private' }, from: { id: 902, username: 'attacker' }, text: '000000' },
         });
       }
 
-      await waitUntil(() => mock.sentMessages.filter((message) => String(message.text).includes('Этот код не подошёл')).length >= 5, 5_000);
+      expect(mock.sentMessages.filter((message) => String(message.text).includes('Этот код не подошёл'))).toHaveLength(5);
       const blockedState = JSON.parse(await readFile(statePath, 'utf8')) as {
         pairingAttempts?: Record<string, { blockedUntil?: number }>;
       };
@@ -1320,6 +1319,9 @@ describe('Telegram Module', () => {
       mock.updates.length = 0;
 
       const secondModule = new TelegramModule({ projectRoot: root, apiBase: mock.apiBase, token: 'test-token', autoStart: false });
+      const secondHandleUpdate = (update: unknown) => (
+        secondModule as unknown as { handleUpdate: (value: unknown) => Promise<void> }
+      ).handleUpdate(update);
       secondKernel = new MonarchKernel();
       secondKernel.registerModule(secondModule);
       await secondKernel.start();
@@ -1327,12 +1329,12 @@ describe('Telegram Module', () => {
         id: 'exec_pair_persist_restart', intentId: 'intent_pair_persist_restart', moduleId: 'telegram', capabilityId: 'telegram.bot.start',
         input: {}, requestedBy: 'smoke', confirmed: true, createdAt: new Date(0).toISOString(),
       });
-      mock.updates.push({
+      await secondHandleUpdate({
         update_id: 100,
         message: { message_id: 100, chat: { id: 702, type: 'private' }, from: { id: 902, username: 'attacker' }, text: validCode },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Слишком много неверных попыток')), 5_000);
+      expect(mock.sentMessages.some((message) => String(message.text).includes('Слишком много неверных попыток'))).toBe(true);
       const persisted = JSON.parse(await readFile(statePath, 'utf8')) as { pairings: unknown[] };
       expect(persisted.pairings).toEqual([]);
       expect(mock.sentMessages.some((message) => String(message.text).includes('Готово — связал этот чат'))).toBe(false);
