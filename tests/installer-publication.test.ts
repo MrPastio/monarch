@@ -18,6 +18,10 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(builder).toContain('profiles\\cpu');
     expect(builder).toContain('profiles\\cuda');
     expect(builder).toContain('Portable Python runtime validation');
+    expect(builder).toContain(
+      "'^python-\\d+\\.\\d+\\.\\d+-amd64\\.exe$'",
+    );
+    expect(builder).toContain("'^python3\\.exe$'");
     expect(builder).toContain('Offline Oscar CPU runtime validation');
     expect(builder).toContain('Offline Oscar CUDA runtime validation');
     expect(builder).toContain('Remove-PythonBytecode');
