@@ -84,6 +84,41 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(finalizer).not.toMatch(/-m\s+pip\s+install/i);
   });
 
+  it('keeps every installer entrypoint on one default version contract', () => {
+    const packageVersion = JSON.parse(read('package.json')).version as string;
+    const payloadContract = JSON.parse(
+      read('installer/payload-version-contract.json'),
+    ) as {
+      runtime: { version: string };
+      environment: { version: string };
+    };
+    for (const scriptPath of [
+      'installer/bootstrap.ps1',
+      'installer/build-installer.ps1',
+      'installer/build-offline-payload.ps1',
+      'installer/finalize-offline-install.ps1',
+    ]) {
+      const script = read(scriptPath);
+      expect(script, scriptPath).toContain(
+        `[string]$AppVersion = "${packageVersion}"`,
+      );
+      expect(script, scriptPath).toContain(
+        `[string]$RuntimeVersion = "${payloadContract.runtime.version}"`,
+      );
+      expect(script, scriptPath).toContain(
+        `[string]$BackendEnvironment = "${payloadContract.environment.version}"`,
+      );
+    }
+    const definition = read('installer/Monarch.iss');
+    expect(definition).toContain(`#define AppVersion "${packageVersion}"`);
+    expect(definition).toContain(
+      `#define RuntimeVersion "${payloadContract.runtime.version}"`,
+    );
+    expect(definition).toContain(
+      `#define BackendEnvironment "${payloadContract.environment.version}"`,
+    );
+  });
+
   it('installs llama.cpp from a published Windows wheel instead of compiling it locally', () => {
     const oscarInstaller = read('oscar/scripts/install.ps1');
     expect(oscarInstaller).toContain('.requirements-installer.tmp');
