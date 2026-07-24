@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
@@ -8,9 +9,9 @@ import type {
   MonarchModulePackage,
   MonarchRouteDecision,
 } from '../../core';
+import { resolveMonarchRuntimePaths } from '../../core';
 import { memoryManifest } from './manifest';
 import {
-  defaultMemoryStorePath,
   MonarchMemoryStore,
   type MonarchMemoryMetadata,
   type MonarchMemoryPatch,
@@ -562,5 +563,6 @@ function resolveMemoryStorePath(options: MemoryModuleOptions): string | undefine
     return configuredPath;
   }
 
-  return defaultMemoryStorePath(options.workspaceRoot || process.cwd());
+  const workspaceRoot = options.workspaceRoot || process.cwd();
+  return path.join(resolveMonarchRuntimePaths(workspaceRoot).dataRoot, 'memory.json');
 }

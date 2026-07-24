@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import tomllib
 
@@ -158,7 +159,19 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         )
     )
     if not model_path.is_absolute():
-        model_path = root / model_path
+        models_root = os.getenv("MONARCH_MODELS_ROOT", "").strip()
+        payload_root = os.getenv("MONARCH_PAYLOAD_ROOT", "").strip()
+        if models_root or payload_root:
+            configured_models_root = (
+                Path(models_root) if models_root else Path(payload_root) / "models"
+            )
+            model_parts = model_path.parts
+            if len(model_parts) >= 2 and model_parts[0] == ".." and model_parts[1] == "gemma_models":
+                model_path = configured_models_root / "gemma_models" / Path(*model_parts[2:])
+            else:
+                model_path = root / model_path
+        else:
+            model_path = root / model_path
     runtime_data = data.get("runtime", {})
     file_watch_data = data.get("file_watch", {})
     network_data = data.get("network", {})
@@ -306,6 +319,20 @@ def _resolve_path(root: Path, value: str | Path) -> Path:
     path = Path(value)
     if path.is_absolute():
         return path
+    if path.parts and path.parts[0].lower() == "data":
+        configured = os.getenv("MONARCH_SECURITY_DATA_ROOT", "").strip()
+        if not configured:
+            monarch_data = os.getenv("MONARCH_DATA_ROOT", "").strip()
+            configured = str(Path(monarch_data) / "security") if monarch_data else ""
+        if configured:
+            return Path(configured) / Path(*path.parts[1:])
+    if path.parts and path.parts[0].lower() == "logs":
+        configured = os.getenv("MONARCH_SECURITY_LOGS_ROOT", "").strip()
+        if not configured:
+            monarch_logs = os.getenv("MONARCH_LOGS_ROOT", "").strip()
+            configured = str(Path(monarch_logs) / "security") if monarch_logs else ""
+        if configured:
+            return Path(configured) / Path(*path.parts[1:])
     return root / path
 
 

@@ -57,7 +57,7 @@ export class LocalMonarchSharingClient implements MonarchSharingClient {
     const baseUrl = normalizeSharingBaseUrl(
       this.env.MONARCH_SHARING_BASE_URL || this.env.OSCAR_API_BASE || DEFAULT_SHARING_BASE_URL
     );
-    const tokenPath = path.join(this.projectRoot, 'secrets', 'oscar_token.txt');
+    const tokenPath = sharingTokenPath(this.env, this.projectRoot);
     return {
       baseUrl,
       endpoints: {
@@ -90,7 +90,7 @@ export class LocalMonarchSharingClient implements MonarchSharingClient {
     } catch (error) {
       return {
         connected: false,
-        connection: fallbackConnection(this.projectRoot),
+        connection: fallbackConnection(this.env, this.projectRoot),
         models: [],
         ttsModels: [],
         error: error instanceof Error ? error.message : String(error),
@@ -201,8 +201,8 @@ function configuredTimeout(env: NodeJS.ProcessEnv): number {
   return Number.isFinite(parsed) ? Math.max(250, Math.min(parsed, 30000)) : DEFAULT_TIMEOUT_MS;
 }
 
-function fallbackConnection(projectRoot: string): MonarchSharingConnection {
-  const tokenPath = path.join(projectRoot, 'secrets', 'oscar_token.txt');
+function fallbackConnection(env: NodeJS.ProcessEnv, projectRoot: string): MonarchSharingConnection {
+  const tokenPath = sharingTokenPath(env, projectRoot);
   return {
     baseUrl: DEFAULT_SHARING_BASE_URL,
     endpoints: {
@@ -222,4 +222,12 @@ function fallbackConnection(projectRoot: string): MonarchSharingConnection {
     },
     defaultBinding: '127.0.0.1',
   };
+}
+
+function sharingTokenPath(env: NodeJS.ProcessEnv, projectRoot: string): string {
+  const configured = String(env.MONARCH_SECRETS_ROOT || '').trim();
+  return path.join(
+    configured && path.isAbsolute(configured) ? path.resolve(configured) : projectRoot,
+    configured && path.isAbsolute(configured) ? 'oscar_token.txt' : path.join('secrets', 'oscar_token.txt'),
+  );
 }

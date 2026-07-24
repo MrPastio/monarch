@@ -1,7 +1,7 @@
 param(
   [string]$InstallDirectory = "",
   [string]$InstallRoot = "",
-  [string]$AppVersion = "0.2.3.7",
+  [string]$AppVersion = "0.2.3.2",
   [string]$RuntimeVersion = "2026.07.1",
   [string]$BackendEnvironment = "backend-0.1.5",
   [int]$DataSchemaVersion = 1,
@@ -95,6 +95,24 @@ if ($InstallRoot) {
   $env:MONARCH_CONFIG_ROOT = [string]$layout.configRoot
   $env:MONARCH_DATA_ROOT = [string]$layout.dataRoot
   $env:MONARCH_LOGS_ROOT = [string]$layout.logsRoot
+  $env:MONARCH_GENERATED_ROOT = [string]$layout.generatedRoot
+  $env:MONARCH_MODELS_ROOT = [string]$layout.modelsRoot
+  $env:MONARCH_SECRETS_ROOT = [string]$layout.secretsRoot
+  $env:MONARCH_STATE_ROOT = [string]$layout.stateRoot
+  $env:MONARCH_WORKSPACE_ROOT = [string]$layout.workspaceRoot
+  $env:MONARCH_CODER_WORKSPACE_ROOT = [string]$layout.coderWorkspaceRoot
+  $env:MONARCH_CODER_SANDBOX_ROOT = [string]$layout.coderSandboxRoot
+  $env:MONARCH_SECURITY_DATA_ROOT = [string]$layout.securityDataRoot
+  $env:MONARCH_SECURITY_LOGS_ROOT = [string]$layout.securityLogsRoot
+  $env:OSCAR_DATA_DIR = Join-Path $layout.dataRoot "oscar"
+  $env:OSCAR_DB_PATH = Join-Path $layout.dataRoot "oscar\memory\oscar_memory.sqlite3"
+  $env:OSCAR_OFFLOAD_DIR = Join-Path $layout.dataRoot "oscar\offload"
+  $env:OSCAR_GEMMA_MODELS_DIR = Join-Path $layout.modelsRoot "gemma_models"
+  $env:OSCAR_CODER_MODELS_DIR = Join-Path $layout.modelsRoot "coder"
+  $env:OSCAR_SHARING_QWEN_MODELS_DIR = Join-Path $layout.modelsRoot "voice\voice-lite"
+  $env:OSCAR_SHARING_TTS_MODELS_DIR = Join-Path $layout.modelsRoot "voice"
+  $env:OSCAR_WORKSPACE_ROOT = [string]$layout.workspaceRoot
+  $env:OSCAR_WORKSPACE_GENERATED_DIR = [string]$layout.generatedRoot
   $oscarConfigDirectory = Join-Path $layout.configRoot "config\oscar"
   $oscarConfigPath = Join-Path $oscarConfigDirectory ".env"
   if (-not (Test-Path -LiteralPath $oscarConfigPath -PathType Leaf)) {

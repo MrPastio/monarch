@@ -58,7 +58,7 @@ describe('Monarch distribution workflows', () => {
     expect(releaseSpec.available).toBe(true);
     expect(releaseSpec.withdrawnReason).toBeNull();
     expect(releaseSpec.compatibility).toMatchObject({
-      runtimeVersion: '2026.07.6',
+      runtimeVersion: '2026.07.7',
       backendEnvironment: 'backend-0.1.5-offline5',
     });
     expect(JSON.stringify(releaseSpec)).not.toContain('bootstrap-pending');

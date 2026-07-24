@@ -6,7 +6,9 @@ import {
   type MonarchModuleLoadRecord,
   type MonarchModulePackage,
   type MonarchPermissionProfile,
+  resolveMonarchRuntimePaths,
 } from './core';
+import path from 'node:path';
 import { builtInModulePackages } from './modules';
 import { createLocalSystemRouter } from './modules/models/system-router';
 
@@ -32,14 +34,24 @@ export function createMonarchKernel(options: MonarchBootstrapOptions = {}): Mona
 
 export function createMonarchRuntime(options: MonarchBootstrapOptions = {}): MonarchRuntime {
   const workspaceRoot = options.workspaceRoot || process.cwd();
+  const runtimePaths = resolveMonarchRuntimePaths(workspaceRoot);
   const kernel = options.enableLocalSystemRouter === false
-    ? new MonarchKernel({ workspaceRoot, ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}) })
+    ? new MonarchKernel({
+      workspaceRoot: runtimePaths.userWorkspaceRoot,
+      agencyStateDirectory: path.join(runtimePaths.stateRoot, 'agency'),
+      ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
+    })
     : new MonarchKernel({
-      workspaceRoot,
+      workspaceRoot: runtimePaths.userWorkspaceRoot,
+      agencyStateDirectory: path.join(runtimePaths.stateRoot, 'agency'),
       llmRouter: createLocalSystemRouter({ workspaceRoot }),
       ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
     });
-  const loader = new MonarchModuleLoader({ workspaceRoot });
+  const loader = new MonarchModuleLoader({
+    workspaceRoot,
+    userWorkspaceRoot: runtimePaths.userWorkspaceRoot,
+    runtimePaths,
+  });
   const packages = selectModulePackages(options.packages || builtInModulePackages, options);
 
   for (const modulePackage of packages) {

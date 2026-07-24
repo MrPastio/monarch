@@ -11,6 +11,7 @@ const MAX_STOP_WAIT_SECONDS = 300;
 
 export interface SecurityClientOptions {
   projectRoot?: string;
+  dataRoot?: string;
   configPath?: string;
   pythonPath?: string;
   timeoutMs?: number;
@@ -18,6 +19,7 @@ export interface SecurityClientOptions {
 
 export interface SecurityRuntimeConfig {
   projectRoot: string;
+  dataRoot: string;
   configPath: string;
   pythonPath: string;
   timeoutMs: number;
@@ -63,6 +65,13 @@ export class SecurityClient {
 
     this.config = {
       projectRoot,
+      dataRoot: path.resolve(
+        options.dataRoot
+          || process.env.MONARCH_SECURITY_DATA_ROOT
+          || (process.env.MONARCH_DATA_ROOT
+            ? path.join(process.env.MONARCH_DATA_ROOT, 'security')
+            : path.join(projectRoot, 'data'))
+      ),
       configPath: path.resolve(
         options.configPath
           || process.env.MONARCH_SECURITY_CONFIG
@@ -177,7 +186,7 @@ export class SecurityClient {
   }
 
   async approveResponse(proposalId: string, pin: string): Promise<SecurityCommandResult> {
-    const requestDirectory = path.join(this.config.projectRoot, 'data', 'pin-requests');
+    const requestDirectory = path.join(this.config.dataRoot, 'pin-requests');
     await mkdir(requestDirectory, { recursive: true, mode: 0o700 });
     const requestPath = path.join(requestDirectory, `${process.pid}-${randomUUID()}.json`);
     await writeFile(requestPath, `${JSON.stringify({ pin })}\n`, {
@@ -207,7 +216,7 @@ export class SecurityClient {
   }
 
   async resolveEmergency(input: { decision: 'release' | 'continue'; pin: string }): Promise<SecurityCommandResult> {
-    const requestDirectory = path.join(this.config.projectRoot, 'data', 'pin-requests');
+    const requestDirectory = path.join(this.config.dataRoot, 'pin-requests');
     await mkdir(requestDirectory, { recursive: true, mode: 0o700 });
     const requestPath = path.join(requestDirectory, `${process.pid}-${randomUUID()}.json`);
     await writeFile(requestPath, `${JSON.stringify({ pin: input.pin })}\n`, {
@@ -502,7 +511,7 @@ export class SecurityClient {
     noLlm?: boolean;
     monarchConfirmed?: boolean;
   }): Promise<SecurityCommandResult> {
-    const requestDirectory = path.join(this.config.projectRoot, 'data', 'action-requests');
+    const requestDirectory = path.join(this.config.dataRoot, 'action-requests');
     await mkdir(requestDirectory, { recursive: true, mode: 0o700 });
     const requestPath = path.join(requestDirectory, `${process.pid}-${randomUUID()}.json`);
     await writeFile(requestPath, `${JSON.stringify({
@@ -608,7 +617,7 @@ export class SecurityClient {
   }
 
   private async runPinRequest(command: 'pin-set' | 'pin-verify' | 'pin-recover', payload: Record<string, string>): Promise<SecurityCommandResult> {
-    const requestDirectory = path.join(this.config.projectRoot, 'data', 'pin-requests');
+    const requestDirectory = path.join(this.config.dataRoot, 'pin-requests');
     await mkdir(requestDirectory, { recursive: true, mode: 0o700 });
     const requestPath = path.join(requestDirectory, `${process.pid}-${randomUUID()}.json`);
     await writeFile(requestPath, `${JSON.stringify(payload)}\n`, {

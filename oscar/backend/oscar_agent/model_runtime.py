@@ -2000,6 +2000,15 @@ CONTEXTUAL_AGENT_FOLLOWUP_PATTERN = re.compile(
     r"[.!? ]*$",
     re.IGNORECASE,
 )
+CONTEXT_PRESERVING_RETRY_PATTERN = re.compile(
+    r"^\s*(?:"
+    r"продолжи\s+(?:предыдущий\s+ответ|код|окончательный\s+исследовательский\s+ответ)|"
+    r"continue\s+(?:the\s+previous\s+response|the\s+code|the\s+final\s+research\s+answer)|"
+    r"rewrite\s+the\s+answer\s+in\s+(?:russian|english|ukrainian|bulgarian)\s+only|"
+    r"regenerate\s+your\s+previous\s+answer\s+because"
+    r")",
+    re.IGNORECASE,
+)
 ENVIRONMENT_TARGET_PATTERN = re.compile(
     r"(?:\b(?:workspace|cwd|runtime|backend|environment|os|ram|gpu|disk|process|service|installed|loaded)\b|"
     r"\b(?:workspace|рантайм|бэкенд|окружени\w*|операционн\w*\s+систем\w*|оперативн\w*\s+памят\w*|"
@@ -2040,7 +2049,11 @@ def prompt_needs_agent_context(text: str) -> bool:
 
 
 def prompt_is_contextual_agent_followup(text: str) -> bool:
-    return bool(CONTEXTUAL_AGENT_FOLLOWUP_PATTERN.search(str(text or "")))
+    value = str(text or "")
+    return bool(
+        CONTEXTUAL_AGENT_FOLLOWUP_PATTERN.search(value)
+        or CONTEXT_PRESERVING_RETRY_PATTERN.search(value)
+    )
 
 
 def prompt_needs_environment_context(text: str) -> bool:

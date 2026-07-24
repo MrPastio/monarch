@@ -3503,6 +3503,26 @@ def test_real_environment_queries_still_receive_environment_context(query):
     assert runtime_module.prompt_needs_environment_context(query) is True
 
 
+def test_runtime_preserves_environment_grounding_across_automatic_continuation(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    runtime = LocalModelRuntime(settings)
+    prompt = runtime._build_prompt_messages(
+        [
+            ChatMessage(role="user", content="Где ты сейчас находишься и что установлено?"),
+            ChatMessage(role="assistant", content="Я запущен локально"),
+            ChatMessage(role="user", content=main_module.continuation_instruction("ru")),
+        ],
+        [],
+        "low",
+        [],
+        [],
+    )
+
+    assert str(settings.workspace_root.resolve()) in prompt[0].content
+    assert "environment.inspect" in prompt[0].content
+    assert "workspace.files.write" in prompt[0].content
+
+
 def test_runtime_compacts_internal_system_prompt_beyond_external_message_limit():
     runtime = LocalModelRuntime(Settings(
         api_token="test",

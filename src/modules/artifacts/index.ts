@@ -10,7 +10,11 @@ import type {
   MonarchModulePackage,
   MonarchRouteDecision,
 } from '../../core';
-import { evaluateFilesystemAccess, permissionModeForRisk } from '../../core';
+import {
+  evaluateFilesystemAccess,
+  permissionModeForRisk,
+  resolveMonarchRuntimePaths,
+} from '../../core';
 import { artifactsManifest } from './manifest';
 
 type ArtifactType = 'html' | 'md' | 'txt' | 'json';
@@ -27,7 +31,9 @@ export class ArtifactsModule implements MonarchModule {
 
   constructor(options: ArtifactsModuleOptions = {}) {
     this.workspaceRoot = path.resolve(options.workspaceRoot || process.cwd());
-    this.artifactsRoot = path.resolve(options.artifactsRoot || path.join(this.workspaceRoot, 'artifacts', 'generated'));
+    this.artifactsRoot = path.resolve(
+      options.artifactsRoot || resolveMonarchRuntimePaths(this.workspaceRoot).generatedRoot,
+    );
   }
 
   async activate(context: MonarchKernelContext): Promise<void> {
@@ -335,5 +341,12 @@ export const artifactsModulePackage: MonarchModulePackage = {
   core: {
     minVersion: '0.1.0',
   },
-  factory: createArtifactsModule,
+  factory: (context) => createArtifactsModule({
+    ...((context?.userWorkspaceRoot || context?.workspaceRoot)
+      ? { workspaceRoot: context.userWorkspaceRoot || context.workspaceRoot! }
+      : {}),
+    ...(context?.runtimePaths?.generatedRoot
+      ? { artifactsRoot: context.runtimePaths.generatedRoot }
+      : {}),
+  }),
 };

@@ -8,6 +8,68 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MONARCH_CONFIG_ROOT = os.getenv("MONARCH_CONFIG_ROOT", "").strip()
+MONARCH_DATA_ROOT = os.getenv("MONARCH_DATA_ROOT", "").strip()
+MONARCH_PAYLOAD_ROOT = os.getenv("MONARCH_PAYLOAD_ROOT", "").strip()
+MONARCH_MODELS_ROOT = os.getenv("MONARCH_MODELS_ROOT", "").strip()
+MONARCH_GENERATED_ROOT = os.getenv("MONARCH_GENERATED_ROOT", "").strip()
+MONARCH_SECRETS_ROOT = os.getenv("MONARCH_SECRETS_ROOT", "").strip()
+MONARCH_WORKSPACE_ROOT = os.getenv("MONARCH_WORKSPACE_ROOT", "").strip()
+MONARCH_RUNTIME_ROOT = os.getenv("MONARCH_RUNTIME_ROOT", "").strip()
+MONARCH_VOICE_LITE_PYTHON = os.getenv("MONARCH_VOICE_LITE_PYTHON", "").strip()
+OSCAR_PYTHON = os.getenv("OSCAR_PYTHON", "").strip()
+MONARCH_BACKEND_ENVIRONMENT_ROOT = os.getenv("MONARCH_BACKEND_ENVIRONMENT_ROOT", "").strip()
+DEFAULT_DATA_DIR = (
+    Path(MONARCH_DATA_ROOT) / "oscar"
+    if MONARCH_DATA_ROOT
+    else PROJECT_ROOT / "data"
+)
+DEFAULT_MODELS_ROOT = (
+    Path(MONARCH_MODELS_ROOT)
+    if MONARCH_MODELS_ROOT
+    else (
+        Path(MONARCH_PAYLOAD_ROOT) / "models"
+        if MONARCH_PAYLOAD_ROOT
+        else PROJECT_ROOT.parent
+    )
+)
+DEFAULT_GEMMA_MODELS_DIR = (
+    DEFAULT_MODELS_ROOT / "gemma_models"
+    if MONARCH_MODELS_ROOT or MONARCH_PAYLOAD_ROOT
+    else PROJECT_ROOT.parent / "gemma_models"
+)
+DEFAULT_CODER_MODELS_DIR = (
+    DEFAULT_MODELS_ROOT / "coder"
+    if MONARCH_MODELS_ROOT or MONARCH_PAYLOAD_ROOT
+    else PROJECT_ROOT.parent / "runtime" / "coder" / "models"
+)
+DEFAULT_VOICE_MODELS_DIR = (
+    DEFAULT_MODELS_ROOT / "voice"
+    if MONARCH_MODELS_ROOT or MONARCH_PAYLOAD_ROOT
+    else PROJECT_ROOT.parent / "runtime" / "voice" / "models"
+)
+DEFAULT_GENERATED_DIR = (
+    Path(MONARCH_GENERATED_ROOT)
+    if MONARCH_GENERATED_ROOT
+    else (
+        Path(MONARCH_PAYLOAD_ROOT) / "generated"
+        if MONARCH_PAYLOAD_ROOT
+        else PROJECT_ROOT.parent / "artifacts" / "generated"
+    )
+)
+DEFAULT_WORKSPACE_ROOT = (
+    Path(MONARCH_WORKSPACE_ROOT)
+    if MONARCH_WORKSPACE_ROOT
+    else PROJECT_ROOT.parent
+)
+DEFAULT_SHARING_TTS_PYTHON = (
+    Path(MONARCH_VOICE_LITE_PYTHON or OSCAR_PYTHON)
+    if MONARCH_VOICE_LITE_PYTHON or OSCAR_PYTHON
+    else (
+        Path(MONARCH_RUNTIME_ROOT) / "python" / "python.exe"
+        if MONARCH_RUNTIME_ROOT
+        else PROJECT_ROOT.parent / "runtime" / "voice" / ".venv" / "Scripts" / "python.exe"
+    )
+)
 SETTINGS_ENV_FILE = (
     Path(MONARCH_CONFIG_ROOT) / "config" / "oscar" / ".env"
     if MONARCH_CONFIG_ROOT
@@ -28,11 +90,12 @@ DEFAULT_CORS_ORIGINS = [
 
 
 def default_model_path() -> Path:
-    return PROJECT_ROOT.parent / "gemma_models" / "Gemma_12B" / "gemma-4-12B-it-Q4_K_M.gguf"
+    return DEFAULT_GEMMA_MODELS_DIR / "Gemma_12B" / "gemma-4-12B-it-Q4_K_M.gguf"
 
 
 def default_api_token() -> str | None:
-    token_file = PROJECT_ROOT.parent / "secrets" / "oscar_token.txt"
+    secrets_root = Path(MONARCH_SECRETS_ROOT) if MONARCH_SECRETS_ROOT else PROJECT_ROOT.parent / "secrets"
+    token_file = secrets_root / "oscar_token.txt"
     if token_file.exists():
         try:
             return token_file.read_text(encoding="utf-8").strip().lstrip("\ufeff")
@@ -46,23 +109,23 @@ class Settings(BaseSettings):
 
     app_name: str = "Oscar Local Agent"
     model_path: Path = Field(default_factory=default_model_path)
-    data_dir: Path = Field(default=PROJECT_ROOT / "data")
-    db_path: Path = Field(default=PROJECT_ROOT / "data" / "memory" / "oscar_memory.sqlite3")
-    offload_dir: Path = Field(default=PROJECT_ROOT / "data" / "offload")
-    gemma_models_dir: Path = Field(default=PROJECT_ROOT.parent / "gemma_models")
-    coder_models_dir: Path = Field(default=PROJECT_ROOT.parent / "runtime" / "coder" / "models")
+    data_dir: Path = Field(default=DEFAULT_DATA_DIR)
+    db_path: Path = Field(default=DEFAULT_DATA_DIR / "memory" / "oscar_memory.sqlite3")
+    offload_dir: Path = Field(default=DEFAULT_DATA_DIR / "offload")
+    gemma_models_dir: Path = Field(default=DEFAULT_GEMMA_MODELS_DIR)
+    coder_models_dir: Path = Field(default=DEFAULT_CODER_MODELS_DIR)
     # Monarch Sharing exposes the two small Qwen GGUFs as explicit Super Fast
     # chat models and the installed Qwen3-TTS checkpoints through its separate
     # speech endpoint. Keeping both roots explicit prevents a client request
     # from ever selecting an arbitrary model path.
     sharing_qwen_models_dir: Path = Field(
-        default=PROJECT_ROOT.parent / "runtime" / "voice" / "models" / "voice-lite"
+        default=DEFAULT_VOICE_MODELS_DIR / "voice-lite"
     )
     sharing_tts_models_dir: Path = Field(
-        default=PROJECT_ROOT.parent / "runtime" / "voice" / "models"
+        default=DEFAULT_VOICE_MODELS_DIR
     )
     sharing_tts_python: Path = Field(
-        default=PROJECT_ROOT.parent / "runtime" / "voice" / ".venv" / "Scripts" / "python.exe"
+        default=DEFAULT_SHARING_TTS_PYTHON
     )
     gemma_high_model_filename: str = "gemma-4-12B-it-Q4_K_M.gguf"
     gemma_high_vision_filename: str = "mmproj-BF16_12B.gguf"
@@ -130,8 +193,8 @@ class Settings(BaseSettings):
     chunk_chars: int = 1400
     chunk_overlap: int = 180
 
-    workspace_root: Path = Field(default=PROJECT_ROOT.parent)
-    workspace_generated_dir: Path = Field(default=PROJECT_ROOT.parent / "artifacts" / "generated")
+    workspace_root: Path = Field(default=DEFAULT_WORKSPACE_ROOT)
+    workspace_generated_dir: Path = Field(default=DEFAULT_GENERATED_DIR)
     workspace_max_read_bytes: int = 256 * 1024
     workspace_max_write_bytes: int = 512 * 1024
     workspace_search_file_bytes: int = 256 * 1024

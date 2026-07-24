@@ -525,7 +525,7 @@ async function handleRequest(
 
   if (request.method === 'GET' && url.pathname === '/api/skills') {
     enforceReadApiToken(request, session);
-    const registry = getAgentSkillRegistry(app.workspaceRoot);
+    const registry = getAgentSkillRegistry(app.sourceRoot || app.workspaceRoot);
     const query = (url.searchParams.get('query') || '').trim();
     if (query) {
       const matches = await registry.match(query, {
@@ -551,7 +551,8 @@ async function handleRequest(
     enforceReadApiToken(request, session);
     const skillId = decodeURIComponent(activateSkillMatch[1]);
     const prompt = url.searchParams.get('prompt') || '';
-    const skill = await getAgentSkillRegistry(app.workspaceRoot).activate(skillId, prompt, { explicit: true });
+    const skill = await getAgentSkillRegistry(app.sourceRoot || app.workspaceRoot)
+      .activate(skillId, prompt, { explicit: true });
     if (!skill) {
       sendJson(response, 404, { ok: false, error: 'skill-not-found' });
       return;

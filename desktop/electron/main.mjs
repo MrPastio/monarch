@@ -76,6 +76,23 @@ const installedLauncher = configuredInstallRoot
 const configuredPayloadRoot = process.env.MONARCH_PAYLOAD_ROOT && path.isAbsolute(process.env.MONARCH_PAYLOAD_ROOT)
   ? path.resolve(process.env.MONARCH_PAYLOAD_ROOT)
   : null;
+const configuredDataRoot = process.env.MONARCH_DATA_ROOT && path.isAbsolute(process.env.MONARCH_DATA_ROOT)
+  ? path.resolve(process.env.MONARCH_DATA_ROOT)
+  : null;
+const configuredLogsRoot = process.env.MONARCH_LOGS_ROOT && path.isAbsolute(process.env.MONARCH_LOGS_ROOT)
+  ? path.resolve(process.env.MONARCH_LOGS_ROOT)
+  : null;
+const configuredSecretsRoot = process.env.MONARCH_SECRETS_ROOT && path.isAbsolute(process.env.MONARCH_SECRETS_ROOT)
+  ? path.resolve(process.env.MONARCH_SECRETS_ROOT)
+  : configuredInstallRoot
+    ? path.join(configuredInstallRoot, 'secrets')
+    : path.join(workspaceRoot, 'secrets');
+const desktopRuntimeRoot = configuredDataRoot
+  ? path.join(configuredDataRoot, 'runtime', 'desktop')
+  : path.join(workspaceRoot, 'runtime');
+const desktopLogsRoot = configuredLogsRoot
+  ? path.join(configuredLogsRoot, 'desktop')
+  : desktopRuntimeRoot;
 const updatePolicy = resolveDesktopUpdatePolicy({
   isPackaged: app.isPackaged,
   demoMode: updateDemoMode,
@@ -147,7 +164,7 @@ updateService.on('state', (snapshot) => {
   if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
   mainWindow.webContents.send('monarch:update-state-changed', snapshot);
 });
-const speechDiagnosticsPath = path.join(workspaceRoot, 'runtime', 'electron-speech.log');
+const speechDiagnosticsPath = path.join(desktopLogsRoot, 'electron-speech.log');
 let speechLogQueue = Promise.resolve();
 const speechOutput = createWindowsSpeechOutput({
   workspaceRoot,
@@ -338,7 +355,7 @@ ipcMain.handle('monarch:copy-sharing-token', async (event) => {
   if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
     return { ok: false, error: 'untrusted-renderer' };
   }
-  const tokenPath = path.join(workspaceRoot, 'secrets', 'oscar_token.txt');
+  const tokenPath = path.join(configuredSecretsRoot, 'oscar_token.txt');
   if (!existsSync(tokenPath)) {
     return { ok: false, error: 'token-missing' };
   }
@@ -528,7 +545,10 @@ async function startDesktopApp() {
       });
     }
   }
-  await mkdir(path.join(workspaceRoot, 'runtime'), { recursive: true });
+  await Promise.all([
+    mkdir(desktopRuntimeRoot, { recursive: true }),
+    mkdir(desktopLogsRoot, { recursive: true }),
+  ]);
   // Spawn the Qwen worker synchronously before the runtime can prewarm other
   // local models. Renderer callers await this exact shared promise via IPC.
   if (!smokeMode && !safeEntryQaMode && !safeLaunchMode && !updateDemoMode) void speechWarmup.start();
@@ -1475,8 +1495,8 @@ async function startRuntime() {
   // Voice Mode owns STT preparation after the shared Qwen warmup settles.
   // Do not let an inherited shell flag race Vosk/sherpa allocation with TTS.
   delete env.MONARCH_STT_PREWARM_ON_ACTIVATE;
-  const outPath = path.join(workspaceRoot, 'runtime', `electron-server-${port}.out.log`);
-  const errPath = path.join(workspaceRoot, 'runtime', `electron-server-${port}.err.log`);
+  const outPath = path.join(desktopLogsRoot, `electron-server-${port}.out.log`);
+  const errPath = path.join(desktopLogsRoot, `electron-server-${port}.err.log`);
   const out = await import('node:fs').then((fs) => fs.createWriteStream(outPath, { flags: 'a' }));
   const err = await import('node:fs').then((fs) => fs.createWriteStream(errPath, { flags: 'a' }));
   out.write(`[desktop] Runtime entry: ${runtimeLaunch.kind} ${runtimeLaunch.entryPath}\n`);
@@ -1576,7 +1596,7 @@ async function shutdownDesktop() {
 }
 
 async function stopOscarBackend() {
-  const tokenPath = path.join(workspaceRoot, 'secrets', 'oscar_token.txt');
+  const tokenPath = path.join(configuredSecretsRoot, 'oscar_token.txt');
   if (!existsSync(tokenPath)) {
     return;
   }

@@ -2,6 +2,7 @@ import { open, readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { classifyIntentText } from '../../core/intent-classifier';
 import { selectModelRouteForText } from '../../core/model-router';
+import { resolveMonarchRuntimePaths } from '../../core/runtime-paths';
 import type { MonarchModelRuntimeReport } from './runtime-adapters';
 
 export type MonarchModelRole =
@@ -298,12 +299,13 @@ const MODEL_DIRECTORY_SPECS: ModelDirectorySpec[] = [
 ];
 
 export async function readModelCatalog(workspaceRoot: string): Promise<MonarchModelCatalog> {
-  const root = path.join(workspaceRoot, 'gemma_models');
+  const runtimePaths = resolveMonarchRuntimePaths(workspaceRoot);
+  const root = path.join(runtimePaths.modelsRoot, 'gemma_models');
   const exists = await directoryExists(root);
   const models: MonarchModelEntry[] = [];
 
   for (const spec of MODEL_DIRECTORY_SPECS) {
-    models.push(await readModelEntry(workspaceRoot, spec, exists));
+    models.push(await readModelEntry(workspaceRoot, spec));
   }
 
   return {
@@ -428,10 +430,9 @@ export function createRouterPipeline(
 
 async function readModelEntry(
   root: string,
-  spec: ModelDirectorySpec,
-  rootExists: boolean
+  spec: ModelDirectorySpec
 ): Promise<MonarchModelEntry> {
-  const directory = path.join(root, spec.directoryName);
+  const directory = resolveModelCatalogPath(root, spec.directoryName);
 
   let enabled = spec.enabled;
   if (spec.role === 'gemma4-31b') {
@@ -441,7 +442,7 @@ async function readModelEntry(
     }
   }
 
-  if (!rootExists || !(await directoryExists(directory))) {
+  if (!(await directoryExists(directory))) {
     return {
       role: spec.role,
       directoryName: spec.directoryName,
@@ -637,12 +638,31 @@ function toWorkspaceRelativePath(directoryName: string, relativePath: string): s
 
 async function resolveFirstValidWorkspaceGguf(root: string, candidates: string[]): Promise<string | undefined> {
   for (const candidate of candidates) {
-    const fullPath = path.join(root, candidate);
+    const fullPath = resolveModelCatalogPath(root, candidate);
     if (await hasGgufMagic(fullPath)) {
       return candidate.replaceAll('\\', '/');
     }
   }
   return undefined;
+}
+
+function resolveModelCatalogPath(workspaceRoot: string, relativePath: string): string {
+  const runtimePaths = resolveMonarchRuntimePaths(workspaceRoot);
+  const normalized = relativePath.replaceAll('\\', '/').replace(/^\/+/, '');
+  if (runtimePaths.mode === 'installed') {
+    if (normalized === 'gemma_models' || normalized.startsWith('gemma_models/')) {
+      return path.join(runtimePaths.modelsRoot, normalized);
+    }
+    const coderPrefix = 'runtime/coder/models';
+    if (normalized === coderPrefix || normalized.startsWith(`${coderPrefix}/`)) {
+      return path.join(runtimePaths.modelsRoot, 'coder', normalized.slice(coderPrefix.length).replace(/^\/+/, ''));
+    }
+    const voicePrefix = 'runtime/voice/models';
+    if (normalized === voicePrefix || normalized.startsWith(`${voicePrefix}/`)) {
+      return path.join(runtimePaths.modelsRoot, 'voice', normalized.slice(voicePrefix.length).replace(/^\/+/, ''));
+    }
+  }
+  return path.join(runtimePaths.workspaceRoot, normalized);
 }
 
 async function hasGgufMagic(filePath: string): Promise<boolean> {

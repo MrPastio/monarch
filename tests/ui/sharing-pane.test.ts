@@ -43,7 +43,7 @@ describe('Monarch Sharing UI', () => {
     expect(desktopPreload).toContain("copySharingToken: () => ipcRenderer.invoke('monarch:copy-sharing-token')");
     expect(desktopMain).toContain("ipcMain.handle('monarch:copy-sharing-token', async (event) => {");
     expect(desktopMain).toContain('event.sender.id !== mainWindow.webContents.id');
-    expect(desktopMain).toContain("path.join(workspaceRoot, 'secrets', 'oscar_token.txt')");
+    expect(desktopMain).toContain("path.join(configuredSecretsRoot, 'oscar_token.txt')");
     expect(desktopMain).toContain('clipboard.writeText(token);');
     expect(desktopMain).toContain('return { ok: true };');
     expect(desktopMain).not.toContain('return { ok: true, token };');

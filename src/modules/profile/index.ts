@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
@@ -7,10 +8,9 @@ import type {
   MonarchModulePackage,
   MonarchRouteDecision,
 } from '../../core';
-import { permissionModeForRisk } from '../../core';
+import { permissionModeForRisk, resolveMonarchRuntimePaths } from '../../core';
 import { profileManifest } from './manifest';
 import {
-  defaultProfileStorePath,
   MonarchProfileStore,
   type MonarchProfilePatch,
 } from './store';
@@ -210,7 +210,8 @@ function resolveProfileStorePath(options: ProfileModuleOptions): string | undefi
     return configuredPath;
   }
 
-  return defaultProfileStorePath(options.workspaceRoot || process.cwd());
+  const workspaceRoot = options.workspaceRoot || process.cwd();
+  return path.join(resolveMonarchRuntimePaths(workspaceRoot).dataRoot, 'profile.json');
 }
 
 export function createProfileModule(options: ProfileModuleOptions = {}): MonarchModule {

@@ -1345,5 +1345,9 @@ export const workspaceModulePackage: MonarchModulePackage = {
   core: {
     minVersion: '0.1.0',
   },
-  factory: createWorkspaceModule,
+  factory: (context) => createWorkspaceModule(
+    context?.userWorkspaceRoot || context?.workspaceRoot
+      ? { workspaceRoot: context.userWorkspaceRoot || context.workspaceRoot! }
+      : {},
+  ),
 };

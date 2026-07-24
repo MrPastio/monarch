@@ -73,25 +73,53 @@ function Set-MonarchPrivateAcl {
   $directoryInfo.SetAccessControl($acl)
 }
 
-function New-MonarchDirectoryJunction {
+function Remove-MonarchLegacyVersionJunction {
   param(
-    [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][string]$Target
+    [Parameter(Mandatory = $true)][string]$VersionRoot,
+    [Parameter(Mandatory = $true)][string]$RelativePath
   )
 
-  New-Item -ItemType Directory -Path $Target -Force | Out-Null
-  if (Test-Path -LiteralPath $Path) {
-    $existing = Get-Item -LiteralPath $Path -Force
-    if (($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-      return
-    }
-    foreach ($child in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
-      Move-Item -LiteralPath $child.FullName -Destination $Target -Force
-    }
-    Remove-Item -LiteralPath $Path -Force
+  $version = [System.IO.Path]::GetFullPath($VersionRoot).TrimEnd('\')
+  $candidate = [System.IO.Path]::GetFullPath((Join-Path $version $RelativePath)).TrimEnd('\')
+  if (-not $candidate.StartsWith(
+    $version + '\',
+    [StringComparison]::OrdinalIgnoreCase
+  )) {
+    throw "Legacy junction path escaped the version root: $RelativePath"
   }
-  New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
-  New-Item -ItemType Junction -Path $Path -Target $Target | Out-Null
+
+  $existing = Get-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
+  if (-not $existing -or
+      ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+    return
+  }
+
+  [System.IO.Directory]::Delete($candidate)
+  if (Get-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue) {
+    throw "Could not remove legacy version junction: $candidate"
+  }
+}
+
+function Assert-MonarchWritableDirectory {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $canonical = [System.IO.Path]::GetFullPath($Path)
+  $probe = Join-Path $canonical (".monarch-write-probe-$([guid]::NewGuid().ToString('N'))")
+  $moved = "$probe.ok"
+  try {
+    New-Item -ItemType Directory -Path $canonical -Force | Out-Null
+    [System.IO.File]::WriteAllText(
+      $probe,
+      "ok",
+      (New-Object System.Text.UTF8Encoding($false))
+    )
+    [System.IO.File]::Move($probe, $moved)
+  } catch {
+    throw "Monarch writable storage is unavailable at $canonical. $($_.Exception.Message)"
+  } finally {
+    Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $moved -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Copy-MonarchLegacySecretsForMigration {
@@ -163,8 +191,14 @@ function Initialize-MonarchInstallLayout {
     (Join-Path $payload "downloads"),
     (Join-Path $payload "updates"),
     (Join-Path $payload "transactions"),
+    (Join-Path $payload "workspaces\default"),
+    (Join-Path $payload "workspaces\coder"),
+    (Join-Path $payload "coder-sandbox"),
     (Join-Path $localState "data"),
+    (Join-Path $localState "data\runtime"),
+    (Join-Path $localState "data\security"),
     (Join-Path $localState "logs"),
+    (Join-Path $localState "logs\security"),
     (Join-Path $configRoot "config"),
     (Join-Path $configRoot "Safe"),
     (Join-Path $configRoot "migration\secrets"),
@@ -174,19 +208,44 @@ function Initialize-MonarchInstallLayout {
   }
   Set-MonarchPrivateAcl -Path (Join-Path $install "secrets")
 
-  New-MonarchDirectoryJunction -Path (Join-Path $version "gemma_models") -Target (Join-Path $modelsRoot "gemma_models")
-  New-MonarchDirectoryJunction -Path (Join-Path $version "data\local") -Target (Join-Path $localState "data")
-  New-MonarchDirectoryJunction -Path (Join-Path $version "logs") -Target (Join-Path $localState "logs")
-  New-MonarchDirectoryJunction -Path (Join-Path $version "oscar\data") -Target (Join-Path $localState "data\oscar")
-  New-MonarchDirectoryJunction -Path (Join-Path $version "oscar\logs") -Target (Join-Path $localState "logs\oscar")
-  New-MonarchDirectoryJunction -Path (Join-Path $version "security\data") -Target (Join-Path $localState "data\security")
-  New-MonarchDirectoryJunction -Path (Join-Path $version "security\logs") -Target (Join-Path $localState "logs\security")
-  New-MonarchDirectoryJunction -Path (Join-Path $version "artifacts\generated") -Target (Join-Path $payload "generated")
-  New-MonarchDirectoryJunction -Path (Join-Path $version "oscar\.venv") -Target (Join-Path $environmentRoot "oscar")
-  New-MonarchDirectoryJunction -Path (Join-Path $version "security\.venv") -Target (Join-Path $environmentRoot "security")
-  New-MonarchDirectoryJunction -Path (Join-Path $version "runtime\coder\models") -Target (Join-Path $modelsRoot "coder")
-  New-MonarchDirectoryJunction -Path (Join-Path $version "runtime\voice\models") -Target (Join-Path $modelsRoot "voice")
-  New-MonarchDirectoryJunction -Path (Join-Path $version "secrets") -Target (Join-Path $install "secrets")
+  foreach ($legacyJunction in @(
+    "gemma_models",
+    "data\local",
+    "logs",
+    "oscar\data",
+    "oscar\logs",
+    "security\data",
+    "security\logs",
+    "artifacts\generated",
+    "oscar\.venv",
+    "security\.venv",
+    "runtime\coder\models",
+    "runtime\voice\models",
+    "secrets"
+  )) {
+    Remove-MonarchLegacyVersionJunction `
+      -VersionRoot $version `
+      -RelativePath $legacyJunction
+  }
+
+  foreach ($writablePath in @(
+    (Join-Path $payload "generated"),
+    (Join-Path $payload "downloads"),
+    (Join-Path $payload "updates"),
+    (Join-Path $payload "transactions"),
+    (Join-Path $payload "workspaces\default"),
+    (Join-Path $payload "workspaces\coder"),
+    (Join-Path $payload "coder-sandbox"),
+    $modelsRoot,
+    (Join-Path $localState "data"),
+    (Join-Path $localState "data\runtime"),
+    (Join-Path $localState "data\security"),
+    (Join-Path $localState "logs"),
+    (Join-Path $localState "logs\security"),
+    (Join-Path $install "secrets")
+  )) {
+    Assert-MonarchWritableDirectory -Path $writablePath
+  }
 
   $legacySecretBackup = Copy-MonarchLegacySecretsForMigration `
     -LegacyRoot (Join-Path $install "secrets") `
@@ -199,7 +258,15 @@ function Initialize-MonarchInstallLayout {
     configRoot = $configRoot
     dataRoot = Join-Path $localState "data"
     logsRoot = Join-Path $localState "logs"
+    generatedRoot = Join-Path $payload "generated"
     modelsRoot = $modelsRoot
+    secretsRoot = Join-Path $install "secrets"
+    stateRoot = Join-Path $localState "data\runtime"
+    workspaceRoot = Join-Path $payload "workspaces\default"
+    coderWorkspaceRoot = Join-Path $payload "workspaces\coder"
+    coderSandboxRoot = Join-Path $payload "coder-sandbox"
+    securityDataRoot = Join-Path $localState "data\security"
+    securityLogsRoot = Join-Path $localState "logs\security"
     runtimeRoot = $runtimeRoot
     environmentRoot = $environmentRoot
     transactionsRoot = Join-Path $payload "transactions"
@@ -248,7 +315,7 @@ function Write-MonarchVersionDescriptor {
     descriptorVersion = 1
     appVersion = $AppVersion
     layoutSchemaVersion = 1
-    minimumLauncherVersion = "1.0.0"
+    minimumLauncherVersion = "1.0.2"
     runtimeVersion = $RuntimeVersion
     backendEnvironment = $BackendEnvironment
     dataSchemaVersion = $DataSchemaVersion
@@ -312,7 +379,7 @@ function New-MonarchPendingUpdate {
     previousVersion = $PreviousVersion
     candidateVersion = $CandidateVersion
     previousLauncherVersion = $previousLauncherVersion
-    candidateLauncherVersion = "1.0.1"
+    candidateLauncherVersion = "1.0.2"
     previousRuntimeVersion = [string]$previousDescriptor.runtimeVersion
     expectedRuntimeVersion = $CandidateRuntimeVersion
     previousBackendEnvironment = [string]$previousDescriptor.backendEnvironment

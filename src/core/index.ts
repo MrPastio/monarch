@@ -18,6 +18,7 @@ export * from './router-mesh';
 export * from './router-policy';
 export * from './router-resolver';
 export * from './router-scoring';
+export * from './runtime-paths';
 export * from './safe-preview';
 export * from './schema-validator';
 export * from './tier-config';

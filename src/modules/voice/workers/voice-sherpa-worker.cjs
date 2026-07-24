@@ -25,9 +25,13 @@ class WorkerFailure extends Error {
 
 function findModelDir() {
   const configured = String(process.env.MONARCH_SHERPA_MODEL_DIR || '').trim();
+  const modelsRoot = String(process.env.MONARCH_MODELS_ROOT || '').trim();
   const candidates = configured
     ? [path.resolve(configured)]
     : [
+        ...(modelsRoot
+          ? [path.resolve(modelsRoot, 'voice', 'sherpa-onnx-streaming-t-one-russian-2025-09-08')]
+          : []),
         path.resolve(process.cwd(), 'runtime', 'voice', 'models', 'sherpa-onnx-streaming-t-one-russian-2025-09-08'),
       ];
   for (const candidate of candidates) {

@@ -1,9 +1,9 @@
 param(
   [Parameter(Mandatory = $true)][string]$StagingRoot,
   [Parameter(Mandatory = $true)][string]$InstallRoot,
-  [string]$AppVersion = "0.2.3.7",
-  [string]$RuntimeVersion = "2026.07.6",
-  [string]$BackendEnvironment = "backend-0.1.5-offline5",
+  [string]$AppVersion = "0.2.3.2",
+  [string]$RuntimeVersion = "2026.07.7",
+  [string]$BackendEnvironment = "backend-0.1.5-offline4",
   [int]$DataSchemaVersion = 1,
   [int]$MinimumReadableDataSchema = 1,
   [int]$MaximumReadableDataSchema = 1,
@@ -301,6 +301,45 @@ try {
     -BackendEnvironment $BackendEnvironment `
     -PayloadRoot $payloadRoot
 
+  $packagedNode = Join-Path $runtimeRoot "node\node.exe"
+  $packagedPython = Join-Path $runtimeRoot "python\python.exe"
+  $env:MONARCH_INSTALL_ROOT = $appRoot
+  $env:MONARCH_VERSION_ROOT = $versionRoot
+  $env:MONARCH_PAYLOAD_ROOT = [string]$layout.payloadRoot
+  $env:MONARCH_RUNTIME_ROOT = $runtimeRoot
+  $env:MONARCH_BACKEND_ENVIRONMENT_ROOT = $environmentRoot
+  $env:MONARCH_NODE_PATH = $packagedNode
+  $env:MONARCH_CONFIG_ROOT = [string]$layout.configRoot
+  $env:MONARCH_DATA_ROOT = [string]$layout.dataRoot
+  $env:MONARCH_LOGS_ROOT = [string]$layout.logsRoot
+  $env:MONARCH_GENERATED_ROOT = [string]$layout.generatedRoot
+  $env:MONARCH_MODELS_ROOT = [string]$layout.modelsRoot
+  $env:MONARCH_SECRETS_ROOT = [string]$layout.secretsRoot
+  $env:MONARCH_STATE_ROOT = [string]$layout.stateRoot
+  $env:MONARCH_WORKSPACE_ROOT = [string]$layout.workspaceRoot
+  $env:MONARCH_CODER_WORKSPACE_ROOT = [string]$layout.coderWorkspaceRoot
+  $env:MONARCH_CODER_SANDBOX_ROOT = [string]$layout.coderSandboxRoot
+  $env:MONARCH_SECURITY_DATA_ROOT = [string]$layout.securityDataRoot
+  $env:MONARCH_SECURITY_LOGS_ROOT = [string]$layout.securityLogsRoot
+  $env:MONARCH_SECURITY_ROOT = Join-Path $versionRoot "security"
+  $env:MONARCH_SECURITY_SITE_PACKAGES = Join-Path $environmentRoot "security\site-packages"
+  $env:MONARCH_SECURITY_PYTHON = $packagedPython
+  $env:MONARCH_STT_PYTHON = $packagedPython
+  $env:MONARCH_VOICE_LITE_PYTHON = $packagedPython
+  $env:OSCAR_PYTHON = $packagedPython
+  $env:OSCAR_PROJECT_ROOT = Join-Path $versionRoot "oscar"
+  $env:OSCAR_DATA_DIR = Join-Path $layout.dataRoot "oscar"
+  $env:OSCAR_DB_PATH = Join-Path $layout.dataRoot "oscar\memory\oscar_memory.sqlite3"
+  $env:OSCAR_OFFLOAD_DIR = Join-Path $layout.dataRoot "oscar\offload"
+  $env:OSCAR_GEMMA_MODELS_DIR = Join-Path $layout.modelsRoot "gemma_models"
+  $env:OSCAR_CODER_MODELS_DIR = Join-Path $layout.modelsRoot "coder"
+  $env:OSCAR_SHARING_QWEN_MODELS_DIR = Join-Path $layout.modelsRoot "voice\voice-lite"
+  $env:OSCAR_SHARING_TTS_MODELS_DIR = Join-Path $layout.modelsRoot "voice"
+  $env:OSCAR_SHARING_TTS_PYTHON = $packagedPython
+  $env:OSCAR_WORKSPACE_ROOT = [string]$layout.workspaceRoot
+  $env:OSCAR_WORKSPACE_GENERATED_DIR = [string]$layout.generatedRoot
+  $env:MONARCH_STT_PREWARM_ON_ACTIVATE = "0"
+
   $oscarConfigPath = Join-Path $layout.configRoot "config\oscar\.env"
   if (-not (Test-Path -LiteralPath $oscarConfigPath -PathType Leaf)) {
     New-Item -ItemType Directory -Path (Split-Path -Parent $oscarConfigPath) -Force | Out-Null
@@ -310,9 +349,9 @@ try {
   }
 
   Write-Host "[offline] Validating installed runtimes without network access"
-  $node = Join-Path $runtimeRoot "node\node.exe"
+  $node = $packagedNode
   $electron = Join-Path $runtimeRoot "electron\electron.exe"
-  $python = Join-Path $runtimeRoot "python\python.exe"
+  $python = $packagedPython
   foreach ($required in @($node, $electron, $python)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
       throw "Installed runtime is incomplete: $required"
@@ -343,6 +382,18 @@ try {
     $env:PYTHONPATH = "$($environmentRoot)\security\site-packages;$versionRoot\security\src"
     & $python -B -c "import psutil, monarch_security; print('installed-security-ok')"
     Assert-NativeSuccess "Installed Monarch Security runtime validation"
+
+    $runtimeBundle = Join-Path $versionRoot "dist\monarch-server.mjs"
+    if (-not (Test-Path -LiteralPath $runtimeBundle -PathType Leaf)) {
+      throw "Installed Monarch runtime bundle is missing: $runtimeBundle"
+    }
+    Push-Location $versionRoot
+    try {
+      & $node $runtimeBundle system
+      Assert-NativeSuccess "Installed Monarch full module activation"
+    } finally {
+      Pop-Location
+    }
   } finally {
     $env:PYTHONPATH = $previousPythonPath
     $env:PATH = $previousPath

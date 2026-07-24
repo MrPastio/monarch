@@ -26,7 +26,9 @@ import {
   type MonarchRecentIntentJobSnapshot,
   type MonarchRouteDecision,
   type MonarchOperationalContext,
+  type MonarchRuntimePaths,
   reduceOperationalContext,
+  resolveMonarchRuntimePaths,
   safePreview,
   withUserFacingExecutionResult,
   withUserFacingIntentResult,
@@ -186,7 +188,9 @@ interface CachedRuntimeState {
 }
 
 export class MonarchApplication {
+  readonly sourceRoot: string;
   readonly workspaceRoot: string;
+  readonly runtimePaths: MonarchRuntimePaths;
   readonly runtime: MonarchRuntime;
   readonly agentRuntime: MonarchAgentRuntime | null;
   private started = false;
@@ -211,9 +215,11 @@ export class MonarchApplication {
       agentRuntimeAutoRun,
       ...bootstrapOptions
     } = options;
-    this.workspaceRoot = workspaceRoot;
+    this.sourceRoot = workspaceRoot;
+    this.runtimePaths = resolveMonarchRuntimePaths(workspaceRoot);
+    this.workspaceRoot = this.runtimePaths.userWorkspaceRoot;
     const permissionProfile = bootstrapOptions.permissionProfile
-      || readStoredPermissionProfile(workspaceRoot);
+      || readStoredPermissionProfile(this.runtimePaths.stateRoot);
     this.runtime = createMonarchRuntime({
       ...bootstrapOptions,
       workspaceRoot,
@@ -234,9 +240,11 @@ export class MonarchApplication {
     const agentEnabled = enableAgentRuntimeV2 ?? readBooleanEnvironment('MONARCH_AGENT_RUNTIME_V2', false);
     if (agentEnabled) {
       const store = agentTaskStore || new LocalJsonAgentTaskStore(
-        path.join(workspaceRoot, 'runtime', 'agent', 'tasks.v2.json'),
+        path.join(this.runtimePaths.stateRoot, 'agent', 'tasks.v2.json'),
       );
-      const decisionProvider = agentDecisionProvider || new LocalAgentDecisionProvider({ workspaceRoot });
+      const decisionProvider = agentDecisionProvider || new LocalAgentDecisionProvider({
+        workspaceRoot: this.workspaceRoot,
+      });
       const executionAdapter = new AgentKernelExecutionAdapter(
         (submission) => this.submitActionProposal(submission),
         (submission) => this.prepareActionProposal(submission),
@@ -269,7 +277,7 @@ export class MonarchApplication {
       return;
     }
 
-    this.modelCatalog = await readModelCatalog(this.workspaceRoot);
+    this.modelCatalog = await readModelCatalog(this.sourceRoot);
     await this.runtime.kernel.start();
     try {
       await this.agentRuntime?.start();
@@ -646,7 +654,7 @@ export class MonarchApplication {
   }
 
   private async refreshModelCatalog(): Promise<MonarchModelCatalog> {
-    this.modelCatalog = await readModelCatalog(this.workspaceRoot);
+    this.modelCatalog = await readModelCatalog(this.sourceRoot);
     return this.modelCatalog;
   }
 
@@ -673,7 +681,7 @@ export class MonarchApplication {
 
   setPermissionProfile(profile: MonarchPermissionProfile): MonarchPermissionProfile {
     const updated = this.runtime.kernel.setPermissionProfile(profile);
-    persistPermissionProfile(this.workspaceRoot, updated);
+    persistPermissionProfile(this.runtimePaths.stateRoot, updated);
     return updated;
   }
 
@@ -1088,12 +1096,12 @@ function snapshotIntentJob(job: PendingIntentJob): MonarchIntentJobSnapshot {
   return snapshot;
 }
 
-function permissionProfilePath(workspaceRoot: string): string {
-  return path.join(workspaceRoot, 'runtime', 'settings', 'permissions.json');
+function permissionProfilePath(stateRoot: string): string {
+  return path.join(stateRoot, 'settings', 'permissions.json');
 }
 
-function readStoredPermissionProfile(workspaceRoot: string): MonarchPermissionProfile | undefined {
-  const filePath = permissionProfilePath(workspaceRoot);
+function readStoredPermissionProfile(stateRoot: string): MonarchPermissionProfile | undefined {
+  const filePath = permissionProfilePath(stateRoot);
   if (!existsSync(filePath)) return undefined;
   try {
     const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, unknown>;
@@ -1117,9 +1125,9 @@ function readStoredPermissionProfile(workspaceRoot: string): MonarchPermissionPr
   return undefined;
 }
 
-function persistPermissionProfile(workspaceRoot: string, profile: MonarchPermissionProfile): void {
+function persistPermissionProfile(stateRoot: string, profile: MonarchPermissionProfile): void {
   try {
-    const filePath = permissionProfilePath(workspaceRoot);
+    const filePath = permissionProfilePath(stateRoot);
     mkdirSync(path.dirname(filePath), { recursive: true });
     writeFileSync(filePath, `${JSON.stringify(profile, null, 2)}\n`, 'utf8');
   } catch {

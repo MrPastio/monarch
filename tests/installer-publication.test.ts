@@ -22,6 +22,13 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(builder).toContain('Offline Oscar CUDA runtime validation');
     expect(builder).toContain('Remove-PythonBytecode');
     expect(builder).toContain('PYTHONDONTWRITEBYTECODE');
+    expect(builder).toContain('--retries 10');
+    expect(builder).toContain('--timeout 120');
+    expect(builder).toContain('using the persistent build cache');
+    expect(builder).toContain('Resolve-PinnedPythonWheel');
+    expect(builder).toContain('8f238e24ed335ad05acf48648d0855714dfeb0ed341d1ff15d8b8cc06bd51d6a');
+    expect(builder).toContain('90bffd9957b68e801db6f7781a786523e22f431738c260c42666d7f9413e3a8e');
+    expect(builder).toContain('@("RECORD", "direct_url.json")');
     expect(builder).toContain('Offline Monarch Security runtime validation');
     expect(builder).toContain('payload-manifest.json');
     expect(builder).toContain('payload-version-contract.json');
@@ -39,7 +46,7 @@ describe('Windows installer and public snapshot boundary', () => {
       environment: { version: string; sha256: string };
     };
     expect(payloadContract.schemaVersion).toBe(1);
-    expect(payloadContract.runtime.version).toBe('2026.07.6');
+    expect(payloadContract.runtime.version).toBe('2026.07.7');
     expect(payloadContract.runtime.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(payloadContract.environment.version).toBe(
       'backend-0.1.5-offline5',
@@ -64,6 +71,10 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(finalizer).toContain('Assert-TreeRecord');
     expect(finalizer).toContain('Publish-ImmutableComponent');
     expect(finalizer).toContain('PYTHONDONTWRITEBYTECODE');
+    expect(finalizer).toContain('Installed Monarch full module activation');
+    expect(finalizer).toContain('$env:MONARCH_RUNTIME_ROOT = $runtimeRoot');
+    expect(finalizer).toContain('$env:OSCAR_WORKSPACE_ROOT = [string]$layout.workspaceRoot');
+    expect(finalizer).toContain('$env:OSCAR_PYTHON = $packagedPython');
     expect(finalizer).not.toContain('winget.exe');
     expect(finalizer).not.toContain('npm.cmd');
     expect(finalizer).not.toMatch(/-m\s+pip\s+install/i);
@@ -110,7 +121,7 @@ describe('Windows installer and public snapshot boundary', () => {
     const definition = read('installer/Monarch.iss');
     const packageVersion = JSON.parse(read('package.json')).version as string;
     expect(definition).toContain(`#define AppVersion "${packageVersion}"`);
-    expect(definition).toContain('#define RuntimeVersion "2026.07.6"');
+    expect(definition).toContain('#define RuntimeVersion "2026.07.7"');
     expect(definition).toContain('WizardStyle=modern');
     expect(definition).toContain('PrivilegesRequired=lowest');
     expect(definition).toContain('ArchitecturesInstallIn64BitMode=x64compatible');
@@ -136,17 +147,26 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(definition).toContain('AfterInstall: FinalizeOfflinePayload');
     expect(definition).toContain('Monarch.next.exe');
     expect(definition).toContain('GetLauncherSwapParameters');
-    expect(definition).toContain('-LauncherVersion "1.0.1"');
+    expect(definition).toContain('-LauncherVersion "1.0.2"');
     expect(definition).toContain('versions\\{#AppVersion}');
     expect(definition).toContain('CloseApplications=no');
     expect(read('tools/launcher/MonarchLauncher.cs')).toContain(
-      'private const string LauncherVersion = "1.0.1"',
+      'private const string LauncherVersion = "1.0.2"',
     );
     expect(read('installer/layout.ps1')).toContain(
-      'candidateLauncherVersion = "1.0.1"',
+      'candidateLauncherVersion = "1.0.2"',
+    );
+    expect(read('installer/layout.ps1')).toContain(
+      'minimumLauncherVersion = "1.0.2"',
+    );
+    expect(read('installer/layout.ps1')).toContain(
+      'Remove-MonarchLegacyVersionJunction',
+    );
+    expect(read('installer/layout.ps1')).not.toContain(
+      'New-Item -ItemType Junction',
     );
     expect(read('installer/swap-launcher.ps1')).toContain(
-      '[string]$LauncherVersion = "1.0.1"',
+      '[string]$LauncherVersion = "1.0.2"',
     );
   });
 

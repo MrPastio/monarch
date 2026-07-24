@@ -59,6 +59,14 @@ describe('Monarch launcher terminal update phases', () => {
       currentVersion: '0.2.3.5',
       previousVersion: '0.2.3.4',
     });
+    expect(readJson(fixture.environmentPath)).toMatchObject({
+      generatedRoot: path.join(fixture.payloadRoot, 'generated'),
+      modelsRoot: path.join(fixture.payloadRoot, 'models'),
+      workspaceRoot: path.join(fixture.payloadRoot, 'workspaces', 'default'),
+      secretsRoot: path.join(fixture.installRoot, 'secrets'),
+      oscarWorkspaceRoot: path.join(fixture.payloadRoot, 'workspaces', 'default'),
+      oscarPython: path.join(fixture.payloadRoot, 'runtimes', 'runtime-qa-runtime', 'python', 'python.exe'),
+    });
   });
 
   it('keeps a completed rollback terminal instead of re-entering the trial loop', async () => {
@@ -83,6 +91,7 @@ function createFixture(phase: 'committed' | 'rollback-required') {
   const payloadRoot = path.join(fixtureRoot, 'payload');
   const dataRoot = path.join(fixtureRoot, 'data');
   const markerPath = path.join(dataRoot, 'launched-version.txt');
+  const environmentPath = path.join(dataRoot, 'launched-environment.json');
   const runtimeRoot = path.join(payloadRoot, 'runtimes', 'runtime-qa-runtime');
   const environmentRoot = path.join(payloadRoot, 'environments', 'qa-environment');
   const transactionRoot = path.join(payloadRoot, 'transactions');
@@ -108,6 +117,7 @@ function createFixture(phase: 'committed' | 'rollback-required') {
       "const dataRoot = process.env.MONARCH_DATA_ROOT;",
       "mkdirSync(dataRoot, { recursive: true });",
       "writeFileSync(path.join(dataRoot, 'launched-version.txt'), path.basename(process.env.MONARCH_VERSION_ROOT));",
+      "writeFileSync(path.join(dataRoot, 'launched-environment.json'), JSON.stringify({ generatedRoot: process.env.MONARCH_GENERATED_ROOT, modelsRoot: process.env.MONARCH_MODELS_ROOT, workspaceRoot: process.env.MONARCH_WORKSPACE_ROOT, secretsRoot: process.env.MONARCH_SECRETS_ROOT, oscarWorkspaceRoot: process.env.OSCAR_WORKSPACE_ROOT, oscarPython: process.env.OSCAR_PYTHON }));",
       '',
     ].join('\n'));
     writeJson(path.join(versionRoot, 'version.json'), {
@@ -158,7 +168,7 @@ function createFixture(phase: 'committed' | 'rollback-required') {
     rolledBackAt: phase === 'rollback-required' ? 'sentinel-rollback' : undefined,
   });
   copyFileSync(launcherPath, path.join(installRoot, 'Monarch.exe'));
-  return { installRoot, markerPath, pendingPath, currentPath };
+  return { installRoot, payloadRoot, markerPath, environmentPath, pendingPath, currentPath };
 }
 
 function runLauncher(installRoot: string) {

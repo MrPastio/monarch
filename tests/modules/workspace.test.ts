@@ -430,16 +430,16 @@ describe('Workspace Module', () => {
       expect((prefixedReadResult.route?.input as any)?.path).toBe('package.json');
 
       // 3. Test "найди в файлах router"
-      const searchResult = await runtime.kernel.submitIntent('найди в файлах router', 'smoke');
-      expect(searchResult.route?.targetModuleId).toBe('workspace');
-      expect(searchResult.route?.capabilityId).toBe('workspace.files.search');
-      expect((searchResult.route?.input as any)?.query).toBe('router');
+      const searchRoute = await routeWorkspaceText(runtime.kernel, 'найди в файлах router');
+      expect(searchRoute?.targetModuleId).toBe('workspace');
+      expect(searchRoute?.capabilityId).toBe('workspace.files.search');
+      expect((searchRoute?.input as any)?.query).toBe('router');
 
-      const projectSearchResult = await runtime.kernel.submitIntent('найди AssistantModule в проекте', 'smoke');
-      expect(projectSearchResult.route?.targetModuleId).toBe('workspace');
-      expect(projectSearchResult.route?.capabilityId).toBe('workspace.files.search');
-      expect((projectSearchResult.route?.input as any)?.query).toBe('AssistantModule');
-      expect((projectSearchResult.route?.input as any)?.path).toBe('.');
+      const projectSearchRoute = await routeWorkspaceText(runtime.kernel, 'найди AssistantModule в проекте');
+      expect(projectSearchRoute?.targetModuleId).toBe('workspace');
+      expect(projectSearchRoute?.capabilityId).toBe('workspace.files.search');
+      expect((projectSearchRoute?.input as any)?.query).toBe('AssistantModule');
+      expect((projectSearchRoute?.input as any)?.path).toBe('.');
 
       const writeResult = await runtime.kernel.submitIntent('создай файл runtime/ui-note.txt с текстом "готово"', 'smoke');
       expect(writeResult.route?.targetModuleId).toBe('workspace');
@@ -765,6 +765,19 @@ describe('Workspace Module', () => {
   });
 
 });
+
+let workspaceRouteSequence = 0;
+
+function routeWorkspaceText(kernel: MonarchKernel, text: string) {
+  workspaceRouteSequence += 1;
+  return kernel.routeIntent({
+    id: `intent_workspace_route_${workspaceRouteSequence}`,
+    source: 'smoke',
+    text,
+    createdAt: new Date(0).toISOString(),
+    context: {},
+  });
+}
 
 function executeWorkspace(
   kernel: MonarchKernel,

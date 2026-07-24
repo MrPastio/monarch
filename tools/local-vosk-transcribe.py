@@ -449,7 +449,12 @@ def find_model_dir(language_code: str) -> Path | None:
         return path if is_vosk_model(path) else None
 
     root = Path(__file__).resolve().parents[1]
-    models_root = root / "runtime" / "voice" / "models"
+    configured_models_root = os.environ.get("MONARCH_MODELS_ROOT", "").strip()
+    models_root = (
+        Path(configured_models_root).expanduser().resolve() / "voice"
+        if configured_models_root
+        else root / "runtime" / "voice" / "models"
+    )
     if not models_root.exists():
         return None
 
