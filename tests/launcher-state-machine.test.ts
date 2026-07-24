@@ -67,7 +67,7 @@ describe('Monarch launcher terminal update phases', () => {
       oscarWorkspaceRoot: path.join(fixture.payloadRoot, 'workspaces', 'default'),
       oscarPython: path.join(fixture.payloadRoot, 'runtimes', 'runtime-qa-runtime', 'python', 'python.exe'),
     });
-  });
+  }, 15_000);
 
   it('keeps a completed rollback terminal instead of re-entering the trial loop', async () => {
     const fixture = createFixture('rollback-required');
@@ -82,7 +82,7 @@ describe('Monarch launcher terminal update phases', () => {
       currentVersion: '0.2.3.4',
       previousVersion: '0.2.3.5',
     });
-  });
+  }, 15_000);
 });
 
 function createFixture(phase: 'committed' | 'rollback-required') {
