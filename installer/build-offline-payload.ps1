@@ -509,6 +509,10 @@ try {
     ) `
     -ExcludedPatterns @(
       '(^|/)__pycache__(/|$)',
+      # actions/setup-python leaves its installer and python3.exe alias in the
+      # hosted toolcache root; neither belongs to the portable runtime.
+      '^python-\d+\.\d+\.\d+-amd64\.exe$',
+      '^python3\.exe$',
       '\.(pyc|pyo|pdb|lib|exp|chm)$'
     )
   $stagedPython = Join-Path $pythonRuntime "python.exe"
