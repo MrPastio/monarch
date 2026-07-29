@@ -76,6 +76,21 @@ describe('Monarch distribution workflows', () => {
     expect(desktopSmoke).toBeGreaterThan(smoke);
     expect(frontendBuild).toBeGreaterThan(desktopSmoke);
     expect(boundary).toBeGreaterThan(frontendBuild);
+    expect(workflow).toContain(
+      'npm run test:raw -- --exclude tests/modules/coder.test.ts --exclude tests/app/coder-agent-controller.test.ts --maxWorkers=1',
+    );
+  });
+
+  it('serializes the broad Windows source suite in CI and stable release jobs', async () => {
+    for (const workflowPath of [
+      '.github/workflows/ci.yml',
+      '.github/workflows/release-stable.yml',
+    ]) {
+      const workflow = await read(workflowPath);
+      expect(workflow).toContain(
+        'npm run test:raw -- --exclude tests/modules/coder.test.ts --exclude tests/app/coder-agent-controller.test.ts --maxWorkers=1',
+      );
+    }
   });
 
   it('refreshes at 30 days and raises an urgent issue at 14 days', async () => {
