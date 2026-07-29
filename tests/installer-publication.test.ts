@@ -26,6 +26,10 @@ interface PublicationFixture {
   snapshot: string;
 }
 
+const isolatedGitEnvironment = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
+);
+
 const runGit = (
   repo: string,
   args: string[],
@@ -33,6 +37,7 @@ const runGit = (
 ): string => execFileSync('git.exe', args, {
   cwd: repo,
   encoding: 'utf8',
+  env: isolatedGitEnvironment,
   input,
 });
 
@@ -42,6 +47,7 @@ const runGitBytes = (
   input?: Buffer,
 ): Buffer => execFileSync('git.exe', args, {
   cwd: repo,
+  env: isolatedGitEnvironment,
   input,
 });
 
