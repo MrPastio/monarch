@@ -45,6 +45,36 @@ const runGitBytes = (
   input,
 });
 
+const materializeFixtureObjectDatabase = (repo: string) => {
+  const gitDirectory = path.join(repo, '.git');
+  const objectDirectory = path.join(gitDirectory, 'objects');
+  const localRepositoryEnvironment = {
+    ...process.env,
+    GIT_DIR: gitDirectory,
+    GIT_WORK_TREE: repo,
+    GIT_OBJECT_DIRECTORY: objectDirectory,
+  };
+  execFileSync('git.exe', ['repack', '-a', '-d', '--quiet'], {
+    cwd: repo,
+    env: localRepositoryEnvironment,
+  });
+  execFileSync('git.exe', ['fsck', '--full', '--no-dangling'], {
+    cwd: repo,
+    env: {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
+      ),
+      GIT_DIR: gitDirectory,
+      GIT_WORK_TREE: repo,
+      GIT_OBJECT_DIRECTORY: objectDirectory,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: '',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+      GIT_NO_REPLACE_OBJECTS: '1',
+    },
+  });
+};
+
 const createPublicationFixture = (): PublicationFixture => {
   const temporaryRoot = process.platform === 'win32'
     ? path.join(path.parse(root).root, 'Monarch-Agent-QA')
@@ -142,6 +172,7 @@ const createPublicationFixture = (): PublicationFixture => {
   runGit(repo, ['config', 'user.email', 'publication-test@invalid.local']);
   runGit(repo, ['add', '--all']);
   runGit(repo, ['commit', '--quiet', '-m', 'fixture']);
+  materializeFixtureObjectDatabase(repo);
   return {
     fixtureRoot,
     repo,
@@ -486,7 +517,7 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(exporter).not.toContain('Remove-Item -LiteralPath $stagingPath -Recurse');
     expect(exporter).not.toContain('-Force and the snapshot marker');
     expect(dryRun).not.toContain('$LASTEXITCODE');
-  }, 15_000);
+  }, 30_000);
 
   it('exports and validates only exact pinned Git-object bytes in a fresh snapshot', () => {
     const fixture = createPublicationFixture();
