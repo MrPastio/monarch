@@ -121,7 +121,6 @@ def test_voice_fast_returns_only_bounded_contract_and_skips_standard_chat_hooks(
     for name in (
         "hydrate_conversation_context",
         "begin_conversation",
-        "maybe_execute_agent_tools",
         "prepare_sources",
         "record_model_quality_result",
         "complete_conversation",
@@ -196,6 +195,8 @@ def test_runtime_voice_fast_uses_only_trusted_prompt_and_fixed_raw_limits(monkey
     assert [message.role for message in captured["messages"]] == ["system", "user", "assistant", "user"]
     assert captured["messages"][0].content == f"{VOICE_FAST_SYSTEM_PROMPT}\nReply in Russian."
     assert len(VOICE_FAST_SYSTEM_PROMPT) < 600
+    assert "warm, lively" in VOICE_FAST_SYSTEM_PROMPT
+    assert "Answer casual social questions directly" in VOICE_FAST_SYSTEM_PROMPT
     assert captured["messages"][1].content == "Кто сейчас премьер России?"
     assert captured["messages"][2].content == "Премьер-министр России — Михаил Мишустин."
     assert captured["messages"][3].content == "А сколько ему лет?"

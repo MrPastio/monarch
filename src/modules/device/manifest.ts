@@ -1,4 +1,50 @@
-import type { MonarchModuleManifest } from '../../core';
+import type { MonarchAgentCapabilityMetadataInput, MonarchModuleManifest } from '../../core';
+
+interface DeviceAgentOptions {
+  tags: string[];
+  effectKind: string;
+  effectDescription: string;
+  targetScope: 'application' | 'device';
+  mutating: boolean;
+  destructive?: boolean;
+  verificationDescription: string;
+}
+
+function deviceAgent(options: DeviceAgentOptions): MonarchAgentCapabilityMetadataInput {
+  return {
+    tags: ['windows', 'device', ...options.tags],
+    effects: [{
+      kind: options.effectKind,
+      description: options.effectDescription,
+      targetScope: options.targetScope,
+    }],
+    idempotency: options.mutating ? 'non-idempotent' : 'idempotent',
+    reversibility: options.destructive ? 'irreversible' : options.mutating ? 'manual' : 'automatic',
+    effectProfile: {
+      mutation: options.destructive ? 'persistent' : options.mutating ? 'temporary' : 'none',
+      targetScope: options.targetScope,
+      reversibility: options.destructive ? 'irreversible' : options.mutating ? 'manual' : 'automatic',
+      privilege: options.mutating ? 'elevated' : 'normal',
+      dataSensitivity: 'private',
+      communication: 'none',
+      financialImpact: false,
+      identityImpact: false,
+      securityImpact: options.mutating,
+    },
+    supportedSources: options.destructive
+      ? ['desktop', 'system', 'smoke']
+      : ['desktop', 'voice', 'api', 'system', 'smoke'],
+    estimatedLatency: 'short',
+    computeClass: 'light',
+    cancellation: 'supported',
+    verification: [{
+      kind: options.targetScope === 'application' ? 'runtime-status' : 'predicate',
+      description: options.verificationDescription,
+      required: true,
+      predicate: { kind: 'status', target: 'result.output.verified', value: true },
+    }],
+  };
+}
 
 export const deviceManifest: MonarchModuleManifest = {
   id: 'device',
@@ -10,6 +56,7 @@ export const deviceManifest: MonarchModuleManifest = {
   permissions: ['read', 'delete', 'device-control'],
   events: [
     'device.activated',
+    'device.apps.searched',
     'device.app.opened',
     'device.browser.opened',
     'device.system.time.read',
@@ -45,6 +92,14 @@ export const deviceManifest: MonarchModuleManifest = {
       title: 'Read verified Windows volume',
       description: 'Read the current Windows endpoint volume and mute state through the verified local volume helper.',
       risk: 'read',
+      agent: deviceAgent({
+        tags: ['volume', 'sound', 'read'],
+        effectKind: 'volume-observation',
+        effectDescription: 'Reads the current Windows endpoint volume and mute state.',
+        targetScope: 'device',
+        mutating: false,
+        verificationDescription: 'The device helper must return an authoritative verified volume state.',
+      }),
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       routing: {
         aliases: ['current volume', 'какая громкость', 'уровень звука'],
@@ -59,6 +114,14 @@ export const deviceManifest: MonarchModuleManifest = {
       title: 'Set verified Windows volume',
       description: 'Set, change, mute, or unmute Windows endpoint volume and verify the observed state.',
       risk: 'device-control',
+      agent: deviceAgent({
+        tags: ['volume', 'sound', 'mute', 'set'],
+        effectKind: 'volume-change',
+        effectDescription: 'Changes the exact requested Windows endpoint volume or mute state.',
+        targetScope: 'device',
+        mutating: true,
+        verificationDescription: 'A device readback must match the requested volume or mute state.',
+      }),
       inputSchema: {
         type: 'object',
         properties: {
@@ -82,6 +145,14 @@ export const deviceManifest: MonarchModuleManifest = {
       title: 'Read active display brightness',
       description: 'Read the current WMI brightness of the active built-in Windows display.',
       risk: 'read',
+      agent: deviceAgent({
+        tags: ['brightness', 'display', 'read'],
+        effectKind: 'brightness-observation',
+        effectDescription: 'Reads the active built-in display brightness.',
+        targetScope: 'device',
+        mutating: false,
+        verificationDescription: 'WMI must return a bounded verified brightness value.',
+      }),
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       routing: {
         aliases: ['read brightness', 'current brightness', 'какая яркость'],
@@ -96,6 +167,14 @@ export const deviceManifest: MonarchModuleManifest = {
       title: 'Set active display brightness',
       description: 'Set or adjust the WMI brightness of the active built-in Windows display and verify it by rereading the device.',
       risk: 'device-control',
+      agent: deviceAgent({
+        tags: ['brightness', 'display', 'set'],
+        effectKind: 'brightness-change',
+        effectDescription: 'Changes the active built-in display to the exact computed brightness.',
+        targetScope: 'device',
+        mutating: true,
+        verificationDescription: 'WMI readback must match the requested brightness within the documented tolerance.',
+      }),
       inputSchema: {
         type: 'object',
         properties: {
@@ -114,11 +193,111 @@ export const deviceManifest: MonarchModuleManifest = {
       },
     },
     {
+      id: 'device.apps.search',
+      moduleId: 'device',
+      title: 'Find installed Windows applications',
+      description: 'Search the real Windows Start application registry and return exact launchable display names before opening an app.',
+      risk: 'read',
+      agent: {
+        tags: ['windows', 'device', 'application', 'installed-apps', 'discovery'],
+        effects: [{
+          kind: 'installed-application-observation',
+          description: 'Returns bounded Start application names and identifiers without launching them.',
+          targetScope: 'application',
+        }],
+        idempotency: 'idempotent',
+        reversibility: 'automatic',
+        effectProfile: {
+          mutation: 'none',
+          targetScope: 'application',
+          reversibility: 'automatic',
+          privilege: 'normal',
+          dataSensitivity: 'private',
+          communication: 'none',
+          financialImpact: false,
+          identityImpact: false,
+          securityImpact: false,
+        },
+        supportedSources: ['desktop', 'voice', 'api', 'system', 'smoke'],
+        estimatedLatency: 'short',
+        computeClass: 'light',
+        cancellation: 'supported',
+        verification: [{
+          kind: 'schema',
+          description: 'The result identifies the normalized query and bounded installed application matches.',
+        }],
+        examples: [{ query: 'Photoshop', purpose: 'Resolve the exact installed application name before launch.' }],
+      },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', minLength: 1, maxLength: 120 },
+          limit: { type: 'integer', minimum: 1, maximum: 50 },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          matches: { type: 'array' },
+        },
+        required: ['query', 'matches'],
+        additionalProperties: true,
+      },
+      routing: {
+        aliases: ['find installed app', 'search applications', 'найди установленную программу', 'какие приложения установлены'],
+        keywords: ['find', 'installed', 'application', 'program', 'найди', 'установлен', 'приложение', 'программа'],
+        examples: ['найди установленный Photoshop'],
+        intentKinds: ['device-control'],
+      },
+    },
+    {
       id: 'device.app.open',
       moduleId: 'device',
       title: 'Open an installed Windows application',
-      description: 'Resolve an allowlisted alias or an installed Start app and launch it after one-time confirmation.',
+      description: 'Resolve an exact installed Start application name or a common alias, launch it, and return the observed Windows launch receipt.',
       risk: 'device-control',
+      agent: {
+        tags: ['windows', 'device', 'application', 'launch', 'open'],
+        preconditions: [{
+          kind: 'installed-application-resolved',
+          description: 'The application must resolve uniquely through a known alias or the Windows Start application registry.',
+        }],
+        effects: [{
+          kind: 'application-launch',
+          description: 'Launches one application in the current interactive Windows user session.',
+          targetScope: 'application',
+        }],
+        idempotency: 'non-idempotent',
+        reversibility: 'manual',
+        effectProfile: {
+          mutation: 'temporary',
+          targetScope: 'application',
+          reversibility: 'manual',
+          privilege: 'elevated',
+          dataSensitivity: 'private',
+          communication: 'none',
+          financialImpact: false,
+          identityImpact: false,
+          securityImpact: true,
+        },
+        supportedSources: ['desktop', 'voice', 'api', 'system', 'smoke'],
+        estimatedLatency: 'short',
+        computeClass: 'light',
+        cancellation: 'supported',
+        verification: [{
+          kind: 'runtime-status',
+          description: 'The Windows launch receipt must report result.output.opened=true.',
+          required: true,
+          predicate: { kind: 'status', target: 'result.output.opened', value: true },
+        }],
+        examples: [{
+          input: { app: 'Visual Studio Code' },
+          verification: [{ kind: 'status', target: 'result.output.opened', value: true }],
+        }],
+      },
       inputSchema: {
         type: 'object',
         properties: {
@@ -127,10 +306,29 @@ export const deviceManifest: MonarchModuleManifest = {
         required: ['app'],
         additionalProperties: false,
       },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          opened: { type: 'boolean' },
+          displayName: { type: 'string' },
+          launcher: { type: 'string' },
+          performed: { type: 'boolean' },
+          verified: { type: 'boolean' },
+        },
+        required: ['opened', 'displayName', 'performed', 'verified'],
+        additionalProperties: true,
+      },
       routing: {
-        aliases: ['open app', 'launch program', 'открой приложение', 'запусти программу'],
-        keywords: ['open', 'launch', 'app', 'program', 'открой', 'запусти', 'приложение'],
-        examples: ['открой калькулятор'],
+        aliases: [
+          'open app',
+          'launch program',
+          'открой приложение',
+          'открыть приложение',
+          'запусти программу',
+          'запустить программу',
+        ],
+        keywords: ['open', 'launch', 'start', 'app', 'program', 'открой', 'открыть', 'запусти', 'запустить', 'приложение', 'программа'],
+        examples: ['открой калькулятор', 'можешь открыть калькулятор', 'could you open Calculator'],
         intentKinds: ['device-control'],
       },
     },
@@ -140,6 +338,14 @@ export const deviceManifest: MonarchModuleManifest = {
       title: 'Open a safe web target in a browser',
       description: 'Open an HTTP(S) URL or an encoded search query in the default or explicitly selected browser.',
       risk: 'device-control',
+      agent: deviceAgent({
+        tags: ['browser', 'url', 'open', 'search'],
+        effectKind: 'browser-open',
+        effectDescription: 'Opens one normalized HTTP(S) target or encoded search query in the requested browser.',
+        targetScope: 'application',
+        mutating: true,
+        verificationDescription: 'The launch receipt must report result.output.opened=true for the normalized target.',
+      }),
       inputSchema: {
         type: 'object',
         properties: {
@@ -163,6 +369,15 @@ export const deviceManifest: MonarchModuleManifest = {
       title: 'Empty Windows Recycle Bin',
       description: 'Empty the current Windows user recycle bin after one-time confirmation.',
       risk: 'delete',
+      agent: deviceAgent({
+        tags: ['recycle-bin', 'empty', 'delete'],
+        effectKind: 'recycle-bin-empty',
+        effectDescription: 'Irreversibly empties the current Windows user Recycle Bin.',
+        targetScope: 'device',
+        mutating: true,
+        destructive: true,
+        verificationDescription: 'The Windows operation must return an explicit emptied and verified receipt.',
+      }),
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       routing: {
         aliases: ['empty recycle bin', 'clear recycle bin', 'очисти корзину'],
@@ -176,33 +391,21 @@ export const deviceManifest: MonarchModuleManifest = {
       moduleId: 'device',
       title: 'Close active browser',
       description: 'Gracefully close the foreground window only when it belongs to a known browser.',
-      risk: 'device-control',
+      risk: 'delete',
+      agent: deviceAgent({
+        tags: ['browser', 'close', 'foreground'],
+        effectKind: 'browser-close',
+        effectDescription: 'Gracefully closes only the exact foreground process after confirming it is a supported browser.',
+        targetScope: 'application',
+        mutating: true,
+        destructive: true,
+        verificationDescription: 'A post-dispatch reconciliation must prove that the exact foreground browser window closed or report failure.',
+      }),
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       routing: {
         aliases: ['close active browser', 'закрой активный браузер'],
         keywords: ['close', 'active browser', 'закрой', 'активный браузер'],
         examples: ['закрой активный браузер'],
-        intentKinds: ['device-control'],
-      },
-    },
-    {
-      id: 'device.desktop.actions',
-      moduleId: 'device',
-      title: 'Run combined desktop actions',
-      description: 'Run a bounded set of supported Windows desktop actions under one confirmation.',
-      risk: 'device-control',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          emptyRecycleBin: { type: 'boolean' },
-          closeActiveBrowser: { type: 'boolean' },
-        },
-        additionalProperties: false,
-      },
-      routing: {
-        aliases: ['desktop actions', 'действия на компьютере'],
-        keywords: ['desktop', 'computer', 'компьютер', 'ноутбук'],
-        examples: ['очисти корзину и закрой активный браузер'],
         intentKinds: ['device-control'],
       },
     },

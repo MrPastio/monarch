@@ -90,6 +90,21 @@ export class CoderAgentController {
     return run;
   }
 
+  resume(runId: string): CoderRun {
+    const run = this.runs.require(runId);
+    if (run.status !== 'interrupted') {
+      throw new Error(`Only an interrupted Coder run can be resumed; current status is ${run.status}.`);
+    }
+    if (this.running.has(runId)) throw new Error('Coder run is already active.');
+    const project = this.coder.projects.require(run.projectId);
+    if (run.projectRoot && !samePath(run.projectRoot, project.root)) {
+      throw new Error('Coder project root changed after this run was created. Start a new run from the intended project.');
+    }
+    const promise = this.executeRun(run.id, true).finally(() => this.running.delete(run.id));
+    this.running.set(run.id, promise);
+    return this.runs.require(run.id);
+  }
+
   async waitForTerminal(runId: string): Promise<CoderRun> {
     const execution = this.running.get(runId);
     if (execution) await execution;
@@ -136,9 +151,11 @@ export class CoderAgentController {
     });
   }
 
-  private async executeRun(runId: string): Promise<void> {
+  private async executeRun(runId: string, resumed = false): Promise<void> {
     try {
-      this.runs.setStatus(runId, 'running', 'Coder agent started.');
+      this.runs.setStatus(runId, 'running', resumed
+        ? 'Coder agent resumed from the last durable checkpoint.'
+        : 'Coder agent started.');
       const initial = this.runs.require(runId);
       const projectSnapshot = await this.coder.projects.snapshot(initial.projectId);
       const runProjectRoot = initial.projectRoot || projectSnapshot.project.root;
@@ -146,17 +163,40 @@ export class CoderAgentController {
         throw new Error('Coder project root changed after this run was created. Start a new run from the intended project.');
       }
       const modelTask = compactForModel(initial.prompt, 12_000);
-      const actionExecutions = new Map<string, { count: number; projectStateVersion: number }>();
-      let projectStateVersion = 0;
+      const restoredExecutionState = resumed
+        ? seedActionExecutionsFromJournal(initial)
+        : {
+            actionExecutions: new Map<string, { count: number; projectStateVersion: number }>(),
+            projectStateVersion: 0,
+            uncertain: [],
+          };
+      const actionExecutions = restoredExecutionState.actionExecutions;
+      let projectStateVersion = restoredExecutionState.projectStateVersion;
+      const resumedWithUncertainMutation = restoredExecutionState.uncertain.length > 0;
+      for (const uncertain of restoredExecutionState.uncertain) {
+        this.runs.addEvent(
+          runId,
+          'error',
+          'Uncertain effectful action quarantined',
+          `${uncertain.capabilityId} has a durable dispatch checkpoint but no trustworthy Kernel receipt. This resumed run is read-only; inspect current state and start a new explicit run before any further mutation.`,
+          { capabilityId: uncertain.capabilityId, ok: false, error: 'receipt-missing-after-restart' },
+        );
+      }
       let activeModel = initial.model;
       let consecutiveTerminalRejections = 0;
       let conversation: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
         { role: 'system', content: await this.buildSystemContext(runId, projectSnapshot) },
-        { role: 'user', content: `CODER MODE TASK\n${modelTask}` },
+        {
+          role: 'user',
+          content: resumed
+            ? `CODER MODE RESUME\n${modelTask}\nContinue from the durable checkpoint and verified receipts. Never repeat an effectful action that lacks a trustworthy receipt after restart. Inspect current state with read-only coder.* capabilities before deciding a replacement action.`
+            : `CODER MODE TASK\n${modelTask}`,
+        },
       ];
       let finalAnswer = '';
 
-      for (let iteration = 1; iteration <= initial.maxIterations; iteration += 1) {
+      const firstIteration = resumed ? Math.max(1, initial.iteration + 1) : 1;
+      for (let iteration = firstIteration; iteration <= initial.maxIterations; iteration += 1) {
         const current = this.runs.require(runId);
         if (current.cancelled) {
           this.runs.setStatus(runId, 'cancelled', 'Task cancelled before the next action.');
@@ -218,7 +258,22 @@ export class CoderAgentController {
             this.coder.manifest.capabilities,
           );
           const args = normalized.args;
-          const actionHash = createHash('sha256').update(JSON.stringify({ capabilityId: action.capabilityId, args })).digest('hex');
+          if (resumedWithUncertainMutation && mayChangeCoderProjectState(action.capabilityId)) {
+            receipts.push({
+              capabilityId: action.capabilityId,
+              ok: false,
+              error: 'This resumed run has an unresolved pre-restart dispatch and is read-only. Inspect current state, then start a new explicit run before any mutation.',
+            });
+            this.runs.addEvent(
+              runId,
+              'error',
+              'Uncertain action repeat stopped',
+              action.capabilityId,
+              { capabilityId: action.capabilityId, ok: false, error: 'receipt-missing-after-restart' },
+            );
+            continue;
+          }
+          const actionHash = hashCoderAction(action.capabilityId, args);
           const previousExecution = actionExecutions.get(actionHash);
           if (previousExecution?.projectStateVersion === projectStateVersion || (previousExecution?.count || 0) >= MAX_IDENTICAL_ACTION_EXECUTIONS) {
             receipts.push({ capabilityId: action.capabilityId, ok: false, error: 'Repeated identical action was stopped.' });
@@ -317,6 +372,7 @@ export class CoderAgentController {
     let lastFailure = '';
     for (const model of order) {
       if (this.runs.require(runId).cancelled) throw new CoderRunCancelledError('Coder run was cancelled.');
+      const modelStartedAt = Date.now();
       this.runs.addEvent(runId, 'model', `Calling ${model}`, 'Local Coder inference started.', { ok: true });
       this.activeModelRuns.add(runId);
       let cancelModelTurn: () => void = () => undefined;
@@ -341,6 +397,7 @@ export class CoderAgentController {
             max_new_tokens: 2_048,
             temperature: 0.15,
             top_p: 0.9,
+            inference_lane: 'coder',
             route: { intentKind: 'code', modelTier: model, riskHint: 'execute', language: 'auto' },
           },
         });
@@ -360,6 +417,19 @@ export class CoderAgentController {
         lastFailure = 'Oscar returned an invalid Coder response.';
         continue;
       }
+      const latencyMs = Math.max(0, Date.now() - modelStartedAt);
+      this.runs.addEvent(
+        runId,
+        'model',
+        `${model} completed`,
+        compactJson({
+          model,
+          latencyMs,
+          inputTokens: readUsageMetric(response.usage, ['prompt_tokens', 'input_tokens', 'promptTokens', 'inputTokens']),
+          outputTokens: readUsageMetric(response.usage, ['completion_tokens', 'output_tokens', 'completionTokens', 'outputTokens']),
+        }),
+        { ok: true },
+      );
       return { ...response, model };
     }
     throw new Error(lastFailure || 'No Coder model is available.');
@@ -441,6 +511,93 @@ function mayChangeCoderProjectState(capabilityId: string): boolean {
     'coder.huggingface.repo.info',
     'coder.integrations.status',
   ]).has(capabilityId);
+}
+
+function seedActionExecutionsFromJournal(run: CoderRun): {
+  actionExecutions: Map<string, { count: number; projectStateVersion: number }>;
+  projectStateVersion: number;
+  uncertain: Array<{ capabilityId: string; args: Record<string, unknown> | null }>;
+} {
+  const pending: Array<{ capabilityId: string; args: Record<string, unknown> | null }> = [];
+  const successful: Array<{ capabilityId: string; args: Record<string, unknown> }> = [];
+  let projectStateVersion = 0;
+  for (const event of run.events) {
+    if (event.kind === 'tool-start' && event.capabilityId) {
+      pending.push({ capabilityId: event.capabilityId, args: parseJournalArgs(event.detail) });
+      continue;
+    }
+    if (event.kind !== 'tool-result' || !event.capabilityId) continue;
+    let startIndex = -1;
+    for (let index = pending.length - 1; index >= 0; index -= 1) {
+      if (pending[index]?.capabilityId === event.capabilityId) {
+        startIndex = index;
+        break;
+      }
+    }
+    if (startIndex < 0) continue;
+    const [started] = pending.splice(startIndex, 1);
+    if (event.ok === true && started?.args) {
+      successful.push({ capabilityId: event.capabilityId, args: started.args });
+      if (mayChangeCoderProjectState(event.capabilityId)) projectStateVersion += 1;
+    }
+  }
+  const actionExecutions = new Map<string, { count: number; projectStateVersion: number }>();
+  for (const action of successful) {
+    const hash = hashCoderAction(action.capabilityId, action.args);
+    const previous = actionExecutions.get(hash);
+    actionExecutions.set(hash, {
+      count: (previous?.count || 0) + 1,
+      projectStateVersion,
+    });
+  }
+  const uncertain = pending.filter((entry) => mayChangeCoderProjectState(entry.capabilityId));
+  for (const action of uncertain) {
+    if (!action.args) continue;
+    const hash = hashCoderAction(action.capabilityId, action.args);
+    actionExecutions.set(hash, {
+      count: MAX_IDENTICAL_ACTION_EXECUTIONS,
+      projectStateVersion,
+    });
+  }
+  return {
+    actionExecutions,
+    projectStateVersion,
+    uncertain,
+  };
+}
+
+function parseJournalArgs(detail: string): Record<string, unknown> | null {
+  try {
+    const value = JSON.parse(detail);
+    return isRecord(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function hashCoderAction(capabilityId: string, args: Record<string, unknown>): string {
+  return createHash('sha256').update(JSON.stringify({
+    capabilityId,
+    args: sortJsonValue(args),
+  })).digest('hex');
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonValue);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, sortJsonValue(entry)]),
+  );
+}
+
+function readUsageMetric(usage: Record<string, unknown>, keys: string[]): number {
+  for (const key of keys) {
+    const value = Number(usage[key]);
+    if (Number.isFinite(value) && value >= 0) return Math.round(value);
+  }
+  return 0;
 }
 
 interface CoderTerminalEvidenceRequirements {

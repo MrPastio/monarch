@@ -121,6 +121,7 @@ export interface MonarchAgentCapabilityVerificationDescriptor {
   kind: 'predicate' | 'read-after-write' | 'schema' | 'runtime-status' | 'external-receipt';
   description: string;
   required?: boolean;
+  predicate?: MonarchActionPredicate;
 }
 
 export interface MonarchCapabilityEffectProfile {
@@ -755,6 +756,8 @@ export interface MonarchExecutionRequest {
   input: unknown;
   createdAt: string;
   requestedBy: string;
+  /** Authoritative request surface used for capability source enforcement. */
+  source?: MonarchAgentCapabilitySource;
   confirmed?: boolean;
   securityOverrideConfirmed?: boolean;
   proposalId?: string;
@@ -770,7 +773,7 @@ export interface MonarchExecutionRequest {
   skillIds?: string[];
   modelId?: string;
   /** Internal-only execution lane. HTTP callers cannot set this field. */
-  executionMode?: 'coder';
+  executionMode?: 'coder' | 'agent-runtime';
   /** Internal-only scoped profile used by trusted controllers, never copied from API input. */
   permissionProfileOverride?: MonarchPermissionProfile;
 }

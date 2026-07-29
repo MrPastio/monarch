@@ -105,6 +105,23 @@ describe('single Policy Kernel', () => {
     expect(blocked.evidence.map((entry) => entry.code)).toContain('proposal.user-intent-unproven');
     expect(policy.preflight({ ...proposalRequest, originatingUserText: 'Создай файл с итогом' }, capability, 'write').decision.outcome).toBe('allow');
   });
+
+  it('applies the same read-to-write intent guard inside Agent Runtime', () => {
+    const policy = createPolicy('workspace-autonomous');
+    const injected = request({
+      proposalId: 'proposal_agent_injected',
+      proposalHash: 'e'.repeat(64),
+      executionMode: 'agent-runtime',
+      requestedBy: 'agent:task_fixture',
+      originatingUserText: 'Прочитай status.txt и объясни результат',
+    });
+    expect(policy.preflight(injected, capability, 'write').decision).toMatchObject({
+      outcome: 'confirm',
+      evidence: expect.arrayContaining([
+        expect.objectContaining({ code: 'proposal.user-intent-unproven' }),
+      ]),
+    });
+  });
 });
 
 function createPolicy(autonomyMode: 'guided' | 'workspace-autonomous'): MonarchPolicyKernel {

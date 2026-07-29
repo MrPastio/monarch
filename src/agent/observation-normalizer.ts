@@ -72,6 +72,9 @@ export function normalizeAgentObservation(
     ? sanitizeString(input.result.error, 1_000)
     : input.result.ok ? '' : 'execution-failed-without-error-code';
   const warnings = sanitizeWarnings(input.result.metadata?.warnings);
+  const runtimeTelemetry = readRecord(input.result.metadata?.runtimeTelemetry);
+  const toolLatencyMs = safeLatency(runtimeTelemetry?.toolLatencyMs);
+  const verificationLatencyMs = safeLatency(runtimeTelemetry?.verificationLatencyMs);
   if (input.mutation && input.mutation !== 'none' && mutationTruth?.state === 'unknown') {
     warnings.push('Kernel receipt could not prove whether the mutating capability changed its target.');
   }
@@ -100,6 +103,8 @@ export function normalizeAgentObservation(
       startedAt,
       completedAt,
       durationMs,
+      ...(toolLatencyMs !== undefined ? { toolLatencyMs } : {}),
+      ...(verificationLatencyMs !== undefined ? { verificationLatencyMs } : {}),
       ...(input.ledgerId ? { ledgerId: normalizeRequiredId(input.ledgerId, 'ledger') } : {}),
     },
     outputSchema: {
@@ -129,6 +134,12 @@ export function normalizeAgentObservation(
     ...(toStateDelta(input.result.metadata?.stateDelta)),
     occurredAt: completedAt,
   };
+}
+
+function safeLatency(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.round(value * 100) / 100
+    : undefined;
 }
 
 export function deriveAgentMutationTruth(

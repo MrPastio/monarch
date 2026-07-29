@@ -15,6 +15,7 @@ import type {
   MonarchIntentJobSubmission,
   MonarchIntentSubmission,
 } from './application';
+import { classifyOscarRequestDisposition } from '../core';
 import { getAgentSkillRegistry } from '../modules/astra/agent-skills';
 import type { MonarchApprovalPolicy, MonarchAutonomyMode, MonarchSandboxMode } from '../core';
 import { CoderAgentController } from './coder-agent-controller';
@@ -27,6 +28,7 @@ export interface MonarchHttpServerOptions {
   host?: string;
   port?: number;
   apiToken?: string;
+  desktopAttestationToken?: string;
   requireApiToken?: boolean;
   allowNonLoopbackMutations?: boolean;
 }
@@ -47,12 +49,14 @@ interface JsonError {
 
 interface MonarchHttpSession {
   apiToken: string;
+  desktopAttestationToken: string;
   requireApiToken: boolean;
   origin: string;
   allowNonLoopbackMutations: boolean;
 }
 
 const MAX_JSON_BODY_BYTES = 50 * 1024 * 1024; // 50MB
+const MAX_OSCAR_DISPOSITION_BODY_BYTES = 32 * 1024;
 const INTERNAL_ERROR_MESSAGE = 'Monarch столкнулся с внутренней ошибкой. Детали остались в локальных логах.';
 const STREAM_ERROR_MESSAGE = 'Поток ответа прервался. Попробуй повторить запрос.';
 const coderControllers = new WeakMap<MonarchApplication, CoderAgentController>();
@@ -96,6 +100,7 @@ export async function startMonarchHttpServer(
     host,
     port,
     apiToken: session.apiToken,
+    desktopAttestationToken: session.desktopAttestationToken,
     requireApiToken: session.requireApiToken,
     allowNonLoopbackMutations: session.allowNonLoopbackMutations,
   });
@@ -131,6 +136,28 @@ async function handleRequest(
     return;
   }
 
+  if (request.method === 'POST' && url.pathname === '/api/oscar/request-disposition') {
+    enforceReadApiToken(request, session);
+    const body = await readJsonBody<{ text?: unknown }>(request, MAX_OSCAR_DISPOSITION_BODY_BYTES);
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
+    if (!text) throw badRequest('empty-oscar-request', 'Oscar request text is required.');
+    if (text.length > 16_000) throw badRequest('oscar-request-too-long', 'Oscar request text is too long.');
+    response.setHeader('Cache-Control', 'no-store');
+    sendJson(response, 200, {
+      ok: true,
+      disposition: classifyOscarRequestDisposition(text),
+    });
+    return;
+  }
+  if (url.pathname === '/api/oscar/request-disposition') {
+    sendJson(response, 405, {
+      ok: false,
+      error: 'method-not-allowed',
+      message: 'Use POST for Oscar request disposition.',
+    });
+    return;
+  }
+
   if (await handleAgentTaskHttpRequest({
     app,
     url,
@@ -138,6 +165,7 @@ async function handleRequest(
     response,
     enforceMutation: () => enforceMutationGuards(request, session),
     enforceRead: () => enforceReadApiToken(request, session),
+    httpSource: executionSourceForHttpRequest(request, session),
   })) {
     return;
   }
@@ -212,6 +240,13 @@ async function handleRequest(
   if (request.method === 'POST' && coderCancelMatch?.[1]) {
     enforceMutationGuards(request, session);
     sendJson(response, 200, { ok: true, run: await getCoderController(app).cancel(decodeURIComponent(coderCancelMatch[1])) });
+    return;
+  }
+
+  const coderResumeMatch = url.pathname.match(/^\/api\/coder\/runs\/([^/]+)\/resume$/);
+  if (request.method === 'POST' && coderResumeMatch?.[1]) {
+    enforceMutationGuards(request, session);
+    sendJson(response, 202, { ok: true, run: getCoderController(app).resume(decodeURIComponent(coderResumeMatch[1])) });
     return;
   }
 
@@ -305,6 +340,7 @@ async function handleRequest(
 
     const submission: MonarchIntentSubmission = {
       text,
+      source: executionSourceForHttpRequest(request, session),
       confirmed: Boolean(body.confirmed),
       context: readContext(body.context),
     };
@@ -314,10 +350,6 @@ async function handleRequest(
     if (typeof body.confirmationToken === 'string') {
       submission.confirmationToken = body.confirmationToken;
     }
-    if (body.source) {
-      submission.source = body.source;
-    }
-
     const result = await app.submitIntent(submission);
     sendJson(response, 200, {
       ok: true,
@@ -337,6 +369,7 @@ async function handleRequest(
 
     const submission: MonarchIntentJobSubmission = {
       text,
+      source: executionSourceForHttpRequest(request, session),
       confirmed: Boolean(body.confirmed),
       context: readContext(body.context),
     };
@@ -349,10 +382,6 @@ async function handleRequest(
     if (typeof body.confirmationToken === 'string') {
       submission.confirmationToken = body.confirmationToken;
     }
-    if (body.source) {
-      submission.source = body.source;
-    }
-
     const job = await app.submitIntentJob(submission);
     sendJson(response, 202, {
       ok: true,
@@ -597,6 +626,7 @@ async function handleRequest(
       confirmed,
       originatingUserText: readBoundedContextText(body.originatingUserText, 8_000),
       requestedBy: typeof body.requestedBy === 'string' ? body.requestedBy : 'api:model-proposal',
+      source: executionSourceForHttpRequest(request, session),
       ...(typeof body.model === 'string' ? { model: body.model } : {}),
       ...(Array.isArray(body.skillIds) ? { skillIds: body.skillIds.filter((entry): entry is string => typeof entry === 'string').slice(0, 8) } : {}),
       ...(typeof body.leaseId === 'string' ? { leaseId: body.leaseId } : {}),
@@ -756,6 +786,7 @@ async function handleRequest(
       capabilityId,
       input: body.input,
       requestedBy: typeof body.requestedBy === 'string' ? body.requestedBy : 'api',
+      source: executionSourceForHttpRequest(request, session),
       confirmed: Boolean(body.confirmed),
     };
     if (execution.confirmed && typeof body.confirmationToken !== 'string') {
@@ -810,6 +841,7 @@ async function handleRequest(
       capabilityId,
       input: body.input,
       requestedBy: typeof body.requestedBy === 'string' ? body.requestedBy : 'api',
+      source: executionSourceForHttpRequest(request, session),
       confirmed: Boolean(body.confirmed),
     };
     if (execution.confirmed && typeof body.confirmationToken !== 'string') {
@@ -967,18 +999,18 @@ async function serveStatic(
   }
 }
 
-async function readJsonBody<T>(request: IncomingMessage): Promise<T> {
+async function readJsonBody<T>(request: IncomingMessage, maxBytes = MAX_JSON_BODY_BYTES): Promise<T> {
   const chunks: Buffer[] = [];
   let totalBytes = 0;
 
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     totalBytes += buffer.byteLength;
-    if (totalBytes > MAX_JSON_BODY_BYTES) {
+    if (totalBytes > maxBytes) {
       throw {
         statusCode: 413,
         code: 'request-too-large',
-        message: `Request body exceeds ${MAX_JSON_BODY_BYTES} bytes.`,
+        message: `Request body exceeds ${maxBytes} bytes.`,
       } satisfies JsonError;
     }
     chunks.push(buffer);
@@ -1164,9 +1196,15 @@ function createHttpSession(options: MonarchHttpServerOptions): MonarchHttpSessio
   const apiToken = requireApiToken
     ? configuredToken || randomBytes(32).toString('base64url')
     : configuredToken;
+  const desktopAttestationToken = (
+    options.desktopAttestationToken
+    || process.env.MONARCH_DESKTOP_ATTESTATION_TOKEN
+    || ''
+  ).trim();
 
   return {
     apiToken,
+    desktopAttestationToken,
     requireApiToken,
     origin: `http://${host}:${port}`,
     allowNonLoopbackMutations: options.allowNonLoopbackMutations
@@ -1204,6 +1242,23 @@ function enforceMutationGuards(request: IncomingMessage, session: MonarchHttpSes
       message: 'Mutating Monarch API calls require a valid UI session token.',
     } satisfies JsonError;
   }
+}
+
+function executionSourceForHttpRequest(
+  request: IncomingMessage,
+  session: MonarchHttpSession,
+): Extract<import('../core').MonarchIntentSource, 'desktop' | 'api'> {
+  return isTrustedDesktopMutationRequest(request, session) ? 'desktop' : 'api';
+}
+
+function isTrustedDesktopMutationRequest(request: IncomingMessage, session: MonarchHttpSession): boolean {
+  if (!isLoopbackRemoteAddress(request.socket.remoteAddress)) return false;
+  const origin = readHeader(request, 'origin');
+  if (!origin || !sameOrigin(origin, session.origin)) return false;
+  const attestation = readHeader(request, 'x-monarch-desktop-attestation').trim();
+  return Boolean(attestation)
+    && Boolean(session.desktopAttestationToken)
+    && constantTimeEquals(attestation, session.desktopAttestationToken);
 }
 
 function enforceReadApiToken(request: IncomingMessage, session: MonarchHttpSession): void {

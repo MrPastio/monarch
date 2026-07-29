@@ -1,1 +1,9 @@
 gemma_models/**/*.gguf filter=lfs diff=lfs merge=lfs -text
+/.gitattributes text eol=lf
+/assets/voice/generation-manifest.json text eol=lf
+/assets/voice/reference-provenance.json text eol=lf
+/scripts/export-public.ps1 text eol=lf
+/scripts/public-source-policy.ps1 text eol=lf
+/scripts/public-source-structure.json text eol=lf
+/scripts/upload-dry-run.ps1 text eol=lf
+/tools/generate-voice-references.py text eol=lf

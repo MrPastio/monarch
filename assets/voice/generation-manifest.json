@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "contractId": "monarch-synthetic-voice-references-v1",
+  "source": {
+    "contract": {
+      "path": "assets/voice/reference-provenance.json#generation-source-v1",
+      "projectionId": "monarch-voice-generation-source-v1",
+      "sha256": "b4ddb655a3ef5d23a0684f45ac484548f7c0049751c0ff267382eb7614b20c8b"
+    },
+    "generator": {
+      "path": "tools/generate-voice-references.py",
+      "sha256": "47dcf22b32c68847c7d94934f62e25cd955569c9d7c04f9a31b8164bc029ef6d"
+    }
+  },
+  "model": {
+    "repository": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+    "revision": "5ecdb67327fd37bb2e042aab12ff7391903235d3",
+    "license": "Apache-2.0",
+    "verifiedFiles": [
+      {
+        "path": "config.json",
+        "bytes": 4421,
+        "sha256": "aecd2cc4c1fe9edef1cb7ca7c401685a43879ad43f3f9e883f1c6760b61731e0"
+      },
+      {
+        "path": "generation_config.json",
+        "bytes": 245,
+        "sha256": "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa"
+      },
+      {
+        "path": "merges.txt",
+        "bytes": 1671839,
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+      },
+      {
+        "path": "model.safetensors",
+        "bytes": 3833402552,
+        "sha256": "391e8db219f292c515297cdceeb43e4eae67cdde35fa57e79a6a8a532fca0522"
+      },
+      {
+        "path": "preprocessor_config.json",
+        "bytes": 127,
+        "sha256": "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "bytes": 7344,
+        "sha256": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670"
+      },
+      {
+        "path": "vocab.json",
+        "bytes": 2776833,
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      },
+      {
+        "path": "speech_tokenizer/config.json",
+        "bytes": 2336,
+        "sha256": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167"
+      },
+      {
+        "path": "speech_tokenizer/configuration.json",
+        "bytes": 76,
+        "sha256": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd"
+      },
+      {
+        "path": "speech_tokenizer/model.safetensors",
+        "bytes": 682293092,
+        "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+      },
+      {
+        "path": "speech_tokenizer/preprocessor_config.json",
+        "bytes": 234,
+        "sha256": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb"
+      }
+    ]
+  },
+  "runtime": {
+    "python": "3.11.9",
+    "torch": "2.11.0+cu128",
+    "numpy": "2.4.6",
+    "faster-qwen3-tts": "0.3.0",
+    "qwen-tts": "0.1.1"
+  },
+  "origin": {
+    "kind": "synthetic-text-and-instruction-only",
+    "humanReferenceAudio": false,
+    "voiceCloning": false
+  },
+  "referenceText": "Привет. Меня зовут Оскар. Я говорю спокойно, уверенно и по делу. Давай вместе найдём точное и надёжное решение.",
+  "settings": {
+    "device": "cuda",
+    "dtype": "bfloat16",
+    "attentionImplementation": "sdpa",
+    "chunkSize": 8,
+    "doSample": true,
+    "temperature": 0.78,
+    "topK": 36,
+    "topP": 0.94,
+    "repetitionPenalty": 1.08,
+    "maxNewTokens": 1024,
+    "cublasWorkspaceConfig": ":4096:8",
+    "deterministicAlgorithms": true,
+    "allowTf32": false
+  },
+  "voices": [
+    {
+      "id": "oscar",
+      "description": "Спокойный уверенный мужской голос среднего-низкого регистра, естественный и собранный. Чёткая русская дикция, ровный темп, короткие естественные паузы, без театральности и без имитации конкретного человека.",
+      "seed": 2026072901,
+      "stagingPath": "artifacts/qa/voice-reference-provenance-v1/oscar-reference.wav",
+      "assetPath": "assets/voice/oscar-reference.wav",
+      "artifact": {
+        "status": "verified",
+        "sha256": "c8f7331c103a524d415b3c4fc680a1cb1d8dda69bec7f57bb8448f9195223a1d",
+        "bytes": 410924,
+        "durationSeconds": 8.56,
+        "sampleRateHz": 24000,
+        "channels": 1,
+        "sampleWidthBits": 16
+      }
+    },
+    {
+      "id": "oscar-clear",
+      "description": "Чистый нейтральный мужской голос среднего регистра. Очень ясная русская дикция, спокойный ровный темп, точные окончания, минимум окраски, без театральности и без имитации конкретного человека.",
+      "seed": 2026072902,
+      "stagingPath": "artifacts/qa/voice-reference-provenance-v1/oscar-clear-reference.wav",
+      "assetPath": "assets/voice/oscar-clear-reference.wav",
+      "artifact": {
+        "status": "verified",
+        "sha256": "b58ee475c1ac7ada0752cd01d2a5e14323403f100f687d6f059caab0cab26003",
+        "bytes": 549164,
+        "durationSeconds": 11.44,
+        "sampleRateHz": 24000,
+        "channels": 1,
+        "sampleWidthBits": 16
+      }
+    },
+    {
+      "id": "aurora",
+      "description": "Тёплый ясный женский голос среднего регистра. Естественная русская дикция, мягкая уверенная подача, спокойный темп, дружелюбие без наигранности и без имитации конкретного человека.",
+      "seed": 2026072903,
+      "stagingPath": "artifacts/qa/voice-reference-provenance-v1/aurora-reference.wav",
+      "assetPath": "assets/voice/aurora-reference.wav",
+      "artifact": {
+        "status": "verified",
+        "sha256": "47d7eeef4f4e1b9eff20d9664b047196a20f6479f2d0e579a6da76f10a12f1c5",
+        "bytes": 599084,
+        "durationSeconds": 12.48,
+        "sampleRateHz": 24000,
+        "channels": 1,
+        "sampleWidthBits": 16
+      }
+    }
+  ]
+}

@@ -1,6 +1,9 @@
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { appendFile, copyFile, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import type {
   MonarchExecutionRequest,
   MonarchExecutionControl,
@@ -31,8 +34,178 @@ const MAX_WRITE_BYTES = 512 * 1024;
 const MAX_COPY_BYTES = 32 * 1024 * 1024;
 const MAX_COPY_ENTRIES = 2_000;
 
+export const WINDOWS_RECYCLE_ANCESTOR_FENCE_CSHARP = String.raw`
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public sealed class MonarchRecycleAncestorFence : IDisposable
+{
+    private const uint FileReadAttributes = 0x0080;
+    private const uint FileShareRead = 0x00000001;
+    private const uint FileShareWrite = 0x00000002;
+    private const uint OpenExisting = 3;
+    private const uint FileFlagBackupSemantics = 0x02000000;
+    private const uint FileFlagOpenReparsePoint = 0x00200000;
+    private const uint FileAttributeReparsePoint = 0x00000400;
+    private readonly List<SafeFileHandle> handles;
+
+    private MonarchRecycleAncestorFence(List<SafeFileHandle> handles)
+    {
+        this.handles = handles;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileAttributeTagInfo
+    {
+        public uint FileAttributes;
+        public uint ReparseTag;
+    }
+
+    private enum FileInfoByHandleClass
+    {
+        FileAttributeTagInfo = 9
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        IntPtr securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandleEx(
+        SafeFileHandle file,
+        FileInfoByHandleClass fileInformationClass,
+        out FileAttributeTagInfo fileInformation,
+        uint bufferSize);
+
+    public static MonarchRecycleAncestorFence Acquire(string targetPath)
+    {
+        string fullTarget = Path.GetFullPath(targetPath);
+        string parent = Path.GetDirectoryName(fullTarget);
+        if (String.IsNullOrWhiteSpace(parent))
+        {
+            throw new InvalidOperationException("Recycle target has no parent directory.");
+        }
+
+        var chain = new Stack<string>();
+        string root = Path.GetPathRoot(fullTarget);
+        string cursor = parent;
+        while (!String.IsNullOrWhiteSpace(cursor))
+        {
+            chain.Push(cursor);
+            if (String.Equals(
+                cursor.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+            string trimmed = cursor.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string next = Path.GetDirectoryName(trimmed);
+            if (String.IsNullOrWhiteSpace(next) ||
+                String.Equals(next, cursor, StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+            cursor = next;
+        }
+
+        var opened = new List<SafeFileHandle>();
+        try
+        {
+            while (chain.Count > 0)
+            {
+                string ancestor = chain.Pop();
+                SafeFileHandle handle = CreateFileW(
+                    ancestor,
+                    FileReadAttributes,
+                    FileShareRead | FileShareWrite,
+                    IntPtr.Zero,
+                    OpenExisting,
+                    FileFlagBackupSemantics | FileFlagOpenReparsePoint,
+                    IntPtr.Zero);
+                if (handle.IsInvalid)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    handle.Dispose();
+                    throw new Win32Exception(error, "Could not hold recycle target ancestor: " + ancestor);
+                }
+
+                FileAttributeTagInfo info;
+                if (!GetFileInformationByHandleEx(
+                    handle,
+                    FileInfoByHandleClass.FileAttributeTagInfo,
+                    out info,
+                    (uint)Marshal.SizeOf(typeof(FileAttributeTagInfo))))
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    handle.Dispose();
+                    throw new Win32Exception(error, "Could not verify recycle target ancestor: " + ancestor);
+                }
+                if ((info.FileAttributes & FileAttributeReparsePoint) != 0)
+                {
+                    handle.Dispose();
+                    throw new IOException("Recycle target ancestor is a reparse point: " + ancestor);
+                }
+                opened.Add(handle);
+            }
+            return new MonarchRecycleAncestorFence(opened);
+        }
+        catch
+        {
+            foreach (SafeFileHandle handle in opened)
+            {
+                handle.Dispose();
+            }
+            throw;
+        }
+    }
+
+    public void Dispose()
+    {
+        for (int index = handles.Count - 1; index >= 0; index--)
+        {
+            handles[index].Dispose();
+        }
+        handles.Clear();
+    }
+}
+`;
+
 export interface WorkspaceModuleOptions {
   workspaceRoot?: string;
+  trashPath?: (
+    targetPath: string,
+    isDirectory: boolean,
+    signal?: AbortSignal,
+    expectedIdentity?: WorkspacePathIdentity,
+  ) => Promise<void>;
+  beforeMutation?: (
+    operation: 'write' | 'replace' | 'append' | 'mkdir' | 'copy' | 'move' | 'delete' | 'trash',
+    targetPaths: readonly string[],
+    signal?: AbortSignal,
+  ) => void | Promise<void>;
+}
+
+interface WorkspacePathIdentity {
+  realPath: string;
+  kind: 'file' | 'directory';
+  device: number;
+  inode: number;
+  size: number;
+  mode: number;
+  createdMs: number;
+  modifiedMs: number;
 }
 
 interface FileEntry {
@@ -60,9 +233,13 @@ class WorkspaceTraversalPolicyError extends Error {
 export class WorkspaceModule implements MonarchModule {
   readonly manifest = workspaceManifest;
   private readonly workspaceRoot: string;
+  private readonly trashPath: NonNullable<WorkspaceModuleOptions['trashPath']>;
+  private readonly beforeMutation: NonNullable<WorkspaceModuleOptions['beforeMutation']>;
 
   constructor(options: WorkspaceModuleOptions = {}) {
     this.workspaceRoot = path.resolve(options.workspaceRoot || process.cwd());
+    this.trashPath = options.trashPath || trashWorkspacePath;
+    this.beforeMutation = options.beforeMutation || (() => undefined);
   }
 
   async activate(context: MonarchKernelContext): Promise<void> {
@@ -123,7 +300,10 @@ export class WorkspaceModule implements MonarchModule {
     }
 
     if (/(delete|remove|удали|сотри|стереть).{0,20}(?:file|файл)/i.test(lower) || /^(удали|сотри|стереть) файл/i.test(lower)) {
-      return this.route(intent, 'workspace.files.delete', 0.96, { path: extractPath(text) });
+      const permanent = /(?:permanent(?:ly)?|irreversible|without\s+recycle|безвозврат|навсегда|мимо\s+корзин)/i.test(lower);
+      return this.route(intent, permanent ? 'workspace.files.delete' : 'workspace.files.trash', 0.96, {
+        path: extractPath(text),
+      });
     }
     if (/(?:mkdir|create).{0,24}(?:folder|directory)|(?:создай|создать|сделай|сделать).{0,24}(?:папку|директорию)/i.test(lower)) {
       return this.route(intent, 'workspace.files.mkdir', 0.96, extractDirectoryInput(text));
@@ -203,17 +383,19 @@ export class WorkspaceModule implements MonarchModule {
     case 'workspace.files.write':
       return this.writeFileCapability(request.input, context, control.signal);
     case 'workspace.files.append':
-      return this.appendFileCapability(request.input, context);
+      return this.appendFileCapability(request.input, context, control.signal);
     case 'workspace.files.mkdir':
-      return this.makeDirectoryCapability(request.input, context);
+      return this.makeDirectoryCapability(request.input, context, control.signal);
     case 'workspace.files.copy':
-      return this.copyPathCapability(request.input, context);
+      return this.copyPathCapability(request.input, context, control.signal);
     case 'workspace.files.move':
-      return this.movePathCapability(request.input, context);
+      return this.movePathCapability(request.input, context, control.signal);
     case 'workspace.files.replace':
-      return this.replaceFileTextCapability(request.input, context);
+      return this.replaceFileTextCapability(request.input, context, control.signal);
+    case 'workspace.files.trash':
+      return this.trashPathCapability(request.input, context, control.signal);
     case 'workspace.files.delete':
-      return this.deleteFileCapability(request.input, context);
+      return this.deleteFileCapability(request.input, context, control.signal);
     default:
       return {
         ok: false,
@@ -436,11 +618,31 @@ export class WorkspaceModule implements MonarchModule {
       };
     }
 
-    signal?.throwIfAborted();
-    await mkdir(path.dirname(evaluation.resolvedPath), { recursive: true });
-    signal?.throwIfAborted();
-    await writeFile(evaluation.resolvedPath, content, { encoding: 'utf8', signal });
-    signal?.throwIfAborted();
+    try {
+      signal?.throwIfAborted();
+      await this.beforeMutation('write', [evaluation.resolvedPath], signal);
+      signal?.throwIfAborted();
+      await mkdir(path.dirname(evaluation.resolvedPath), { recursive: true });
+      signal?.throwIfAborted();
+      await writeFile(evaluation.resolvedPath, content, { encoding: 'utf8', signal });
+    } catch (error) {
+      return filesystemMutationFailure('write', evaluation.resolvedPath, error);
+    }
+    const readback = await readFile(evaluation.resolvedPath).catch(() => undefined);
+    const expected = Buffer.from(content, 'utf8');
+    if (!readback?.equals(expected)) {
+      return {
+        ok: false,
+        summary: `Write readback failed for ${evaluation.resolvedPath}.`,
+        error: 'write-readback-mismatch',
+        output: {
+          path: evaluation.resolvedPath,
+          bytes: readback?.byteLength || 0,
+          verified: false,
+          cancellationObservedAfterDispatch: signal?.aborted === true,
+        },
+      };
+    }
     await context.emit('workspace.file.written', this.manifest.id, {
       path: evaluation.resolvedPath,
       bytes,
@@ -452,14 +654,19 @@ export class WorkspaceModule implements MonarchModule {
       output: {
         path: evaluation.resolvedPath,
         bytes,
+        verified: true,
+        readbackSha256: createHash('sha256').update(readback).digest('hex'),
+        cancellationObservedAfterDispatch: signal?.aborted === true,
       },
     };
   }
 
   private async replaceFileTextCapability(
     input: unknown,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
   ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const evaluation = this.evaluate(readStringInput(input, 'path'), 'write', context);
     if (!evaluation.allowed) {
       return blockedResult(evaluation.message, evaluation);
@@ -506,7 +713,7 @@ export class WorkspaceModule implements MonarchModule {
       };
     }
 
-    const content = await readFile(evaluation.resolvedPath, 'utf8');
+    const content = await readFile(evaluation.resolvedPath, { encoding: 'utf8', signal });
     const occurrences = countOccurrences(content, oldText);
     if (occurrences === 0) {
       return {
@@ -536,7 +743,24 @@ export class WorkspaceModule implements MonarchModule {
       };
     }
 
-    await writeFile(evaluation.resolvedPath, updated, 'utf8');
+    try {
+      signal?.throwIfAborted();
+      await this.beforeMutation('replace', [evaluation.resolvedPath], signal);
+      signal?.throwIfAborted();
+      await writeFile(evaluation.resolvedPath, updated, { encoding: 'utf8', signal });
+    } catch (error) {
+      return filesystemMutationFailure('replace', evaluation.resolvedPath, error);
+    }
+    const readback = await readFile(evaluation.resolvedPath);
+    const expected = Buffer.from(updated, 'utf8');
+    if (!readback.equals(expected)) {
+      return {
+        ok: false,
+        summary: `Exact replace readback failed for ${evaluation.resolvedPath}.`,
+        error: 'replace-readback-mismatch',
+        output: { path: evaluation.resolvedPath, verified: false },
+      };
+    }
     await context.emit('workspace.file.replaced', this.manifest.id, {
       path: evaluation.resolvedPath,
       bytes,
@@ -548,14 +772,19 @@ export class WorkspaceModule implements MonarchModule {
       output: {
         path: evaluation.resolvedPath,
         bytes,
+        verified: true,
+        readbackSha256: createHash('sha256').update(readback).digest('hex'),
+        cancellationObservedAfterDispatch: signal?.aborted === true,
       },
     };
   }
 
   private async appendFileCapability(
     input: unknown,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
   ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const evaluation = this.evaluate(readStringInput(input, 'path'), 'write', context);
     if (!evaluation.allowed) return blockedResult(evaluation.message, evaluation);
     const realPathBlock = await this.blockIfRealPathEscapes(evaluation.resolvedPath, 'write', context);
@@ -566,16 +795,48 @@ export class WorkspaceModule implements MonarchModule {
     if (existing && !existing.isFile()) return { ok: false, summary: `Target is not a file: ${evaluation.resolvedPath}`, error: 'not-a-file' };
     const nextBytes = (existing?.size || 0) + Buffer.byteLength(content, 'utf8');
     if (nextBytes > MAX_WRITE_BYTES) return { ok: false, summary: `Appended file would exceed ${MAX_WRITE_BYTES} bytes.`, error: 'file-too-large' };
-    await mkdir(path.dirname(evaluation.resolvedPath), { recursive: true });
-    await appendFile(evaluation.resolvedPath, content, 'utf8');
+    try {
+      signal?.throwIfAborted();
+      await this.beforeMutation('append', [evaluation.resolvedPath], signal);
+      signal?.throwIfAborted();
+      await mkdir(path.dirname(evaluation.resolvedPath), { recursive: true });
+      signal?.throwIfAborted();
+      await appendFile(evaluation.resolvedPath, content, 'utf8');
+    } catch (error) {
+      return filesystemMutationFailure('append', evaluation.resolvedPath, error);
+    }
+    const readback = await readFile(evaluation.resolvedPath);
+    const appendedBytes = Buffer.from(content, 'utf8');
+    const verified = readback.byteLength === nextBytes
+      && readback.subarray(Math.max(0, readback.byteLength - appendedBytes.byteLength)).equals(appendedBytes);
+    if (!verified) {
+      return {
+        ok: false,
+        summary: `Append readback failed for ${evaluation.resolvedPath}.`,
+        error: 'append-readback-mismatch',
+        output: { path: evaluation.resolvedPath, bytes: readback.byteLength, verified: false },
+      };
+    }
     await context.emit('workspace.file.written', this.manifest.id, { path: evaluation.resolvedPath, append: true, bytes: nextBytes });
-    return { ok: true, summary: `Appended file ${evaluation.resolvedPath}.`, output: { path: evaluation.resolvedPath, bytes: nextBytes } };
+    return {
+      ok: true,
+      summary: `Appended file ${evaluation.resolvedPath}.`,
+      output: {
+        path: evaluation.resolvedPath,
+        bytes: nextBytes,
+        verified: true,
+        readbackSha256: createHash('sha256').update(readback).digest('hex'),
+        cancellationObservedAfterDispatch: signal?.aborted === true,
+      },
+    };
   }
 
   private async makeDirectoryCapability(
     input: unknown,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
   ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const evaluation = this.evaluate(readStringInput(input, 'path'), 'mkdir', context);
     if (!evaluation.allowed) return blockedResult(evaluation.message, evaluation);
     const targetPath = readBooleanInput(input, 'ensureUnique', false)
@@ -592,17 +853,52 @@ export class WorkspaceModule implements MonarchModule {
       return { ok: false, summary: `Directory target already exists as a file: ${targetEvaluation.resolvedPath}`, error: 'target-exists' };
     }
     if (existing?.isDirectory()) {
-      return { ok: true, summary: `Directory already exists ${targetEvaluation.resolvedPath}.`, output: { path: targetEvaluation.resolvedPath, alreadyExists: true } };
+      return {
+        ok: true,
+        summary: `Directory already exists ${targetEvaluation.resolvedPath}.`,
+        output: {
+          path: targetEvaluation.resolvedPath,
+          alreadyExists: true,
+          verified: true,
+          cancellationObservedAfterDispatch: false,
+        },
+      };
     }
-    await mkdir(targetEvaluation.resolvedPath, { recursive: true });
+    try {
+      signal?.throwIfAborted();
+      await this.beforeMutation('mkdir', [targetEvaluation.resolvedPath], signal);
+      signal?.throwIfAborted();
+      await mkdir(targetEvaluation.resolvedPath, { recursive: true });
+    } catch (error) {
+      return filesystemMutationFailure('mkdir', targetEvaluation.resolvedPath, error);
+    }
+    const readback = await stat(targetEvaluation.resolvedPath).catch(() => undefined);
+    if (!readback?.isDirectory()) {
+      return {
+        ok: false,
+        summary: `Directory creation was not verified: ${targetEvaluation.resolvedPath}`,
+        error: 'mkdir-readback-mismatch',
+        output: { path: targetEvaluation.resolvedPath, verified: false },
+      };
+    }
     await context.emit('workspace.directory.created', this.manifest.id, { path: targetEvaluation.resolvedPath });
-    return { ok: true, summary: `Created directory ${targetEvaluation.resolvedPath}.`, output: { path: targetEvaluation.resolvedPath } };
+    return {
+      ok: true,
+      summary: `Created directory ${targetEvaluation.resolvedPath}.`,
+      output: {
+        path: targetEvaluation.resolvedPath,
+        verified: true,
+        cancellationObservedAfterDispatch: signal?.aborted === true,
+      },
+    };
   }
 
   private async copyPathCapability(
     input: unknown,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
   ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const source = this.evaluate(readStringInput(input, 'path'), 'read', context);
     const target = this.evaluate(readStringInput(input, 'targetPath'), 'write', context);
     if (!source.allowed) return blockedResult(source.message, source);
@@ -614,25 +910,47 @@ export class WorkspaceModule implements MonarchModule {
     if (await stat(target.resolvedPath).catch(() => undefined)) return { ok: false, summary: `Copy target already exists: ${target.resolvedPath}`, error: 'target-exists' };
     let copied: { bytes: number; entries: number };
     try {
+      await this.beforeMutation('copy', [source.resolvedPath, target.resolvedPath], signal);
       copied = await copyWorkspaceTree(source.resolvedPath, target.resolvedPath, {
         sourcePolicyGuard: (candidatePath) => this.blockIfRealPathEscapes(candidatePath, 'read', context),
+        ...(signal ? { signal } : {}),
       });
     } catch (error) {
       if (error instanceof WorkspaceTraversalPolicyError) return error.result;
+      const targetAfter = await lstat(target.resolvedPath).catch(() => undefined);
       return {
         ok: false,
         summary: `Copy failed: ${errorMessage(error)}`,
-        error: 'copy-failed',
+        error: filesystemErrorCode(error, 'copy-failed'),
+        output: {
+          source: source.resolvedPath,
+          target: target.resolvedPath,
+          targetExists: Boolean(targetAfter),
+          verified: false,
+          cancellationObservedAfterDispatch: signal?.aborted === true,
+        },
       };
     }
     await context.emit('workspace.path.copied', this.manifest.id, { source: source.resolvedPath, target: target.resolvedPath, ...copied });
-    return { ok: true, summary: `Copied ${source.resolvedPath} to ${target.resolvedPath}.`, output: { source: source.resolvedPath, target: target.resolvedPath, ...copied } };
+    return {
+      ok: true,
+      summary: `Copied ${source.resolvedPath} to ${target.resolvedPath}.`,
+      output: {
+        source: source.resolvedPath,
+        target: target.resolvedPath,
+        ...copied,
+        verified: true,
+        cancellationObservedAfterDispatch: signal?.aborted === true,
+      },
+    };
   }
 
   private async movePathCapability(
     input: unknown,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
   ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const source = this.evaluate(readStringInput(input, 'path'), 'delete', context);
     const target = this.evaluate(readStringInput(input, 'targetPath'), 'write', context);
     if (!source.allowed) return blockedResult(source.message, source);
@@ -643,16 +961,53 @@ export class WorkspaceModule implements MonarchModule {
     if (targetBlock) return targetBlock;
     if (!(await stat(source.resolvedPath).catch(() => undefined))) return { ok: false, summary: `Move source does not exist: ${source.resolvedPath}`, error: 'source-not-found' };
     if (await stat(target.resolvedPath).catch(() => undefined)) return { ok: false, summary: `Move target already exists: ${target.resolvedPath}`, error: 'target-exists' };
-    await mkdir(path.dirname(target.resolvedPath), { recursive: true });
-    await rename(source.resolvedPath, target.resolvedPath);
+    try {
+      signal?.throwIfAborted();
+      await this.beforeMutation('move', [source.resolvedPath, target.resolvedPath], signal);
+      signal?.throwIfAborted();
+      await mkdir(path.dirname(target.resolvedPath), { recursive: true });
+      signal?.throwIfAborted();
+      await rename(source.resolvedPath, target.resolvedPath);
+    } catch (error) {
+      return filesystemMutationFailure('move', source.resolvedPath, error, target.resolvedPath);
+    }
+    const sourceAfter = await lstat(source.resolvedPath).catch(() => undefined);
+    const targetAfter = await lstat(target.resolvedPath).catch(() => undefined);
+    if (sourceAfter || !targetAfter) {
+      return {
+        ok: false,
+        summary: `Move reconciliation failed for ${source.resolvedPath}.`,
+        error: 'move-readback-mismatch',
+        output: {
+          source: source.resolvedPath,
+          target: target.resolvedPath,
+          sourceExists: Boolean(sourceAfter),
+          targetExists: Boolean(targetAfter),
+          verified: false,
+        },
+      };
+    }
     await context.emit('workspace.path.moved', this.manifest.id, { source: source.resolvedPath, target: target.resolvedPath });
-    return { ok: true, summary: `Moved ${source.resolvedPath} to ${target.resolvedPath}.`, output: { source: source.resolvedPath, target: target.resolvedPath } };
+    return {
+      ok: true,
+      summary: `Moved ${source.resolvedPath} to ${target.resolvedPath}.`,
+      output: {
+        source: source.resolvedPath,
+        target: target.resolvedPath,
+        sourceExists: false,
+        targetExists: true,
+        verified: true,
+        cancellationObservedAfterDispatch: signal?.aborted === true,
+      },
+    };
   }
 
   private async deleteFileCapability(
     input: unknown,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
   ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const evaluation = this.evaluate(readStringInput(input, 'path'), 'delete', context);
     if (!evaluation.allowed) {
       return blockedResult(evaluation.message, evaluation);
@@ -680,7 +1035,23 @@ export class WorkspaceModule implements MonarchModule {
       };
     }
 
-    await rm(evaluation.resolvedPath, { force: false });
+    try {
+      signal?.throwIfAborted();
+      await this.beforeMutation('delete', [evaluation.resolvedPath], signal);
+      signal?.throwIfAborted();
+      await rm(evaluation.resolvedPath, { force: false });
+    } catch (error) {
+      return filesystemMutationFailure('delete', evaluation.resolvedPath, error);
+    }
+    const existsAfter = Boolean(await lstat(evaluation.resolvedPath).catch(() => undefined));
+    if (existsAfter) {
+      return {
+        ok: false,
+        summary: `Permanent delete was not verified: ${evaluation.resolvedPath}.`,
+        error: 'delete-readback-mismatch',
+        output: { path: evaluation.resolvedPath, exists: true, verified: false },
+      };
+    }
     await context.emit('workspace.file.deleted', this.manifest.id, {
       path: evaluation.resolvedPath,
     });
@@ -688,7 +1059,91 @@ export class WorkspaceModule implements MonarchModule {
     return {
       ok: true,
       summary: `Deleted file ${evaluation.resolvedPath}.`,
-      output: { path: evaluation.resolvedPath },
+      output: {
+        path: evaluation.resolvedPath,
+        exists: false,
+        permanent: true,
+        verified: true,
+        cancellationObservedAfterDispatch: signal?.aborted === true,
+      },
+    };
+  }
+
+  private async trashPathCapability(
+    input: unknown,
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
+  ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
+    const evaluation = this.evaluate(readStringInput(input, 'path'), 'delete', context);
+    if (!evaluation.allowed) return blockedResult(evaluation.message, evaluation);
+    const realPathBlock = await this.blockIfRealPathEscapes(evaluation.resolvedPath, 'delete', context);
+    if (realPathBlock) return realPathBlock;
+    const before = await lstat(evaluation.resolvedPath).catch(() => undefined);
+    if (!before) {
+      return {
+        ok: false,
+        summary: `Trash target does not exist: ${evaluation.resolvedPath}`,
+        error: 'path-not-found',
+        metadata: { evaluation },
+      };
+    }
+    if (!before.isFile() && !before.isDirectory()) {
+      return {
+        ok: false,
+        summary: `Trash target type is unsupported: ${evaluation.resolvedPath}`,
+        error: 'unsupported-entry-type',
+        metadata: { evaluation },
+      };
+    }
+    try {
+      const expectedIdentity = await captureWorkspacePathIdentity(evaluation.resolvedPath, before);
+      signal?.throwIfAborted();
+      await this.beforeMutation('trash', [evaluation.resolvedPath], signal);
+      signal?.throwIfAborted();
+      const immediatelyBeforeDispatch = await captureWorkspacePathIdentity(evaluation.resolvedPath);
+      if (!sameWorkspacePathIdentity(expectedIdentity, immediatelyBeforeDispatch)) {
+        return {
+          ok: false,
+          summary: `Trash target changed before dispatch: ${evaluation.resolvedPath}.`,
+          error: 'trash-target-identity-changed',
+          output: {
+            path: evaluation.resolvedPath,
+            recycled: false,
+            verified: false,
+            authoritative: true,
+          },
+        };
+      }
+      await this.trashPath(evaluation.resolvedPath, before.isDirectory(), signal, expectedIdentity);
+    } catch (error) {
+      return filesystemMutationFailure('trash', evaluation.resolvedPath, error);
+    }
+    const existsAfter = Boolean(await lstat(evaluation.resolvedPath).catch(() => undefined));
+    if (existsAfter) {
+      return {
+        ok: false,
+        summary: `Recycle Bin move was not verified: ${evaluation.resolvedPath}`,
+        error: 'trash-readback-mismatch',
+        output: { path: evaluation.resolvedPath, exists: true, recycled: false, verified: false },
+      };
+    }
+    await context.emit('workspace.path.trashed', this.manifest.id, {
+      path: evaluation.resolvedPath,
+      entryType: before.isDirectory() ? 'directory' : 'file',
+    });
+    return {
+      ok: true,
+      summary: `Moved ${evaluation.resolvedPath} to the Windows Recycle Bin.`,
+      output: {
+        path: evaluation.resolvedPath,
+        entryType: before.isDirectory() ? 'directory' : 'file',
+        exists: false,
+        recycled: true,
+        recoverable: true,
+        verified: true,
+        cancellationObservedAfterDispatch: signal?.aborted === true,
+      },
     };
   }
 
@@ -936,6 +1391,7 @@ const WORKSPACE_CAPABILITY_INPUTS: Record<string, readonly string[]> = {
   'workspace.files.copy': ['path', 'targetPath'],
   'workspace.files.move': ['path', 'targetPath'],
   'workspace.files.replace': ['path', 'oldText', 'newText'],
+  'workspace.files.trash': ['path'],
   'workspace.files.delete': ['path'],
 };
 const WORKSPACE_CAPABILITY_IDS = new Set(Object.keys(WORKSPACE_CAPABILITY_INPUTS));
@@ -1147,12 +1603,17 @@ function matchesEntryFilters(
 async function copyWorkspaceTree(
   source: string,
   target: string,
-  options: { sourcePolicyGuard?: WorkspaceTraversalPolicyGuard } = {}
-): Promise<{ bytes: number; entries: number }> {
+  options: {
+    sourcePolicyGuard?: WorkspaceTraversalPolicyGuard;
+    signal?: AbortSignal;
+  } = {}
+): Promise<{ bytes: number; entries: number; readbackSha256: string }> {
   let bytes = 0;
   let entries = 0;
+  const readbackHash = createHash('sha256');
 
   const visit = async (currentSource: string, currentTarget: string): Promise<void> => {
+    options.signal?.throwIfAborted();
     entries += 1;
     if (entries > MAX_COPY_ENTRIES) throw new Error(`Copy exceeds ${MAX_COPY_ENTRIES} entries.`);
     const blocked = await options.sourcePolicyGuard?.(currentSource);
@@ -1163,6 +1624,7 @@ async function copyWorkspaceTree(
       await mkdir(currentTarget, { recursive: false });
       const children = await readdir(currentSource);
       for (const child of children) {
+        options.signal?.throwIfAborted();
         await visit(path.join(currentSource, child), path.join(currentTarget, child));
       }
       return;
@@ -1171,16 +1633,128 @@ async function copyWorkspaceTree(
     bytes += info.size;
     if (bytes > MAX_COPY_BYTES) throw new Error(`Copy exceeds ${MAX_COPY_BYTES} bytes.`);
     await mkdir(path.dirname(currentTarget), { recursive: true });
+    options.signal?.throwIfAborted();
     await copyFile(currentSource, currentTarget);
+    const [sourceReadback, targetReadback] = await Promise.all([
+      readFile(currentSource),
+      readFile(currentTarget),
+    ]);
+    if (!sourceReadback.equals(targetReadback)) {
+      throw new Error(`Copy byte-for-byte verification failed: ${currentSource}`);
+    }
+    readbackHash.update(path.relative(source, currentSource));
+    readbackHash.update('\0');
+    readbackHash.update(targetReadback);
   };
 
   try {
     await visit(source, target);
-    return { bytes, entries };
+    return { bytes, entries, readbackSha256: readbackHash.digest('hex') };
   } catch (error) {
     await rm(target, { recursive: true, force: true }).catch(() => undefined);
     throw error;
   }
+}
+
+const execFileAsync = promisify(execFile);
+
+async function trashWorkspacePath(
+  targetPath: string,
+  isDirectory: boolean,
+  signal?: AbortSignal,
+  expectedIdentity?: WorkspacePathIdentity,
+): Promise<void> {
+  if (process.platform !== 'win32') {
+    throw new Error('workspace.files.trash requires Windows Recycle Bin support.');
+  }
+  signal?.throwIfAborted();
+  const request = Buffer.from(JSON.stringify({
+    path: targetPath,
+    kind: isDirectory ? 'directory' : 'file',
+    expectedIdentity,
+  }), 'utf8').toString('base64');
+  const ancestorFenceSource = Buffer.from(
+    WINDOWS_RECYCLE_ANCESTOR_FENCE_CSHARP,
+    'utf8',
+  ).toString('base64');
+  await execFileAsync('powershell.exe', [
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    [
+      "$ErrorActionPreference = 'Stop'",
+      "Add-Type -AssemblyName Microsoft.VisualBasic",
+      "$fenceSource = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:MONARCH_TRASH_FENCE_SOURCE_B64))",
+      "Add-Type -TypeDefinition $fenceSource -Language CSharp",
+      "$request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:MONARCH_TRASH_REQUEST_B64)) | ConvertFrom-Json",
+      "$fence = [MonarchRecycleAncestorFence]::Acquire([string]$request.path)",
+      'try {',
+      "$item = Get-Item -LiteralPath ([string]$request.path) -Force -ErrorAction Stop",
+      "if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Trash target became a reparse point.' }",
+      "$actualKind = if ($item.PSIsContainer) { 'directory' } else { 'file' }",
+      "if ($actualKind -ne [string]$request.kind) { throw 'Trash target type changed before dispatch.' }",
+      "if ($null -ne $request.expectedIdentity) {",
+      "  $actualSize = if ($item.PSIsContainer) { 0 } else { [int64]$item.Length }",
+      "  $actualCreatedMs = [DateTimeOffset]::new($item.CreationTimeUtc).ToUnixTimeMilliseconds()",
+      "  $actualModifiedMs = [DateTimeOffset]::new($item.LastWriteTimeUtc).ToUnixTimeMilliseconds()",
+      "  if ($actualSize -ne [int64]$request.expectedIdentity.size -or $actualCreatedMs -ne [int64]$request.expectedIdentity.createdMs -or $actualModifiedMs -ne [int64]$request.expectedIdentity.modifiedMs) { throw 'Trash target identity changed before Windows dispatch.' }",
+      "}",
+      "if ([string]$request.kind -eq 'directory') {",
+      "  [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory([string]$request.path, [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin, [Microsoft.VisualBasic.FileIO.UICancelOption]::ThrowException)",
+      '} else {',
+      "  [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile([string]$request.path, [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin, [Microsoft.VisualBasic.FileIO.UICancelOption]::ThrowException)",
+      '}',
+      '} finally {',
+      '  if ($null -ne $fence) { $fence.Dispose() }',
+      '}',
+    ].join('; '),
+  ], {
+    env: {
+      ...process.env,
+      MONARCH_TRASH_REQUEST_B64: request,
+      MONARCH_TRASH_FENCE_SOURCE_B64: ancestorFenceSource,
+    },
+    windowsHide: true,
+    maxBuffer: 64 * 1024,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+async function captureWorkspacePathIdentity(
+  targetPath: string,
+  existing?: Stats,
+): Promise<WorkspacePathIdentity> {
+  const stats = existing || await lstat(targetPath);
+  if (stats.isSymbolicLink() || (!stats.isFile() && !stats.isDirectory())) {
+    throw new Error('Workspace trash target must be one regular file or directory, not a reparse point.');
+  }
+  return {
+    realPath: await realpath(targetPath),
+    kind: stats.isDirectory() ? 'directory' : 'file',
+    device: stats.dev,
+    inode: stats.ino,
+    size: stats.isDirectory() ? 0 : stats.size,
+    mode: stats.mode,
+    createdMs: Math.trunc(stats.birthtimeMs),
+    modifiedMs: Math.trunc(stats.mtimeMs),
+  };
+}
+
+function sameWorkspacePathIdentity(
+  expected: WorkspacePathIdentity,
+  actual: WorkspacePathIdentity,
+): boolean {
+  return expected.realPath === actual.realPath
+    && expected.kind === actual.kind
+    && expected.device === actual.device
+    && expected.inode === actual.inode
+    && expected.size === actual.size
+    && expected.mode === actual.mode
+    && expected.createdMs === actual.createdMs
+    && expected.modifiedMs === actual.modifiedMs;
 }
 
 function extractTransferInput(text: string): { path: string; targetPath: string } {
@@ -1253,6 +1827,35 @@ function readNumberInput(input: unknown, key: string, fallback: number): number 
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function filesystemMutationFailure(
+  operation: string,
+  targetPath: string,
+  error: unknown,
+  secondaryPath?: string,
+): MonarchExecutionResult {
+  const code = filesystemErrorCode(error, `${operation}-failed`);
+  return {
+    ok: false,
+    summary: `${operation} failed for ${targetPath}: ${errorMessage(error)}`,
+    error: code,
+    output: {
+      path: targetPath,
+      ...(secondaryPath ? { targetPath: secondaryPath } : {}),
+      verified: false,
+    },
+  };
+}
+
+function filesystemErrorCode(error: unknown, fallback: string): string {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code || '').toUpperCase()
+    : '';
+  if (code === 'ENOSPC' || code === 'EDQUOT') return 'disk-full';
+  if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return 'permission-denied';
+  if (code === 'ABORT_ERR' || (error instanceof Error && error.name === 'AbortError')) return 'cancelled-before-dispatch';
+  return fallback;
 }
 
 function readBooleanInput(input: unknown, key: string, fallback: boolean): boolean {

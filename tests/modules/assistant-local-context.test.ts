@@ -25,16 +25,28 @@ describe('assistant local profile context', () => {
 
     const messages = await buildAssistantModelMessages({ text: 'Привет', context });
     expect(messages[0]?.content).toContain('<monarch_direct_model_policy');
-    expect(messages[0]?.content).toContain('version="3.1"');
+    expect(messages[0]?.content).toContain('version="3.2"');
     expect(messages[0]?.content).toContain('Oscar и Monarch создал MrPastio');
     expect(messages[0]?.content).toContain('Codex создан OpenAI');
     expect(messages[0]?.content).not.toContain('MrPastio создал Monarch и Codex');
-    expect(messages[0]?.content).toContain('короткие follow-up');
+    expect(messages[0]?.content).toContain('спокойный, любопытный, живой, тёплый');
+    expect(messages[0]?.content).toContain('Не вставляй оговорки');
+    expect(messages[0]?.content).toContain('«Кратко» означает 1–3 коротких предложения');
+    expect(messages[0]?.content).not.toContain('не изображая человеческие чувства');
+    expect(messages[0]?.content).toContain('Сохраняй активную тему');
     expect(messages[0]?.content).toContain('execution result/receipt');
     const localContext = messages.find((message) => message.content.includes('<local_user_context>'))?.content || '';
     expect(localContext).toContain('Сначала результат');
     expect(localContext).toContain('Не удалять чужие изменения');
     expect(localContext).not.toContain('Временная заметка');
     expect(messages[0]?.content.length).toBeLessThan(3200);
+
+    const englishMessages = await buildAssistantModelMessages({ text: 'Are you excited?', context });
+    expect(englishMessages[0]?.content).toContain('language="en"');
+    expect(englishMessages[0]?.content).toContain('calm, curious, lively, warm');
+    expect(englishMessages[0]?.content).toContain('Do not add "I am an AI"');
+    expect(englishMessages[0]?.content).toContain('"Briefly" means 1-3 short sentences');
+    expect(englishMessages[0]?.content).not.toContain('language="ru"');
+    expect(englishMessages[0]?.content.length).toBeLessThan(2400);
   });
 });

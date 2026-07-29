@@ -21,6 +21,7 @@ import {
 import { MonarchActionLedger } from './action-ledger';
 import { verifyActionPredicates } from './action-verifier';
 import { MonarchMutationJournal } from './mutation-journal';
+import { resolveAgentCapabilityMetadata } from './capability-metadata';
 
 export class MonarchExecutionEngine {
   constructor(
@@ -127,6 +128,30 @@ export class MonarchExecutionEngine {
         summary: `Capability is not registered for module ${request.moduleId}: ${request.capabilityId}`,
         error: 'capability-not-found',
       };
+    }
+
+    if (request.source) {
+      const metadata = resolveAgentCapabilityMetadata(capability);
+      if (!metadata.supportedSources.includes(request.source)) {
+        await context.audit('permission', 'Capability source boundary denied execution.', {
+          requestId: request.id,
+          moduleId: request.moduleId,
+          capabilityId: request.capabilityId,
+          source: request.source,
+          supportedSources: metadata.supportedSources,
+        }, 'warn');
+        return {
+          ok: false,
+          summary: `Permission denied: ${request.source} cannot execute ${request.capabilityId}.`,
+          error: 'permission-denied',
+          metadata: {
+            sourceBoundary: {
+              source: request.source,
+              supportedSources: metadata.supportedSources,
+            },
+          },
+        };
+      }
     }
 
     const validation = validateAgainstSchema(request.input, capability.inputSchema);
@@ -301,7 +326,10 @@ export class MonarchExecutionEngine {
       };
     }
 
-    const journalCapture = await this.mutationJournal.capture(ledger.record.ledgerId, request);
+    const effectiveProfile = this.policy.getEffectivePermissionProfile(request);
+    const journalCapture = await this.mutationJournal.capture(ledger.record.ledgerId, request, {
+      allowOutsideWorkspace: effectiveProfile.sandboxMode === 'danger-full-access',
+    });
     if (journalCapture.supported && !journalCapture.ok) {
       const blocked: MonarchExecutionResult = {
         ok: false,
@@ -314,7 +342,7 @@ export class MonarchExecutionEngine {
     }
     if (control.signal?.aborted) {
       const cancelled = cancelledExecutionResult(control.signal, { permission, policy: policyDecision, ledger: ledger.record });
-      const rollback = await this.mutationJournal.finalize(ledger.record.ledgerId, request, cancelled);
+      const rollback = await this.mutationJournal.finalize(ledger.record.ledgerId, cancelled);
       if (rollback) this.actionLedger.setRollback(ledger.record.idempotencyKey, rollback);
       this.actionLedger.complete(ledger.record.idempotencyKey, cancelled);
       return cancelled;
@@ -335,6 +363,7 @@ export class MonarchExecutionEngine {
     });
 
     let result: MonarchExecutionResult;
+    const toolStartedAt = Date.now();
     try {
       result = await module.executeCapability(request, context, control);
     } catch (error) {
@@ -348,16 +377,19 @@ export class MonarchExecutionEngine {
             metadata: { thrownError: message },
           };
     }
+    const toolLatencyMs = Math.max(0, Date.now() - toolStartedAt);
 
-    const rollback = await this.mutationJournal.finalize(ledger.record.ledgerId, request, result);
+    const rollback = await this.mutationJournal.finalize(ledger.record.ledgerId, result);
     if (rollback) this.actionLedger.setRollback(ledger.record.idempotencyKey, rollback);
 
+    const verificationStartedAt = Date.now();
     const verificationObservations = await verifyActionPredicates(request.verification, {
       phase: 'verification',
       workspaceRoot: this.workspaceRoot,
       ...(request.actionScope?.roots ? { allowedRoots: request.actionScope.roots } : {}),
       result,
     });
+    const verificationLatencyMs = Math.max(0, Date.now() - verificationStartedAt);
     if (verificationObservations.length > 0) {
       await context.emit('action.verification.checked', 'execution-engine', {
         requestId: request.id,
@@ -386,6 +418,10 @@ export class MonarchExecutionEngine {
           ...(rollback ? { rollback } : {}),
         },
         ...(policyDecision.leaseId ? { leaseId: policyDecision.leaseId } : {}),
+        runtimeTelemetry: {
+          toolLatencyMs,
+          verificationLatencyMs,
+        },
         ...(preconditionObservations.length || verificationObservations.length
           ? { observations: [...preconditionObservations, ...verificationObservations] }
           : {}),
@@ -403,6 +439,8 @@ export class MonarchExecutionEngine {
       ok: resultWithPolicy.ok,
       summary: resultWithPolicy.summary,
       error: resultWithPolicy.error,
+      toolLatencyMs,
+      verificationLatencyMs,
     });
 
     await context.audit('execution', 'Capability execution finished.', {
@@ -841,7 +879,12 @@ function createRequestFromStep(
     input: step.input,
     createdAt: nowIso(),
     requestedBy,
+    ...(isAgentCapabilitySource(requestedBy) ? { source: requestedBy } : {}),
     confirmed,
     securityOverrideConfirmed,
   };
+}
+
+function isAgentCapabilitySource(value: string): value is import('./contracts').MonarchAgentCapabilitySource {
+  return ['desktop', 'voice', 'telegram', 'api', 'system', 'smoke', 'coder'].includes(value);
 }

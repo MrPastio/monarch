@@ -24,6 +24,12 @@ export interface MonarchModelMessage {
 export interface MonarchModelCompletionRequest {
   role: MonarchModelRole;
   messages: MonarchModelMessage[];
+  purpose?: 'conversation' | 'agent-decision';
+  /**
+   * Internal, local-only model preference for the Agent Runtime Fast tier.
+   * The backend still validates this against its explicit local model catalog.
+   */
+  agentDecisionModel?: string;
   imageAttachments?: unknown[];
   requestedModel?: string;
   selectionSource?: 'auto' | 'user-explicit' | 'fallback' | 'recovery';
@@ -32,6 +38,11 @@ export interface MonarchModelCompletionRequest {
   temperature?: number;
   maxTokens?: number;
   responseFormat?: 'text' | 'json';
+  /**
+   * The Windows llama.cpp backend is process-recycled between incompatible
+   * model tiers because destroying a loaded CUDA model in-process is unsafe.
+   */
+  forceManagedRuntimeRestart?: boolean;
   timeoutMs?: number;
   fallbackRoles?: MonarchModelRole[];
   onToken?: (token: string) => void;
@@ -51,6 +62,9 @@ export interface MonarchModelCompletionResult {
   degraded?: boolean;
   firstTokenLatencyMs?: number;
   totalLatencyMs?: number;
+  queueLatencyMs?: number;
+  loadLatencyMs?: number;
+  generationLatencyMs?: number;
   trace?: MonarchModelRouteTrace;
 }
 
@@ -69,6 +83,11 @@ export interface MonarchModelRouteTrace {
 
 interface OpenAiChatResponse {
   model?: unknown;
+  monarch_runtime?: {
+    queue_latency_ms?: unknown;
+    load_latency_ms?: unknown;
+    generation_latency_ms?: unknown;
+  };
   choices?: Array<{
     message?: { content?: unknown };
     text?: unknown;
@@ -96,6 +115,12 @@ export async function completeWithModelRole(
   env: NodeJS.ProcessEnv = process.env
 ): Promise<MonarchModelCompletionResult> {
   const startedAt = Date.now();
+  if (request.forceManagedRuntimeRestart) {
+    await new OscarClient({
+      chatTimeoutMs: request.timeoutMs || 300000,
+      timeoutMs: Math.min(request.timeoutMs || 30000, 30000),
+    }).shutdownManagedBackend();
+  }
   const runtimeReport = createModelRuntimeReport(catalog, env);
   const requestedModel = normalizeRequestedModel(request.requestedModel);
   const selectionSource = request.selectionSource || (requestedModel ? 'user-explicit' : 'auto');
@@ -275,6 +300,15 @@ export async function completeWithModelRole(
       chatTimeoutMs: request.timeoutMs || 300000,
       timeoutMs: Math.min(request.timeoutMs || 30000, 30000),
     });
+    if (request.purpose === 'agent-decision') {
+      return await completeAgentDecisionThroughOscar(
+        oscar,
+        request,
+        primaryRole,
+        attemptedRoles,
+        startedAt,
+      );
+    }
     const imageAttachments = normalizeOscarImageAttachments(request.imageAttachments || []);
 
     const explicitRequestedModel = selectionSource === 'user-explicit'
@@ -304,7 +338,7 @@ export async function completeWithModelRole(
     let firstTokenAt = 0;
     const oscarStartedAt = Date.now();
     if (request.onToken) {
-      for await (const event of oscar.streamChat(oscarRequest)) {
+      for await (const event of oscar.streamChat(oscarRequest, request.signal)) {
         const token = readOscarStreamToken(event);
         if (token) {
           if (!firstTokenAt) {
@@ -325,7 +359,7 @@ export async function completeWithModelRole(
         }
       }
     } else {
-      const payload = await oscar.chat(oscarRequest);
+      const payload = await oscar.chat(oscarRequest, request.signal);
       rawText = readOscarAnswer(payload) || '';
       streamOk = !isOscarRecoveryText(rawText);
     }
@@ -398,6 +432,104 @@ export async function completeWithModelRole(
       totalLatencyMs: Date.now() - startedAt,
     }),
   };
+}
+
+async function completeAgentDecisionThroughOscar(
+  oscar: OscarClient,
+  request: MonarchModelCompletionRequest,
+  primaryRole: MonarchModelRole,
+  attemptedRoles: MonarchModelRole[],
+  startedAt: number,
+): Promise<MonarchModelCompletionResult> {
+  let lastError = 'no-local-agent-model-answered';
+  for (const role of attemptedRoles) {
+    if (request.signal?.aborted) {
+      return createAbortedCompletion(primaryRole, attemptedRoles, startedAt);
+    }
+    const preferredModel = role === primaryRole
+      ? normalizeAgentDecisionModel(request.agentDecisionModel)
+      : '';
+    const models = Array.from(new Set([
+      ...(preferredModel ? [preferredModel] : []),
+      oscarPublicModelForRole(role),
+    ]));
+    for (const model of models) {
+      try {
+        const payload = await oscar.completeRaw({
+          model,
+          messages: request.messages,
+          temperature: request.temperature ?? 0.1,
+          top_p: 0.9,
+          max_tokens: Math.min(request.maxTokens ?? 512, 8_192),
+          reasoning_effort: oscarReasoningEffortFor(role),
+          ...(request.responseFormat === 'json' ? { response_format: { type: 'json_object' as const } } : {}),
+          inference_lane: 'agent',
+        }, request.signal);
+        const rawText = readOpenAiAnswer(payload);
+        if (!rawText) {
+          lastError = `${model}:empty-model-response`;
+          continue;
+        }
+        const totalLatencyMs = Date.now() - startedAt;
+        const responseModel = readOpenAiModel(payload) || model;
+        const queueLatencyMs = readOpenAiQueueLatency(payload);
+        const loadLatencyMs = readOpenAiRuntimeLatency(payload, 'load_latency_ms');
+        const generationLatencyMs = readOpenAiRuntimeLatency(payload, 'generation_latency_ms');
+        return {
+          ok: true,
+          role,
+          attemptedRoles,
+          adapter: 'oscar-agent-raw',
+          endpoint: `${oscar.config.apiBase}/v1`,
+          model: responseModel,
+          rawText,
+          output: normalizeModelOutput(rawText),
+          degraded: role !== primaryRole || model !== models[0],
+          totalLatencyMs,
+          ...(queueLatencyMs !== undefined ? { queueLatencyMs } : {}),
+          ...(loadLatencyMs !== undefined ? { loadLatencyMs } : {}),
+          ...(generationLatencyMs !== undefined ? { generationLatencyMs } : {}),
+          trace: createRouteTrace('oscar-managed-backend', role, attemptedRoles, 'oscar-agent-raw', role === primaryRole ? 'success' : 'degraded', {
+            endpoint: `${oscar.config.apiBase}/v1`,
+            model: responseModel,
+            reason: role === primaryRole ? undefined : `fallback-from-${primaryRole}`,
+            totalLatencyMs,
+          }),
+        };
+      } catch (error) {
+        if (request.signal?.aborted) {
+          return createAbortedCompletion(primaryRole, attemptedRoles, startedAt);
+        }
+        lastError = `${model}:${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+  }
+  const totalLatencyMs = Date.now() - startedAt;
+  return {
+    ok: false,
+    role: primaryRole,
+    attemptedRoles,
+    adapter: 'oscar-agent-raw',
+    endpoint: `${oscar.config.apiBase}/v1`,
+    error: 'agent-decision-model-unavailable',
+    degraded: true,
+    totalLatencyMs,
+    trace: createRouteTrace('oscar-managed-backend', primaryRole, attemptedRoles, 'oscar-agent-raw', 'failed', {
+      endpoint: `${oscar.config.apiBase}/v1`,
+      reason: lastError.slice(0, 500),
+      totalLatencyMs,
+    }),
+  };
+}
+
+function normalizeAgentDecisionModel(value: string | undefined): string {
+  const model = String(value || '').trim().toLowerCase();
+  return new Set([
+    'qwen3-1.7b-instruct',
+    'qwen2.5-0.5b-instruct',
+    'monarch-fast',
+    'monarch-balanced',
+  ]).has(model) ? model : '';
 }
 
 function readOscarStreamToken(event: unknown): string {
@@ -916,6 +1048,53 @@ function readOscarAnswer(payload: unknown): string {
   }
   const value = (payload as { answer?: unknown }).answer;
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function readOpenAiAnswer(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const choices = (payload as OpenAiChatResponse).choices;
+  const value = choices?.[0]?.message?.content ?? choices?.[0]?.text;
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function readOpenAiModel(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const value = (payload as OpenAiChatResponse).model;
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function readOpenAiQueueLatency(payload: unknown): number | undefined {
+  return readOpenAiRuntimeLatency(payload, 'queue_latency_ms');
+}
+
+function readOpenAiRuntimeLatency(
+  payload: unknown,
+  key: 'queue_latency_ms' | 'load_latency_ms' | 'generation_latency_ms',
+): number | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const value = (payload as OpenAiChatResponse).monarch_runtime?.[key];
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function oscarPublicModelForRole(role: MonarchModelRole): string {
+  switch (role) {
+  case 'gemma4-fast':
+  case 'weak':
+  case 'router':
+    return 'monarch-fast';
+  case 'gemma4-deepthinking':
+  case 'powerful':
+    return 'monarch-deep';
+  case 'gemma4-31b':
+    return 'monarch-extra';
+  case 'qwen3-coder-30b-a3b-instruct':
+  case 'deepseek-coder-v2-lite-instruct':
+    return role;
+  default:
+    return 'monarch-balanced';
+  }
 }
 
 function createAbortedCompletion(

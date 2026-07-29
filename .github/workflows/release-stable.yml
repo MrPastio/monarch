@@ -16,7 +16,56 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  security-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11.9"
+      - name: Install deterministic Security test runner
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          python -m pip install --disable-pip-version-check --no-deps `
+            pytest==9.1.1 psutil==7.2.2 colorama==0.4.6 `
+            iniconfig==2.3.0 packaging==26.2 pluggy==1.6.0 Pygments==2.20.0
+      - name: Run Security tests
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $env:MONARCH_SECURITY_PYTHON = (Get-Command python).Source
+          .\security\scripts\test.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  oscar-provenance-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11.9"
+      - name: Install deterministic Oscar provenance test runner
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          python -m pip install --disable-pip-version-check --no-deps `
+            pytest==9.1.1 iniconfig==2.3.0 packaging==26.2 `
+            pluggy==1.6.0 Pygments==2.20.0
+      - name: Run Sharing TTS provenance tests
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $env:PYTHONPATH = Join-Path $PWD 'oscar\backend'
+          python -m pytest oscar\backend\tests\test_sharing_tts_runtime.py -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   gates-and-installer:
+    needs: [security-tests, oscar-provenance-tests]
     runs-on: windows-latest
     env:
       RELEASE_VERSION: ${{ inputs.version }}
@@ -28,9 +77,6 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
       - name: Validate release input and installer version
         shell: pwsh
         run: |
@@ -63,6 +109,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run test:raw -- --exclude tests/modules/coder.test.ts --exclude tests/app/coder-agent-controller.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run model-free runtime smokes
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $qa = Join-Path $env:RUNNER_TEMP 'monarch-release-smoke'
+          $env:MONARCH_DATA_ROOT = Join-Path $qa 'data'
+          $env:MONARCH_LOGS_ROOT = Join-Path $qa 'logs'
+          $env:MONARCH_CONFIG_ROOT = Join-Path $qa 'config'
+          $env:MONARCH_SECRETS_ROOT = Join-Path $qa 'secrets'
+          $env:MONARCH_MODELS_ROOT = Join-Path $qa 'models'
+          npm run smoke:raw
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run desktop:smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build Oscar frontend
+        timeout-minutes: 5
+        run: npm run oscar:frontend:build
       - name: Verify public snapshot boundary
         run: npm run upload:dry-run
       - name: Install Inno Setup

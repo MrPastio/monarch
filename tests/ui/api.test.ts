@@ -5,6 +5,8 @@ import {
   executeVoiceModeAction,
   executeVoiceModeDeviceAction,
   executeVoiceModeScripted,
+  createAgentTask,
+  fetchOscarRequestDisposition,
   fetchCoderRuns,
   formatMonarchHttpError,
   prepareVoiceModeModels,
@@ -13,8 +15,37 @@ import {
   respondVoiceModeFast,
   respondVoiceModeRealtime,
   submitAgentActionJob,
+  streamAgentTask,
   transcribeVoiceAudio,
 } from '../../src/ui/public/modules/api.js';
+
+function stubVoiceAgentCompletion(summary: string) {
+  return stubVoiceAgentTerminal('task.completed', { summary });
+}
+
+function stubVoiceAgentTerminal(type: string, payload: Record<string, unknown>) {
+  vi.stubGlobal('window', {
+    monarchDesktop: { getMutationAttestation: vi.fn(async () => 'desktop-attestation-fixture') },
+  });
+  const fetchMock = vi.fn(async (url: string) => {
+    if (url === '/api/agent/tasks') {
+      return {
+        ok: true,
+        status: 202,
+        json: async () => ({ version: 1, ok: true, task: { id: 'voice-task-1' } }),
+      };
+    }
+    if (url.includes('/api/agent/tasks/voice-task-1/events')) {
+      return new Response(`event: ${type}\ndata: ${JSON.stringify({ payload })}\n\n`, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }
+    throw new Error(`Unexpected voice Agent request: ${url}`);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
 
 describe('static UI API errors', () => {
   afterEach(() => {
@@ -274,98 +305,36 @@ describe('static UI API errors', () => {
   });
 
   it('confirms only the exact scripted volume command and keeps state payloads disabled', async () => {
-    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
-      const body = JSON.parse(String(init.body));
-      return {
-        ok: true,
-        json: async () => body.confirmed
-          ? {
-              ok: true,
-              result: {
-                ok: true,
-                summary: 'verified',
-                output: { text: 'Громкость установлена на 100%.', verified: true, level: 100 },
-              },
-            }
-          : {
-              ok: false,
-              result: {
-                ok: false,
-                error: 'confirmation-required',
-                metadata: { confirmation: { token: 'voice-volume-token' } },
-              },
-            },
-      };
-    });
-    vi.stubGlobal('fetch', fetchMock);
+    const fetchMock = stubVoiceAgentCompletion('Громкость установлена на 100%.');
 
     await expect(executeVoiceModeDeviceAction('поставь громкость на максимум'))
       .resolves.toMatchObject({ ok: true, text: 'Громкость установлена на 100%.' });
 
-    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)));
-    expect(bodies).toHaveLength(2);
-    expect(bodies[0]).toMatchObject({
-      moduleId: 'voice',
-      capabilityId: 'voice.mode.execute-scripted',
-      input: { text: 'поставь громкость на максимум' },
-      confirmed: false,
-      includeState: false,
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body).toMatchObject({
+      request: 'поставь громкость на максимум',
+      source: 'voice',
+      autoStart: true,
     });
-    expect(bodies[1]).toEqual({
-      ...bodies[0],
-      confirmed: true,
-      confirmationToken: 'voice-volume-token',
-    });
+    expect(body).not.toHaveProperty('capabilityId');
   });
 
   it('rejects a volume success payload unless Windows verification is explicit', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({
-      ok: true,
-      json: async () => ({
-        ok: true,
-        result: {
-          ok: true,
-          summary: 'claimed success',
-          output: {
-            text: 'Громкость установлена на 100%.',
-            actionId: 'device.volume',
-            verified: false,
-          },
-        },
-      }),
-    })));
+    stubVoiceAgentTerminal('task.failed', {
+      summary: 'Windows не подтвердил новый уровень громкости.',
+      code: 'verification-failed',
+    });
 
     await expect(executeVoiceModeDeviceAction('поставь громкость на максимум'))
       .resolves.toMatchObject({
         ok: false,
         text: '',
-        error: 'voice-volume-unverified',
+        error: 'verification-failed',
       });
   });
 
   it('delegates a spoken app launch to the Device module with an exact one-time confirmation', async () => {
-    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
-      const body = JSON.parse(String(init.body));
-      return {
-        ok: true,
-        json: async () => body.confirmed
-          ? {
-              result: {
-                ok: true,
-                summary: 'Открыл Калькулятор.',
-                output: { opened: true, text: 'Открыл Калькулятор.' },
-              },
-            }
-          : {
-              result: {
-                ok: false,
-                error: 'confirmation-required',
-                metadata: { confirmation: { token: 'voice-app-token' } },
-              },
-            },
-      };
-    });
-    vi.stubGlobal('fetch', fetchMock);
+    const fetchMock = stubVoiceAgentCompletion('Открыл Калькулятор.');
 
     await expect(executeVoiceModeAction({
       actionId: 'device.app.open',
@@ -375,41 +344,75 @@ describe('static UI API errors', () => {
       text: 'Открыл Калькулятор.',
     });
 
-    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)));
-    expect(bodies).toHaveLength(2);
-    expect(bodies[0]).toMatchObject({
-      moduleId: 'device',
-      capabilityId: 'device.app.open',
-      input: { app: 'calculator' },
-      requestedBy: 'ui:voice-mode',
-      confirmed: false,
-      includeState: false,
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body).toMatchObject({ request: 'открой калькулятор', source: 'voice' });
+    expect(body).not.toHaveProperty('capabilityId');
+  });
+
+  it('keeps Oscar disposition text out of the request URL', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: true, disposition: { mode: 'chat' } }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(fetchOscarRequestDisposition('секретный текст')).resolves.toMatchObject({ mode: 'chat' });
+    expect(fetchMock).toHaveBeenCalledWith('/api/oscar/request-disposition', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ text: 'секретный текст' }),
+    }));
+  });
+
+  it('passes cancellation to the Agent Task event stream request', async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn((_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const opening = streamAgentTask('task-1', 4, { signal: controller.signal });
+    controller.abort();
+
+    await expect(opening).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/agent/tasks/task-1/events?after=4',
+      expect.objectContaining({ signal: controller.signal }),
+    );
+  });
+
+  it('attests Electron desktop mutations without putting the secret in request bodies', async () => {
+    vi.stubGlobal('window', {
+      monarchDesktop: {
+        getMutationAttestation: vi.fn(async () => 'desktop-attestation-fixture'),
+      },
     });
-    expect(bodies[1]).toMatchObject({ confirmed: true, confirmationToken: 'voice-app-token' });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ version: 1, ok: true, task: { id: 'task-attested' } }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createAgentTask('Открой калькулятор', {
+      source: 'desktop',
+      autoStart: false,
+    })).resolves.toMatchObject({ task: { id: 'task-attested' } });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.headers).toMatchObject({
+      'Content-Type': 'application/json',
+      'X-Monarch-Desktop-Attestation': 'desktop-attestation-fixture',
+    });
+    expect(String(init.body)).not.toContain('desktop-attestation-fixture');
   });
 
   it('uses the same Device clock and verified volume capabilities as ordinary chat', async () => {
-    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
-      const body = JSON.parse(String(init.body));
-      if (body.capabilityId === 'device.system.time.get') {
-        return {
-          ok: true,
-          json: async () => ({ result: { ok: true, output: { text: 'Сейчас 23:34.', verified: true, authoritative: true } } }),
-        };
-      }
-      return {
-        ok: true,
-        json: async () => body.confirmed
-          ? { result: { ok: true, output: { text: 'Громкость установлена на 45%.', verified: true, authoritative: true } } }
-          : { result: { ok: false, error: 'confirmation-required', metadata: { confirmation: { token: 'volume-token' } } } },
-      };
-    });
-    vi.stubGlobal('fetch', fetchMock);
+    stubVoiceAgentCompletion('Сейчас 23:34.');
 
     await expect(executeVoiceModeAction({
       actionId: 'time.query',
       slots: { query: 'local-clock' },
     }, 'сколько времени')).resolves.toMatchObject({ ok: true, text: 'Сейчас 23:34.' });
+    stubVoiceAgentCompletion('Громкость установлена на 45%.');
     await expect(executeVoiceModeAction({
       actionId: 'device.volume',
       slots: { operation: 'set', value: '45' },
@@ -418,40 +421,10 @@ describe('static UI API errors', () => {
       text: 'Громкость установлена на 45%.',
     });
 
-    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)));
-    expect(bodies).toHaveLength(3);
-    expect(bodies[0]).toMatchObject({
-      moduleId: 'device',
-      capabilityId: 'device.system.time.get',
-      input: { kind: 'time' },
-      confirmed: false,
-    });
-    expect(bodies[1]).toMatchObject({
-      moduleId: 'device',
-      capabilityId: 'device.volume.set',
-      input: { action: 'set', value: 45 },
-      confirmed: false,
-    });
-    expect(bodies[2]).toMatchObject({ confirmed: true, confirmationToken: 'volume-token' });
   });
 
   it('reads brightness directly and confirms only the exact mutating brightness request', async () => {
-    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
-      const body = JSON.parse(String(init.body));
-      if (body.capabilityId === 'device.brightness.get') {
-        return {
-          ok: true,
-          json: async () => ({ result: { ok: true, output: { level: 72, verified: true, text: 'Сейчас яркость экрана 72%.' } } }),
-        };
-      }
-      return {
-        ok: true,
-        json: async () => body.confirmed
-          ? { result: { ok: true, output: { level: 55, verified: true, text: 'Яркость установлена на 55%.' } } }
-          : { result: { ok: false, error: 'confirmation-required', metadata: { confirmation: { token: 'brightness-token' } } } },
-      };
-    });
-    vi.stubGlobal('fetch', fetchMock);
+    stubVoiceAgentCompletion('Сейчас яркость экрана 72%.');
 
     await expect(executeVoiceModeAction({
       actionId: 'device.brightness.status',
@@ -460,6 +433,7 @@ describe('static UI API errors', () => {
       ok: true,
       text: 'Сейчас яркость экрана 72%.',
     });
+    stubVoiceAgentCompletion('Яркость установлена на 55%.');
     await expect(executeVoiceModeAction({
       actionId: 'device.brightness',
       slots: { operation: 'set', value: '55' },
@@ -468,35 +442,10 @@ describe('static UI API errors', () => {
       text: 'Яркость установлена на 55%.',
     });
 
-    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)));
-    expect(bodies).toHaveLength(3);
-    expect(bodies[0]).toMatchObject({
-      moduleId: 'device',
-      capabilityId: 'device.brightness.get',
-      input: {},
-      confirmed: false,
-    });
-    expect(bodies[1]).toMatchObject({
-      moduleId: 'device',
-      capabilityId: 'device.brightness.set',
-      input: { operation: 'set', value: 55 },
-      confirmed: false,
-    });
-    expect(bodies[2]).toMatchObject({
-      capabilityId: 'device.brightness.set',
-      input: { operation: 'set', value: 55 },
-      confirmed: true,
-      confirmationToken: 'brightness-token',
-    });
   });
 
   it('delegates voice workspace creation to the existing Workspace capability', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({
-      ok: true,
-      json: async () => ({
-        result: { ok: true, summary: 'File written.', output: { path: 'note.txt' } },
-      }),
-    })));
+    const fetchMock = stubVoiceAgentCompletion('Создал файл note.txt.');
 
     await expect(executeVoiceModeAction({
       actionId: 'workspace.create',
@@ -506,12 +455,9 @@ describe('static UI API errors', () => {
       text: 'Создал файл note.txt.',
     });
 
-    const body = JSON.parse(String(((fetch as any).mock.calls[0][1] as RequestInit).body));
-    expect(body).toMatchObject({
-      moduleId: 'workspace',
-      capabilityId: 'workspace.files.write',
-      input: { path: 'note.txt', content: 'готово', overwrite: false },
-    });
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body).toMatchObject({ request: 'создай файл note.txt', source: 'voice' });
+    expect(body).not.toHaveProperty('capabilityId');
   });
 
   it('queues an Oscar agent action through the streamed job endpoint', async () => {

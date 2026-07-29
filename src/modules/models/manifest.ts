@@ -1,5 +1,7 @@
 import type { MonarchModuleManifest } from '../../core';
 
+export const MAX_AGENT_RESPONSE_TOKENS = 8_192;
+
 export const modelsManifest: MonarchModuleManifest = {
   id: 'models',
   name: 'Monarch Models',
@@ -7,7 +9,7 @@ export const modelsManifest: MonarchModuleManifest = {
   kind: 'runtime',
   description: 'Local model catalog and routing policy surface for Monarch LLM runtimes.',
   owns: ['models', 'llm', 'router model', 'gemma', 'модели', 'роутер', 'изображения'],
-  permissions: ['read', 'network', 'execute'],
+  permissions: ['none', 'read', 'network', 'execute'],
   events: [
     'models.activated',
   ],
@@ -87,6 +89,79 @@ export const modelsManifest: MonarchModuleManifest = {
           text: { type: 'string' },
         },
         additionalProperties: false,
+      },
+    },
+    {
+      id: 'models.agent.respond',
+      moduleId: 'models',
+      title: 'Compose a local conversational answer',
+      description: 'Generate a local answer only when the user request needs no file, application, device, browser, network, or other real-world action.',
+      risk: 'none',
+      agent: {
+        tags: ['answer', 'conversation', 'local-model', 'no-side-effect'],
+        preconditions: [{
+          kind: 'no-real-world-effect-required',
+          description: 'Use only when the requested outcome is an answer rather than an action.',
+        }],
+        effects: [{
+          kind: 'answer-observation',
+          description: 'Returns locally generated answer text as a factual task observation.',
+          targetScope: 'agent-state',
+        }],
+        idempotency: 'idempotent',
+        reversibility: 'automatic',
+        effectProfile: {
+          mutation: 'none',
+          targetScope: 'agent-state',
+          reversibility: 'automatic',
+          privilege: 'normal',
+          dataSensitivity: 'private',
+          communication: 'loopback',
+          financialImpact: false,
+          identityImpact: false,
+          securityImpact: false,
+        },
+        supportedSources: ['desktop', 'api', 'system'],
+        estimatedLatency: 'long',
+        computeClass: 'medium',
+        cancellation: 'supported',
+        verification: [{
+          kind: 'schema',
+          description: 'The result must contain non-empty local model output.',
+          required: true,
+        }],
+        examples: [{ goal: 'Explain a concept without changing the computer.' }],
+      },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', minLength: 1, maxLength: 16000 },
+          role: { type: 'string' },
+          system: { type: 'string', maxLength: 4000 },
+          maxTokens: {
+            type: 'integer',
+            minimum: 1,
+            maximum: MAX_AGENT_RESPONSE_TOKENS,
+          },
+        },
+        required: ['text'],
+        additionalProperties: false,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          rawText: { type: 'string' },
+          role: { type: 'string' },
+          adapter: { type: 'string' },
+        },
+        required: ['rawText'],
+        additionalProperties: true,
+      },
+      routing: {
+        aliases: ['answer locally', 'conversational answer', 'ответить локально'],
+        keywords: ['answer', 'explain', 'conversation', 'ответ', 'объясни', 'расскажи'],
+        examples: ['объясни простыми словами'],
+        intentKinds: ['chat'],
       },
     },
     {

@@ -1,4 +1,5 @@
 import type {
+  MonarchAgentCapabilitySource,
   MonarchActionProposalInput,
   MonarchActionProposalV1,
   MonarchCapabilityLeaseV1,
@@ -10,12 +11,14 @@ export interface AgentActionGatewaySubmission {
   proposal: MonarchActionProposalInput | MonarchActionProposalV1;
   originatingUserText?: string;
   requestedBy?: string;
+  source?: MonarchAgentCapabilitySource;
   model?: string;
   skillIds?: string[];
   confirmed?: boolean;
   confirmationToken?: string;
   grantScope?: 'once' | 'task';
   leaseId?: string;
+  executionMode?: 'agent-runtime';
   signal?: AbortSignal;
 }
 
@@ -38,6 +41,7 @@ export interface ExecuteAgentActionInput {
   proposal: MonarchActionProposalInput | MonarchActionProposalV1;
   originatingUserText: string;
   requestedBy: string;
+  source: MonarchAgentCapabilitySource;
   model?: string;
   skillIds?: string[];
   leaseId?: string;
@@ -71,9 +75,11 @@ export class AgentKernelExecutionAdapter {
       proposal: input.proposal,
       originatingUserText: input.originatingUserText,
       requestedBy: input.requestedBy,
+      source: input.source,
       ...(input.model ? { model: input.model } : {}),
       ...(input.skillIds ? { skillIds: input.skillIds } : {}),
       ...(input.leaseId ? { leaseId: input.leaseId } : {}),
+      executionMode: 'agent-runtime',
       ...(input.signal ? { signal: input.signal } : {}),
     });
   }
@@ -83,9 +89,11 @@ export class AgentKernelExecutionAdapter {
       proposal: input.proposal,
       originatingUserText: input.originatingUserText,
       requestedBy: input.requestedBy,
+      source: input.source,
       ...(input.model ? { model: input.model } : {}),
       ...(input.skillIds ? { skillIds: input.skillIds } : {}),
       ...(input.leaseId ? { leaseId: input.leaseId } : {}),
+      executionMode: 'agent-runtime',
       ...(input.signal ? { signal: input.signal } : {}),
     });
   }
@@ -120,11 +128,13 @@ export class AgentKernelExecutionAdapter {
       proposal: prepared.proposal,
       originatingUserText: input.originatingUserText,
       requestedBy: input.requestedBy,
+      source: input.source,
       ...(input.model ? { model: input.model } : {}),
       ...(input.skillIds ? { skillIds: input.skillIds } : {}),
       confirmed: true,
       confirmationToken: prepared.confirmation.token,
       grantScope: input.grantScope || 'once',
+      executionMode: 'agent-runtime',
       ...(input.signal ? { signal: input.signal } : {}),
     });
     if (executed.proposal.canonicalHash !== input.expectedCanonicalHash) {

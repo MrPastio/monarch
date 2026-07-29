@@ -1,7 +1,7 @@
 param(
   [string]$SourceRoot = "",
   [string]$OutputDirectory = "",
-  [string]$AppVersion = "0.2.3.8",
+  [string]$AppVersion = "0.2.4.0",
   [string]$RuntimeVersion = "2026.07.7",
   [string]$BackendEnvironment = "backend-0.1.5-offline5",
   [int]$DataSchemaVersion = 1,
@@ -55,8 +55,8 @@ if (-not $SourceRoot -and (Test-PrivateSource $root)) {
   $driveRoot = [System.IO.Path]::GetPathRoot($projectRoot)
   $temporarySource = Join-Path $driveRoot ("Monarch-installer-source-" + [guid]::NewGuid().ToString("N"))
   & (Join-Path $projectRoot "scripts\export-public.ps1") -Destination $temporarySource
-  if ($LASTEXITCODE -ne 0) {
-    throw "Could not create a clean installer source snapshot."
+  if (-not (Test-Path -LiteralPath (Join-Path $temporarySource ".monarch-public-snapshot") -PathType Leaf)) {
+    throw "Clean installer source snapshot is missing its verified marker."
   }
   $root = $temporarySource
 }
@@ -195,13 +195,12 @@ try {
     [StringComparison]::OrdinalIgnoreCase
   )) {
     if (Test-Path -LiteralPath $frontendDist) {
-      Remove-Item -LiteralPath $frontendDist -Recurse -Force
+      throw "Fresh installer source unexpectedly contains frontend build output: $frontendDist"
     }
     Copy-Item `
       -LiteralPath $builtFrontendDist `
       -Destination $frontendDist `
-      -Recurse `
-      -Force
+      -Recurse
   }
 
   & (Join-Path $root "scripts\build-launcher.ps1")
@@ -226,14 +225,17 @@ try {
     throw "Inno Setup 6 is required. Rerun with -InstallCompiler."
   }
 
+  $offlinePayloadOutput = Join-Path $root "installer\offline-payload"
+  if (Test-Path -LiteralPath $offlinePayloadOutput) {
+    throw "Fresh installer source unexpectedly contains offline payload output: $offlinePayloadOutput"
+  }
   & (Join-Path $root "installer\build-offline-payload.ps1") `
     -SourceRoot $root `
     -BuildRuntimeRoot $runtimeBuildRoot `
-    -OutputDirectory (Join-Path $root "installer\offline-payload") `
+    -OutputDirectory $offlinePayloadOutput `
     -AppVersion $AppVersion `
     -RuntimeVersion $RuntimeVersion `
-    -BackendEnvironment $BackendEnvironment `
-    -Force
+    -BackendEnvironment $BackendEnvironment
   if ($LASTEXITCODE -ne 0) {
     throw "Monarch offline payload build failed."
   }
@@ -265,15 +267,9 @@ try {
   Write-Host "SHA256: $hash"
 } finally {
   if ($temporarySource -and (Test-Path -LiteralPath $temporarySource)) {
-    $marker = Join-Path $temporarySource ".monarch-public-snapshot"
-    $resolved = (Resolve-Path -LiteralPath $temporarySource).Path
-    if (-not (Test-Path -LiteralPath $marker -PathType Leaf) -or
-        -not $resolved.StartsWith(
-          [System.IO.Path]::GetPathRoot($projectRoot),
-          [StringComparison]::OrdinalIgnoreCase
-        )) {
-      throw "Refusing to clean an unverified temporary installer source: $resolved"
-    }
-    Remove-Item -LiteralPath $resolved -Recurse -Force
+    # The build adds generated files to the exported tree, so it no longer
+    # matches the immutable snapshot plan. Preserve it instead of recursively
+    # deleting a path that another local process could have replaced.
+    Write-Warning "Temporary installer source was preserved for explicit inspection and cleanup: $temporarySource"
   }
 }

@@ -49,7 +49,7 @@ async function main(): Promise<void> {
 }
 
 async function runServe(): Promise<void> {
-  const app = new MonarchApplication({ workspaceRoot });
+  const app = new MonarchApplication({ workspaceRoot, enableAgentRuntimeV2: true });
   const requestedPort = readNumberFlag('--port') || Number(process.env.MONARCH_UI_PORT || process.env.PORT || 4317);
   const host = readStringFlag('--host') || process.env.MONARCH_HOST || '127.0.0.1';
   const publicDirectory = path.join(workspaceRoot, 'src', 'ui', 'public');

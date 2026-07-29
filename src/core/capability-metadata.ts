@@ -2,12 +2,14 @@ import type {
   MonarchAgentCapabilityIdempotency,
   MonarchAgentCapabilityMetadataInput,
   MonarchAgentCapabilityVerificationDescriptor,
+  MonarchActionPredicate,
   MonarchCapability,
   MonarchCapabilityEffectProfile,
   MonarchAgentCapabilitySource,
   MonarchResolvedAgentCapabilityMetadata,
   MonarchRisk,
 } from './contracts';
+import { actionPredicateValueError } from './action-predicate';
 
 const IDEMPOTENCY_VALUES = ['idempotent', 'conditional', 'non-idempotent'] as const;
 const REVERSIBILITY_VALUES = ['automatic', 'manual', 'irreversible'] as const;
@@ -26,6 +28,13 @@ const VERIFICATION_VALUES: readonly MonarchAgentCapabilityVerificationDescriptor
   'schema',
   'runtime-status',
   'external-receipt',
+];
+const PREDICATE_VALUES: readonly MonarchActionPredicate['kind'][] = [
+  'exists',
+  'not-exists',
+  'equals',
+  'contains',
+  'status',
 ];
 
 const MAX_METADATA_ITEMS = 64;
@@ -370,7 +379,14 @@ function assertRiskFloor(
   const floor = legacyAgentCapabilityDefaults(risk);
   assertRankAtLeast(idempotency, floor.idempotency, IDEMPOTENCY_VALUES, 'agent.idempotency', capabilityId);
   assertRankAtLeast(profile.mutation, floor.effectProfile.mutation, MUTATION_VALUES, 'agent.effectProfile.mutation', capabilityId);
-  assertRankAtLeast(profile.reversibility, floor.effectProfile.reversibility, REVERSIBILITY_VALUES, 'agent.reversibility', capabilityId);
+  // `delete` is the permission/risk class for any action that removes the
+  // original object, including an exact move/rename and recoverable Recycle
+  // Bin transfer. Explicit metadata may truthfully mark those operations as
+  // manually reversible; the delete Permission Gate and every other risk
+  // floor remain unchanged. Unmigrated delete capabilities stay irreversible.
+  if (!(risk === 'delete' && profile.reversibility === 'manual')) {
+    assertRankAtLeast(profile.reversibility, floor.effectProfile.reversibility, REVERSIBILITY_VALUES, 'agent.reversibility', capabilityId);
+  }
   assertRankAtLeast(profile.privilege, floor.effectProfile.privilege, PRIVILEGE_VALUES, 'agent.effectProfile.privilege', capabilityId);
   assertRankAtLeast(profile.dataSensitivity, floor.effectProfile.dataSensitivity, SENSITIVITY_VALUES, 'agent.effectProfile.dataSensitivity', capabilityId);
   assertRankAtLeast(profile.communication, floor.effectProfile.communication, COMMUNICATION_VALUES, 'agent.effectProfile.communication', capabilityId);
@@ -465,18 +481,43 @@ function validateVerification(
   return value.map((entry, index) => {
     const path = `agent.verification[${index}]`;
     assertPlainObject(entry, path, capabilityId);
-    assertKnownKeys(entry, ['kind', 'description', 'required'], path, capabilityId);
+    assertKnownKeys(entry, ['kind', 'description', 'required', 'predicate'], path, capabilityId);
     const kind = entry.kind;
     validateOptionalEnum(kind, VERIFICATION_VALUES, `${path}.kind`, capabilityId);
     if (kind === undefined) fail(`${path}.kind is required.`, capabilityId);
     const required = entry.required;
     validateOptionalBoolean(required, `${path}.required`, capabilityId);
+    const predicate = entry.predicate === undefined
+      ? undefined
+      : validateVerificationPredicate(entry.predicate, `${path}.predicate`, capabilityId);
     return {
       kind,
       description: validateText(entry.description, `${path}.description`, capabilityId),
       ...(required === undefined ? {} : { required: required as boolean }),
+      ...(predicate === undefined ? {} : { predicate }),
     };
   });
+}
+
+function validateVerificationPredicate(
+  value: unknown,
+  path: string,
+  capabilityId: string,
+): MonarchActionPredicate {
+  assertPlainObject(value, path, capabilityId);
+  assertKnownKeys(value, ['kind', 'target', 'value'], path, capabilityId);
+  validateOptionalEnum(value.kind, PREDICATE_VALUES, `${path}.kind`, capabilityId);
+  if (value.kind === undefined) fail(`${path}.kind is required.`, capabilityId);
+  const predicate = {
+    kind: value.kind,
+    target: validateText(value.target, `${path}.target`, capabilityId),
+    ...(Object.prototype.hasOwnProperty.call(value, 'value')
+      ? { value: structuredClone(value.value) }
+      : {}),
+  };
+  const predicateError = actionPredicateValueError(predicate);
+  if (predicateError) fail(`${path}: ${predicateError}`, capabilityId);
+  return predicate as MonarchActionPredicate;
 }
 
 function validateExamples(value: unknown, capabilityId: string): unknown[] {

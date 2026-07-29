@@ -32,6 +32,7 @@ out/
 /.playwright-cli/
 /Workspace Coder/
 /output/
+/scratch/
 /tmp/
 /test_files/
 
@@ -41,6 +42,7 @@ out/
 /ORIGINAL_REQUEST.md
 /MARK_ALFA_FINDINGS.md
 /design-qa.md
+/docs/OSCAR_AGENT_RUNTIME_QA_*.md
 
 # Local runtime state
 runtime/*
@@ -115,6 +117,8 @@ security/src/*.egg-info/
 /monarch_detailed_review.pdf
 /monarch_safe_audit.pdf
 /artifacts/audits/
+/artifacts/qa/
+/artifacts/studio/qa/
 /installer/out/
 /installer/offline-payload/
 /installer/.offline-build-cache/

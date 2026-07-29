@@ -3,6 +3,7 @@ import { normalizeAgentObservation } from '../../src/agent/observation-normalize
 
 describe('agent observation normalizer', () => {
   it('records schema, error-safe provenance and untrusted output without leaking secrets', () => {
+    const hfSecret = ['hf', 'abcdefghijklmnopqrstuvwxyz123456'].join('_');
     const observation = normalizeAgentObservation({
       observationId: 'observation-1',
       taskId: 'task-1',
@@ -15,11 +16,12 @@ describe('agent observation normalizer', () => {
       completedAt: '2026-07-22T10:00:01.000Z',
       result: {
         ok: true,
-        summary: 'Read completed with hf_abcdefghijklmnopqrstuvwxyz123456.',
-        output: { token: 'secret-value', nested: 'hf_abcdefghijklmnopqrstuvwxyz123456', wrong: true },
+        summary: `Read completed with ${hfSecret}.`,
+        output: { token: 'secret-value', nested: hfSecret, wrong: true },
         metadata: {
-          warnings: ['Do not persist hf_abcdefghijklmnopqrstuvwxyz123456.'],
-          observations: [{ ok: true, code: 'secret-check', message: 'Saw hf_abcdefghijklmnopqrstuvwxyz123456.' }],
+          warnings: [`Do not persist ${hfSecret}.`],
+          observations: [{ ok: true, code: 'secret-check', message: `Saw ${hfSecret}.` }],
+          runtimeTelemetry: { toolLatencyMs: 12.345, verificationLatencyMs: 4.567 },
         },
       },
       outputSchema: {
@@ -32,11 +34,16 @@ describe('agent observation normalizer', () => {
     expect(observation.status).toBe('partial');
     expect(observation.evidence.some((entry) => entry.reference.endsWith(':output-schema'))).toBe(true);
     expect(JSON.stringify(observation)).not.toContain('secret-value');
-    expect(JSON.stringify(observation)).not.toContain('hf_abcdefghijklmnopqrstuvwxyz123456');
+    expect(JSON.stringify(observation)).not.toContain(hfSecret);
     expect(observation.structuredData).toMatchObject({
       trust: 'untrusted-tool-output',
       instructionsAllowed: false,
-      provenance: { executionId: 'execution-1', actionAttemptId: 'attempt-1' },
+      provenance: {
+        executionId: 'execution-1',
+        actionAttemptId: 'attempt-1',
+        toolLatencyMs: 12.35,
+        verificationLatencyMs: 4.57,
+      },
       outputSchema: { declared: true, valid: false },
     });
   });

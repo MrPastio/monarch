@@ -1,4 +1,65 @@
-import type { MonarchModuleManifest } from '../../core';
+import type {
+  MonarchActionPredicate,
+  MonarchAgentCapabilityMetadataInput,
+  MonarchModuleManifest,
+} from '../../core';
+
+interface WorkspaceFileAgentOptions {
+  tags: string[];
+  effectKind: string;
+  effectDescription: string;
+  idempotency: 'idempotent' | 'conditional' | 'non-idempotent';
+  reversibility: 'automatic' | 'manual' | 'irreversible';
+  destructive?: boolean;
+  verificationKind?: 'predicate' | 'read-after-write' | 'schema' | 'runtime-status' | 'external-receipt';
+  verificationPredicate?: MonarchActionPredicate;
+  verificationDescription: string;
+}
+
+function workspaceFileAgent(options: WorkspaceFileAgentOptions): MonarchAgentCapabilityMetadataInput {
+  const verificationKind = options.verificationKind || 'external-receipt';
+  const verificationPredicate = options.verificationPredicate
+    || (verificationKind === 'external-receipt' || verificationKind === 'runtime-status'
+      ? { kind: 'status' as const, target: 'result.output.verified', value: true }
+      : undefined);
+  return {
+    tags: ['workspace', 'filesystem', ...options.tags],
+    preconditions: [{
+      kind: 'canonical-path-policy',
+      description: 'The exact canonical input path must remain inside an explicitly allowed root and outside production Safe.',
+    }],
+    effects: [{
+      kind: options.effectKind,
+      description: options.effectDescription,
+      targetScope: 'workspace',
+    }],
+    idempotency: options.idempotency,
+    reversibility: options.reversibility,
+    effectProfile: {
+      mutation: 'persistent',
+      targetScope: 'workspace',
+      reversibility: options.reversibility,
+      privilege: 'normal',
+      dataSensitivity: 'private',
+      communication: 'none',
+      financialImpact: false,
+      identityImpact: false,
+      securityImpact: options.destructive === true,
+    },
+    supportedSources: options.destructive
+      ? ['desktop', 'system', 'smoke']
+      : ['desktop', 'voice', 'telegram', 'api', 'system', 'smoke'],
+    estimatedLatency: 'short',
+    computeClass: 'light',
+    cancellation: 'supported',
+    verification: [{
+      kind: verificationKind,
+      description: options.verificationDescription,
+      required: true,
+      ...(verificationPredicate ? { predicate: verificationPredicate } : {}),
+    }],
+  };
+}
 
 export const workspaceManifest: MonarchModuleManifest = {
   id: 'workspace',
@@ -16,6 +77,7 @@ export const workspaceManifest: MonarchModuleManifest = {
     'workspace.directory.created',
     'workspace.path.copied',
     'workspace.path.moved',
+    'workspace.path.trashed',
   ],
   capabilities: [
     {
@@ -301,6 +363,14 @@ export const workspaceManifest: MonarchModuleManifest = {
       title: 'Append file',
       description: 'Append bounded text to a file inside the allowed workspace roots.',
       risk: 'write',
+      agent: workspaceFileAgent({
+        tags: ['append', 'file', 'write'],
+        effectKind: 'file-append',
+        effectDescription: 'Appends the supplied bytes to one exact canonical file path.',
+        idempotency: 'non-idempotent',
+        reversibility: 'manual',
+        verificationDescription: 'Byte-for-byte readback must confirm the appended suffix at the exact target.',
+      }),
       routing: {
         aliases: ['append file', 'допиши файл', 'добавь в файл'],
         keywords: ['append', 'add', 'file', 'допиши', 'добавь', 'файл'],
@@ -320,10 +390,18 @@ export const workspaceManifest: MonarchModuleManifest = {
       title: 'Create directory',
       description: 'Create a directory tree inside the allowed workspace roots.',
       risk: 'write',
+      agent: workspaceFileAgent({
+        tags: ['directory', 'mkdir', 'create'],
+        effectKind: 'directory-create',
+        effectDescription: 'Creates one exact canonical directory tree.',
+        idempotency: 'conditional',
+        reversibility: 'manual',
+        verificationDescription: 'A filesystem readback must confirm that the exact target is a directory.',
+      }),
       routing: {
-        aliases: ['create folder', 'mkdir', 'создай папку'],
-        keywords: ['create', 'folder', 'directory', 'mkdir', 'создай', 'папку', 'директорию'],
-        examples: ['создай папку artifacts/generated/demo'],
+        aliases: ['create folder', 'make folder', 'mkdir', 'создай папку', 'сделай папку'],
+        keywords: ['create', 'make', 'folder', 'directory', 'mkdir', 'создай', 'сделай', 'папку', 'директорию'],
+        examples: ['создай папку artifacts/generated/demo', 'сделай папку artifacts/generated/demo'],
         intentKinds: ['file.write', 'file.operation'],
       },
       inputSchema: {
@@ -342,6 +420,14 @@ export const workspaceManifest: MonarchModuleManifest = {
       title: 'Copy file or directory',
       description: 'Copy a bounded file tree without following symbolic links.',
       risk: 'write',
+      agent: workspaceFileAgent({
+        tags: ['copy', 'file', 'directory'],
+        effectKind: 'path-copy',
+        effectDescription: 'Copies one exact bounded source tree to one exact canonical target without following links.',
+        idempotency: 'non-idempotent',
+        reversibility: 'manual',
+        verificationDescription: 'Every copied file must pass byte-for-byte readback at the exact target.',
+      }),
       routing: {
         aliases: ['copy file', 'copy folder', 'скопируй файл', 'скопируй папку'],
         keywords: ['copy', 'duplicate', 'file', 'folder', 'скопируй', 'дублируй', 'файл', 'папку'],
@@ -361,6 +447,15 @@ export const workspaceManifest: MonarchModuleManifest = {
       title: 'Move file or directory',
       description: 'Move or rename a file or directory inside the allowed workspace roots.',
       risk: 'delete',
+      agent: workspaceFileAgent({
+        tags: ['move', 'rename', 'file', 'directory'],
+        effectKind: 'path-move',
+        effectDescription: 'Moves one exact canonical source to one exact canonical target.',
+        idempotency: 'non-idempotent',
+        reversibility: 'manual',
+        destructive: true,
+        verificationDescription: 'Readback must prove the source is absent and the exact target exists.',
+      }),
       routing: {
         aliases: ['move file', 'rename file', 'перемести файл', 'переименуй папку'],
         keywords: ['move', 'rename', 'file', 'folder', 'перемести', 'переименуй', 'файл', 'папку'],
@@ -380,6 +475,14 @@ export const workspaceManifest: MonarchModuleManifest = {
       title: 'Replace file text',
       description: 'Replace one exact text fragment inside a text file in the allowed workspace roots.',
       risk: 'write',
+      agent: workspaceFileAgent({
+        tags: ['replace', 'edit', 'file', 'exact'],
+        effectKind: 'file-exact-replace',
+        effectDescription: 'Replaces one unambiguous exact fragment in one exact canonical text file.',
+        idempotency: 'non-idempotent',
+        reversibility: 'manual',
+        verificationDescription: 'Byte-for-byte readback must equal the computed replacement content.',
+      }),
       routing: {
         aliases: ['replace in file', 'replace file text', 'замени в файле', 'заменить текст в файле'],
         keywords: ['replace', 'edit', 'file', 'workspace', 'замени', 'заменить', 'исправь', 'файл'],
@@ -398,15 +501,55 @@ export const workspaceManifest: MonarchModuleManifest = {
       },
     },
     {
+      id: 'workspace.files.trash',
+      moduleId: 'workspace',
+      title: 'Move file or directory to Recycle Bin',
+      description: 'Recoverable-default removal of one exact file or directory through the Windows Recycle Bin.',
+      risk: 'delete',
+      agent: workspaceFileAgent({
+        tags: ['trash', 'recycle', 'remove', 'file', 'directory'],
+        effectKind: 'path-recycle',
+        effectDescription: 'Moves one exact canonical file or directory into the current Windows user Recycle Bin.',
+        idempotency: 'non-idempotent',
+        reversibility: 'manual',
+        destructive: true,
+        verificationKind: 'external-receipt',
+        verificationDescription: 'The Windows recycle operation must succeed and readback must prove the exact original target is absent.',
+      }),
+      routing: {
+        aliases: ['trash file', 'remove file', 'delete file', 'удали файл', 'убери в корзину'],
+        keywords: ['trash', 'recycle', 'delete', 'remove', 'file', 'folder', 'удали', 'корзину', 'файл', 'папку'],
+        examples: ['move runtime/example.txt to recycle bin', 'удали файл runtime/example.txt'],
+        intentKinds: ['file.delete', 'file.operation'],
+      },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      },
+    },
+    {
       id: 'workspace.files.delete',
       moduleId: 'workspace',
-      title: 'Delete file',
-      description: 'Delete a file inside the allowed workspace roots.',
+      title: 'Permanently delete file',
+      description: 'Irreversibly delete one exact file only when the user explicitly requests permanent removal.',
       risk: 'delete',
+      agent: workspaceFileAgent({
+        tags: ['permanent', 'delete', 'irreversible', 'file'],
+        effectKind: 'file-permanent-delete',
+        effectDescription: 'Permanently deletes one exact canonical file without using the Recycle Bin.',
+        idempotency: 'non-idempotent',
+        reversibility: 'irreversible',
+        destructive: true,
+        verificationDescription: 'Readback must prove the exact file no longer exists.',
+      }),
       routing: {
-        aliases: ['delete file', 'remove file', 'удали файл'],
-        keywords: ['delete', 'remove', 'file', 'workspace', 'удали', 'сотри', 'файл'],
-        examples: ['delete file runtime/example.txt', 'удали файл runtime/example.txt'],
+        aliases: ['permanently delete file', 'безвозвратно удали файл', 'удали файл навсегда'],
+        keywords: ['permanent', 'irreversible', 'delete', 'безвозвратно', 'навсегда', 'удали'],
+        examples: ['permanently delete file runtime/example.txt', 'безвозвратно удали файл runtime/example.txt'],
         intentKinds: ['file.delete', 'file.operation'],
       },
       inputSchema: {

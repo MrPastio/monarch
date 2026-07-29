@@ -60,6 +60,18 @@ export interface OscarChatRequest {
   skills?: OscarAgentSkillContext[];
   capabilities?: OscarCapabilityContext[];
   access?: OscarAccessContext;
+  inference_lane?: 'interactive' | 'agent' | 'coder' | 'background';
+}
+
+export interface OscarRawChatCompletionRequest {
+  model: string;
+  messages: OscarChatMessage[];
+  temperature?: number;
+  top_p?: number;
+  max_tokens?: number;
+  reasoning_effort?: 'low' | 'medium' | 'high';
+  response_format?: { type: 'text' | 'json_object' };
+  inference_lane?: 'interactive' | 'agent' | 'coder' | 'background';
 }
 
 export interface OscarChatRoutePreview {
@@ -282,11 +294,16 @@ export class OscarClient {
     }
   }
 
-  async chat(request: OscarChatRequest): Promise<unknown> {
+  async chat(request: OscarChatRequest, signal?: AbortSignal): Promise<unknown> {
     await this.ensureBackendAvailable();
     let response: unknown;
     try {
-      response = await this.postJson('/api/chat', request, this.chatTimeoutForRequest(request));
+      response = await this.postJson(
+        '/api/chat',
+        request,
+        this.chatTimeoutForRequest(request),
+        signal,
+      );
     } catch (error) {
       if (isCoderChatRequest(request) && isLocalApiBase(this.config.apiBase)) {
         await this.releaseFailedCoderGeneration();
@@ -298,6 +315,16 @@ export class OscarClient {
       await stopManagedOscarBackend();
     }
     return response;
+  }
+
+  async completeRaw(request: OscarRawChatCompletionRequest, signal?: AbortSignal): Promise<unknown> {
+    await this.ensureBackendAvailable();
+    return this.postJson(
+      '/v1/chat/completions',
+      request,
+      this.config.chatTimeoutMs,
+      signal,
+    );
   }
 
   async previewChatRoute(request: OscarChatRequest): Promise<OscarChatRoutePreview> {
@@ -315,7 +342,7 @@ export class OscarClient {
     return this.postJson('/api/voice/realtime', request, this.config.chatTimeoutMs) as Promise<OscarVoiceRealtimeResponse>;
   }
 
-  async *streamChat(request: OscarChatRequest): AsyncGenerator<any, void, unknown> {
+  async *streamChat(request: OscarChatRequest, signal?: AbortSignal): AsyncGenerator<any, void, unknown> {
     await this.ensureBackendAvailable();
     const url = new URL('/api/chat/stream', this.config.apiBase);
     
@@ -327,6 +354,12 @@ export class OscarClient {
     }
 
     const controller = new AbortController();
+    const abortFromCaller = () => controller.abort(signal?.reason);
+    if (signal?.aborted) {
+      abortFromCaller();
+    } else {
+      signal?.addEventListener('abort', abortFromCaller, { once: true });
+    }
     const timeout = setTimeout(() => {
       controller.abort();
     }, this.chatTimeoutForRequest(request));
@@ -412,6 +445,7 @@ export class OscarClient {
       };
     } finally {
       clearTimeout(timeout);
+      signal?.removeEventListener('abort', abortFromCaller);
       if (!receivedDoneEvent) {
         controller.abort();
         try {
@@ -606,14 +640,19 @@ export class OscarClient {
     });
   }
 
-  private async postJson(path: string, body: unknown, timeoutMs = this.config.timeoutMs): Promise<unknown> {
+  private async postJson(
+    path: string,
+    body: unknown,
+    timeoutMs = this.config.timeoutMs,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     return this.fetchJson(path, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
-    }, timeoutMs);
+    }, timeoutMs, signal);
   }
 
   private async patchJson(path: string, body: unknown): Promise<unknown> {
@@ -630,9 +669,20 @@ export class OscarClient {
     return this.fetchJson(path, { method: 'DELETE' });
   }
 
-  private async fetchJson(path: string, init: RequestInit, timeoutMs = this.config.timeoutMs): Promise<unknown> {
+  private async fetchJson(
+    path: string,
+    init: RequestInit,
+    timeoutMs = this.config.timeoutMs,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const abortFromCaller = () => controller.abort(signal?.reason);
+    if (signal?.aborted) {
+      abortFromCaller();
+    } else {
+      signal?.addEventListener('abort', abortFromCaller, { once: true });
+    }
 
     const headers = {
       ...(init.headers || {}),
@@ -656,6 +706,7 @@ export class OscarClient {
       throw new Error(normalizeError(error, timeoutMs));
     } finally {
       clearTimeout(timeout);
+      signal?.removeEventListener('abort', abortFromCaller);
     }
   }
 }
@@ -680,6 +731,7 @@ export function createDefaultOscarChatRequest(
   const researchMode = readStringInput(input, 'research_mode');
   const route = readRouteInput(input);
   const deepThinkingConsent = readStringInput(input, 'deep_thinking_consent');
+  const inferenceLane = readStringInput(input, 'inference_lane');
   const request: OscarChatRequest = {
     messages,
     use_memory: readBooleanInput(input, 'use_memory', true),
@@ -716,6 +768,14 @@ export function createDefaultOscarChatRequest(
   }
   if (deepThinkingConsent === 'allow' || deepThinkingConsent === 'deny') {
     request.deep_thinking_consent = deepThinkingConsent;
+  }
+  if (
+    inferenceLane === 'interactive'
+    || inferenceLane === 'agent'
+    || inferenceLane === 'coder'
+    || inferenceLane === 'background'
+  ) {
+    request.inference_lane = inferenceLane;
   }
   return request;
 }

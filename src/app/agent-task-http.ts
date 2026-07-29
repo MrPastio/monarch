@@ -8,6 +8,7 @@ import type {
   AgentSuccessCriterion,
   AgentTaskCheckpoint,
   AgentTaskEvent,
+  AgentTaskSurface,
 } from '../agent/types';
 
 const MAX_AGENT_JSON_BODY_BYTES = 256 * 1024;
@@ -32,6 +33,7 @@ export interface AgentTaskHttpContext {
   response: ServerResponse;
   enforceMutation: () => void;
   enforceRead: () => void;
+  httpSource: Extract<AgentTaskSurface, 'desktop' | 'api'>;
 }
 
 export async function handleAgentTaskHttpRequest(context: AgentTaskHttpContext): Promise<boolean> {
@@ -61,10 +63,16 @@ export async function handleAgentTaskHttpRequest(context: AgentTaskHttpContext):
     const userPreferences = readStringArray(body.userPreferences, 'userPreferences', 32, 1_000);
     const budgets = readBudget(body.budgets);
     const autoStart = readOptionalBoolean(body.autoStart, 'autoStart');
-    assertOptionalSource(body.source);
+    const claimedSource = readOptionalSource(body.source);
+    const source = resolveHttpTaskSource(claimedSource, context.httpSource);
     const checkpoint = await app.createAgentTask({
       request: taskRequest,
-      source: { surface: 'api', ...(clientRequestId ? { requestId: clientRequestId } : {}) },
+      source: {
+        surface: source,
+        remote: source === 'api',
+        ...(clientRequestId ? { requestId: clientRequestId } : {}),
+        ...(conversationId ? { conversationId } : {}),
+      },
       ...(clientRequestId ? { clientRequestId } : {}),
       ...(conversationId ? { conversationId } : {}),
       ...(parentTaskId ? { parentTaskId } : {}),
@@ -87,7 +95,7 @@ export async function handleAgentTaskHttpRequest(context: AgentTaskHttpContext):
     return true;
   }
 
-  const match = url.pathname.match(/^\/api\/agent\/tasks\/([^/]+)(?:\/(messages|pause|resume|cancel|events|approvals)(?:\/([^/]+))?)?$/);
+  const match = url.pathname.match(/^\/api\/agent\/tasks\/([^/]+)(?:\/(messages|pause|resume|cancel|repeat|events|approvals)(?:\/([^/]+))?)?$/);
   if (!match?.[1]) throw httpError(405, 'method-not-allowed', 'Unsupported Agent Task method.');
   const taskId = decodePathId(match[1], 'taskId');
   const action = match[2] || '';
@@ -129,11 +137,38 @@ export async function handleAgentTaskHttpRequest(context: AgentTaskHttpContext):
     return true;
   }
 
+  if (request.method === 'POST' && action === 'repeat' && !nestedId) {
+    context.enforceMutation();
+    const body = await readBoundedJson(request);
+    assertVersion(body);
+    assertKeys(body, ['version', 'clientRequestId', 'autoStart']);
+    const clientRequestId = readOptionalId(body.clientRequestId, 'clientRequestId');
+    const autoStart = readOptionalBoolean(body.autoStart, 'autoStart');
+    const checkpoint = await runtime.repeatTask(taskId, {
+      ...(clientRequestId ? { clientRequestId } : {}),
+      ...(autoStart !== undefined ? { autoStart } : {}),
+      source: {
+        surface: context.httpSource,
+        remote: context.httpSource === 'api',
+      },
+    });
+    sendJson(response, 202, { version: 1, ok: true, task: checkpoint.task });
+    return true;
+  }
+
   if (request.method === 'POST' && action === 'approvals' && nestedId) {
     context.enforceMutation();
     const body = await readBoundedJson(request);
     assertVersion(body);
-    assertKeys(body, ['version', 'decision', 'grantScope', 'requestId', 'reason']);
+    assertKeys(body, [
+      'version',
+      'decision',
+      'grantScope',
+      'requestId',
+      'reason',
+      'canonicalProposalHash',
+      'capabilityId',
+    ]);
     if (body.decision !== 'approve' && body.decision !== 'deny') {
       throw httpError(400, 'invalid-approval-decision', 'decision must be approve or deny.');
     }
@@ -142,6 +177,36 @@ export async function handleAgentTaskHttpRequest(context: AgentTaskHttpContext):
     }
     const requestId = readOptionalId(body.requestId, 'requestId');
     const reason = readOptionalText(body.reason, 'reason', 1_000);
+    const canonicalProposalHash = readOptionalText(
+      body.canonicalProposalHash,
+      'canonicalProposalHash',
+      256,
+    );
+    const capabilityId = readOptionalText(body.capabilityId, 'capabilityId', 256);
+    if (body.decision === 'approve') {
+      if (!canonicalProposalHash || !capabilityId) {
+        throw httpError(
+          400,
+          'approval-binding-required',
+          'Approval requires the exact canonical proposal hash and capability id shown to the user.',
+        );
+      }
+      const current = await runtime.getTask(taskId);
+      const approval = current?.approvals.find((entry) => entry.id === nestedId && entry.status === 'pending');
+      if (
+        !current
+        || current.task.activeApprovalId !== nestedId
+        || !approval
+        || approval.canonicalProposalHash !== canonicalProposalHash
+        || approval.capabilityId !== capabilityId
+      ) {
+        throw httpError(
+          409,
+          'approval-binding-mismatch',
+          'The pending action changed. Review its exact target before approving again.',
+        );
+      }
+    }
     const checkpoint = await runtime.resolveApproval(taskId, nestedId, {
       decision: body.decision,
       ...(body.grantScope ? { grantScope: body.grantScope } : {}),
@@ -170,6 +235,25 @@ export async function handleAgentTaskHttpRequest(context: AgentTaskHttpContext):
   }
 
   throw httpError(405, 'method-not-allowed', 'Unsupported Agent Task method.');
+}
+
+function resolveHttpTaskSource(
+  claimedSource: AgentTaskSurface | undefined,
+  httpSource: Extract<AgentTaskSurface, 'desktop' | 'api'>,
+): AgentTaskSurface {
+  if (httpSource === 'desktop' && claimedSource === 'voice') {
+    // Voice is a narrower local UI surface than Desktop: it cannot access
+    // destructive local capabilities because Kernel rechecks supportedSources.
+    return 'voice';
+  }
+  if (claimedSource && claimedSource !== httpSource) {
+    throw httpError(
+      403,
+      'untrusted-agent-source',
+      `HTTP Agent Task source is derived by Monarch as ${httpSource}; callers cannot claim ${claimedSource}.`,
+    );
+  }
+  return httpSource;
 }
 
 function streamTaskEvents(
@@ -428,11 +512,12 @@ function decodePathId(value: string, field: string): string {
   return id;
 }
 
-function assertOptionalSource(value: unknown): void {
-  if (value === undefined) return;
+function readOptionalSource(value: unknown): AgentTaskSurface | undefined {
+  if (value === undefined) return undefined;
   if (typeof value !== 'string' || !AGENT_TASK_SURFACES.has(value)) {
     throw httpError(400, 'invalid-source', 'source must be a supported Agent Task surface name.');
   }
+  return value as AgentTaskSurface;
 }
 
 function invalidFieldCode(field: string): string {

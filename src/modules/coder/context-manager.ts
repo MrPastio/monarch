@@ -131,7 +131,13 @@ export class CoderRunStore {
     const now = new Date().toISOString();
     run.status = status;
     run.updatedAt = now;
-    if (status === 'running' && !run.startedAt) run.startedAt = now;
+    if (status === 'running') {
+      if (!run.startedAt) run.startedAt = now;
+      run.finishedAt = null;
+      run.error = '';
+      run.cancelled = false;
+    }
+    if (status === 'interrupted') run.finishedAt = null;
     if (status === 'completed' || status === 'failed' || status === 'cancelled') run.finishedAt = now;
     if (status === 'failed') run.error = detail || run.error;
     if (status === 'cancelled') run.cancelled = true;
@@ -271,10 +277,19 @@ export class CoderRunStore {
       if (!isValidRun(run)) continue;
       if (run.status === 'running' || run.status === 'queued') {
         const now = new Date().toISOString();
-        run.status = 'failed';
-        run.error = 'Previous Coder process stopped before completion; the full journal is preserved for a new run.';
-        run.finishedAt = now;
+        run.status = 'interrupted';
+        run.error = '';
+        run.finishedAt = null;
+        run.cancelled = false;
         run.updatedAt = now;
+        run.events.push({
+          id: `coder_event_${randomUUID()}`,
+          sequence: (run.events.at(-1)?.sequence || 0) + 1,
+          kind: 'status',
+          createdAt: now,
+          title: 'Task interrupted',
+          detail: 'The previous Monarch process stopped. Verified receipts and checkpoints were preserved; the run can be resumed explicitly.',
+        });
       }
       run.context.modelCalls ||= 0;
       run.context.modelInputTokens ||= 0;

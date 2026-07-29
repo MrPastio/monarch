@@ -137,7 +137,6 @@ def test_voice_realtime_uses_only_dedicated_search_and_prompt_hooks(
     for name in (
         "hydrate_conversation_context",
         "begin_conversation",
-        "maybe_execute_agent_tools",
         "prepare_sources",
         "record_model_quality_result",
         "complete_conversation",
@@ -387,6 +386,7 @@ def test_runtime_voice_realtime_keeps_web_data_untrusted_and_bounded(monkeypatch
     assert captured["strict_tier"] is True
     assert messages[0].content.startswith(VOICE_REALTIME_SYSTEM_PROMPT)
     assert len(VOICE_REALTIME_SYSTEM_PROMPT) < 600
+    assert "warm, lively voice" in VOICE_REALTIME_SYSTEM_PROMPT
     assert "untrusted data" in messages[0].content
     assert len(messages[1].content) < 3900
     assert OSCAR_SYSTEM_PROMPT_RU not in messages[0].content

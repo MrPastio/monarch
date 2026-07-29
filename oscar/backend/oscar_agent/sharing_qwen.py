@@ -12,6 +12,7 @@ from __future__ import annotations
 import gc
 import os
 import threading
+import time
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +50,7 @@ QWEN_CHAT_MODELS: tuple[QwenChatModel, ...] = (
         label="Qwen3 1.7B",
         description="Быстрый локальный Qwen3-профиль без thinking trace.",
         aliases=("qwen3-1.7b",),
+        context_tokens=2_048,
     ),
 )
 
@@ -88,6 +90,7 @@ class QwenSharingRuntime:
         self._lock = threading.RLock()
         self._model: Any | None = None
         self._model_id: str | None = None
+        self.last_load_latency_ms = 0.0
         self._generation_cancelled = threading.Event()
 
     def available_models(self) -> tuple[QwenChatModel, ...]:
@@ -120,6 +123,7 @@ class QwenSharingRuntime:
         max_tokens: int,
         temperature: float,
         top_p: float,
+        response_format: dict[str, str] | None = None,
     ) -> Generator[str, None, None]:
         model = find_qwen_chat_model(model_id)
         if model is None:
@@ -135,6 +139,7 @@ class QwenSharingRuntime:
                 temperature=float(temperature),
                 top_p=float(top_p),
                 repeat_penalty=1.05,
+                response_format=response_format,
                 stream=True,
             )
             for chunk in stream:
@@ -146,8 +151,10 @@ class QwenSharingRuntime:
 
     def _load(self, model: QwenChatModel):
         if self._model is not None and self._model_id == model.id:
+            self.last_load_latency_ms = 0.0
             return self._model
 
+        load_started_at = time.perf_counter()
         self.unload()
         # The installed llama-cpp package is CUDA-enabled even though these
         # Super Fast profiles stay CPU-only. On Windows its dependent CUDA DLLs
@@ -157,24 +164,55 @@ class QwenSharingRuntime:
 
         path = qwen_models_root(self.settings) / model.filename
         threads = max(2, min(8, (os.cpu_count() or 4) - 1))
-        llama = Llama(
-            model_path=str(path),
-            n_gpu_layers=0,
-            n_ctx=model.context_tokens,
-            n_batch=128,
-            n_threads=threads,
-            n_threads_batch=threads,
-            use_mmap=True,
-            use_mlock=False,
-            offload_kqv=False,
-            op_offload=False,
-            verbose=False,
+        configured_gpu_layers = max(
+            0,
+            int(getattr(self.settings, "sharing_qwen_gpu_layers", 0) or 0),
+        )
+        llama = self._create_llama(
+            Llama,
+            path=path,
+            model=model,
+            threads=threads,
+            gpu_layers=configured_gpu_layers,
         )
         if model.id.startswith("qwen3-"):
             self._disable_qwen3_thinking(llama)
         self._model = llama
         self._model_id = model.id
+        self.last_load_latency_ms = (time.perf_counter() - load_started_at) * 1000
         return llama
+
+    def _create_llama(
+        self,
+        llama_type: Any,
+        *,
+        path: Path,
+        model: QwenChatModel,
+        threads: int,
+        gpu_layers: int,
+    ) -> Any:
+        def create(layers: int) -> Any:
+            use_gpu = layers > 0
+            return llama_type(
+                model_path=str(path),
+                n_gpu_layers=layers,
+                n_ctx=model.context_tokens,
+                n_batch=256,
+                n_threads=threads,
+                n_threads_batch=threads,
+                use_mmap=True,
+                use_mlock=False,
+                offload_kqv=use_gpu,
+                op_offload=use_gpu,
+                verbose=False,
+            )
+
+        try:
+            return create(gpu_layers)
+        except Exception:
+            if gpu_layers <= 0 or not bool(getattr(self.settings, "cpu_fallback", True)):
+                raise
+            return create(0)
 
     @staticmethod
     def _disable_qwen3_thinking(llama: Any) -> None:

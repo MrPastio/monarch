@@ -1,11 +1,15 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AgentTaskRunnerClaimError,
   AgentTaskStoreConflictError,
   AgentTaskStoreCorruptionError,
+  AgentTaskStoreError,
   AgentTaskStoreLockTimeoutError,
   AgentTaskStoreValidationError,
   InMemoryAgentTaskStore,
@@ -266,6 +270,143 @@ describe('LocalJsonAgentTaskStore', () => {
     const files = await readdir(root);
     expect(files).toEqual(['agent-tasks.json']);
   });
+
+  it('survives 500 mutations across 100 contended lock rounds without losing a task', async () => {
+    const root = await makeTemporaryRoot();
+    const filePath = path.join(root, 'agent-tasks.json');
+    const stores = Array.from({ length: 8 }, () => new LocalJsonAgentTaskStore(filePath, {
+      retryDelayMs: 1,
+      lockTimeoutMs: 60_000,
+    }));
+
+    for (let round = 0; round < 100; round += 1) {
+      await Promise.all(Array.from({ length: 5 }, async (_entry, lane) => {
+        const id = `task_stress_${String(round).padStart(3, '0')}_${lane}`;
+        await stores[(round + lane) % stores.length]!.createTask(createTask(id));
+      }));
+    }
+
+    const restarted = new LocalJsonAgentTaskStore(filePath);
+    const tasks = await restarted.listTasks();
+    expect(tasks).toHaveLength(500);
+    expect(new Set(tasks.map((task) => task.id)).size).toBe(500);
+    expect((await readdir(root)).filter((entry) => entry.includes('.lock.'))).toEqual([]);
+  }, 120_000);
+
+  it.each(['EPERM', 'EBUSY'])(
+    're-enumerates contenders after a transient Windows %s lock read failure',
+    async (code) => {
+      const root = await makeTemporaryRoot();
+      const filePath = path.join(root, 'agent-tasks.json');
+      const faultPath = `${filePath}.lock.000_transient_${code.toLowerCase()}.json`;
+      await writeFile(faultPath, `${JSON.stringify(createLockDocument(
+        `transient_${code.toLowerCase()}`,
+        424_242,
+      ))}\n`, 'utf8');
+      let injectedFailures = 0;
+      const store = new LocalJsonAgentTaskStore(filePath, {
+        isProcessAlive: (pid) => pid !== 424_242,
+        retryDelayMs: 1,
+        lockTimeoutMs: 1_000,
+        __testHooks: {
+          beforeReadLockClaim: (candidatePath) => {
+            if (candidatePath === faultPath && injectedFailures === 0) {
+              injectedFailures += 1;
+              throw createFileSystemError(code);
+            }
+          },
+        },
+      });
+
+      await expect(store.createTask(createTask(`task_after_${code.toLowerCase()}`))).resolves.toBeDefined();
+
+      expect(injectedFailures).toBe(1);
+      expect((await store.listTasks()).map((task) => task.id)).toEqual([
+        `task_after_${code.toLowerCase()}`,
+      ]);
+      expect((await readdir(root)).filter((entry) => entry.includes('.lock.'))).toEqual([]);
+    },
+  );
+
+  it('fails closed after persistent EACCES leaves a lock claim unreadable', async () => {
+    const root = await makeTemporaryRoot();
+    const filePath = path.join(root, 'agent-tasks.json');
+    const faultPath = `${filePath}.lock.000_unreadable.json`;
+    const lockDocument = `${JSON.stringify(createLockDocument('unreadable', 424_242))}\n`;
+    await writeFile(faultPath, lockDocument, 'utf8');
+    let readAttempts = 0;
+    const store = new LocalJsonAgentTaskStore(filePath, {
+      isProcessAlive: () => true,
+      retryDelayMs: 1,
+      lockTimeoutMs: 1_000,
+      __testHooks: {
+        beforeReadLockClaim: (candidatePath) => {
+          if (candidatePath === faultPath) {
+            readAttempts += 1;
+            throw createFileSystemError('EACCES');
+          }
+        },
+      },
+    });
+
+    await expect(store.createTask(createTask('task_blocked_by_unreadable_lock')))
+      .rejects.toBeInstanceOf(AgentTaskStoreError);
+
+    expect(readAttempts).toBe(4);
+    expect(await readFile(faultPath, 'utf8')).toBe(lockDocument);
+    expect((await readdir(root)).filter((entry) => entry.includes('.lock.'))).toEqual([
+      path.basename(faultPath),
+    ]);
+    await expect(readFile(filePath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('fails closed on a young malformed lock claim and never removes it', async () => {
+    const root = await makeTemporaryRoot();
+    const filePath = path.join(root, 'agent-tasks.json');
+    const malformedPath = `${filePath}.lock.000_malformed.json`;
+    const malformedLock = '{"schemaVersion":"monarch.agent-task-lock.v1","ownerId":';
+    await writeFile(malformedPath, malformedLock, 'utf8');
+    const store = new LocalJsonAgentTaskStore(filePath, {
+      lockTtlMs: 30_000,
+      retryDelayMs: 1,
+      lockTimeoutMs: 25,
+    });
+
+    await expect(store.createTask(createTask('task_blocked_by_malformed_lock')))
+      .rejects.toBeInstanceOf(AgentTaskStoreLockTimeoutError);
+
+    expect(await readFile(malformedPath, 'utf8')).toBe(malformedLock);
+    expect((await readdir(root)).filter((entry) => entry.includes('.lock.'))).toEqual([
+      path.basename(malformedPath),
+    ]);
+    await expect(readFile(filePath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('serializes bounded mutations from real child processes without orphaned claims', async () => {
+    const root = await makeTemporaryRoot();
+    const filePath = path.join(root, 'agent-tasks.json');
+    const workerPath = path.join(root, 'agent-task-store-child.mts');
+    await writeFile(workerPath, createChildProcessWorkerSource(), 'utf8');
+    const lanes = 4;
+    const tasksPerLane = 6;
+
+    await Promise.all(Array.from({ length: lanes }, (_entry, lane) => runStoreChildProcess({
+      workerPath,
+      filePath,
+      lane,
+      taskCount: tasksPerLane,
+      template: createTask('task_child_template'),
+      timeoutMs: 30_000,
+    })));
+
+    const restarted = new LocalJsonAgentTaskStore(filePath);
+    const tasks = await restarted.listTasks();
+    expect(tasks).toHaveLength(lanes * tasksPerLane);
+    expect(new Set(tasks.map((task) => task.id)).size).toBe(lanes * tasksPerLane);
+    expect((await readdir(root)).filter((entry) => (
+      entry.includes('.lock.') || entry.endsWith('.tmp')
+    ))).toEqual([]);
+  }, 45_000);
 
   it('fences and retries a writer whose lock expires before replace without losing a concurrent commit', async () => {
     const root = await makeTemporaryRoot();
@@ -528,8 +669,118 @@ function mutableClock(initial: string): {
   };
 }
 
+function createLockDocument(ownerId: string, pid: number): Record<string, unknown> {
+  return {
+    schemaVersion: 'monarch.agent-task-lock.v1',
+    ownerId,
+    pid,
+    state: 'held',
+    ticket: 1,
+    createdAt: '2026-07-22T10:00:00.000Z',
+    expiresAt: '2099-07-22T10:00:00.000Z',
+  };
+}
+
+function createFileSystemError(code: string): NodeJS.ErrnoException {
+  const error = new Error(`Simulated ${code} lock read failure.`) as NodeJS.ErrnoException;
+  error.code = code;
+  return error;
+}
+
+function createChildProcessWorkerSource(): string {
+  const storeModuleUrl = pathToFileURL(path.resolve('src/agent/agent-task-store.ts')).href;
+  return `
+import { LocalJsonAgentTaskStore } from ${JSON.stringify(storeModuleUrl)};
+
+const [filePath, laneText, countText] = process.argv.slice(2);
+const templateText = process.env.MONARCH_AGENT_TASK_TEMPLATE;
+if (!filePath || !laneText || !countText || !templateText) {
+  throw new Error('Missing child-process store arguments.');
+}
+const lane = Number.parseInt(laneText, 10);
+const taskCount = Number.parseInt(countText, 10);
+const template = JSON.parse(templateText);
+const store = new LocalJsonAgentTaskStore(filePath, {
+  retryDelayMs: 1,
+  lockTimeoutMs: 20_000,
+});
+for (let index = 0; index < taskCount; index += 1) {
+  const id = \`task_child_\${lane}_\${index}\`;
+  const task = structuredClone(template);
+  task.id = id;
+  task.traceId = \`trace_\${id}\`;
+  task.source.requestId = \`source_\${id}\`;
+  task.goal.originalRequest = \`Complete \${id}\`;
+  task.goal.normalizedObjective = \`Complete durable task \${id}\`;
+  task.messages[0].id = \`message_\${id}\`;
+  task.messages[0].content = \`Complete \${id}\`;
+  await store.createTask(task);
+}
+`;
+}
+
+interface StoreChildProcessOptions {
+  workerPath: string;
+  filePath: string;
+  lane: number;
+  taskCount: number;
+  template: AgentTask;
+  timeoutMs: number;
+}
+
+async function runStoreChildProcess(options: StoreChildProcessOptions): Promise<void> {
+  const require = createRequire(import.meta.url);
+  const tsxCliPath = require.resolve('tsx/cli');
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      tsxCliPath,
+      options.workerPath,
+      options.filePath,
+      String(options.lane),
+      String(options.taskCount),
+    ], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        MONARCH_AGENT_TASK_TEMPLATE: JSON.stringify(options.template),
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr = `${stderr}${chunk}`.slice(-4_000);
+    });
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error(`AgentTaskStore child lane ${options.lane} exceeded ${options.timeoutMs}ms.`));
+    }, options.timeoutMs);
+    timeout.unref?.();
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('close', (code, signal) => {
+      clearTimeout(timeout);
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(
+        `AgentTaskStore child lane ${options.lane} failed (${code ?? signal ?? 'unknown'}): ${stderr}`,
+      ));
+    });
+  });
+}
+
 async function makeTemporaryRoot(): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), 'monarch-agent-task-store-'));
+  const workspaceDrive = process.platform === 'win32' ? path.parse(process.cwd()).root : '';
+  const basePath = workspaceDrive
+    ? path.join(workspaceDrive, 'Monarch-Agent-QA')
+    : tmpdir();
+  await mkdir(basePath, { recursive: true });
+  const root = await mkdtemp(path.join(basePath, 'monarch-agent-task-store-'));
   temporaryRoots.push(root);
   return root;
 }

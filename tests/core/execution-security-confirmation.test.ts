@@ -8,6 +8,77 @@ import {
 import { SecurityModule } from '../../src/modules/security';
 
 describe('Monarch Access and Monarch Security confirmation', () => {
+  it('enforces explicit capability supportedSources again at Kernel dispatch', async () => {
+    const kernel = new MonarchKernel();
+    let executions = 0;
+    kernel.registerModule({
+      manifest: {
+        id: 'source-boundary',
+        name: 'Source Boundary Fixture',
+        version: '0.1.0',
+        kind: 'runtime',
+        description: 'Test-only source boundary fixture.',
+        owns: ['source boundary'],
+        permissions: ['read'],
+        capabilities: [{
+          id: 'source-boundary.desktop-only',
+          moduleId: 'source-boundary',
+          title: 'Desktop-only observation',
+          risk: 'read',
+          agent: {
+            supportedSources: ['desktop'],
+            cancellation: 'supported',
+          },
+        }],
+      },
+      async activate(): Promise<void> {},
+      async executeCapability(): Promise<MonarchExecutionResult> {
+        executions += 1;
+        return { ok: true, summary: 'Desktop-only fixture executed.' };
+      },
+    });
+    await kernel.start();
+
+    try {
+      const blocked = await kernel.execute({
+        id: 'exec_source_boundary_api',
+        intentId: 'intent_source_boundary_api',
+        moduleId: 'source-boundary',
+        capabilityId: 'source-boundary.desktop-only',
+        input: {},
+        createdAt: new Date(0).toISOString(),
+        requestedBy: 'api',
+        source: 'api',
+      });
+      expect(blocked).toMatchObject({
+        ok: false,
+        error: 'permission-denied',
+        metadata: {
+          sourceBoundary: {
+            source: 'api',
+            supportedSources: ['desktop'],
+          },
+        },
+      });
+      expect(executions).toBe(0);
+
+      const allowed = await kernel.execute({
+        id: 'exec_source_boundary_desktop',
+        intentId: 'intent_source_boundary_desktop',
+        moduleId: 'source-boundary',
+        capabilityId: 'source-boundary.desktop-only',
+        input: {},
+        createdAt: new Date(0).toISOString(),
+        requestedBy: 'desktop',
+        source: 'desktop',
+      });
+      expect(allowed).toMatchObject({ ok: true, summary: 'Desktop-only fixture executed.' });
+      expect(executions).toBe(1);
+    } finally {
+      await kernel.stop();
+    }
+  });
+
   it('uses one verified confirmation for the exact request', async () => {
     const kernel = new MonarchKernel({
       permissionProfile: { sandboxMode: 'workspace-write', approvalPolicy: 'on-request' },
@@ -355,6 +426,12 @@ describe('Monarch Access and Monarch Security confirmation', () => {
         requestedBy: 'unit',
       });
       expect(result).toMatchObject({ ok: true, summary: 'Wrote smoke fixture.' });
+      expect(result.metadata).toMatchObject({
+        runtimeTelemetry: {
+          toolLatencyMs: expect.any(Number),
+          verificationLatencyMs: expect.any(Number),
+        },
+      });
     } finally {
       await kernel.stop();
     }

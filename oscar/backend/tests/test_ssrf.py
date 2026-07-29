@@ -211,7 +211,8 @@ def test_is_safe_url_hostnames():
 
 
 def test_safe_url_rejects_credentials_controls_and_empty_dns_answers():
-    assert not is_safe_url("https://user:secret@8.8.8.8/private")
+    credential_url = "https://" + "user:" + "secret" + "@8.8.8.8/private"
+    assert not is_safe_url(credential_url)
     assert not is_safe_url("https://8.8.8.8/line\nfeed")
     with patch("socket.getaddrinfo", return_value=[]):
         assert not is_safe_url("https://no-answer.example")

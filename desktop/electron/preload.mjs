@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 contextBridge.exposeInMainWorld('monarchDesktop', {
   getRuntimeUrl: () => ipcRenderer.invoke('monarch:get-runtime-url'),
+  getMutationAttestation: () => ipcRenderer.invoke('monarch:get-desktop-attestation'),
   getAppInfo: () => ipcRenderer.invoke('monarch:get-app-info'),
   copyText: (value) => ipcRenderer.invoke('monarch:copy-text', value),
   warmSpeechOutput: (value = {}) => ipcRenderer.invoke('monarch:speech-warmup', { retry: value?.retry === true }),

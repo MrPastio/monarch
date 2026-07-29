@@ -7,6 +7,7 @@ import {
   resolveAgentCapabilityMetadata,
 } from '../../src/core';
 import type { MonarchCapability, MonarchModuleManifest } from '../../src/core';
+import { deviceManifest } from '../../src/modules/device/manifest';
 import { workspaceManifest } from '../../src/modules/workspace/manifest';
 
 describe('Agent capability metadata', () => {
@@ -79,6 +80,35 @@ describe('Agent capability metadata', () => {
     ]));
   });
 
+  it('accepts a typed capability-owned runtime verification predicate', () => {
+    const resolved = resolveAgentCapabilityMetadata(capability({
+      risk: 'device-control',
+      agent: {
+        verification: [{
+          kind: 'runtime-status',
+          description: 'The launch receipt must report opened=true.',
+          required: true,
+          predicate: { kind: 'status', target: 'result.output.opened', value: true },
+        }],
+      },
+    }));
+
+    expect(resolved.verification).toContainEqual(expect.objectContaining({
+      kind: 'runtime-status',
+      required: true,
+      predicate: { kind: 'status', target: 'result.output.opened', value: true },
+    }));
+    expect(() => resolveAgentCapabilityMetadata(capability({
+      agent: {
+        verification: [{
+          kind: 'runtime-status',
+          description: 'Malformed predicate.',
+          predicate: { kind: 'status', target: 'result.output.opened' } as never,
+        }],
+      },
+    }))).toThrowError(/status predicates require/i);
+  });
+
   it.each([
     {
       name: 'write mutation',
@@ -87,14 +117,6 @@ describe('Agent capability metadata', () => {
         agent: { effectProfile: { mutation: 'none' } },
       }),
       match: /mutation cannot weaken/i,
-    },
-    {
-      name: 'delete reversibility',
-      capability: capability({
-        risk: 'delete',
-        agent: { reversibility: 'manual' },
-      }),
-      match: /reversibility cannot weaken/i,
     },
     {
       name: 'money financial impact',
@@ -106,6 +128,22 @@ describe('Agent capability metadata', () => {
     },
   ])('rejects explicit metadata that weakens the legacy $name floor', ({ capability: item, match }) => {
     expect(() => resolveAgentCapabilityMetadata(item)).toThrowError(match);
+  });
+
+  it('allows recoverable delete-class operations without weakening their permission class', () => {
+    const resolved = resolveAgentCapabilityMetadata(capability({
+      risk: 'delete',
+      agent: { reversibility: 'manual' },
+    }));
+
+    expect(resolved).toMatchObject({
+      reversibility: 'manual',
+      effectProfile: {
+        mutation: 'persistent',
+        reversibility: 'manual',
+        dataSensitivity: 'private',
+      },
+    });
   });
 
   it('rejects malformed and internally inconsistent explicit metadata at registry admission', () => {
@@ -126,7 +164,34 @@ describe('Agent capability metadata', () => {
     expect(() => registry.registerModule(moduleManifest(unknownKey))).toThrowError(/unexpected is not supported/i);
   });
 
-  it('migrates only the five first-slice workspace capabilities to explicit metadata', () => {
+  it('keeps destructive local actions off Voice, Telegram, and API surfaces', () => {
+    const destructive = [
+      ...workspaceManifest.capabilities.filter((entry) => [
+        'workspace.files.move',
+        'workspace.files.trash',
+        'workspace.files.delete',
+      ].includes(entry.id)),
+      ...deviceManifest.capabilities.filter((entry) => [
+        'device.recycle-bin.empty',
+        'device.browser.close-active',
+      ].includes(entry.id)),
+    ];
+
+    expect(destructive).toHaveLength(5);
+    for (const entry of destructive) {
+      expect(resolveAgentCapabilityMetadata(entry).supportedSources).toEqual([
+        'desktop',
+        'system',
+        'smoke',
+      ]);
+    }
+    const browserOpen = deviceManifest.capabilities.find((entry) => entry.id === 'device.browser.open');
+    expect(browserOpen).toBeDefined();
+    expect(resolveAgentCapabilityMetadata(browserOpen!).supportedSources).toContain('voice');
+    expect(resolveAgentCapabilityMetadata(browserOpen!).supportedSources).toContain('api');
+  });
+
+  it('migrates the complete local workspace capability slice to explicit metadata', () => {
     const explicitIds = workspaceManifest.capabilities
       .filter((entry) => entry.agent !== undefined)
       .map((entry) => entry.id);
@@ -137,6 +202,13 @@ describe('Agent capability metadata', () => {
       'workspace.files.list',
       'workspace.files.search',
       'workspace.files.write',
+      'workspace.files.append',
+      'workspace.files.mkdir',
+      'workspace.files.copy',
+      'workspace.files.move',
+      'workspace.files.replace',
+      'workspace.files.trash',
+      'workspace.files.delete',
     ]);
 
     for (const id of explicitIds) {
@@ -152,7 +224,13 @@ describe('Agent capability metadata', () => {
 
     const append = workspaceManifest.capabilities.find((entry) => entry.id === 'workspace.files.append');
     expect(append).toBeDefined();
-    expect(resolveAgentCapabilityMetadata(append!).source).toBe('legacy-default');
+    expect(resolveAgentCapabilityMetadata(append!).source).toBe('explicit');
+    const trash = workspaceManifest.capabilities.find((entry) => entry.id === 'workspace.files.trash');
+    expect(trash).toBeDefined();
+    expect(resolveAgentCapabilityMetadata(trash!).reversibility).toBe('manual');
+    const permanentDelete = workspaceManifest.capabilities.find((entry) => entry.id === 'workspace.files.delete');
+    expect(permanentDelete).toBeDefined();
+    expect(resolveAgentCapabilityMetadata(permanentDelete!).reversibility).toBe('irreversible');
   });
 
   it('generates a deterministic migration inventory with priority review reasons', () => {

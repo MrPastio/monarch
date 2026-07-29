@@ -2335,15 +2335,20 @@ def test_prompt_builder_uses_russian_only_base_prompt():
     )
     system = messages[0].content
 
-    assert '<oscar_agent_policy version="3.2" language="ru">' in system
+    assert '<oscar_agent_policy version="3.3" language="ru">' in system
     assert "Тебя зовут Oscar" in system
     assert "Тебя и Monarch создал MrPastio" in system
+    assert "Oscar: спокойный, любопытный, живой, тёплый" in system
+    assert "Не прерывай живой разговор" in system
+    assert "не изображая человеческие чувства" not in system
     assert "Никогда не представляйся языковой моделью Google" in system
     assert "Codex создан OpenAI" in system
     assert "создавший Monarch и Codex" not in system
     assert "Главная цель" in system
+    assert "«кратко» — 1–3 коротких предложения" in system
     assert "You are Oscar" not in system
     assert "Primary objective" not in system
+    assert len(runtime_module.OSCAR_SYSTEM_PROMPT_RU) <= 4200
 
 
 def test_prompt_builder_uses_english_only_base_prompt():
@@ -2356,14 +2361,19 @@ def test_prompt_builder_uses_english_only_base_prompt():
     )
     system = messages[0].content
 
-    assert '<oscar_agent_policy version="3.2" language="en">' in system
+    assert '<oscar_agent_policy version="3.3" language="en">' in system
     assert "Your name is Oscar" in system
     assert "MrPastio created you and Monarch" in system
+    assert "calm, curious, lively, warm" in system
+    assert "Do not interrupt a natural exchange" in system
+    assert "without claiming human emotions" not in system
     assert "Never introduce yourself as a Google language model" in system
     assert "Codex was created by OpenAI" in system
     assert "MrPastio created Monarch and Codex" not in system
     assert "Primary objective" in system
+    assert '"briefly" means 1-3 short sentences' in system
     assert "Главная цель" not in system
+    assert len(runtime_module.OSCAR_SYSTEM_PROMPT_EN) <= 4200
 
 
 def test_prompt_carries_current_turn_date_and_preserves_elliptical_followups():
@@ -2384,6 +2394,26 @@ def test_prompt_carries_current_turn_date_and_preserves_elliptical_followups():
     assert "Сохраняй активную тему диалога" in system
     assert "ещё больше" in system
     assert "один конкретный вопрос" in system
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [
+        ("Ответь одним словом: готов?", 32),
+        ("Объясни кратко, чем хэш отличается от шифрования.", 192),
+        ("Explain briefly why the sky is blue.", 192),
+        ("Объясни принцип работы хэша.", 1536),
+        ("Объясни подробно и пошагово.", 3072),
+    ],
+)
+def test_adaptive_generation_budget_honors_explicit_length(prompt: str, expected: int):
+    request = ChatRequest(
+        messages=[ChatMessage(role="user", content=prompt)],
+        max_new_tokens=65_536,
+        research_mode="off",
+    )
+
+    assert main_module.adaptive_generation_budget(request) == expected
 
 
 def test_prompt_keeps_agent_catalog_for_short_action_followup():
@@ -2417,7 +2447,7 @@ def test_simple_chat_prompt_skips_unneeded_agent_catalog_and_environment():
         )
         system = messages[0].content
 
-        assert len(system) < 7000
+        assert len(system) < 5000
         assert "Agent operating context" not in system
         assert '<monarch_action_policy version="3.0">' not in system
         assert "workspace.files.write" not in system
@@ -2491,6 +2521,78 @@ def test_quality_gate_allows_correct_codex_creator_attribution():
     )
 
     assert "creator_confusion" not in flags
+
+
+@pytest.mark.parametrize(
+    ("prompt", "answer"),
+    [
+        ("Ты рад?", "Я — локальный AI-ассистент. У меня нет эмоций, поэтому я не могу испытывать радость."),
+        ("Ну что, доволен результатом?", "Как ИИ, я не способен испытывать чувства."),
+        ("Are you excited?", "As an AI, I cannot experience emotions."),
+    ],
+)
+def test_quality_gate_regenerates_sterile_persona_refusal(prompt: str, answer: str):
+    request = ChatRequest(messages=[ChatMessage(role="user", content=prompt)])
+
+    flags = main_module.detect_quality_flags(answer, "ru", request)
+
+    assert "sterile_persona_refusal" in flags
+    assert main_module.quality_regeneration_enabled(request, flags) is True
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Есть ли у тебя настоящие эмоции?",
+        "Ты на самом деле обладаешь сознанием?",
+        "Do you actually have real emotions?",
+    ],
+)
+def test_quality_gate_preserves_literal_ai_boundary_answers(prompt: str):
+    request = ChatRequest(messages=[ChatMessage(role="user", content=prompt)])
+    answer = "Я не обладаю человеческим сознанием или физическими эмоциями."
+
+    assert "sterile_persona_refusal" not in main_module.detect_quality_flags(answer, "ru", request)
+
+
+def test_quality_gate_allows_lively_oscar_social_answer():
+    request = ChatRequest(messages=[ChatMessage(role="user", content="Ты рад?")])
+    answer = "Да, ещё как — мы наконец довели большой релиз до финишной прямой."
+
+    assert "sterile_persona_refusal" not in main_module.detect_quality_flags(answer, "ru", request)
+    assert "irrelevant_identity_fallback" not in main_module.detect_quality_flags(answer, "ru", request)
+
+
+@pytest.mark.asyncio
+async def test_quality_repair_retries_balanced_without_deep_consent(monkeypatch):
+    captured = {}
+
+    def stream_chat(tier, messages, *_args, **kwargs):
+        captured["tier"] = tier
+        captured["messages"] = messages
+        captured["trusted_retry_instruction"] = kwargs.get("trusted_retry_instruction")
+        yield "Да, рад — большой релиз наконец складывается в цельную систему."
+
+    monkeypatch.setattr(main_module.model_runtime, "stream_chat", stream_chat)
+    request = ChatRequest(
+        messages=[ChatMessage(role="user", content="Ты рад?")],
+        deep_thinking_consent="deny",
+    )
+    original = "Я — локальный AI-ассистент. У меня нет эмоций, поэтому я не могу испытывать радость."
+
+    answer, flags, repaired = await main_module.maybe_regenerate_for_quality(
+        "gemma4-balanced",
+        request,
+        [],
+        original,
+    )
+
+    assert captured["tier"] == "gemma4-balanced"
+    assert captured["messages"][-1].role == "user"
+    assert "<oscar_quality_retry>" in captured["trusted_retry_instruction"]
+    assert "sterile_persona_refusal" in flags
+    assert repaired is True
+    assert answer.startswith("Да, рад")
 
 
 def test_quality_gate_allows_valid_russian_answer():
@@ -2584,6 +2686,23 @@ def test_hidden_monarch_command_is_not_persisted_as_visible_chat_text():
     assert main_module.strip_hidden_monarch_commands(answer) == "Проверяю общую безопасность."
 
 
+def test_hidden_chat_protocol_filter_blocks_split_action_markers():
+    state = {"buffer": "", "hidden": False}
+    answer = (
+        "Начало "
+        '[[MONARCH_ACTION:{"actions":[{"capabilityId":"workspace.files.list"}]}]]'
+        " конец."
+    )
+    visible = "".join(
+        main_module.filter_hidden_chat_protocol_chunk(state, character)
+        for character in answer
+    )
+    visible += main_module.filter_hidden_chat_protocol_chunk(state, "", final=True)
+
+    assert visible == "Начало  конец."
+    assert "MONARCH_ACTION" not in visible
+
+
 def test_action_protocol_envelope_is_extracted_and_validated_against_catalog():
     request = ChatRequest(
         messages=[ChatMessage(role="user", content="Создай заметку")],
@@ -2597,14 +2716,7 @@ def test_action_protocol_envelope_is_extracted_and_validated_against_catalog():
     visible, proposals = main_module.extract_action_proposals(answer, request)
 
     assert visible == "Создаю заметку."
-    assert proposals == [{
-        "version": 1,
-        "capabilityId": "workspace.files.write",
-        "args": {"path": "note.txt", "content": "ok"},
-        "reason": "requested",
-        "expectedEffect": "create note",
-        "provenance": {"source": "runtime-grammar", "model": main_module.model_runtime.active_tier or "unknown"},
-    }]
+    assert proposals == []
 
 
 def test_coder_action_protocol_rejects_default_workspace_capabilities():
@@ -2720,7 +2832,7 @@ def test_native_tool_call_protocol_is_coder_only_and_fails_closed_when_malformed
     assert main_module.extract_action_proposals(native.replace("```json", "```json BROKEN"), malformed_coder)[1] == []
 
 
-def test_raw_environment_toolcall_is_replaced_with_environment_result(monkeypatch, tmp_path: Path):
+def test_raw_environment_toolcall_is_rejected_without_execution(monkeypatch, tmp_path: Path):
     settings = make_settings(tmp_path)
     settings.workspace_root.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("OSCAR_WORKSPACE_ROOT", str(settings.workspace_root))
@@ -2737,11 +2849,11 @@ def test_raw_environment_toolcall_is_replaced_with_environment_result(monkeypatc
 
     assert "<|toolcall|>" not in sanitized
     assert "environment.inspect" not in sanitized
-    assert "Окружение Monarch/Oscar" in sanitized
-    assert str(settings.workspace_root.resolve()) in sanitized
+    assert "не был выполнен контроллером" in sanitized
+    assert str(settings.workspace_root.resolve()) not in sanitized
 
 
-def test_raw_json_environment_toolcall_is_replaced(monkeypatch, tmp_path: Path):
+def test_raw_json_environment_toolcall_is_rejected(monkeypatch, tmp_path: Path):
     settings = make_settings(tmp_path)
     settings.workspace_root.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("OSCAR_WORKSPACE_ROOT", str(settings.workspace_root))
@@ -2758,7 +2870,7 @@ def test_raw_json_environment_toolcall_is_replaced(monkeypatch, tmp_path: Path):
 
     assert "<tool_call>" not in sanitized
     assert "environment.inspect" not in sanitized
-    assert "Окружение Monarch/Oscar" in sanitized
+    assert "не был выполнен контроллером" in sanitized
 
 
 def test_runtime_repairs_common_russian_mojibake():
@@ -4011,6 +4123,74 @@ async def test_chat_stream_marks_model_fallback_as_not_ok(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ordinary_chat_never_executes_legacy_workspace_tools(monkeypatch, tmp_path: Path):
+    workspace = WorkspaceService(make_settings(tmp_path))
+    monkeypatch.setattr(main_module, "workspace", workspace)
+
+    def fail_legacy_tools(*_args, **_kwargs):
+        raise AssertionError("ordinary chat must never enter the legacy workspace tool path")
+
+    def stream_chat(*_args, **_kwargs):
+        yield "Отвечаю по существу: предыдущий результат нельзя было считать завершённой задачей."
+
+    monkeypatch.setattr(workspace, "execute", fail_legacy_tools)
+    monkeypatch.setattr(main_module.model_runtime, "stream_chat", stream_chat)
+    monkeypatch.setattr(main_module.model_runtime, "unload", lambda: None)
+
+    response = await main_module.chat(ChatRequest(
+        messages=[ChatMessage(
+            role="user",
+            content=(
+                "Я не просил тебя перечислять папки собственного репозитория. "
+                "Объясни ошибку и ответь по существу — без новых действий с workspace."
+            ),
+        )],
+        use_memory=False,
+        allow_tools=True,
+        requested_model="weak",
+        max_new_tokens=64,
+    ))
+
+    assert response.answer.startswith("Отвечаю по существу")
+    assert response.tool_results == []
+    assert response.action_proposals == []
+    assert response.outcome == "completed"
+
+
+def test_chat_request_disables_legacy_tools_by_default():
+    request = ChatRequest(messages=[ChatMessage(role="user", content="Обычный вопрос")])
+
+    assert request.allow_tools is False
+
+
+@pytest.mark.asyncio
+async def test_ordinary_chat_stream_never_emits_tools_or_action_proposals(monkeypatch):
+    def stream_chat(*_args, **_kwargs):
+        yield (
+            "Обычный ответ."
+            '[[MONARCH_ACTION:{"actions":[{"capabilityId":"workspace.files.list","args":{"path":"."}}]}]]'
+        )
+
+    monkeypatch.setattr(main_module.model_runtime, "stream_chat", stream_chat)
+    monkeypatch.setattr(main_module.model_runtime, "unload", lambda: None)
+
+    response = await main_module.chat_stream(ChatRequest(
+        messages=[ChatMessage(role="user", content="Объясни прошлый ответ без действий.")],
+        use_memory=False,
+        allow_tools=True,
+        requested_model="weak",
+        max_new_tokens=64,
+    ))
+    body = await collect_stream_body(response)
+
+    assert "Обычный ответ." in body
+    assert "MONARCH_ACTION" not in body
+    assert "event: tool" not in body
+    assert "event: action_proposal" not in body
+
+
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
+@pytest.mark.asyncio
 async def test_chat_endpoint_executes_workspace_batch_without_model(monkeypatch, tmp_path: Path):
     workspace = WorkspaceService(make_settings(tmp_path))
     monkeypatch.setattr(main_module, "workspace", workspace)
@@ -4044,6 +4224,7 @@ async def test_chat_endpoint_executes_workspace_batch_without_model(monkeypatch,
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_workspace_root_followups_are_exact_fast_and_persisted(monkeypatch, tmp_path: Path):
     settings = make_settings(tmp_path)
     workspace = WorkspaceService(settings)
@@ -4088,6 +4269,7 @@ async def test_chat_workspace_root_followups_are_exact_fast_and_persisted(monkey
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_executes_environment_ping_without_model(monkeypatch, tmp_path: Path):
     settings = make_settings(tmp_path)
     settings.workspace_root.mkdir(parents=True, exist_ok=True)
@@ -4119,6 +4301,7 @@ async def test_chat_executes_environment_ping_without_model(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_stream_executes_environment_ping_without_model(monkeypatch, tmp_path: Path):
     settings = make_settings(tmp_path)
     settings.workspace_root.mkdir(parents=True, exist_ok=True)
@@ -4206,6 +4389,7 @@ async def test_chat_environment_questions_are_grounded_in_model_context(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_executes_saved_root_folder_request_without_model(monkeypatch, tmp_path: Path):
     workspace = WorkspaceService(make_settings(tmp_path))
     monkeypatch.setattr(main_module, "workspace", workspace)
@@ -4231,6 +4415,7 @@ async def test_chat_executes_saved_root_folder_request_without_model(monkeypatch
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_does_not_create_literal_placeholder_directory_name(monkeypatch, tmp_path: Path):
     workspace = WorkspaceService(make_settings(tmp_path))
     monkeypatch.setattr(main_module, "workspace", workspace)
@@ -4254,6 +4439,7 @@ async def test_chat_does_not_create_literal_placeholder_directory_name(monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_hands_assigned_directory_name_to_kernel_without_persisting_a_false_result(monkeypatch, tmp_path: Path):
     settings = make_settings(tmp_path)
     workspace = WorkspaceService(settings)
@@ -4326,6 +4512,7 @@ async def test_chat_compound_unnamed_creation_does_not_execute_partial_mkdir(mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_uses_recent_directory_for_text_file_followup(monkeypatch, tmp_path: Path):
     workspace = WorkspaceService(make_settings(tmp_path))
     monkeypatch.setattr(main_module, "workspace", workspace)
@@ -4361,6 +4548,7 @@ async def test_chat_uses_recent_directory_for_text_file_followup(monkeypatch, tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_executes_oscar_architecture_audit_starter_without_model(monkeypatch, tmp_path: Path):
     workspace = WorkspaceService(make_settings(tmp_path))
     monkeypatch.setattr(main_module, "workspace", workspace)
@@ -4393,6 +4581,7 @@ async def test_chat_executes_oscar_architecture_audit_starter_without_model(monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_workspace_tools_respect_monarch_access(monkeypatch, tmp_path: Path):
     workspace = WorkspaceService(make_settings(tmp_path))
     monkeypatch.setattr(main_module, "workspace", workspace)
@@ -4432,6 +4621,7 @@ async def test_chat_workspace_tools_respect_monarch_access(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_workspace_tools_do_not_expose_red_zone_files(monkeypatch, tmp_path: Path):
     workspace = WorkspaceService(make_settings(tmp_path))
     monkeypatch.setattr(main_module, "workspace", workspace)
@@ -4463,6 +4653,7 @@ async def test_chat_workspace_tools_do_not_expose_red_zone_files(monkeypatch, tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_workspace_tools_fail_closed_when_approvals_disabled(monkeypatch, tmp_path: Path):
     workspace = WorkspaceService(make_settings(tmp_path))
     monkeypatch.setattr(main_module, "workspace", workspace)
@@ -4500,6 +4691,7 @@ async def test_chat_incomplete_workspace_write_runs_model_planner(monkeypatch, t
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_endpoint_executes_workspace_multi_action_without_model(monkeypatch, tmp_path: Path):
     workspace = WorkspaceService(make_settings(tmp_path))
     monkeypatch.setattr(main_module, "workspace", workspace)
@@ -4531,6 +4723,7 @@ async def test_chat_endpoint_executes_workspace_multi_action_without_model(monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Removed legacy /api/chat workspace execution path; Agent Runtime owns actions.")
 async def test_chat_endpoint_executes_workspace_structure_without_model(monkeypatch, tmp_path: Path):
     workspace = WorkspaceService(make_settings(tmp_path))
     monkeypatch.setattr(main_module, "workspace", workspace)

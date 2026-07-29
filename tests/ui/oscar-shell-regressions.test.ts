@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 const oscarSource = readFileSync('src/ui/public/modules/oscar-pane.js', 'utf8');
 const utilsSource = readFileSync('src/ui/public/modules/utils.js', 'utf8');
+const apiSource = readFileSync('src/ui/public/modules/api.js', 'utf8');
 const styles = readFileSync('src/ui/public/styles-v2.css', 'utf8');
 const appSource = readFileSync('src/ui/public/app.js', 'utf8');
 const indexSource = readFileSync('src/ui/public/index.html', 'utf8');
@@ -11,6 +12,49 @@ const coderSource = readFileSync('src/ui/public/modules/coder-pane.js', 'utf8');
 const coderStyles = readFileSync('src/ui/public/coder.css', 'utf8');
 
 describe('Oscar live shell regressions', () => {
+  it('uses Agent Task only after the server classifies a verified system effect', () => {
+    expect(apiSource).toContain("export async function createAgentTask");
+    expect(apiSource).toContain("export async function streamAgentTask");
+    expect(apiSource).toContain("export function sendAgentTaskMessage");
+    expect(apiSource).toContain("export async function fetchOscarRequestDisposition");
+    expect(oscarSource).toContain('await shouldUseOscarAgentRuntime(text, attachments)');
+    expect(oscarSource).toContain("return disposition?.mode === 'agent'");
+    expect(oscarSource).toContain('Older/degraded runtimes must fall back to chat');
+    expect(oscarSource).toContain("kind: 'state-change'");
+    expect(oscarSource).toContain('await handleOscarAgentTask(');
+    expect(oscarSource).not.toContain('shouldPreDispatchAgentAction(dispatchedText)');
+    expect(oscarSource).not.toContain('await handleDispatchedAction(dispatchedText');
+    expect(oscarSource).toContain("case 'approval.required'");
+    expect(oscarSource).toContain("case 'observation.created'");
+    expect(oscarSource).toContain("case 'task.completed'");
+    expect(oscarSource).toContain('formatAgentTaskFailure(payload.summary, payload.code)');
+    expect(oscarSource).toContain('activeOscarAgentTaskStreamController');
+    expect(oscarSource).toContain('streamController?.abort()');
+    expect(oscarSource).toContain('Задача остановлена. Новые действия и повторные шаги не будут запущены.');
+    expect(oscarSource).not.toContain('Cancellation settled after the active stage.');
+    expect(utilsSource).toContain('agent-decision-model-unavailable');
+    expect(oscarSource).toContain('await sendAgentTaskMessage(continuation.taskId, text)');
+    expect(oscarSource).toContain("payload.to === 'waiting-for-user'");
+    expect(oscarSource).toContain('state.oscar.incognito === true');
+    expect(oscarSource).toContain('const continueAgentTask = state.oscar.incognito !== true');
+    expect(oscarSource).toMatch(/toggleOscarIncognitoConversation\(\)[\s\S]{0,180}waitingOscarAgentTask = null;/);
+    expect(utilsSource).toContain('data-agent-approval-id');
+    expect(styles).toContain('.claude-secondary-btn');
+  });
+
+  it('renders durable Agent Tasks in the glass missions panel with lifecycle controls', () => {
+    expect(indexSource).toContain('id="oscar-missions-panel"');
+    expect(apiSource).toContain('export function listAgentTasks');
+    expect(apiSource).toContain('export function pauseAgentTask');
+    expect(apiSource).toContain('export function resumeAgentTask');
+    expect(apiSource).toContain('export function repeatAgentTask');
+    expect(oscarSource).toContain("missionActionButton(task.id, 'repeat', 'Повторить')");
+    expect(oscarSource).toContain('canonicalProposalHash: approval.canonicalProposalHash');
+    expect(oscarSource).toContain('Подтвердить точное действие');
+    expect(styles).toContain('.oscar-missions-panel');
+    expect(styles).toContain('backdrop-filter: blur(26px)');
+  });
+
   it('keeps the history drawer anchored to the trigger that opened it', () => {
     expect(styles).toMatch(/\.sidebar-history\[data-anchor="topbar"\]\s*\{[^}]*right:\s*18px;[^}]*left:\s*auto;/s);
     expect(styles).toMatch(/\.sidebar-history\[data-anchor="sidebar"\]\s*\{[^}]*right:\s*auto;[^}]*left:\s*calc\(var\(--sidebar\) \+ 18px\);/s);
@@ -225,8 +269,8 @@ describe('Oscar live shell regressions', () => {
     expect(indexSource).toContain('id="coder-mobile-project"');
     expect(indexSource).toContain('id="coder-mobile-result"');
     expect(indexSource).toContain('id="coder-run-summary"');
-    expect(coderStyles).toContain('.coder-explorer.is-mobile-open');
-    expect(coderStyles).toContain('.coder-context-panel.is-mobile-open');
+    expect(coderStyles).toContain('.coder-explorer.is-drawer-open');
+    expect(coderStyles).toContain('.coder-context-panel.is-drawer-open');
     expect(coderStyles).toContain('.app-shell.coder-workspace-active #inspector');
   });
 
@@ -248,19 +292,21 @@ describe('Oscar live shell regressions', () => {
     expect(coderStyles).toContain('.coder-history-item[data-active="true"]');
   });
 
-  it('keeps the empty Code composer in its own grid row when the run summary is hidden', () => {
-    expect(coderStyles).toContain("'summary'");
-    expect(coderStyles).toContain("'activity'");
-    expect(coderStyles).toContain("'composer'");
-    expect(coderStyles).toContain('.coder-run-summary { grid-area: summary;');
-    expect(coderStyles).toContain('.coder-activity { grid-area: activity;');
-    expect(coderStyles).toContain('.coder-composer { grid-area: composer;');
+  it('keeps the empty Code composer in a stable task-first stage when the run summary is hidden', () => {
+    expect(coderStyles).toMatch(/\.coder-agent-stage\s*\{[^}]*grid-template-rows:\s*auto auto auto auto minmax\(92px,\s*1fr\) auto;/s);
+    expect(indexSource).toContain('id="coder-progress"');
+    expect(coderSource).toContain('renderRunProgress(run)');
+    expect(coderStyles).toContain('.coder-run-summary[hidden] { display: none; }');
+    expect(coderStyles).toContain('.coder-composer[hidden] { display: none; }');
+    expect(coderSource).toContain('renderComposerVisibility(run)');
   });
 
-  it('keeps lifecycle and model progress visible in the primary Code journal', () => {
-    expect(coderSource).toContain("event?.kind === 'status'");
-    expect(coderSource).toContain("event?.kind === 'model'");
-    expect(coderSource).toContain("presentation.tone === 'progress'");
+  it('keeps failures, model switches and terminal lifecycle visible without flooding the primary Code journal', () => {
+    expect(coderSource).toContain("event?.kind === 'assistant'");
+    expect(coderSource).toContain("presentation.tone === 'failure'");
+    expect(coderSource).toContain("presentation.tone === 'switching'");
+    expect(coderSource).toContain("/^Task\\s+(completed|failed|cancelled|interrupted)$/i");
+    expect(coderSource).toContain("!['coder.files.read', 'coder.files.list'].includes(capability)");
   });
 
   it('locks repeated stop requests while active Coder inference is being cancelled', () => {
@@ -278,9 +324,13 @@ describe('Oscar live shell regressions', () => {
     expect(oscarSource).toContain('Совпадений нет');
   });
 
-  it('never merges proposal narration into the verified action receipt', () => {
-    expect(oscarSource).toContain('executionNeedsAuthoritativeReceipt(execution)');
-    expect(oscarSource).toContain('const receipt = completedSteps.length === 1');
+  it('renders effectful success only from the Agent Task terminal receipt', () => {
+    expect(oscarSource).toContain("case 'task.completed':");
+    expect(oscarSource).toContain("const content = String(payload.summary || '').trim()");
+    expect(oscarSource).toContain('queueDispatchedConversationPersistence(text, content, true)');
+    expect(oscarSource).toContain('Чат вернул action proposal, но effectful UI-путь отключён.');
+    expect(oscarSource).not.toContain('function handleTypedActionPlan(');
+    expect(oscarSource).not.toContain('function confirmDispatchedAction(');
     expect(oscarSource).not.toContain("options.visibleAnswer || ''");
     expect(oscarSource).not.toContain('visibleAnswer: activation.content');
     expect(oscarSource).not.toContain('visibleAnswer: fallbackParser.getContent(true)');

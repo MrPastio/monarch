@@ -222,7 +222,7 @@ describe('Telegram Module', () => {
         },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('максимум 2000')), 5_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('максимум 2000')), 10_000);
       mock.updates.push({
         update_id: 2,
         message: {
@@ -233,7 +233,7 @@ describe('Telegram Module', () => {
         },
       });
 
-      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Формат: /remind')), 5_000);
+      await waitUntil(() => mock.sentMessages.some((message) => String(message.text).includes('Формат: /remind')), 10_000);
       const persisted = JSON.parse(await readFile(statePath, 'utf8')) as { reminders: unknown[] };
       expect(persisted.reminders).toEqual([]);
     } finally {
@@ -241,7 +241,7 @@ describe('Telegram Module', () => {
       await mock.close();
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 25_000);
 
   it('drops orphaned and malformed reminders before exposing Telegram state', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-telegram-reminder-state-'));

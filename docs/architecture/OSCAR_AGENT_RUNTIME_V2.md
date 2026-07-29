@@ -27,7 +27,7 @@ The first slice adds the shared backend runtime and versioned task API behind `M
 
 ## 2. Verified current state
 
-Live `npm run status` on 2026-07-22 reported 21/21 active modules, 202 capabilities and 6/6 model groups. `app.version` still reports the known stale `0.1.0`; package version is `0.2.3.1`.
+Live `npm run status` on 2026-07-22 reported 21/21 active modules, 202 capabilities and 6/6 model groups. That snapshot still exposed the stale core API value as `app.version`; 0.2.4.0 resolves product identity from the checked-in source `package.json` and reports `0.0.0` instead of inventing a version when the manifest is missing or invalid.
 
 ### Desktop main chat
 

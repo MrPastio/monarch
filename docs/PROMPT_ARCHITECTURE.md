@@ -24,14 +24,17 @@
 8. Voice policies stay short enough for small local models and never imply memory, web, tools or device control where those lanes lack them.
 9. Coder is a closed project-scoped prompt lane: general Oscar profile, memory, live Monarch registry, global skills, and synthetic receipt-language inference cannot enter it.
 10. A base model or provider is an internal inference implementation, never Oscar's product identity. Identity and capability questions must describe Oscar and only the live Monarch capabilities supplied to that turn.
+11. Oscar keeps one recognizable warm, lively voice across chat and Voice. Casual social questions get a direct conversational answer; literal consciousness/body questions keep an honest boundary without turning every exchange into an AI disclaimer.
 
 ## Current budgets and measured effect
 
-- Oscar RU base v3.2: `4478` characters.
-- Oscar EN base v3.2: `4388` characters.
-- Minimal Russian chat system context with current turn metadata: about `5065` characters.
-- Voice Fast: `786 -> 513` characters.
-- Voice Realtime: `812 -> 520` characters.
+- Oscar RU base v3.3: `4002` characters.
+- Oscar EN base v3.3: `4034` characters.
+- Minimal Russian chat system context with current turn metadata: `4609` characters.
+- Direct-model RU policy v3.2: `1750` characters.
+- Direct-model EN policy v3.2: `1685` characters.
+- Voice Fast: `591` characters.
+- Voice Realtime: `550` characters.
 - Capability transport: at most 48 ranked entries, eight candidate schemas, valid JSON capped near 12,000 characters; schemas/entries are removed as complete objects rather than truncating JSON text.
 - Local user context: at most 12 permanent memories with smaller per-field bounds.
 

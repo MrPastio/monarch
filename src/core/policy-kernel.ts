@@ -23,8 +23,11 @@ const SAFE_WORKSPACE_MUTATIONS = new Set([
 
 const SAFE_FULL_LOCAL_DEVICE_ACTIONS = new Set([
   'device.app.open',
+  'device.browser.open',
   'device.volume.get',
   'device.volume.set',
+  'device.brightness.get',
+  'device.brightness.set',
   'device.media.control',
 ]);
 
@@ -52,6 +55,12 @@ export class MonarchPolicyKernel {
     private readonly permissions: MonarchPermissionGate,
     readonly leases: MonarchCapabilityLeaseStore,
   ) {}
+
+  getEffectivePermissionProfile(request: MonarchExecutionRequest): MonarchPermissionProfile {
+    return request.permissionProfileOverride
+      ? new MonarchPermissionGate(request.permissionProfileOverride).getProfile()
+      : this.permissions.getProfile();
+  }
 
   preflight(
     request: MonarchExecutionRequest,
@@ -201,7 +210,7 @@ export class MonarchPolicyKernel {
     const scopedPermissions = request.permissionProfileOverride
       ? new MonarchPermissionGate(request.permissionProfileOverride)
       : this.permissions;
-    const profile = scopedPermissions.getProfile();
+    const profile = this.getEffectivePermissionProfile(request);
     const permission = isAutonomyFastPath(request, effectiveCapability, riskVector, profile)
       ? {
         mode: 'allow' as const,
@@ -318,6 +327,11 @@ function isAutonomyFastPath(
     && riskVector.externality === 'local'
     && riskVector.privilege === 'user'
     && riskVector.data !== 'secret') return true;
+  if ((autonomyMode === 'workspace-autonomous' || autonomyMode === 'full-local')
+    && request.executionMode === 'agent-runtime'
+    && capability.id === 'device.app.open'
+    && riskVector.reversibility !== 'irreversible'
+    && riskVector.externality === 'local') return true;
   return autonomyMode === 'full-local'
     && SAFE_FULL_LOCAL_DEVICE_ACTIONS.has(capability.id)
     && riskVector.reversibility !== 'irreversible'
@@ -340,6 +354,11 @@ function shouldRequestSecurityReview(
     && riskVector.externality === 'local'
     && riskVector.privilege === 'user'
     && riskVector.data !== 'secret') return false;
+  if ((autonomyMode === 'workspace-autonomous' || autonomyMode === 'full-local')
+    && request.executionMode === 'agent-runtime'
+    && capability.id === 'device.app.open'
+    && riskVector.reversibility !== 'irreversible'
+    && riskVector.externality === 'local') return false;
   if (autonomyMode === 'full-local'
     && SAFE_FULL_LOCAL_DEVICE_ACTIONS.has(capability.id)
     && riskVector.reversibility !== 'irreversible'
@@ -430,10 +449,25 @@ function riskier<T extends string>(left: T, right: T, order: readonly T[]): T {
 function hasCompatibleModelActionIntent(userText: string, capabilityId: string): boolean {
   const text = userText.trim();
   if (!text) return false;
+  if (capabilityId === 'workspace.files.delete' || capabilityId === 'workspace.files.trash') {
+    return /(?:\b(?:delete|remove|trash)\b|удал|сотр|убер|корзин)/i.test(text);
+  }
+  if (capabilityId === 'device.app.open' || capabilityId === 'device.browser.open') {
+    return /(?:\b(?:open|launch|start|browse)\b|открой|открыть|запуст|перейд|зайди|покажи)/i.test(text);
+  }
+  if (capabilityId === 'device.volume.set') {
+    return /(?:\b(?:set|change|raise|lower|mute|unmute)\b|постав|установ|измен|прибав|убав|выключ|включ).{0,80}(?:volume|sound|громк|звук)/i.test(text);
+  }
+  if (capabilityId === 'device.brightness.set') {
+    return /(?:\b(?:set|change|raise|lower)\b|постав|установ|измен|прибав|убав).{0,80}(?:brightness|яркост)/i.test(text);
+  }
+  if (capabilityId === 'device.browser.close-active') {
+    return /(?:\b(?:close|quit|exit)\b|закрой|закрыть|выключ).{0,80}(?:browser|браузер)/i.test(text);
+  }
+  if (capabilityId === 'device.recycle-bin.empty') {
+    return /(?:\b(?:empty|clear)\b|очист|опустош).{0,80}(?:recycle|корзин)/i.test(text);
+  }
   const mutationIntent = /(?:\b(?:add|append|apply|build|change|copy|create|edit|fix|implement|make|modify|move|rename|replace|save|scaffold|update|write)\b|добав|допиш|запиш|замен|измен|исправ|обнов|реализ|созд|сдела|собер|скопир|перемест|переимен|сохран)/i;
   if (!mutationIntent.test(text)) return false;
-  if (capabilityId === 'workspace.files.delete') {
-    return /(?:\b(?:delete|remove)\b|удал|сотр|убер)/i.test(text);
-  }
   return true;
 }

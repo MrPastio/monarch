@@ -7,6 +7,7 @@ import {
   fetchCoderRun,
   fetchCoderRuns,
   mutateCoderProject,
+  resumeCoderRun,
   startCoderRun,
   submitCoderFastChat,
 } from './api.js';
@@ -48,10 +49,12 @@ const coderState = {
 };
 
 const elements = {};
+const CODER_FOCUS_EVENT_LIMIT = 6;
 
 const CODER_RUN_STATUS_LABELS = Object.freeze({
   queued: 'В очереди',
   running: 'В работе',
+  interrupted: 'Прервано перезапуском',
   completed: 'Готово',
   failed: 'Нужна проверка',
   cancelled: 'Остановлено',
@@ -95,6 +98,7 @@ export async function loadCoderOverview() {
     renderInlineError(error instanceof Error ? error.message : String(error));
   } finally {
     setWorkspaceBusy(false);
+    closeCoderActionMenu(elements.projectSelect);
   }
 }
 
@@ -109,7 +113,7 @@ function collectElements() {
     dialogCancel: '#coder-project-dialog-cancel', refresh: '#coder-refresh', git: '#coder-git-summary', tree: '#coder-file-tree',
     fileSearch: '#coder-file-search', explorer: '#coder-explorer', explorerClose: '#coder-explorer-close',
     runTitle: '#coder-run-title', runProjectRoot: '#coder-run-project-root', runStatus: '#coder-run-status', activity: '#coder-activity', composer: '#coder-composer',
-    historyOpen: '#coder-history-open', historyCount: '#coder-history-count', sessionNew: '#coder-session-new', runSummary: '#coder-run-summary',
+    historyOpen: '#coder-history-open', historyCount: '#coder-history-count', runSummary: '#coder-run-summary',
     runSummaryKicker: '#coder-run-summary-kicker', runSummaryTitle: '#coder-run-summary-title', runSummaryDetail: '#coder-run-summary-detail',
     runRetry: '#coder-run-retry', eventCount: '#coder-event-count', suggestions: '#coder-suggestions', composerContext: '#coder-composer-context',
     input: '#coder-input', submit: '#coder-run-submit', cancel: '#coder-run-cancel', contextPercent: '#coder-context-percent',
@@ -117,7 +121,8 @@ function collectElements() {
     contextEvents: '#coder-context-events', contextModelTokens: '#coder-context-model-tokens', contextFiles: '#coder-context-files', contextTests: '#coder-context-tests',
     contextPending: '#coder-context-pending', contextPanel: '#coder-context-panel', contextClose: '#coder-context-close',
     preview: '#coder-file-preview', previewShell: '#coder-file-preview-shell', previewTitle: '#coder-file-preview-title', previewClose: '#coder-file-preview-close',
-    mobileProject: '#coder-mobile-project', mobileHistory: '#coder-mobile-history', mobileResult: '#coder-mobile-result', panelBackdrop: '#coder-panel-backdrop',
+    workspaceFocus: '#coder-workspace-focus', mobileProject: '#coder-mobile-project', mobileResult: '#coder-mobile-result', panelBackdrop: '#coder-panel-backdrop',
+    progressBrief: '#coder-progress-brief', progressWork: '#coder-progress-work', progressVerify: '#coder-progress-verify',
     historyDrawer: '#coder-history-drawer', historyBackdrop: '#coder-history-backdrop', historyClose: '#coder-history-close',
     historySearch: '#coder-history-search', historyProject: '#coder-history-project', historySummary: '#coder-history-summary',
     historyError: '#coder-history-error', historyList: '#coder-history-list',
@@ -136,11 +141,17 @@ function collectElements() {
 function bindEvents() {
   elements.chatTab?.addEventListener('click', () => setCoderMode('chat'));
   elements.coderTab?.addEventListener('click', () => setCoderMode('coder'));
-  elements.projectNew?.addEventListener('click', openProjectDialog);
+  elements.projectNew?.addEventListener('click', (event) => {
+    closeCoderActionMenu(event.currentTarget);
+    openProjectDialog();
+  });
   elements.onboardingCreate?.addEventListener('click', openProjectDialog);
   elements.dialogCancel?.addEventListener('click', () => elements.projectDialog?.close());
   elements.projectForm?.addEventListener('submit', handleCreateProject);
-  elements.projectImport?.addEventListener('click', handleImportProject);
+  elements.projectImport?.addEventListener('click', (event) => {
+    closeCoderActionMenu(event.currentTarget);
+    void handleImportProject();
+  });
   elements.onboardingImport?.addEventListener('click', handleImportProject);
   elements.projectSelect?.addEventListener('change', handleActivateProject);
   elements.refresh?.addEventListener('click', refreshActiveProject);
@@ -151,16 +162,15 @@ function bindEvents() {
   elements.tree?.addEventListener('click', handleFileClick);
   elements.fileSearch?.addEventListener('input', handleFileSearch);
   elements.historyOpen?.addEventListener('click', openCoderHistory);
-  elements.mobileHistory?.addEventListener('click', openCoderHistory);
   elements.historyClose?.addEventListener('click', closeCoderHistory);
   elements.historyBackdrop?.addEventListener('click', closeCoderHistory);
   elements.historySearch?.addEventListener('input', handleHistorySearch);
   elements.historyProject?.addEventListener('change', handleHistoryProjectFilter);
   elements.historyList?.addEventListener('click', handleHistoryAction);
   for (const button of elements.historyStatusButtons || []) button.addEventListener('click', handleHistoryStatusFilter);
-  elements.sessionNew?.addEventListener('click', startFreshTask);
   elements.runRetry?.addEventListener('click', retryCurrentRun);
   elements.previewClose?.addEventListener('click', closeFilePreview);
+  elements.workspaceFocus?.addEventListener('click', closeMobilePanels);
   elements.mobileProject?.addEventListener('click', () => toggleMobilePanel('project'));
   elements.mobileResult?.addEventListener('click', () => toggleMobilePanel('result'));
   elements.explorerClose?.addEventListener('click', closeMobilePanels);
@@ -170,10 +180,14 @@ function bindEvents() {
   for (const button of elements.eventFilterButtons || []) button.addEventListener('click', handleEventFilter);
   for (const button of elements.templateButtons || []) button.addEventListener('click', applyTaskTemplate);
   for (const button of elements.modelButtons || []) button.addEventListener('click', handleModelChange);
-  elements.fastOpen?.addEventListener('click', () => toggleFastDrawer(true));
+  elements.fastOpen?.addEventListener('click', (event) => {
+    closeCoderActionMenu(event.currentTarget);
+    toggleFastDrawer(true);
+  });
   elements.fastClose?.addEventListener('click', () => toggleFastDrawer(false));
   elements.fastForm?.addEventListener('submit', handleFastChat);
   elements.safeEncrypt?.addEventListener('click', () => {
+    closeCoderActionMenu(elements.safeEncrypt);
     if (coderState.runEncrypted) void lockCoderSafeChats();
     else void encryptCurrentCoderRun();
   });
@@ -349,7 +363,7 @@ function startPolling(runId) {
       mergeRunIntoOverview(payload.run);
       renderRun();
       renderRunHistory();
-      if (['completed', 'failed', 'cancelled'].includes(payload.run.status)) {
+      if (['completed', 'failed', 'cancelled', 'interrupted'].includes(payload.run.status)) {
         stopPolling();
         await refreshActiveProject();
         return;
@@ -382,6 +396,7 @@ function handleModelChange(event) {
   if (!model) return;
   coderState.model = model;
   renderModelSelection();
+  closeCoderActionMenu(event.currentTarget);
 }
 
 async function handleFileClick(event) {
@@ -400,7 +415,7 @@ async function handleFileClick(event) {
   if (elements.previewTitle) elements.previewTitle.textContent = requestedPath;
   elements.preview.textContent = `Читаю ${requestedPath}…`;
   renderFileTree(coderState.snapshot?.entries || []);
-  if (window.matchMedia('(max-width: 980px)').matches) toggleMobilePanel('result');
+  openWorkspaceDrawer('result');
   try {
     const payload = await executeCapability('coder', 'coder.files.read', { projectId, path: requestedPath, maxBytes: 262144 }, 'coder-ui', false, '', { includeState: false });
     if (!payload.result?.ok) throw new Error(payload.result?.summary || 'Файл не прочитан');
@@ -653,22 +668,24 @@ function renderFileTree(entries) {
 function renderRun() {
   const run = coderState.run;
   renderSafeRunButton(run);
+  renderRunProgress(run);
   if (!run) {
-    elements.runTitle.textContent = 'Готов к задаче';
+    elements.runTitle.textContent = 'Что нужно получить?';
     renderRunProjectRoot('');
     elements.runStatus.textContent = 'Готов';
     elements.runStatus.dataset.status = 'idle';
     setRunBusy(false);
     renderRunSummary(null);
     renderContext(null);
+    renderComposerVisibility(null);
     if (elements.eventCount) elements.eventCount.textContent = '';
     if (elements.activity) {
       const empty = document.createElement('div');
       empty.className = 'coder-empty-activity';
       const title = document.createElement('strong');
-      title.textContent = 'Опиши результат';
+      title.textContent = 'Сформулируй конечный результат';
       const detail = document.createElement('span');
-      detail.textContent = 'Coder сам изучит файлы, выполнит действия и сохранит проверенный контекст.';
+      detail.textContent = 'Coder изучит выбранный проект, выполнит изменения и покажет только подтверждённый итог.';
       empty.append(title, detail);
       elements.activity.replaceChildren(empty);
       coderState.lastEventSignature = '';
@@ -684,13 +701,38 @@ function renderRun() {
   renderRunSummary(run);
   renderEvents(run.events || [], run.model);
   renderContext(run);
+  renderComposerVisibility(run);
   renderComposerContext();
+}
+
+function renderRunProgress(run) {
+  const progress = [elements.progressBrief, elements.progressWork, elements.progressVerify];
+  if (progress.some((element) => !element)) return;
+  const events = Array.isArray(run?.events) ? run.events : [];
+  const hasVerifiedWork = events.some((event) => event?.kind === 'tool-result' && event?.ok === true);
+  const hasVerification = Array.isArray(run?.summary?.tests) && run.summary.tests.length > 0;
+  const completed = run?.status === 'completed';
+  const stopped = Boolean(run && ['failed', 'cancelled', 'interrupted'].includes(run.status));
+
+  const states = !run
+    ? ['current', 'idle', 'idle']
+    : completed
+      ? ['done', 'done', 'done']
+      : hasVerification
+        ? ['done', 'done', stopped ? 'warning' : 'current']
+        : hasVerifiedWork
+          ? ['done', stopped ? 'warning' : 'done', stopped ? 'idle' : 'current']
+          : ['done', stopped ? 'warning' : 'current', 'idle'];
+  progress.forEach((element, index) => {
+    element.dataset.state = states[index];
+    element.setAttribute('aria-current', states[index] === 'current' ? 'step' : 'false');
+  });
 }
 
 function renderRunSummary(run) {
   if (!elements.runSummary) return;
   const disconnected = isRunActive(run) && coderState.pollDisconnected;
-  const terminal = run && ['completed', 'failed', 'cancelled'].includes(run.status);
+  const terminal = run && ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status);
   const warningCount = run?.status === 'completed' && Array.isArray(run?.summary?.failures)
     ? run.summary.failures.filter(Boolean).length
     : 0;
@@ -720,16 +762,21 @@ function renderRunSummary(run) {
     const outcome = terminalAnswerPreview(run);
     elements.runSummaryDetail.textContent = warningCount > 0
       ? `${warningCount} ${warningCount === 1 ? 'предупреждение осталось' : 'предупреждения осталось'} в журнале.${outcome ? ` ${outcome}` : ''}`
-      : outcome || 'Проверь изменённые файлы и выполненные проверки справа.';
-    elements.runRetry.textContent = 'Продолжить новой задачей';
+      : outcome || 'Проверенный результат доступен в разделе «Контекст».';
+    elements.runRetry.textContent = 'Новая задача';
   } else if (run.status === 'failed') {
     elements.runSummaryTitle.textContent = 'Не удалось завершить задачу';
     elements.runSummaryDetail.textContent = lastFailureDetail(run.events) || 'Открой основные события ниже, чтобы увидеть причину.';
-    elements.runRetry.textContent = 'Повторить задачу';
+    elements.runRetry.textContent = 'Изменить задачу';
+  } else if (run.status === 'interrupted') {
+    elements.runSummaryKicker.textContent = 'СЕССИЯ ПРЕРВАНА';
+    elements.runSummaryTitle.textContent = 'Можно продолжить с checkpoint';
+    elements.runSummaryDetail.textContent = 'Проверенные receipts сохранены. Действие без достоверного receipt автоматически не повторится.';
+    elements.runRetry.textContent = 'Продолжить с checkpoint';
   } else {
     elements.runSummaryTitle.textContent = 'Работа остановлена';
     elements.runSummaryDetail.textContent = 'Контекст и журнал сохранены. Можно начать новую задачу.';
-    elements.runRetry.textContent = 'Продолжить новой задачей';
+    elements.runRetry.textContent = 'Новая задача';
   }
   elements.runRetry.hidden = false;
 }
@@ -757,7 +804,7 @@ function renderRunHistory() {
     const matchesProject = coderState.historyProject === 'all' || run.projectId === coderState.historyProject;
     const matchesStatus = coderState.historyStatus === 'all'
       || run.status === coderState.historyStatus
-      || (coderState.historyStatus === 'failed' && run.status === 'cancelled');
+      || (coderState.historyStatus === 'failed' && ['cancelled', 'interrupted'].includes(run.status));
     const haystack = [
       run.prompt,
       run.answer,
@@ -917,7 +964,7 @@ function renderModelSelection() {
 
 function renderSafeRunButton(run) {
   if (!elements.safeEncrypt) return;
-  const terminal = run && ['completed', 'failed', 'cancelled'].includes(run.status);
+  const terminal = run && ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status);
   elements.safeEncrypt.disabled = coderState.safeBusy || (!coderState.runEncrypted && !terminal);
   elements.safeEncrypt.classList.toggle('is-active', coderState.runEncrypted);
   elements.safeEncrypt.textContent = coderState.runEncrypted ? 'Safe · закрыть' : 'Safe';
@@ -934,6 +981,13 @@ function renderEvents(events, requestedModel) {
     if (coderState.eventFilter === 'focus' && !isFocusEvent(event, presentation)) continue;
     const previous = presented.at(-1);
     const fingerprint = `${presentation.tone}|${presentation.title}|${presentation.detail}`;
+    const repeatedFailure = coderState.eventFilter === 'focus' && presentation.tone === 'failure'
+      ? presented.find((item) => item.fingerprint === fingerprint)
+      : null;
+    if (repeatedFailure) {
+      repeatedFailure.repeats += 1;
+      continue;
+    }
     if (previous?.fingerprint === fingerprint) {
       previous.repeats += 1;
       continue;
@@ -941,37 +995,32 @@ function renderEvents(events, requestedModel) {
     presented.push({ event, presentation, fingerprint, repeats: 1 });
   }
   const signature = `${coderState.eventFilter}:${presented.map((item) => `${item.event.id || item.event.createdAt}:${item.fingerprint}:${item.repeats}`).join('|')}`;
-  if (elements.eventCount) elements.eventCount.textContent = `${presented.length} из ${events.length}`;
+  if (elements.eventCount) {
+    elements.eventCount.textContent = coderState.eventFilter === 'focus'
+      ? `${presented.length} ключевых · ${events.length} всего`
+      : `${events.length} событий`;
+  }
   if (signature === coderState.lastEventSignature) return;
   coderState.lastEventSignature = signature;
   const stickToBottom = elements.activity.scrollHeight - elements.activity.scrollTop - elements.activity.clientHeight < 100;
   const fragment = document.createDocumentFragment();
-  for (const { event, presentation, repeats } of presented) {
-    const article = document.createElement('article');
-    article.className = 'coder-event';
-    article.dataset.kind = event.kind;
-    article.dataset.tone = presentation.tone;
-    if (typeof event.ok === 'boolean') article.dataset.ok = String(event.ok);
-    const header = document.createElement('header');
-    const title = document.createElement('strong');
-    title.textContent = presentation.title;
-    if (repeats > 1) title.textContent += ` · ×${repeats}`;
-    const time = document.createElement('time');
-    time.textContent = formatTime(event.createdAt);
-    header.append(title, time);
-    const detail = document.createElement('p');
-    detail.textContent = presentation.detail;
-    article.append(header, detail);
-    if (coderState.eventFilter === 'all' && shouldShowTechnicalEventDetail(event, presentation)) {
-      const technical = document.createElement('details');
-      const summary = document.createElement('summary');
-      summary.textContent = 'Технические данные';
-      const raw = document.createElement('pre');
-      raw.textContent = `${event.title || ''}\n${event.detail || ''}`.trim();
-      technical.append(summary, raw);
-      article.append(technical);
+  const archiveCount = coderState.eventFilter === 'focus'
+    ? Math.max(0, presented.length - CODER_FOCUS_EVENT_LIMIT)
+    : 0;
+  if (archiveCount > 0) {
+    const archive = document.createElement('details');
+    archive.className = 'coder-event-archive';
+    const summary = document.createElement('summary');
+    summary.textContent = `Ранее · ${archiveCount} ${pluralizeSteps(archiveCount)}`;
+    const archiveList = document.createElement('div');
+    for (const item of presented.slice(0, archiveCount)) {
+      archiveList.append(createCoderEventArticle(item, { compact: true }));
     }
-    fragment.append(article);
+    archive.append(summary, archiveList);
+    fragment.append(archive);
+  }
+  for (const item of presented.slice(archiveCount)) {
+    fragment.append(createCoderEventArticle(item, { compact: coderState.eventFilter === 'focus' }));
   }
   if (!presented.length) {
     const empty = document.createElement('div');
@@ -980,7 +1029,53 @@ function renderEvents(events, requestedModel) {
     fragment.append(empty);
   }
   elements.activity.replaceChildren(fragment);
-  if (stickToBottom) elements.activity.scrollTop = elements.activity.scrollHeight;
+  if (stickToBottom && isRunActive(coderState.run)) elements.activity.scrollTop = elements.activity.scrollHeight;
+  else if (!isRunActive(coderState.run)) elements.activity.scrollTop = 0;
+}
+
+function createCoderEventArticle({ event, presentation, repeats }, options = {}) {
+  const article = document.createElement('article');
+  article.className = 'coder-event';
+  article.dataset.kind = event.kind;
+  article.dataset.tone = presentation.tone;
+  if (typeof event.ok === 'boolean') article.dataset.ok = String(event.ok);
+  const header = document.createElement('header');
+  const title = document.createElement('strong');
+  title.textContent = presentation.title;
+  if (repeats > 1) title.textContent += ` · ×${repeats}`;
+  const time = document.createElement('time');
+  time.textContent = formatTime(event.createdAt);
+  header.append(title, time);
+  article.append(header);
+
+  const detailText = String(presentation.detail || '').trim();
+  if (options.compact && detailText.length > 240) {
+    const preview = document.createElement('p');
+    preview.textContent = `${detailText.slice(0, 200).trimEnd()}…`;
+    const fullDetail = document.createElement('details');
+    fullDetail.className = 'coder-event-detail';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Показать полностью';
+    const fullText = document.createElement('p');
+    fullText.textContent = detailText;
+    fullDetail.append(summary, fullText);
+    article.append(preview, fullDetail);
+  } else {
+    const detail = document.createElement('p');
+    detail.textContent = detailText;
+    article.append(detail);
+  }
+
+  if (coderState.eventFilter === 'all' && shouldShowTechnicalEventDetail(event, presentation)) {
+    const technical = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Технические данные';
+    const raw = document.createElement('pre');
+    raw.textContent = `${event.title || ''}\n${event.detail || ''}`.trim();
+    technical.append(summary, raw);
+    article.append(technical);
+  }
+  return article;
 }
 
 function presentCoderEvent(event, requestedModel) {
@@ -1068,10 +1163,12 @@ function presentCoderEvent(event, requestedModel) {
 }
 
 function isFocusEvent(event, presentation) {
-  if (event?.kind === 'assistant' || event?.kind === 'status' || event?.kind === 'model' || event?.kind === 'error' || event?.ok === false) return true;
-  if (event?.kind === 'tool-result') return true;
-  if (presentation.tone === 'progress' || presentation.tone === 'switching' || presentation.tone === 'failure') return true;
-  return /^Task\s+(completed|failed|cancelled)$/i.test(String(event?.title || ''));
+  if (event?.kind === 'error' || event?.ok === false || presentation.tone === 'failure' || presentation.tone === 'switching') return true;
+  if (event?.kind === 'assistant') return true;
+  if (/^Task\s+(completed|failed|cancelled|interrupted)$/i.test(String(event?.title || ''))) return true;
+  if (event?.kind !== 'tool-result') return false;
+  const capability = /^Completed\s+(.+)$/i.exec(String(event?.title || ''))?.[1] || String(event?.capabilityId || '');
+  return !['coder.files.read', 'coder.files.list'].includes(capability);
 }
 
 function shouldShowTechnicalEventDetail(event, presentation) {
@@ -1091,6 +1188,12 @@ function coderCapabilityLabel(capability) {
 }
 
 function presentCoderFailureDetail(detail) {
+  if (/required verified receipts:/i.test(detail)) {
+    if (/must read at least one tests file/i.test(detail)) {
+      return 'Аудит остановлен: Coder не подтвердил чтение тестов проекта. Проверенные шаги сохранены — задачу можно продолжить.';
+    }
+    return 'Не хватило подтверждённых результатов для честного завершения. Проверенные шаги сохранены.';
+  }
   if (/request timed out after\s+\d+ms/i.test(detail)) {
     return 'Локальная модель не завершила ответ вовремя. Сессию можно повторить.';
   }
@@ -1140,8 +1243,10 @@ function renderContext(run) {
       ? 'Повтори задачу после проверки локальной модели'
       : run?.status === 'cancelled'
         ? 'Начни новую задачу, когда будешь готов'
+        : run?.status === 'interrupted'
+          ? 'Продолжи задачу с последнего checkpoint'
         : 'Жду задачу';
-  renderContextList(elements.contextPending, ['failed', 'cancelled'].includes(run?.status) ? null : summary?.pending, pendingFallback);
+  renderContextList(elements.contextPending, ['failed', 'cancelled', 'interrupted'].includes(run?.status) ? null : summary?.pending, pendingFallback);
 }
 
 function renderContextList(container, values, fallback) {
@@ -1185,28 +1290,29 @@ function handleComposerKeydown(event) {
 
 function openCoderHistory(event) {
   closeMobilePanels();
+  closeCoderContextMenu();
   toggleFastDrawer(false);
   coderState.historyFocusReturn = event?.currentTarget instanceof HTMLElement
     ? event.currentTarget
     : document.activeElement instanceof HTMLElement ? document.activeElement : elements.historyOpen;
   coderState.historyOpen = true;
+  syncWorkspaceNavigation('history');
   coderState.pendingDeleteRunId = '';
   setInlineMessage(elements.historyError, '');
   if (elements.historyDrawer) elements.historyDrawer.hidden = false;
   if (elements.historyBackdrop) elements.historyBackdrop.hidden = false;
   elements.historyOpen?.setAttribute('aria-expanded', 'true');
-  elements.mobileHistory?.setAttribute('aria-expanded', 'true');
   renderRunHistory();
   requestAnimationFrame(() => elements.historySearch?.focus());
 }
 
 function closeCoderHistory(options = {}) {
   coderState.historyOpen = false;
+  syncWorkspaceNavigation('work');
   coderState.pendingDeleteRunId = '';
   if (elements.historyDrawer) elements.historyDrawer.hidden = true;
   if (elements.historyBackdrop) elements.historyBackdrop.hidden = true;
   elements.historyOpen?.setAttribute('aria-expanded', 'false');
-  elements.mobileHistory?.setAttribute('aria-expanded', 'false');
   if (options.restoreFocus !== false) {
     const target = coderState.historyFocusReturn?.isConnected ? coderState.historyFocusReturn : elements.historyOpen;
     target?.focus();
@@ -1362,12 +1468,27 @@ function startFreshTask(options = {}) {
   requestAnimationFrame(() => elements.input?.focus());
 }
 
-function retryCurrentRun() {
+async function retryCurrentRun() {
   const run = coderState.run;
   if (!run) return;
   if (isRunActive(run) && coderState.pollDisconnected) {
     startPolling(run.id);
     renderRunSummary(run);
+    return;
+  }
+  if (run.status === 'interrupted') {
+    setRunBusy(true);
+    try {
+      const payload = await resumeCoderRun(run.id);
+      coderState.run = payload.run;
+      mergeRunIntoOverview(payload.run);
+      renderRun();
+      renderRunHistory();
+      startPolling(run.id);
+    } catch (error) {
+      renderInlineError(error instanceof Error ? error.message : String(error));
+      setRunBusy(false);
+    }
     return;
   }
   const prompt = run.status === 'failed' ? String(run.prompt || coderState.lastPrompt || '') : '';
@@ -1387,6 +1508,7 @@ function handleEventFilter(event) {
   }
   coderState.lastEventSignature = '';
   renderEvents(coderState.run?.events || [], coderState.run?.model || coderState.model);
+  event.currentTarget?.closest('details.coder-journal-menu')?.removeAttribute('open');
 }
 
 function applyTaskTemplate(event) {
@@ -1398,24 +1520,56 @@ function applyTaskTemplate(event) {
   elements.input.setSelectionRange(template.length, template.length);
 }
 
+function openWorkspaceDrawer(panel) {
+  coderState.mobilePanel = panel;
+  if (elements.explorer) elements.explorer.hidden = panel !== 'project';
+  if (elements.contextPanel) elements.contextPanel.hidden = panel !== 'result';
+  elements.explorer?.classList.toggle('is-drawer-open', panel === 'project');
+  elements.contextPanel?.classList.toggle('is-drawer-open', panel === 'result');
+  elements.mobileProject?.setAttribute('aria-expanded', String(panel === 'project'));
+  elements.mobileResult?.setAttribute('aria-expanded', String(panel === 'result'));
+  syncWorkspaceNavigation(panel);
+  if (elements.panelBackdrop) elements.panelBackdrop.hidden = false;
+  closeCoderContextMenu();
+}
+
 function toggleMobilePanel(panel) {
-  if (!window.matchMedia('(max-width: 980px)').matches) return;
-  const next = coderState.mobilePanel === panel ? null : panel;
-  coderState.mobilePanel = next;
-  elements.explorer?.classList.toggle('is-mobile-open', next === 'project');
-  elements.contextPanel?.classList.toggle('is-mobile-open', next === 'result');
-  elements.mobileProject?.setAttribute('aria-expanded', String(next === 'project'));
-  elements.mobileResult?.setAttribute('aria-expanded', String(next === 'result'));
-  if (elements.panelBackdrop) elements.panelBackdrop.hidden = !next;
+  if (coderState.mobilePanel === panel) {
+    closeMobilePanels();
+    return;
+  }
+  openWorkspaceDrawer(panel);
 }
 
 function closeMobilePanels() {
   coderState.mobilePanel = null;
-  elements.explorer?.classList.remove('is-mobile-open');
-  elements.contextPanel?.classList.remove('is-mobile-open');
+  elements.explorer?.classList.remove('is-drawer-open');
+  elements.contextPanel?.classList.remove('is-drawer-open');
+  if (elements.explorer) elements.explorer.hidden = true;
+  if (elements.contextPanel) elements.contextPanel.hidden = true;
   elements.mobileProject?.setAttribute('aria-expanded', 'false');
   elements.mobileResult?.setAttribute('aria-expanded', 'false');
+  syncWorkspaceNavigation('work');
   if (elements.panelBackdrop) elements.panelBackdrop.hidden = true;
+}
+
+function syncWorkspaceNavigation(active) {
+  const navigation = [
+    [elements.workspaceFocus, 'work'],
+    [elements.mobileProject, 'project'],
+    [elements.mobileResult, 'result'],
+    [elements.historyOpen, 'history'],
+  ];
+  for (const [button, key] of navigation) {
+    if (!button) continue;
+    button.classList.toggle('is-current', key === active);
+    if (key === active) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  }
+}
+
+function closeCoderContextMenu() {
+  document.querySelector('details.coder-context-menu')?.removeAttribute('open');
 }
 
 function handleCoderEscape(event) {
@@ -1446,6 +1600,12 @@ function renderComposerContext() {
   elements.composerContext.textContent = continuation
     ? `${project} · продолжение: ${conciseHistoryTitle(continuation.prompt)}`
     : `${project} · модель запуска: ${coderModelLabel(coderState.model)}`;
+}
+
+function renderComposerVisibility(run) {
+  if (!elements.composer) return;
+  const terminal = Boolean(run && ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status));
+  elements.composer.hidden = terminal;
 }
 
 function mergeRunIntoOverview(run) {
@@ -1525,10 +1685,9 @@ function setRunBusy(busy) {
     elements.cancel.textContent = cancellationRequested ? 'Останавливаю…' : 'Остановить';
   }
   if (elements.input) elements.input.disabled = busy;
-  if (elements.suggestions) elements.suggestions.hidden = busy;
+  if (elements.suggestions) elements.suggestions.hidden = busy || Boolean(coderState.run);
   if (elements.projectSelect) elements.projectSelect.disabled = busy || !(coderState.overview?.projects?.projects || []).length;
   for (const element of [elements.projectNew, elements.projectImport, elements.onboardingCreate, elements.onboardingImport]) if (element) element.disabled = busy;
-  if (elements.sessionNew) elements.sessionNew.disabled = busy;
   renderModelSelection();
   for (const button of elements.modelButtons || []) button.disabled = button.disabled || busy;
 }
@@ -1574,6 +1733,20 @@ function formatHistoryMetric(value, one, few, many) {
   const mod10 = number % 10;
   const label = mod100 >= 11 && mod100 <= 14 ? many : mod10 === 1 ? one : mod10 >= 2 && mod10 <= 4 ? few : many;
   return `${number} ${label}`;
+}
+
+function pluralizeSteps(value) {
+  const number = Math.max(0, Number(value) || 0);
+  const mod100 = number % 100;
+  const mod10 = number % 10;
+  if (mod100 >= 11 && mod100 <= 14) return 'шагов';
+  if (mod10 === 1) return 'шаг';
+  if (mod10 >= 2 && mod10 <= 4) return 'шага';
+  return 'шагов';
+}
+
+function closeCoderActionMenu(element) {
+  element?.closest('details.coder-action-menu')?.removeAttribute('open');
 }
 
 function buildHistoryContinuationPrompt(run) {

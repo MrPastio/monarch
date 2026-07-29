@@ -4,6 +4,7 @@ import { AssistantModule } from '../../src/modules/assistant';
 import {
   MonarchKernel,
   classifyIntentText,
+  classifyOscarRequestDisposition,
   mergeRouteCandidates,
   selectModelRouteForText,
   type MonarchExecutionRequest,
@@ -237,6 +238,47 @@ describe('Router Mesh & Intent Classifier', () => {
     const explanation = classifyIntentText('Объясни как удалить файл в Node.js');
     expect(explanation.kind).toBe('explanation');
     expect(explanation.riskHint).toBe('none');
+
+    expect(classifyOscarRequestDisposition('что делать в случае ракетного обстрела?')).toMatchObject({
+      mode: 'chat',
+      kind: 'explanation',
+    });
+    expect(classifyOscarRequestDisposition('открой стим')).toMatchObject({
+      mode: 'agent',
+      kind: 'system_action',
+    });
+    expect(classifyOscarRequestDisposition('создай файл notes.txt с текстом test')).toMatchObject({
+      mode: 'agent',
+    });
+    expect(classifyOscarRequestDisposition('как открыть Steam?')).toMatchObject({
+      mode: 'chat',
+      kind: 'explanation',
+    });
+    expect(classifyOscarRequestDisposition('ты можешь открыть Steam?')).toMatchObject({
+      mode: 'agent',
+      kind: 'system_action',
+    });
+    expect(classifyOscarRequestDisposition('ты умеешь открывать приложения?')).toMatchObject({
+      mode: 'chat',
+      kind: 'capabilities_question',
+    });
+    expect(classifyOscarRequestDisposition('не открывай Steam, просто объясни как проверить обновления')).toMatchObject({
+      mode: 'chat',
+    });
+    expect(classifyOscarRequestDisposition(
+      'Я не просил тебя перечислять папки собственного репозитория. '
+      + 'Объясни, почему ты посчитал этот ответ завершённым, и ответь по существу — '
+      + 'без новых действий с workspace.',
+    )).toMatchObject({
+      mode: 'chat',
+    });
+    expect(classifyOscarRequestDisposition(
+      'Нет, Oscar. Сейчас ты не защитил себя как продукт. Успешно выполненные '
+      + 'инструменты не означают успешно выполненную задачу. Файлы, аудит, '
+      + 'архитектура и запуск приложений здесь перечислены как предмет критики.',
+    )).toMatchObject({
+      mode: 'chat',
+    });
 
     const teamwork = classifyIntentText('Что означает командная работа?');
     expect(teamwork.kind).toBe('explanation');
