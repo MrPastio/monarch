@@ -92,8 +92,11 @@ class QuarantineVault:
         return self._latest.get(str(quarantine_id))
 
     def isolate(self, source: Path, *, incident_id: str | None = None) -> QuarantineRecord:
-        source_path = source.expanduser().resolve(strict=True)
-        if source_path.is_symlink() or not source_path.is_file():
+        supplied_path = source.expanduser()
+        if supplied_path.is_symlink():
+            raise QuarantineError("Only a regular, non-symlink file can be isolated")
+        source_path = supplied_path.resolve(strict=True)
+        if not source_path.is_file():
             raise QuarantineError("Only a regular, non-symlink file can be isolated")
         if _is_within(source_path, self.root):
             raise QuarantineError("File is already inside the quarantine vault")
