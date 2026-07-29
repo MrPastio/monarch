@@ -468,7 +468,8 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(policy).toContain('taskkill.exe');
     expect(policy).toContain('Public Git blob exceeds preflight file limit');
     expect(policy).toContain('Git blob exceeded its preflight length while streaming');
-    expect(policy).toContain('$process.StandardInput.NewLine = "`n"');
+    expect(policy).toContain('$process.StandardInput.BaseStream');
+    expect(policy).toContain('[System.Text.Encoding]::ASCII.GetBytes');
     expect(policy).toContain('fresh unrelated history');
     expect(policy).toContain('rev-parse --absolute-git-dir');
     expect(policy).toContain('$MonarchPublicFileFlagOpenReparsePoint');
