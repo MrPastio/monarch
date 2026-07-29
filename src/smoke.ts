@@ -117,7 +117,11 @@ async function runSmokeSuite(): Promise<void> {
 
   const health = await kernel.checkHealth();
   if (!health.ok) {
-    throw new Error('Health smoke failed: expected all modules healthy.');
+    const unhealthy = health.modules
+      .filter((entry) => entry.status !== 'active' || entry.health?.ok === false)
+      .map((entry) => `${entry.moduleId}:${entry.status}:${entry.health?.error || 'health-failed'}`)
+      .join(', ');
+    throw new Error(`Health smoke failed: ${unhealthy || 'unknown module state'}.`);
   }
 
   const snapshot = kernel.getSnapshot();
@@ -1800,4 +1804,3 @@ async function assertClarificationRequiredFlow(): Promise<void> {
     await kernel.stop();
   }
 }
-

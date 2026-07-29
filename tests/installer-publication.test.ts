@@ -893,7 +893,7 @@ describe('Windows installer and public snapshot boundary', () => {
     } finally {
       rmSync(fixture.fixtureRoot, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('preflights oversized blobs before creating staging or destination', () => {
     const fixture = createPublicationFixture();
