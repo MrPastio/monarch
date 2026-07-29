@@ -31,6 +31,13 @@ const RESTART_RUNNABLE_STATUSES = new Set<AgentTask['status']>([
   'cancelling',
   'interrupted',
 ]);
+const EXACT_ONCE_APPROVAL_CAPABILITIES = new Set([
+  'workspace.files.move',
+  'workspace.files.trash',
+  'workspace.files.delete',
+  'device.recycle-bin.empty',
+  'device.browser.close-active',
+]);
 
 export interface CreateAgentTaskInput extends NormalizeAgentGoalInput {
   source: AgentTaskSource;
@@ -44,6 +51,12 @@ export interface CreateAgentTaskInput extends NormalizeAgentGoalInput {
 export interface AgentTaskMessageInput {
   content: string;
   messageId?: string;
+}
+
+export interface RepeatAgentTaskInput {
+  clientRequestId?: string;
+  autoStart?: boolean;
+  source?: AgentTaskSource;
 }
 
 export interface AgentApprovalResolutionInput {
@@ -204,6 +217,41 @@ export class MonarchAgentRuntime {
     return this.store.listTasks();
   }
 
+  async repeatTask(
+    taskId: string,
+    input: RepeatAgentTaskInput = {},
+  ): Promise<AgentTaskCheckpoint> {
+    await this.ensureStarted();
+    const original = await this.store.getTask(boundedId(taskId, 'task'));
+    if (!original) {
+      throw new AgentRuntimeError(404, 'task-not-found', 'Agent task was not found.');
+    }
+    if (!isTerminal(original.task)) {
+      throw new AgentRuntimeError(409, 'task-not-terminal', 'Only a terminal Agent Task can be repeated.');
+    }
+    const goal = original.task.goal;
+    return this.createTask({
+      request: goal.originalRequest,
+      normalizedObjective: goal.normalizedObjective,
+      expectedOutputs: goal.expectedOutputs.map((entry) => ({ ...entry })),
+      constraints: goal.constraints.map((entry) => ({ ...entry })),
+      successCriteria: goal.successCriteria.map((entry) => ({ ...entry })),
+      ...(goal.userPreferences ? { userPreferences: [...goal.userPreferences] } : {}),
+      budgets: { ...original.task.budgets },
+      source: input.source || {
+        surface: original.task.source.surface,
+        ...(original.task.source.remote !== undefined
+          ? { remote: original.task.source.remote }
+          : {}),
+      },
+      parentTaskId: original.task.id,
+      ...(input.clientRequestId
+        ? { clientRequestId: boundedId(input.clientRequestId, 'client request') }
+        : {}),
+      ...(input.autoStart !== undefined ? { autoStart: input.autoStart } : {}),
+    });
+  }
+
   async sendMessage(taskId: string, input: AgentTaskMessageInput): Promise<AgentTaskCheckpoint> {
     await this.ensureStarted();
     const content = String(input.content || '').replace(/\s+/g, ' ').trim().slice(0, 16_000);
@@ -354,12 +402,12 @@ export class MonarchAgentRuntime {
           status: 'cancelled',
           cancellationRequested: true,
           completedAt,
-          terminalReason: { code: 'cancelled-by-user', summary: 'Task cancelled before an active stage.' },
+          terminalReason: { code: 'cancelled-by-user', summary: 'Задача остановлена до начала активного шага.' },
         },
         events: [
           ...revoked.events,
           { type: 'task.status.changed' as const, payload: jsonObject({ from: checkpoint.task.status, to: 'cancelled' }) },
-          { type: 'task.cancelled' as const, payload: jsonObject({ summary: 'Task cancelled before an active stage.' }) },
+          { type: 'task.cancelled' as const, payload: jsonObject({ summary: 'Задача остановлена до начала активного шага.' }) },
         ],
         ...(revoked.changed ? { approvals: revoked.approvals } : {}),
       };
@@ -402,6 +450,17 @@ export class MonarchAgentRuntime {
       const index = checkpoint.approvals.findIndex((entry) => entry.id === normalizedApprovalId);
       if (index < 0) throw new AgentRuntimeError(404, 'approval-not-found', 'Agent approval was not found.');
       const current = checkpoint.approvals[index]!;
+      if (
+        input.decision === 'approve'
+        && grantScope === 'task'
+        && EXACT_ONCE_APPROVAL_CAPABILITIES.has(current.capabilityId)
+      ) {
+        throw new AgentRuntimeError(
+          409,
+          'approval-scope-must-be-once',
+          'This destructive action requires a one-time approval for its exact target.',
+        );
+      }
       if (current.status !== 'pending') {
         const same = (input.decision === 'approve' && current.status === 'approved')
           || (input.decision === 'deny' && current.status === 'denied');
@@ -583,7 +642,7 @@ export class MonarchAgentRuntime {
         cancellationRequested: true,
         approvals: revoked.references,
         completedAt,
-        terminalReason: { code: 'cancelled-by-user', summary: 'Cancellation settled after the active stage.' },
+        terminalReason: { code: 'cancelled-by-user', summary: 'Задача остановлена после завершения активного шага.' },
       };
       delete task.activeApprovalId;
       delete task.pendingAction;
@@ -592,7 +651,7 @@ export class MonarchAgentRuntime {
         events: [
           ...revoked.events,
           { type: 'task.status.changed', payload: jsonObject({ from: latest.task.status, to: 'cancelled' }) },
-          { type: 'task.cancelled', payload: jsonObject({ summary: 'Cancellation settled after the active stage.' }) },
+          { type: 'task.cancelled', payload: jsonObject({ summary: 'Задача остановлена после завершения активного шага.' }) },
         ],
         ...(revoked.changed ? { approvals: revoked.approvals } : {}),
       };

@@ -6,7 +6,7 @@ const workspaceRoot = process.cwd();
 const publicDirectory = fileURLToPath(new URL('./public', import.meta.url));
 const port = Number(process.env.MONARCH_UI_PORT || process.env.PORT || 4317);
 const host = process.env.MONARCH_HOST || '127.0.0.1';
-const app = new MonarchApplication({ workspaceRoot });
+const app = new MonarchApplication({ workspaceRoot, enableAgentRuntimeV2: true });
 const server = await startMonarchHttpServer({
   app,
   publicDirectory,

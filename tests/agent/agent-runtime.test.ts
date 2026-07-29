@@ -73,7 +73,7 @@ describe('Oscar Agent Runtime V2 vertical slice', () => {
       expect(completed.events.some((entry) => entry.type === 'model.completed')).toBe(true);
       expect(completed.observations.map((entry) => ({ capabilityId: entry.capabilityId, status: entry.status })))
         .toEqual(replay.expectedObservations);
-      expect(provider.turns).toBeGreaterThanOrEqual(6);
+      expect(provider.turns).toBe(replay.decisions.length);
       expect(evaluateAgentRuns([{ id: replay.name, checkpoint: completed }])).toMatchObject({
         taskCompletionRate: 1,
         unnecessaryClarificationCount: 0,
@@ -183,6 +183,111 @@ describe('Oscar Agent Runtime V2 vertical slice', () => {
       await app.stop();
     }
   }, 30_000);
+
+  it('routes Telegram turns through the durable Agent Task contract', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-agent-telegram-'));
+    roots.push(root);
+    const app = new MonarchApplication({
+      workspaceRoot: root,
+      enabledModules: ['workspace'],
+      enableLocalSystemRouter: false,
+      enableAgentRuntimeV2: true,
+      agentTaskStore: new InMemoryAgentTaskStore(),
+      agentDecisionProvider: new ReplayAgentDecisionProvider([
+        JSON.stringify({ kind: 'ask-user', question: 'Какой файл открыть?', reason: 'Путь не указан.' }),
+      ]),
+    });
+    await app.start();
+    try {
+      const result = await app.submitAgentSurfaceIntent({
+        text: 'открой тот файл',
+        source: 'telegram',
+        context: {
+          clientConversationId: 'telegram:42',
+          clientSessionId: 'telegram:42:7',
+          telegramChatId: 42,
+          telegramUserId: 7,
+        },
+      });
+      expect(result.execution).toMatchObject({
+        ok: false,
+        error: 'clarification-required',
+      });
+      const tasks = await app.agentRuntime!.listTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]?.source).toEqual({
+        surface: 'telegram',
+        remote: true,
+        conversationId: 'telegram:42',
+      });
+      expect(tasks[0]?.status).toBe('waiting-for-user');
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it('binds a Telegram approval token to one exact durable Agent Task action', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-agent-telegram-approval-'));
+    roots.push(root);
+    const context = {
+      clientConversationId: 'telegram:55',
+      clientSessionId: 'telegram:55:9',
+      telegramChatId: 55,
+      telegramUserId: 9,
+    };
+    const request = 'создай файл telegram-note.txt с текстом готово';
+    const app = new MonarchApplication({
+      workspaceRoot: root,
+      enabledModules: ['workspace', 'security'],
+      enableLocalSystemRouter: false,
+      enableAgentRuntimeV2: true,
+      agentTaskStore: new InMemoryAgentTaskStore(),
+      agentDecisionProvider: new TelegramWriteDecisionProvider(),
+      permissionProfile: {
+        sandboxMode: 'read-only',
+        approvalPolicy: 'on-request',
+        autonomyMode: 'guided',
+      },
+    });
+    await app.start();
+    try {
+      const pending = await app.submitAgentSurfaceIntent({
+        text: request,
+        source: 'telegram',
+        context,
+      });
+      expect(pending.execution).toMatchObject({
+        ok: false,
+        error: 'confirmation-required',
+      });
+      expect(pending.confirmation).toMatchObject({
+        mode: 'proposal',
+        target: { capabilityId: 'workspace.files.write' },
+        grantOptions: ['once'],
+      });
+      await expect(readFile(path.join(root, 'telegram-note.txt'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+
+      const completed = await app.submitAgentSurfaceIntent({
+        text: request,
+        source: 'telegram',
+        context,
+        confirmed: true,
+        confirmationToken: pending.confirmation!.token,
+      });
+      expect(completed.execution).toMatchObject({ ok: true });
+      await expect(readFile(path.join(root, 'telegram-note.txt'), 'utf8')).resolves.toBe('готово');
+
+      await expect(app.submitAgentSurfaceIntent({
+        text: request,
+        source: 'telegram',
+        context,
+        confirmed: true,
+        confirmationToken: pending.confirmation!.token,
+      })).rejects.toMatchObject({ code: 'invalid-agent-confirmation-token' });
+    } finally {
+      await app.stop();
+    }
+  });
 });
 
 class WorkspaceReportDecisionProvider implements AgentDecisionProvider {
@@ -214,6 +319,52 @@ class WorkspaceReportDecisionProvider implements AgentDecisionProvider {
       ],
     };
     return Promise.resolve({ ok: true, rawText: JSON.stringify(next), role: 'fixture', adapter: 'fixture' });
+  }
+}
+
+class TelegramWriteDecisionProvider implements AgentDecisionProvider {
+  async decide(request: AgentModelDecisionRequest): Promise<AgentModelDecisionResponse> {
+    const context = request.compiledContext as {
+      observations?: Array<{ id: string; status: string }>;
+      artifacts?: Array<{ id: string }>;
+    };
+    const observation = context.observations?.find((entry) => entry.status === 'success');
+    const artifact = context.artifacts?.[0];
+    const decision = observation
+      ? {
+          kind: 'complete',
+          summary: 'Файл telegram-note.txt создан, содержимое проверено.',
+          evidenceObservationIds: [observation.id],
+          artifactIds: artifact ? [artifact.id] : [],
+          evidenceBindings: [
+            {
+              targetType: 'expected-output',
+              targetId: 'surface_verified_outcome',
+              observationIds: [observation.id],
+              artifactIds: artifact ? [artifact.id] : [],
+            },
+            {
+              targetType: 'success-criterion',
+              targetId: 'surface_outcome_verified',
+              observationIds: [observation.id],
+              artifactIds: [],
+            },
+          ],
+        }
+      : {
+          kind: 'act',
+          capabilityId: 'workspace.files.write',
+          input: { path: 'telegram-note.txt', content: 'готово', overwrite: false },
+          reason: 'Create the exact file requested by the Telegram user.',
+          expectedEffect: 'The exact workspace file exists with the requested bytes.',
+          verification: [{ kind: 'read-after-write', target: 'telegram-note.txt', value: 'готово' }],
+        };
+    return Promise.resolve({
+      ok: true,
+      rawText: JSON.stringify(decision),
+      role: 'fixture-agent-model',
+      adapter: 'fixture-agent-model',
+    });
   }
 }
 

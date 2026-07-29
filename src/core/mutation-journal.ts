@@ -7,6 +7,7 @@ import type {
   MonarchExecutionResult,
 } from './contracts';
 import { readDurableJson, writeDurableJson } from './durable-json';
+import { evaluateFilesystemAccess } from './filesystem-policy';
 import { nowIso } from './utils';
 
 const MAX_BACKUP_BYTES = 1_048_576;
@@ -38,6 +39,7 @@ interface MutationJournalEntryV1 {
   before: MutationSnapshot;
   after?: MutationSnapshot;
   backupFile?: string;
+  boundaryRoot?: string;
   state: MonarchActionRollbackState;
 }
 
@@ -51,6 +53,10 @@ export interface MutationJournalCaptureResult {
   ok: boolean;
   state?: MonarchActionRollbackState;
   error?: string;
+}
+
+export interface MutationJournalCaptureOptions {
+  allowOutsideWorkspace?: boolean;
 }
 
 export class MonarchMutationJournal {
@@ -70,12 +76,28 @@ export class MonarchMutationJournal {
     this.restore();
   }
 
-  async capture(ledgerId: string, request: MonarchExecutionRequest): Promise<MutationJournalCaptureResult> {
+  async capture(
+    ledgerId: string,
+    request: MonarchExecutionRequest,
+    options: MutationJournalCaptureOptions = {},
+  ): Promise<MutationJournalCaptureResult> {
     if (!request.proposalId || !JOURNALED_CAPABILITIES.has(request.capabilityId)) {
       return { supported: false, ok: true };
     }
     try {
-      const targetPath = await this.resolveTarget(request);
+      const resolvedTarget = await this.resolveTarget(request, options.allowOutsideWorkspace === true);
+      const targetPath = resolvedTarget.targetPath;
+      const filesystemBoundary = evaluateFilesystemAccess(targetPath, 'write', {
+        workspaceRoot: this.workspaceRoot,
+        sandboxRoot: this.workspaceRoot,
+        fallbackRoot: this.workspaceRoot,
+        allowedRoots: [resolvedTarget.boundaryRoot || this.workspaceRoot],
+        allowFullDiskAccess: options.allowOutsideWorkspace === true,
+        protectWorkspaceInternals: true,
+      });
+      if (!filesystemBoundary.allowed) {
+        throw new Error(`Filesystem journal boundary blocked mutation target: ${filesystemBoundary.reason}.`);
+      }
       const before = await snapshotPath(targetPath);
       if (before.kind === 'file' && before.bytes > MAX_BACKUP_BYTES) {
         return { supported: true, ok: false, error: `Rollback snapshot exceeds ${MAX_BACKUP_BYTES} bytes.` };
@@ -98,6 +120,7 @@ export class MonarchMutationJournal {
         capabilityId: request.capabilityId,
         targetPath,
         before,
+        ...(resolvedTarget.boundaryRoot ? { boundaryRoot: resolvedTarget.boundaryRoot } : {}),
         state,
       };
       if (before.kind === 'file') {
@@ -122,7 +145,6 @@ export class MonarchMutationJournal {
 
   async finalize(
     ledgerId: string,
-    request: MonarchExecutionRequest,
     result: MonarchExecutionResult,
   ): Promise<MonarchActionRollbackState | null> {
     const entry = this.entries.get(ledgerId);
@@ -130,7 +152,7 @@ export class MonarchMutationJournal {
     try {
       const resultPath = readResultPath(result);
       if (resultPath && entry.before.kind === 'missing') {
-        entry.targetPath = await this.resolveCandidate(resultPath, request);
+        entry.targetPath = await this.resolveEntryCandidate(resultPath, entry);
       }
       const after = await snapshotPath(entry.targetPath);
       if (!result.ok) {
@@ -153,12 +175,22 @@ export class MonarchMutationJournal {
     }
   }
 
-  async rollback(ledgerId: string): Promise<MonarchActionRollbackState | null> {
+  async rollback(
+    ledgerId: string,
+    expectedCapabilityId?: string,
+  ): Promise<MonarchActionRollbackState | null> {
     const entry = this.entries.get(ledgerId);
     if (!entry) return null;
+    if (expectedCapabilityId && entry.capabilityId !== expectedCapabilityId) {
+      return this.updateState(
+        entry,
+        'blocked',
+        'Journal capability does not match the signed action-ledger record.',
+      );
+    }
     if (entry.state.status !== 'available' || !entry.after) return cloneState(entry.state);
     try {
-      await this.assertInsideWorkspace(entry.targetPath);
+      await this.assertEntryTarget(entry);
       const current = await snapshotPath(entry.targetPath);
       if (current.kind !== entry.after.kind || current.digest !== entry.after.digest) {
         return this.updateState(entry, 'blocked', 'Target changed after the action; rollback was not applied.');
@@ -189,39 +221,63 @@ export class MonarchMutationJournal {
     return state ? cloneState(state) : null;
   }
 
-  private async resolveTarget(request: MonarchExecutionRequest): Promise<string> {
+  private async resolveTarget(
+    request: MonarchExecutionRequest,
+    allowOutsideWorkspace: boolean,
+  ): Promise<{ targetPath: string; boundaryRoot?: string }> {
     const input = asRecord(request.input);
     const raw = request.capabilityId === 'workspace.files.copy'
       ? readString(input.targetPath)
       : readString(input.path);
     if (!raw) throw new Error('Workspace mutation target path is missing.');
-    return this.resolveCandidate(raw, request);
+    return this.resolveCandidate(raw, request, allowOutsideWorkspace);
   }
 
-  private async resolveCandidate(raw: string, request: MonarchExecutionRequest): Promise<string> {
+  private async resolveCandidate(
+    raw: string,
+    request: MonarchExecutionRequest,
+    allowOutsideWorkspace: boolean,
+  ): Promise<{ targetPath: string; boundaryRoot?: string }> {
     const candidate = path.resolve(this.workspaceRoot, raw);
-    await this.assertInsideWorkspace(candidate);
+    if (await this.isInsideWorkspace(candidate)) {
+      await this.assertInsideBoundary(candidate, this.workspaceRoot);
+      return { targetPath: candidate };
+    }
+    if (!allowOutsideWorkspace) {
+      throw new Error('Mutation target is outside the workspace.');
+    }
     const roots = request.actionScope?.roots || [];
-    if (roots.length > 0 && !roots.some((root) => isInside(path.resolve(root), candidate))) {
+    const boundaryRoot = roots
+      .map((root) => path.resolve(root))
+      .find((root) => isInside(root, candidate));
+    if (!boundaryRoot) {
       throw new Error('Mutation target is outside the approved action scope.');
     }
+    await this.assertInsideBoundary(candidate, boundaryRoot);
+    return { targetPath: candidate, boundaryRoot };
+  }
+
+  private async isInsideWorkspace(candidate: string): Promise<boolean> {
+    const resolvedWorkspace = await realpath(this.workspaceRoot).catch(() => path.resolve(this.workspaceRoot));
+    return isInside(resolvedWorkspace, candidate);
+  }
+
+  private async assertInsideBoundary(candidate: string, boundaryRoot: string): Promise<void> {
+    const resolvedBoundary = await resolveThroughExistingAncestor(boundaryRoot);
+    const resolvedCandidate = await resolveThroughExistingAncestor(candidate);
+    if (!isInside(resolvedBoundary, resolvedCandidate)) {
+      throw new Error('Mutation target resolves outside the approved action scope.');
+    }
+  }
+
+  private async resolveEntryCandidate(raw: string, entry: MutationJournalEntryV1): Promise<string> {
+    const candidate = path.resolve(this.workspaceRoot, raw);
+    await this.assertInsideBoundary(candidate, entry.boundaryRoot || this.workspaceRoot);
     return candidate;
   }
 
-  private async assertInsideWorkspace(candidate: string): Promise<void> {
-    const resolvedWorkspace = await realpath(this.workspaceRoot).catch(() => path.resolve(this.workspaceRoot));
-    if (!isInside(resolvedWorkspace, candidate)) throw new Error('Mutation target is outside the workspace.');
-    let ancestor = candidate;
-    for (;;) {
-      const resolved = await realpath(ancestor).catch(() => null);
-      if (resolved) {
-        if (!isInside(resolvedWorkspace, resolved)) throw new Error('Mutation target resolves outside the workspace.');
-        return;
-      }
-      const parent = path.dirname(ancestor);
-      if (parent === ancestor) throw new Error('Mutation target has no trusted workspace ancestor.');
-      ancestor = parent;
-    }
+  private async assertEntryTarget(entry: MutationJournalEntryV1): Promise<void> {
+    await this.assertInsideBoundary(entry.targetPath, entry.boundaryRoot || this.workspaceRoot);
   }
 
   private async readBackup(entry: MutationJournalEntryV1): Promise<Buffer | null> {
@@ -252,7 +308,16 @@ export class MonarchMutationJournal {
     const persisted = readDurableJson<PersistedMutationJournalV1>(this.persistencePath);
     if (!persisted || persisted.version !== 1 || !Array.isArray(persisted.entries)) return;
     for (const entry of persisted.entries.slice(-MAX_ENTRIES)) {
-      if (isJournalEntry(entry)) this.entries.set(entry.ledgerId, entry);
+      if (!isJournalEntry(entry)) continue;
+      if (entry.boundaryRoot) {
+        entry.state = {
+          ...entry.state,
+          status: 'blocked',
+          updatedAt: nowIso(),
+          reason: 'External rollback scope is process-local and cannot be restored from persisted journal data.',
+        };
+      }
+      this.entries.set(entry.ledgerId, entry);
     }
   }
 
@@ -315,6 +380,22 @@ async function snapshotPath(targetPath: string): Promise<MutationSnapshot> {
   };
   await visit(targetPath, '');
   return { kind: 'directory', digest: hash.digest('hex'), bytes, entries };
+}
+
+async function resolveThroughExistingAncestor(targetPath: string): Promise<string> {
+  const absolute = path.resolve(targetPath);
+  let ancestor = absolute;
+  const missingSegments: string[] = [];
+  for (;;) {
+    const resolved = await realpath(ancestor).catch(() => null);
+    if (resolved) {
+      return path.resolve(resolved, ...missingSegments.reverse());
+    }
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) throw new Error('Mutation target has no trusted filesystem ancestor.');
+    missingSegments.push(path.basename(ancestor));
+    ancestor = parent;
+  }
 }
 
 function readResultPath(result: MonarchExecutionResult): string {

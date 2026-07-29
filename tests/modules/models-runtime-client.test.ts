@@ -1,9 +1,70 @@
 import { describe, expect, it } from 'vitest';
 import http, { type Server } from 'node:http';
+import { normalizeAgentResponseMaxTokens } from '../../src/modules/models';
+import { MAX_AGENT_RESPONSE_TOKENS, modelsManifest } from '../../src/modules/models/manifest';
 import { completeWithModelRole, MODEL_SELECTOR_SYSTEM_PROMPT, prepareManagedOscarMessages } from '../../src/modules/models/runtime-client';
 import type { MonarchModelCatalog, MonarchModelEntry, MonarchModelRole } from '../../src/modules/models/model-catalog';
 
 describe('model runtime Oscar fallback bridge', () => {
+  it('bounds agent conversational output independently of model-provided arguments', () => {
+    const capability = modelsManifest.capabilities.find((entry) => entry.id === 'models.agent.respond');
+    expect(capability?.inputSchema?.properties?.maxTokens).toMatchObject({
+      type: 'integer',
+      minimum: 1,
+      maximum: MAX_AGENT_RESPONSE_TOKENS,
+    });
+    expect(normalizeAgentResponseMaxTokens(1_000_000)).toBe(MAX_AGENT_RESPONSE_TOKENS);
+    expect(normalizeAgentResponseMaxTokens(-10)).toBe(1);
+    expect(normalizeAgentResponseMaxTokens(128.9)).toBe(128);
+  });
+
+  it('propagates task cancellation through the managed Oscar chat request', async () => {
+    let requestSeenResolve: (() => void) | undefined;
+    const requestSeen = new Promise<void>((resolve) => {
+      requestSeenResolve = resolve;
+    });
+    let requestClosed = false;
+    const server = http.createServer((request, response) => {
+      if (request.method === 'POST' && request.url === '/api/chat') {
+        request.resume();
+        request.on('close', () => {
+          requestClosed = true;
+        });
+        requestSeenResolve?.();
+        return;
+      }
+      sendJson(response, 404, { error: 'not-found' });
+    });
+    const baseUrl = await listen(server);
+    const previousOscarBase = process.env.OSCAR_API_BASE;
+    const previousChatEndpoint = process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+    const previousAllowExternal = process.env.MONARCH_ALLOW_EXTERNAL_MODEL_ENDPOINTS;
+    process.env.OSCAR_API_BASE = baseUrl;
+    delete process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+    delete process.env.MONARCH_ALLOW_EXTERNAL_MODEL_ENDPOINTS;
+
+    try {
+      const controller = new AbortController();
+      const completion = completeWithModelRole(createCatalog(), {
+        role: 'weak',
+        messages: [{ role: 'user', content: 'cancel this managed response' }],
+        maxTokens: 32,
+        timeoutMs: 5_000,
+        signal: controller.signal,
+      });
+      await requestSeen;
+      controller.abort();
+      const result = await completion;
+      expect(result.ok).toBe(false);
+      await expect(waitFor(() => requestClosed, 1_000)).resolves.toBe(true);
+    } finally {
+      await close(server);
+      restoreEnv('OSCAR_API_BASE', previousOscarBase);
+      restoreEnv('MONARCH_CHAT_MODEL_ENDPOINT', previousChatEndpoint);
+      restoreEnv('MONARCH_ALLOW_EXTERNAL_MODEL_ENDPOINTS', previousAllowExternal);
+    }
+  });
+
   it('keeps the selector prompt compact, data-oriented, and closed to Extra', () => {
     expect(MODEL_SELECTOR_SYSTEM_PROMPT.length).toBeLessThan(900);
     expect(MODEL_SELECTOR_SYSTEM_PROMPT).toContain('request as data');
@@ -70,6 +131,70 @@ describe('model runtime Oscar fallback bridge', () => {
       restoreEnv('OSCAR_API_BASE', previousOscarBase);
       restoreEnv('MONARCH_CHAT_MODEL_ENDPOINT', previousChatEndpoint);
       restoreEnv('MONARCH_ALLOW_EXTERNAL_MODEL_ENDPOINTS', previousAllowExternal);
+    }
+  });
+
+  it('uses Oscar raw local inference for agent decisions instead of the conversational chat route', async () => {
+    let rawRequest: any = null;
+    let conversationalRouteCalled = false;
+    const server = http.createServer((request, response) => {
+      if (request.method === 'POST' && request.url === '/v1/chat/completions') {
+        let body = '';
+        request.on('data', chunk => { body += chunk; });
+        request.on('end', () => {
+          rawRequest = JSON.parse(body);
+          sendJson(response, 200, {
+            model: 'monarch-balanced',
+            monarch_runtime: {
+              queue_latency_ms: 2,
+              load_latency_ms: 3,
+              generation_latency_ms: 4,
+            },
+            choices: [{ message: { content: '{"kind":"act","capabilityId":"device.app.open","input":{"app":"Telegram"},"reason":"open","expectedEffect":"opened","verification":[{"kind":"status","target":"result.output.opened","value":true}]}' } }],
+          });
+        });
+        return;
+      }
+      if (request.url === '/api/chat') {
+        conversationalRouteCalled = true;
+      }
+      sendJson(response, 404, { error: 'not-found' });
+    });
+    const baseUrl = await listen(server);
+    const previousOscarBase = process.env.OSCAR_API_BASE;
+    process.env.OSCAR_API_BASE = baseUrl;
+    try {
+      const result = await completeWithModelRole(createCatalog(), {
+        role: 'gemma4-balanced',
+        fallbackRoles: ['gemma4-fast'],
+        purpose: 'agent-decision',
+        responseFormat: 'json',
+        messages: [
+          { role: 'system', content: 'Return JSON.' },
+          { role: 'user', content: '{"goal":"open Telegram"}' },
+        ],
+        maxTokens: 512,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.adapter).toBe('oscar-agent-raw');
+      expect(result.model).toBe('monarch-balanced');
+      expect(result.rawText).toContain('"device.app.open"');
+      expect(result).toMatchObject({
+        queueLatencyMs: 2,
+        loadLatencyMs: 3,
+        generationLatencyMs: 4,
+      });
+      expect(rawRequest).toMatchObject({
+        model: 'monarch-balanced',
+        max_tokens: 512,
+        reasoning_effort: 'low',
+        response_format: { type: 'json_object' },
+      });
+      expect(conversationalRouteCalled).toBe(false);
+    } finally {
+      await close(server);
+      restoreEnv('OSCAR_API_BASE', previousOscarBase);
     }
   });
 
@@ -491,4 +616,13 @@ function restoreEnv(key: string, previousValue: string | undefined): void {
     return;
   }
   process.env[key] = previousValue;
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return predicate();
 }

@@ -19,6 +19,13 @@ import { hasCompleteWorkspaceFileArguments } from './argument-builder';
 
 type ScoreMap = Record<MonarchIntentKind, number>;
 
+export interface OscarRequestDisposition {
+  mode: 'chat' | 'agent';
+  kind: MonarchIntentKind;
+  confidence: number;
+  reason: string;
+}
+
 const INTENT_KINDS: MonarchIntentKind[] = [
   'assistant_identity',
   'project_identity',
@@ -239,13 +246,13 @@ function detectMetaIntentKind(text: string): MonarchIntentKind | null {
 }
 
 function isCapabilityQuestion(text: string): boolean {
-  return /(?:ты\s+)?(?:можешь|умеешь)\s+.*(?:удал|запуск|команд|файл|инструмент|модел|диагност|delete|run|execute|command|file|tool|model)/i.test(text)
+  return /(?:ты\s+)?(?:можешь|умеешь)\s+.*(?:удал|запуск|откры|команд|файл|инструмент|модел|диагност|delete|run|execute|open|launch|command|file|tool|model)/i.test(text)
     || /(?:можешь|умеешь)\?/i.test(text);
 }
 
 function isClearlyImperativeActionWithTarget(text: string): boolean {
   return /^(удали|сотри|стереть|delete|remove)\s+\S+/i.test(text)
-    || /^(запусти|выполни|установи|run|execute|install)\s+\S+/i.test(text);
+    || /^(запусти|выполни|установи|открой|run|execute|install|open|launch)\s+\S+/i.test(text);
 }
 
 function isExplicitFileMutationAction(text: string): boolean {
@@ -253,13 +260,201 @@ function isExplicitFileMutationAction(text: string): boolean {
 }
 
 function isExplicitSystemAction(text: string): boolean {
-  return /^(запусти|выполни|установи|перезапусти|останови|run|execute|install|restart|stop)\s+\S+/i.test(text);
+  return /^(запусти|выполни|установи|перезапусти|останови|открой|run|execute|install|restart|stop|open|launch)\s+\S+/i.test(text);
 }
 
 function isExplicitWebSearch(text: string): boolean {
   return /(найди|поищи|search|find).{0,32}(?:в интернете|в сети|online|web|internet)/i.test(text)
     || isBareExternalLookup(text)
     || hasFreshnessSignal(text);
+}
+
+/**
+ * Chooses only Oscar's execution surface. Capability selection remains
+ * model-driven inside Agent Runtime; ordinary answers stay on the chat path.
+ */
+export function classifyOscarRequestDisposition(text: string): OscarRequestDisposition {
+  const classification = classifyIntentText(text);
+  const classifiedAsOperational = (
+    classification.kind === 'file_generation'
+    || classification.kind === 'file_operation'
+    || classification.kind === 'system_action'
+    || classification.kind === 'tool_use'
+  );
+  const directOperationalRequest = looksLikeDirectOperationalRequest(text);
+  const explicitNonActionRequest = looksLikeExplicitNonActionRequest(text);
+  // Broad intent classification may notice action words while the user is
+  // discussing, criticizing, or explicitly refusing an action. It can label
+  // the request, but only positive request shape may open the Agent surface.
+  const mode = !explicitNonActionRequest && directOperationalRequest
+    ? 'agent'
+    : 'chat';
+  const dispositionKind = mode === 'agent' && !classifiedAsOperational
+    ? (hasConcreteFilesystemTarget(text) ? 'file_operation' : 'system_action')
+    : classification.kind;
+
+  return {
+    mode,
+    kind: dispositionKind,
+    confidence: classification.confidence,
+    reason: mode === 'agent'
+      ? `Operational intent requires a verified Agent Task (${dispositionKind}).`
+      : `No verified system effect is required (${dispositionKind}).`,
+  };
+}
+
+const RU_OPERATION_WORDS = [
+  'открой', 'открыть', 'запусти', 'запустить', 'создай', 'создать',
+  'допиши', 'дописать', 'сделай', 'сделать', 'скопируй', 'скопировать',
+  'переименуй', 'переименовать', 'перемести', 'переместить', 'убери',
+  'убрать', 'удали', 'удалить', 'очисти', 'очистить', 'поставь',
+  'поставить', 'прочитай', 'прочитать', 'найди', 'найти', 'сохрани',
+  'сохранить', 'запиши', 'записать', 'замени', 'заменить', 'закрой',
+  'закрыть', 'выполни', 'выполнить', 'установи', 'установить',
+] as const;
+
+const EN_OPERATION_WORDS = [
+  'open', 'launch', 'start', 'run', 'execute', 'install', 'create', 'write',
+  'append', 'make', 'copy', 'rename', 'move', 'delete', 'remove', 'read',
+  'inspect', 'find', 'set', 'close', 'empty', 'save', 'replace', 'bring',
+] as const;
+
+const OPERATION_WORDS = [...RU_OPERATION_WORDS, ...EN_OPERATION_WORDS];
+
+/**
+ * This detector only decides whether Oscar needs the Agent surface. It never
+ * chooses a capability or constructs action arguments; that remains an LLM
+ * decision inside Agent Runtime.
+ */
+function looksLikeDirectOperationalRequest(value: string): boolean {
+  const text = stripOperationalPrelude(normalizeText(value).toLowerCase());
+  if (!text || looksLikeExplicitNonActionRequest(text)) return false;
+
+  const directQuestion = text.match(
+    /^(?:(?:ты\s+)?(?:можешь|сможешь)|could\s+you|can\s+you|would\s+you)\s+([\s\S]+)$/iu,
+  );
+  if (directQuestion?.[1]) {
+    const requestedEffect = directQuestion[1].replace(
+      /^(?:(?:мне|сейчас|пожалуйста|прямо|just|please|now|for\s+me)\s+)+/iu,
+      '',
+    );
+    if (startsWithOperationalVerbAndTarget(requestedEffect)) return true;
+  }
+  const requestWords = words(text);
+  if (
+    requestWords.length >= 3
+    && ['можешь', 'сможешь'].some((candidate) => isSingleEditApart(candidate, requestWords[0]!))
+  ) {
+    const requestedEffect = requestWords.slice(1).join(' ').replace(
+      /^(?:(?:мне|сейчас|пожалуйста|прямо)\s+)+/iu,
+      '',
+    );
+    if (startsWithOperationalVerbAndTarget(requestedEffect)) return true;
+  }
+
+  if (startsWithOperationalVerbAndTarget(text)) return true;
+
+  if (hasConcreteFilesystemTarget(text)) {
+    return words(text).some((word) => isOperationWord(word));
+  }
+
+  return false;
+}
+
+function looksLikeExplicitNonActionRequest(value: string): boolean {
+  const text = stripOperationalPrelude(normalizeText(value).toLowerCase());
+  if (!text) return false;
+  if (
+    /^(?:как|почему|что\s+(?:произойд[её]т|будет)|объясни|поясни|расскажи|я\s+не\s+(?:просил|прошу)|how|why|what\s+(?:happens|would|will)|explain|tell\s+me\s+(?:how|what)|i\s+(?:did\s+not|didn't|do\s+not|don't)\s+ask)\b/iu.test(text)
+  ) {
+    return true;
+  }
+  if (/^(?:не\s+\p{L}+|do\s+not\s+\w+|don't\s+\w+)\b/iu.test(text)) {
+    return !/(?:,\s*(?:а|но)\s+|;\s*(?:instead|but)\s+).{0,40}\b(?:открой|запусти|создай|open|launch|create|run)\b/iu.test(text);
+  }
+  return false;
+}
+
+function stripOperationalPrelude(value: string): string {
+  let text = value.trim();
+  const prefixes = [
+    /^(?:плиз|пожалуйста)\s*[,—:;-]?\s*/iu,
+    /^короче\s+задача\s+такая\s*[,—:;-]?\s*/iu,
+    /^а\s+можешь\s*:\s*/iu,
+    /^please\s*[,—:;-]?\s*/iu,
+    /^quick\s+one\s*[,—:;-]?\s*/iu,
+    /^would\s+you\s*:\s*/iu,
+  ];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const prefix of prefixes) {
+      const stripped = text.replace(prefix, '');
+      if (stripped !== text) {
+        text = stripped.trim();
+        changed = true;
+      }
+    }
+  }
+  return text;
+}
+
+function startsWithOperationalVerbAndTarget(value: string): boolean {
+  const tokens = words(value);
+  if (tokens.length < 2) return false;
+  let index = 0;
+  while (
+    index < tokens.length
+    && index < 3
+    && /^(?:безвозвратно|навсегда|permanently|irreversibly|exactly)$/iu.test(tokens[index]!)
+  ) {
+    index += 1;
+  }
+  return index < tokens.length - 1 && isOperationWord(tokens[index]!);
+}
+
+function words(value: string): string[] {
+  return value.match(/[\p{L}\p{N}.:/\\_-]+/gu) || [];
+}
+
+function isOperationWord(word: string): boolean {
+  if (OPERATION_WORDS.some((candidate) => candidate === word)) return true;
+  if (word.length < 4) return false;
+  return OPERATION_WORDS.some((candidate) => (
+    isSingleEditApart(candidate, word)
+  ));
+}
+
+function isSingleEditApart(left: string, right: string): boolean {
+  if (left === right) return true;
+  if (Math.abs(left.length - right.length) > 1) return false;
+  if (left.length === right.length) {
+    let differences = 0;
+    for (let index = 0; index < left.length; index += 1) {
+      if (left[index] !== right[index]) differences += 1;
+      if (differences > 1) return false;
+    }
+    return differences === 1;
+  }
+  const [shorter, longer] = left.length < right.length ? [left, right] : [right, left];
+  let shortIndex = 0;
+  let longIndex = 0;
+  let skipped = false;
+  while (shortIndex < shorter.length && longIndex < longer.length) {
+    if (shorter[shortIndex] === longer[longIndex]) {
+      shortIndex += 1;
+      longIndex += 1;
+      continue;
+    }
+    if (skipped) return false;
+    skipped = true;
+    longIndex += 1;
+  }
+  return true;
+}
+
+function hasConcreteFilesystemTarget(value: string): boolean {
+  return /(?:[a-z]:[\\/]|\\\\|\/[\w.-]+|[\w ()-]+\.(?:txt|json|md|html|csv|log|tmp|yaml|yml|toml|ini)\b)/iu.test(value);
 }
 
 function isBareExternalLookup(text: string): boolean {
@@ -311,7 +506,7 @@ function isExplicitWorkspaceBatch(text: string): boolean {
 }
 
 function isExplanationQuestion(text: string): boolean {
-  return /^(?:объясни|поясни|расскажи как|как\s+|почему\s+|что такое\s+|что означает\s+|что значит\s+|explain|how\s+|why\s+|what is\s+|what does\s+.+\s+mean)/i.test(text);
+  return /^(?:объясни|поясни|расскажи как|как\s+|почему\s+|что делать(?:\s+|$)|что такое\s+|что означает\s+|что значит\s+|explain|how\s+|why\s+|what (?:should|do)\s+|what is\s+|what does\s+.+\s+mean)/i.test(text);
 }
 
 function isGeneralTextGeneration(text: string): boolean {

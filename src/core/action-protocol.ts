@@ -26,6 +26,7 @@ const MAX_SKILL_IDS = 8;
 export interface NormalizeActionProposalOptions {
   capability: MonarchCapability;
   workspaceRoot: string;
+  allowExternalPaths?: boolean;
   intentId?: string;
   originatingUserText?: string;
   requestedBy?: string;
@@ -71,7 +72,13 @@ export function normalizeActionProposal(
   const reason = readBoundedString(value.reason, MAX_PROPOSAL_REASON_CHARS)
     || `Use ${capabilityId} for the current user task.`;
   const riskVector = deriveRiskVector(options.capability, args);
-  const scope = normalizeScope(value.scope, args, options.workspaceRoot, riskVector.scope);
+  const scope = normalizeScope(
+    value.scope,
+    args,
+    options.workspaceRoot,
+    riskVector.scope,
+    options.allowExternalPaths === true,
+  );
   const reversibility = normalizeReversibility(value.reversibility, riskVector.reversibility);
   const expectedEffect = readBoundedString(value.expectedEffect, MAX_EXPECTED_EFFECT_CHARS)
     || describeExpectedEffect(options.capability.risk, capabilityId, scope);
@@ -196,6 +203,7 @@ function normalizeScope(
   args: Record<string, unknown>,
   workspaceRoot: string,
   fallbackLevel: MonarchActionScopeLevel,
+  allowExternalPaths: boolean,
 ): MonarchActionScope {
   const paths = uniqueStrings(uniqueStrings([
     ...normalizeStringList(value?.paths, 32),
@@ -203,7 +211,11 @@ function normalizeScope(
   ]).map((entry) => canonicalizePathHint(entry, workspaceRoot)).filter(Boolean));
   const roots = uniqueStrings(normalizeStringList(value?.roots, 8)
     .map((entry) => canonicalizePathHint(entry, workspaceRoot)));
-  if (paths.length > 0 && roots.length === 0) roots.push(path.resolve(workspaceRoot));
+  if (paths.length > 0 && roots.length === 0) {
+    roots.push(...(allowExternalPaths
+      ? uniqueStrings(paths.map((entry) => path.dirname(entry))).slice(0, 8)
+      : [path.resolve(workspaceRoot)]));
+  }
   const origins = uniqueStrings([
     ...normalizeStringList(value?.origins, 16),
     ...extractActionOrigins(args),

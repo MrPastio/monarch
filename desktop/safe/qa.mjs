@@ -273,7 +273,13 @@ async function runQa() {
   await evaluate(`document.querySelector('#confirm-form button[value="cancel"]').click()`);
   await waitFor(() => evaluate(`!document.querySelector('#confirm-dialog').open`));
   assert(await evaluate(`!document.querySelector('#vault-screen').hidden && document.querySelector('#text-editor').value === ${JSON.stringify(dirtyGuardMarker)}`), 'canceling manual lock with a dirty draft must keep the unlocked editor intact');
-  await evaluate(`window.monarchSafe.request('touch')`);
+  // Exercise the same activity path as a real user. Calling the bridge
+  // directly refreshes the vault timer but not the renderer's independent
+  // lock timer, which left this QA sequence racing the intentional 20s lock.
+  await evaluate(`(() => {
+    document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    return window.monarchSafe.request('touch');
+  })()`);
   await evaluate(`document.querySelector('[data-file-id] .file-open-button').click()`);
   await waitFor(() => evaluate(`document.querySelector('#confirm-dialog').open`));
   await evaluate(`document.querySelector('#confirm-action').click()`);

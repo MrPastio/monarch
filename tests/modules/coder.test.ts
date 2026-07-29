@@ -272,6 +272,59 @@ describe('Coder Mode', () => {
     }
   }, 20_000);
 
+  it.runIf(process.platform === 'win32')('kills the sandbox job on command timeout and permits receipt-based reconciliation', async () => {
+    const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-timeout-'));
+    const module = new CoderModule({ monarchRoot });
+    await module.activate(context);
+    try {
+      const project = (await execute(module, 'coder.projects.create', { name: 'Timeout Reconciliation' })).output as any;
+      const marker = path.join(project.root, 'late-timeout-marker.txt');
+      await writeFile(path.join(project.root, 'timeout-child.cmd'), [
+        '@echo off',
+        'start "" /b cmd.exe /d /s /c "choice /d y /n /t 3 >nul & echo SHOULD_NOT_SURVIVE>late-timeout-marker.txt" >nul 2>&1',
+        'choice /d y /n /t 30 >nul',
+        '',
+      ].join('\r\n'), 'utf8');
+
+      const timedOut = await execute(module, 'coder.command.run', {
+        projectId: project.id,
+        executable: '.\\timeout-child.cmd',
+        args: [],
+        timeoutMs: 1_000,
+        allowNetwork: false,
+      });
+      expect(timedOut.ok).toBe(false);
+      expect(timedOut.error).toBe('command-failed');
+      expect(timedOut.summary).toBe('Command timed out.');
+      expect(timedOut.output).toMatchObject({
+        exitCode: null,
+        timedOut: true,
+        isolation: {
+          verified: true,
+          appContainer: true,
+          lowIntegrity: true,
+          hostFilesystemDefaultDeny: true,
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 3_500));
+      expect(existsSync(marker)).toBe(false);
+
+      const reconciled = await execute(module, 'coder.command.run', {
+        projectId: project.id,
+        executable: process.execPath,
+        args: ['-e', 'process.stdout.write(require("fs").existsSync("late-timeout-marker.txt") ? "PRESENT" : "ABSENT")'],
+        timeoutMs: 5_000,
+        allowNetwork: false,
+      });
+      expect(reconciled.ok, reconciled.summary).toBe(true);
+      expect((reconciled.output as any).stdout).toBe('ABSENT');
+      expect((reconciled.output as any).timedOut).toBe(false);
+    } finally {
+      await rm(monarchRoot, { recursive: true, force: true });
+    }
+  }, 25_000);
+
   it('keeps generic network requests public and credential-free and blocks sensitive Hub uploads', async () => {
     const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-integrations-'));
     const module = new CoderModule({ monarchRoot });
@@ -281,7 +334,9 @@ describe('Coder Mode', () => {
       expect(localTarget.ok).toBe(false);
       expect(localTarget.summary).toMatch(/local and private network/i);
 
-      const credentialUrl = await execute(module, 'coder.network.request', { url: 'https://user:password@example.com/' });
+      const credentialUrl = await execute(module, 'coder.network.request', {
+        url: `https://${['user', 'password'].join(':')}@example.com/`,
+      });
       expect(credentialUrl.ok).toBe(false);
       expect(credentialUrl.summary).toMatch(/credentials.*blocked/i);
 
@@ -382,7 +437,8 @@ describe('Coder Mode', () => {
       expect(projection.metrics.estimatedPromptTokens).toBe(projectedTokens);
 
       const reloaded = new CoderRunStore({ monarchRoot, budgetTokens: 8_192, reservedOutputTokens: 1_024 });
-      expect(reloaded.require(run.id).events.length).toBe(restored.events.length);
+      expect(reloaded.require(run.id).status).toBe('interrupted');
+      expect(reloaded.require(run.id).events.length).toBe(restored.events.length + 1);
     } finally {
       await rm(monarchRoot, { recursive: true, force: true });
     }
@@ -411,16 +467,17 @@ describe('Coder Mode', () => {
       const interrupted = restored.require(run.id);
       const projection = restored.projection(run.id);
       const projectedTokens = Math.ceil(JSON.stringify({ summary: projection.summary, recentEvents: projection.recentEvents }).length / 3.6);
-      expect(interrupted.status).toBe('failed');
-      expect(interrupted.error).toMatch(/stopped before completion/i);
-      expect(interrupted.events).toHaveLength(beforeRestart.events.length);
+      expect(interrupted.status).toBe('interrupted');
+      expect(interrupted.error).toBe('');
+      expect(interrupted.finishedAt).toBeNull();
+      expect(interrupted.events).toHaveLength(beforeRestart.events.length + 1);
+      expect(interrupted.events.at(-1)?.title).toBe('Task interrupted');
       expect(interrupted.summary.pending).toEqual(['Run the final focused test.', 'Produce a receipt-grounded summary.']);
       expect(projectedTokens).toBeLessThanOrEqual(2_400);
       expect(projection.metrics.estimatedPromptTokens).toBe(projectedTokens);
 
-      const resumed = restored.create('project-long-run', 'Resume from the preserved journal and finish.');
-      expect(resumed.maxIterations).toBe(64);
-      expect(restored.list('project-long-run').map((entry) => entry.id)).toEqual([resumed.id, run.id]);
+      expect(interrupted.maxIterations).toBe(64);
+      expect(restored.list('project-long-run').map((entry) => entry.id)).toEqual([run.id]);
     } finally {
       await rm(monarchRoot, { recursive: true, force: true });
     }

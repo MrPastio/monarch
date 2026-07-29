@@ -39,6 +39,45 @@ describe('Monarch distribution workflows', () => {
     expect(workflow).not.toContain('tags:');
   });
 
+  it('propagates native Oscar and Security test failures to release callers', async () => {
+    for (const scriptPath of [
+      'oscar/scripts/test.ps1',
+      'security/scripts/test.ps1',
+    ]) {
+      const script = await read(scriptPath);
+      expect(script).toMatch(
+        /& \$python -m pytest[\s\S]*if \(\$LASTEXITCODE -ne 0\) \{\r?\n\s+exit \$LASTEXITCODE\r?\n\}/u,
+      );
+    }
+  });
+
+  it('runs deterministic Security and model-free runtime gates before publication', async () => {
+    const workflow = await read('.github/workflows/release-stable.yml');
+    const security = workflow.indexOf('.\\security\\scripts\\test.ps1');
+    const voiceProvenance = workflow.indexOf(
+      'oscar\\backend\\tests\\test_sharing_tts_runtime.py',
+    );
+    const smoke = workflow.indexOf('npm run smoke:raw');
+    const desktopSmoke = workflow.indexOf('npm run desktop:smoke');
+    const frontendBuild = workflow.indexOf('npm run oscar:frontend:build');
+    const boundary = workflow.indexOf('npm run upload:dry-run');
+
+    expect(workflow).toContain('python-version: "3.11.9"');
+    expect(workflow).toContain('pytest==9.1.1');
+    expect(workflow).toMatch(
+      /gates-and-installer:\r?\n\s+needs: \[security-tests, oscar-provenance-tests\]/u,
+    );
+    expect(security).toBeGreaterThan(-1);
+    expect(voiceProvenance).toBeGreaterThan(security);
+    expect(workflow).toContain(
+      'python -m pytest oscar\\backend\\tests\\test_sharing_tts_runtime.py -q',
+    );
+    expect(smoke).toBeGreaterThan(security);
+    expect(desktopSmoke).toBeGreaterThan(smoke);
+    expect(frontendBuild).toBeGreaterThan(desktopSmoke);
+    expect(boundary).toBeGreaterThan(frontendBuild);
+  });
+
   it('refreshes at 30 days and raises an urgent issue at 14 days', async () => {
     const workflow = await read('.github/workflows/refresh-stable-manifest.yml');
     expect(workflow).toContain('refreshDue');
@@ -48,15 +87,21 @@ describe('Monarch distribution workflows', () => {
     expect(workflow).toContain("cron: '17 5 * * 1'");
   });
 
-  it('keeps signing keys external and arms only the accepted immutable components', async () => {
+  it('does not commit a production private or invented public key', async () => {
     const docs = await read('release/README.md');
     const sample = await read('release/examples/stable-bootstrap.json');
+    const packageManifest = JSON.parse(await read('package.json'));
     const releaseSpec = JSON.parse(await read('release/stable-release-spec.json'));
+    const version = packageManifest.version;
     expect(docs).toContain('No production private key or invented public key is committed');
     expect(sample).not.toContain('BEGIN PRIVATE KEY');
     expect(sample).not.toContain('BEGIN PUBLIC KEY');
     expect(releaseSpec.available).toBe(true);
     expect(releaseSpec.withdrawnReason).toBeNull();
+    expect(releaseSpec.version).toBe(version);
+    expect(releaseSpec.releaseNotesUrl).toContain(`/v${version}`);
+    expect(releaseSpec.asset.url).toContain(`/v${version}/Monarch-Setup-${version}.exe`);
+    expect(releaseSpec.asset.fileName).toBe(`Monarch-Setup-${version}.exe`);
     expect(releaseSpec.compatibility).toMatchObject({
       runtimeVersion: '2026.07.7',
       backendEnvironment: 'backend-0.1.5-offline5',

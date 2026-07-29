@@ -15,6 +15,7 @@ import {
   type MonarchIntent,
   type MonarchIntentResult,
   type MonarchIntentSource,
+  type MonarchAgentCapabilitySource,
   type MonarchPlan,
   type MonarchPermissionProfile,
   type MonarchActionProposalInput,
@@ -47,6 +48,7 @@ import {
   createAgentSystemProfile,
   type MonarchAgentSystemProfile,
 } from './system-profile';
+import { readMonarchProductVersion } from './product-version';
 import type { TelegramIntentDispatcher } from '../modules/telegram';
 import {
   AgentKernelExecutionAdapter,
@@ -109,6 +111,8 @@ export interface MonarchCapabilityExecution {
   capabilityId: string;
   input?: unknown;
   requestedBy?: string;
+  /** Trusted caller surface; HTTP handlers derive this instead of accepting it from JSON. */
+  source?: MonarchAgentCapabilitySource;
   confirmed?: boolean;
   confirmationToken?: string;
   intentId?: string;
@@ -118,12 +122,16 @@ export interface MonarchActionProposalSubmission {
   proposal: MonarchActionProposalInput | MonarchActionProposalV1;
   originatingUserText?: string;
   requestedBy?: string;
+  /** Trusted caller surface; HTTP handlers derive this instead of accepting it from JSON. */
+  source?: MonarchAgentCapabilitySource;
   model?: string;
   skillIds?: string[];
   confirmed?: boolean;
   confirmationToken?: string;
   grantScope?: 'once' | 'task';
   leaseId?: string;
+  /** Internal-only trusted Agent Runtime lane. HTTP bodies never populate this field. */
+  executionMode?: 'agent-runtime';
   /** Internal-only cancellation signal. HTTP bodies never populate this field. */
   signal?: AbortSignal;
 }
@@ -190,6 +198,7 @@ interface CachedRuntimeState {
 export class MonarchApplication {
   readonly sourceRoot: string;
   readonly workspaceRoot: string;
+  readonly productVersion: string;
   readonly runtimePaths: MonarchRuntimePaths;
   readonly runtime: MonarchRuntime;
   readonly agentRuntime: MonarchAgentRuntime | null;
@@ -200,6 +209,7 @@ export class MonarchApplication {
 
   private lastIntent: MonarchIntentResult | null = null;
   private readonly pendingConfirmations = new Map<string, PendingConfirmation>();
+  private readonly pendingAgentSurfaceConfirmations = new Map<string, PendingAgentSurfaceConfirmation>();
   private readonly intentJobs = new Map<string, PendingIntentJob>();
   private readonly operationalContexts = new Map<string, MonarchOperationalContext>();
   private intentJobQueue: Promise<void> = Promise.resolve();
@@ -216,6 +226,7 @@ export class MonarchApplication {
       ...bootstrapOptions
     } = options;
     this.sourceRoot = workspaceRoot;
+    this.productVersion = readMonarchProductVersion(this.sourceRoot);
     this.runtimePaths = resolveMonarchRuntimePaths(workspaceRoot);
     this.workspaceRoot = this.runtimePaths.userWorkspaceRoot;
     const permissionProfile = bootstrapOptions.permissionProfile
@@ -226,24 +237,15 @@ export class MonarchApplication {
       ...(permissionProfile ? { permissionProfile } : {}),
     });
     this.runtime.kernel.setRecentIntentJobsProvider((query) => this.listRecentIntentJobs(query));
-    const telegramDispatcher: TelegramIntentDispatcher = async (request) => this.submitIntent({
-      text: request.text,
-      source: 'telegram',
-      context: request.context,
-      ...(request.confirmed !== undefined ? { confirmed: request.confirmed } : {}),
-      ...(request.confirmationToken ? { confirmationToken: request.confirmationToken } : {}),
-    });
-    for (const module of this.runtime.modules) {
-      const bridge = module as typeof module & { setIntentDispatcher?: (dispatcher: TelegramIntentDispatcher) => void };
-      bridge.setIntentDispatcher?.(telegramDispatcher);
-    }
     const agentEnabled = enableAgentRuntimeV2 ?? readBooleanEnvironment('MONARCH_AGENT_RUNTIME_V2', false);
     if (agentEnabled) {
       const store = agentTaskStore || new LocalJsonAgentTaskStore(
         path.join(this.runtimePaths.stateRoot, 'agent', 'tasks.v2.json'),
       );
       const decisionProvider = agentDecisionProvider || new LocalAgentDecisionProvider({
-        workspaceRoot: this.workspaceRoot,
+        // Model catalog/runtime configuration belongs to the installed source
+        // tree, while Agent file actions intentionally use userWorkspaceRoot.
+        workspaceRoot: this.sourceRoot,
       });
       const executionAdapter = new AgentKernelExecutionAdapter(
         (submission) => this.submitActionProposal(submission),
@@ -265,6 +267,17 @@ export class MonarchApplication {
       });
     } else {
       this.agentRuntime = null;
+    }
+    const telegramDispatcher: TelegramIntentDispatcher = async (request) => this.submitAgentSurfaceIntent({
+      text: request.text,
+      source: 'telegram',
+      context: request.context,
+      ...(request.confirmed !== undefined ? { confirmed: request.confirmed } : {}),
+      ...(request.confirmationToken ? { confirmationToken: request.confirmationToken } : {}),
+    });
+    for (const module of this.runtime.modules) {
+      const bridge = module as typeof module & { setIntentDispatcher?: (dispatcher: TelegramIntentDispatcher) => void };
+      bridge.setIntentDispatcher?.(telegramDispatcher);
     }
   }
 
@@ -321,7 +334,7 @@ export class MonarchApplication {
     return {
       app: {
         name: 'Monarch',
-        version: '0.1.0',
+        version: this.productVersion,
         workspaceRoot: this.workspaceRoot,
         started: this.started,
         startedAt: this.startedAt,
@@ -378,6 +391,56 @@ export class MonarchApplication {
       );
     }
     return this.lastIntent;
+  }
+
+  async submitAgentSurfaceIntent(
+    submission: MonarchIntentSubmission & { source: Extract<MonarchIntentSource, 'telegram' | 'voice' | 'api'> },
+  ): Promise<MonarchIntentResult> {
+    await this.ensureStarted();
+    const text = submission.text.trim();
+    if (!text) {
+      throw new Error('Intent text is required.');
+    }
+    if (!this.agentRuntime) {
+      return this.submitIntent(submission);
+    }
+
+    if (submission.confirmed) {
+      return this.resolveAgentSurfaceConfirmation(submission, text);
+    }
+
+    const context = submission.context || {};
+    const conversationId = readBoundedContextId(context.clientConversationId);
+    const created = await this.agentRuntime.createTask({
+      request: text,
+      source: {
+        surface: submission.source,
+        remote: submission.source !== 'voice',
+        ...(conversationId ? { conversationId } : {}),
+      },
+      ...(conversationId ? { conversationId } : {}),
+      expectedOutputs: [{
+        id: 'surface_verified_outcome',
+        description: `Return only the verified outcome of this request: ${text}`,
+        kind: 'answer',
+        required: true,
+      }],
+      successCriteria: [{
+        id: 'surface_outcome_verified',
+        description: 'Any claimed action is backed by a Kernel receipt and capability-owned verification.',
+      }],
+      budgets: {
+        maxSteps: 12,
+        maxModelTurns: 10,
+        maxToolCalls: 8,
+        maxWallTimeMs: 3 * 60 * 1000,
+        maxFailures: 3,
+        maxConsecutiveNoProgress: 3,
+        maxComputeClass: 'medium',
+      },
+    });
+    await this.agentRuntime.waitForIdle(created.task.id);
+    return this.agentSurfaceTaskResult(created.task.id, text, submission.source, context);
   }
 
   async submitIntentJob(submission: MonarchIntentJobSubmission): Promise<MonarchIntentJobSnapshot> {
@@ -512,6 +575,7 @@ export class MonarchApplication {
       input: execution.input ?? {},
       createdAt: nowIso(),
       requestedBy: execution.requestedBy || 'api',
+      ...(execution.source ? { source: execution.source } : {}),
       confirmed: false,
     };
 
@@ -552,9 +616,11 @@ export class MonarchApplication {
         intentId: pending.proposal.intentId,
         originatingUserText: pending.originatingUserText || '',
         requestedBy,
+        ...(submission.source ? { source: submission.source } : {}),
         confirmed: true,
         securityOverrideConfirmed: pending.securityOverride === true,
         ...(lease ? { leaseId: lease.leaseId } : {}),
+        ...(submission.executionMode ? { executionMode: submission.executionMode } : {}),
         ...(submission.signal ? { signal: submission.signal } : {}),
       });
       return {
@@ -567,9 +633,11 @@ export class MonarchApplication {
     const executed = await this.runtime.kernel.executeActionProposal(submission.proposal, {
       originatingUserText,
       requestedBy,
+      ...(submission.source ? { source: submission.source } : {}),
       ...(submission.model ? { model: submission.model } : {}),
       ...(submission.skillIds ? { skillIds: submission.skillIds } : {}),
       ...(submission.leaseId ? { leaseId: submission.leaseId } : {}),
+      ...(submission.executionMode ? { executionMode: submission.executionMode } : {}),
       ...(submission.signal ? { signal: submission.signal } : {}),
     });
     const result = withUserFacingExecutionResult(executed.result);
@@ -858,6 +926,162 @@ export class MonarchApplication {
     return this.lastIntent;
   }
 
+  private async resolveAgentSurfaceConfirmation(
+    submission: MonarchIntentSubmission & { source: Extract<MonarchIntentSource, 'telegram' | 'voice' | 'api'> },
+    text: string,
+  ): Promise<MonarchIntentResult> {
+    this.pruneExpiredAgentSurfaceConfirmations();
+    const token = String(submission.confirmationToken || '').trim();
+    const pending = token ? this.pendingAgentSurfaceConfirmations.get(token) : undefined;
+    if (token) this.pendingAgentSurfaceConfirmations.delete(token);
+    if (
+      !pending
+      || pending.source !== submission.source
+      || pending.text !== text
+      || pending.contextKey !== agentSurfaceContextKey(submission.context)
+      || Date.parse(pending.expiresAt) <= Date.now()
+    ) {
+      throw new MonarchApplicationError(
+        400,
+        'invalid-agent-confirmation-token',
+        'Agent Task confirmation token is invalid, expired, or belongs to another surface request.',
+      );
+    }
+    await this.agentRuntime!.resolveApproval(pending.taskId, pending.approvalId, {
+      decision: 'approve',
+      grantScope: 'once',
+      requestId: createMonarchId('agent_surface_approval'),
+    });
+    await this.agentRuntime!.waitForIdle(pending.taskId);
+    return this.agentSurfaceTaskResult(
+      pending.taskId,
+      pending.text,
+      pending.source,
+      submission.context || {},
+    );
+  }
+
+  private async agentSurfaceTaskResult(
+    taskId: string,
+    text: string,
+    source: Extract<MonarchIntentSource, 'telegram' | 'voice' | 'api'>,
+    context: Record<string, unknown>,
+  ): Promise<MonarchIntentResult> {
+    const checkpoint = await this.agentRuntime!.getTask(taskId);
+    if (!checkpoint) {
+      throw new MonarchApplicationError(500, 'agent-task-missing', 'Agent Task disappeared before its result was read.');
+    }
+    const task = checkpoint.task;
+    const intent: MonarchIntent = {
+      id: task.id,
+      source,
+      text,
+      createdAt: task.createdAt,
+      context,
+    };
+    let summary = String(task.terminalReason?.summary || '').trim();
+    let execution: MonarchExecutionResult;
+    let confirmation: MonarchConfirmationChallenge | undefined;
+
+    if (task.status === 'completed') {
+      summary = summary || 'Задача выполнена и проверена.';
+      execution = {
+        ok: true,
+        summary,
+        output: {
+          reply: summary,
+          agentTaskId: task.id,
+          status: task.status,
+          verified: true,
+        },
+      };
+    } else if (task.status === 'waiting-for-approval') {
+      const approval = checkpoint.approvals.find((entry) => (
+        entry.id === task.activeApprovalId && entry.status === 'pending'
+      )) || checkpoint.approvals.find((entry) => entry.status === 'pending');
+      if (!approval) {
+        throw new MonarchApplicationError(
+          500,
+          'agent-approval-missing',
+          'Agent Task is waiting for approval but no exact pending proposal exists.',
+        );
+      }
+      const token = randomBytes(32).toString('base64url');
+      const expiresAt = approval.expiresAt
+        && Date.parse(approval.expiresAt) > Date.now()
+        ? approval.expiresAt
+        : new Date(Date.now() + 5 * 60 * 1000).toISOString();
+      const moduleId = approval.capabilityId.split('.')[0] || 'agent';
+      confirmation = {
+        token,
+        mode: 'proposal',
+        expiresAt,
+        target: {
+          intentId: task.id,
+          ...(approval.stepId ? { stepId: approval.stepId } : {}),
+          moduleId,
+          capabilityId: approval.capabilityId,
+        },
+        grantOptions: ['once'],
+      };
+      this.pruneExpiredAgentSurfaceConfirmations();
+      this.pendingAgentSurfaceConfirmations.set(token, {
+        token,
+        taskId: task.id,
+        approvalId: approval.id,
+        source,
+        text,
+        contextKey: agentSurfaceContextKey(context),
+        expiresAt,
+      });
+      summary = `Нужно одноразовое подтверждение точного действия: ${approval.capabilityId}.`;
+      execution = {
+        ok: false,
+        error: 'confirmation-required',
+        summary,
+        metadata: {
+          agentTaskId: task.id,
+          approvalId: approval.id,
+          canonicalProposalHash: approval.canonicalProposalHash,
+        },
+      };
+    } else if (task.status === 'waiting-for-user') {
+      summary = [...task.messages]
+        .reverse()
+        .find((message) => message.kind === 'clarification')?.content
+        || 'Нужно уточнение, чтобы продолжить задачу.';
+      execution = {
+        ok: false,
+        error: 'clarification-required',
+        summary,
+        output: { reply: summary, agentTaskId: task.id, status: task.status },
+      };
+    } else {
+      const cancelled = task.status === 'cancelled' || task.status === 'cancelling';
+      summary = cancelled
+        ? 'Задача остановлена. Новые действия и повторные шаги не будут запущены.'
+        : summary || (task.status === 'failed'
+          ? 'Задача не завершилась: проверенный результат не получен.'
+          : 'Задача приостановлена до готовности локального runtime.');
+      execution = {
+        ok: false,
+        error: cancelled ? 'agent-task-cancelled' : `agent-task-${task.status}`,
+        summary,
+        output: { reply: summary, agentTaskId: task.id, status: task.status },
+      };
+    }
+
+    this.lastIntent = withUserFacingIntentResult({
+      intent,
+      route: null,
+      plan: null,
+      execution,
+      summary,
+      ...(confirmation ? { confirmation } : {}),
+    });
+    return this.lastIntent;
+  }
+
   private async executeConfirmedCapability(
     execution: MonarchCapabilityExecution,
     moduleId: string,
@@ -1018,6 +1242,15 @@ export class MonarchApplication {
     }
   }
 
+  private pruneExpiredAgentSurfaceConfirmations(): void {
+    const now = Date.now();
+    for (const [token, pending] of this.pendingAgentSurfaceConfirmations) {
+      if (Date.parse(pending.expiresAt) <= now) {
+        this.pendingAgentSurfaceConfirmations.delete(token);
+      }
+    }
+  }
+
   private pruneIntentJobs(): void {
     const maxJobs = 50;
     if (this.intentJobs.size <= maxJobs) {
@@ -1055,8 +1288,34 @@ interface PendingConfirmation {
   securityOverride?: boolean;
 }
 
+interface PendingAgentSurfaceConfirmation {
+  token: string;
+  taskId: string;
+  approvalId: string;
+  source: Extract<MonarchIntentSource, 'telegram' | 'voice' | 'api'>;
+  text: string;
+  contextKey: string;
+  expiresAt: string;
+}
+
 interface PendingIntentJob extends MonarchIntentJobSnapshot {
   cancelled: boolean;
+}
+
+function readBoundedContextId(value: unknown): string {
+  const normalized = typeof value === 'string'
+    ? value.trim().replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 256)
+    : '';
+  return normalized;
+}
+
+function agentSurfaceContextKey(context: Record<string, unknown> | undefined): string {
+  return JSON.stringify([
+    String(context?.clientConversationId || ''),
+    String(context?.clientSessionId || ''),
+    String(context?.telegramChatId || ''),
+    String(context?.telegramUserId || ''),
+  ]);
 }
 
 function canGrantTaskLease(proposal: MonarchActionProposalV1): boolean {

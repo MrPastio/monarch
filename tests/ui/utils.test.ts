@@ -18,6 +18,7 @@ import {
   resolveContextualAgentAction,
   sanitizeVisibleAssistantContent,
   readUserFacingFailure,
+  formatAgentTaskFailure,
 } from '../../src/ui/public/modules/utils.js';
 import { state } from '../../src/ui/public/modules/state.js';
 
@@ -27,6 +28,15 @@ describe('Oscar UI utils', () => {
       summary: 'Traceback: local secret',
       userFacing: { message: 'Безопасное сообщение.' },
     }, 'fallback')).toBe('Безопасное сообщение.');
+  });
+
+  it('never exposes raw Agent Runtime model diagnostics as Oscar chat text', () => {
+    expect(formatAgentTaskFailure('no-model-runtime-available', 'unrecoverable-error'))
+      .toBe('Oscar не смог запустить локальную модель. Повтори команду — техническая причина сохранена в диагностике.');
+    expect(formatAgentTaskFailure('agent-decision-model-unavailable'))
+      .not.toContain('agent-decision-model-unavailable');
+    expect(formatAgentTaskFailure('Не удалось однозначно найти приложение.'))
+      .toBe('Не удалось однозначно найти приложение.');
   });
 
   describe('agent action pre-dispatch', () => {

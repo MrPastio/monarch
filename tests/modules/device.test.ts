@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MonarchKernel } from '../../src/core';
 import {
+  createDevicePowerShellEnvironment,
   DeviceModule,
   normalizeApplicationRequest,
   normalizeBrightnessRequest,
@@ -9,16 +10,38 @@ import {
 } from '../../src/modules/device';
 
 describe('Device Module', () => {
-  it('routes the combined Telegram desktop example behind one confirmation', async () => {
+  it('launches Device PowerShell with an OS-only environment and the bounded request payload', () => {
+    const environment = createDevicePowerShellEnvironment(
+      { MONARCH_DEVICE_REQUEST_B64: 'bounded-payload' },
+      {
+        SystemRoot: 'C:\\Windows',
+        Path: 'C:\\Windows\\System32',
+        USERPROFILE: 'C:\\Users\\test',
+        MONARCH_DESKTOP_ATTESTATION_TOKEN: 'must-not-leave-runtime',
+        OSCAR_API_TOKEN: 'must-not-leave-runtime',
+      },
+    );
+
+    expect(environment).toEqual({
+      SystemRoot: 'C:\\Windows',
+      Path: 'C:\\Windows\\System32',
+      USERPROFILE: 'C:\\Users\\test',
+      MONARCH_DEVICE_REQUEST_B64: 'bounded-payload',
+    });
+    expect(() => createDevicePowerShellEnvironment({ MONARCH_OTHER: 'no' }, {})).toThrow(
+      'Unsupported Device PowerShell environment field',
+    );
+  });
+
+  it('does not expose the legacy composite desktop capability', async () => {
     const kernel = new MonarchKernel();
     kernel.registerModule(new DeviceModule());
     await kernel.start();
 
     try {
       const result = await kernel.submitIntent('очисти корзину на компе и закрой активный браузер', 'telegram');
-      expect(result.route?.capabilityId).toBe('device.desktop.actions');
-      expect(result.route?.input).toEqual({ emptyRecycleBin: true, closeActiveBrowser: true });
-      expect(result.execution?.error).toBe('confirmation-required');
+      expect(result.route?.capabilityId).not.toBe('device.desktop.actions');
+      expect(kernel.listCapabilities().some((capability) => capability.id === 'device.desktop.actions')).toBe(false);
     } finally {
       await kernel.stop();
     }
@@ -94,8 +117,8 @@ describe('Device Module', () => {
   it('executes app/browser launch contracts through an injected runner without opening windows', async () => {
     const runner = vi.fn(async (script: string) => JSON.stringify(
       script.includes('Get-StartApps')
-        ? { opened: true, app: 'calculator', displayName: 'Калькулятор', processId: 42 }
-        : { opened: true, browser: 'default', processId: 43, targetOrigin: 'https://example.com' },
+        ? { opened: true, verified: true, app: 'calculator', displayName: 'Калькулятор', processId: 42 }
+        : { opened: true, verified: true, browser: 'default', processId: 43, targetOrigin: 'https://example.com' },
     ));
     const module = new DeviceModule(runner);
     const context = { emit: vi.fn(async () => undefined) } as any;
@@ -123,6 +146,254 @@ describe('Device Module', () => {
     expect(app).toMatchObject({ ok: true, output: { opened: true, text: 'Открыл Калькулятор.' } });
     expect(browser).toMatchObject({ ok: true, output: { opened: true, text: 'Открыл страницу в браузере.' } });
     expect(runner).toHaveBeenCalledTimes(2);
+  });
+
+  it('never reports app success from exit code 0 without a verified window', async () => {
+    const runner = vi.fn(async () => JSON.stringify({
+      opened: false,
+      verified: false,
+      app: 'steam',
+      displayName: 'Steam',
+      processId: 42,
+      exitCode: 0,
+    }));
+    const module = new DeviceModule(runner);
+    const result = await module.executeCapability({
+      id: 'exec_unverified_app',
+      intentId: 'intent_unverified_app',
+      moduleId: 'device',
+      capabilityId: 'device.app.open',
+      input: { app: 'steam' },
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'agent:test',
+      confirmed: true,
+    }, { emit: vi.fn(async () => undefined) } as any);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'app-open-unverified',
+      output: { opened: false, verified: false, exitCode: 0 },
+    });
+  });
+
+  it.each([
+    ['app-not-found', 0],
+    ['app-ambiguous', 3],
+  ])('returns stable app resolution failure %s', async (error, matchCount) => {
+    const runner = vi.fn(async () => JSON.stringify({
+      opened: false,
+      verified: false,
+      app: 'fixture',
+      error,
+      matchCount,
+      candidates: matchCount ? ['Fixture A', 'Fixture B', 'Fixture C'] : [],
+    }));
+    const module = new DeviceModule(runner);
+    const result = await module.executeCapability({
+      id: `exec_${error}`,
+      intentId: `intent_${error}`,
+      moduleId: 'device',
+      capabilityId: 'device.app.open',
+      input: { app: 'fixture' },
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'agent:test',
+      confirmed: true,
+    }, { emit: vi.fn(async () => undefined) } as any);
+
+    expect(result).toMatchObject({ ok: false, error, output: { matchCount } });
+  });
+
+  it('accepts an already-running/UWP launch only with the same verified receipt contract', async () => {
+    const runner = vi.fn(async () => JSON.stringify({
+      opened: true,
+      verified: true,
+      alreadyRunning: true,
+      app: 'discord',
+      displayName: 'Discord',
+      launcher: 'start-apps',
+      processId: 501,
+    }));
+    const module = new DeviceModule(runner);
+    const result = await module.executeCapability({
+      id: 'exec_running_uwp',
+      intentId: 'intent_running_uwp',
+      moduleId: 'device',
+      capabilityId: 'device.app.open',
+      input: { app: 'Discord' },
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'agent:test',
+      confirmed: true,
+    }, { emit: vi.fn(async () => undefined) } as any);
+
+    expect(result).toMatchObject({
+      ok: true,
+      output: {
+        opened: true,
+        verified: true,
+        alreadyRunning: true,
+        launcher: 'start-apps',
+      },
+    });
+  });
+
+  it('cancels app launch before dispatch and reconciles cancellation after dispatch', async () => {
+    const before = new AbortController();
+    before.abort();
+    const runner = vi.fn(async () => JSON.stringify({
+      opened: true, verified: true, app: 'steam', displayName: 'Steam', processId: 42,
+    }));
+    const module = new DeviceModule(runner);
+    const request = {
+      id: 'exec_cancel_app',
+      intentId: 'intent_cancel_app',
+      moduleId: 'device',
+      capabilityId: 'device.app.open',
+      input: { app: 'steam' },
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'agent:test',
+      confirmed: true,
+    };
+    await expect(module.executeCapability(
+      request,
+      { emit: vi.fn(async () => undefined) } as any,
+      { signal: before.signal },
+    )).resolves.toMatchObject({
+      ok: false,
+      error: 'device-action-cancelled',
+      output: { verified: false, reconciliation: 'not-dispatched', cancellationObservedAfterDispatch: false },
+    });
+    expect(runner).not.toHaveBeenCalled();
+
+    const after = new AbortController();
+    const postDispatchRunner = vi.fn(async () => {
+      after.abort();
+      return JSON.stringify({
+        opened: true, verified: true, app: 'steam', displayName: 'Steam', processId: 43,
+      });
+    });
+    const reconciled = await new DeviceModule(postDispatchRunner).executeCapability(
+      { ...request, id: 'exec_cancel_app_after' },
+      { emit: vi.fn(async () => undefined) } as any,
+      { signal: after.signal },
+    );
+    expect(reconciled).toMatchObject({
+      ok: true,
+      output: { opened: true, verified: true, cancellationObservedAfterDispatch: true },
+    });
+
+    const uncertainController = new AbortController();
+    const uncertain = await new DeviceModule(vi.fn(async () => {
+      uncertainController.abort();
+      throw new DOMException('Aborted after dispatch', 'AbortError');
+    })).executeCapability(
+      { ...request, id: 'exec_cancel_app_uncertain' },
+      { emit: vi.fn(async () => undefined) } as any,
+      { signal: uncertainController.signal },
+    );
+    expect(uncertain).toMatchObject({
+      ok: false,
+      error: 'device-action-state-uncertain',
+      output: {
+        verified: false,
+        authoritative: true,
+        reconciliation: 'uncertain',
+        cancellationObservedAfterDispatch: true,
+      },
+    });
+  });
+
+  it('requires a verified closed window receipt for active browser close', async () => {
+    const module = new DeviceModule(vi.fn(async () => JSON.stringify({
+      closed: false,
+      closeRequested: true,
+      verified: false,
+      process: 'chrome',
+      processId: 71,
+      windowHandle: 101,
+    })));
+    const result = await module.executeCapability({
+      id: 'exec_close_browser_unverified',
+      intentId: 'intent_close_browser_unverified',
+      moduleId: 'device',
+      capabilityId: 'device.browser.close-active',
+      input: {},
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'agent:test',
+      confirmed: true,
+    }, { emit: vi.fn(async () => undefined) } as any);
+    expect(result).toMatchObject({ ok: false, error: 'browser-close-rejected' });
+  });
+
+  it('searches the real Start application registry through a bounded read capability', async () => {
+    const runner = vi.fn(async () => JSON.stringify({
+      query: 'Photoshop',
+      matches: [{ name: 'Adobe Photoshop 2026', appId: 'Adobe.Photoshop' }],
+      count: 1,
+    }));
+    const module = new DeviceModule(runner);
+    const context = { emit: vi.fn(async () => undefined) } as any;
+    const result = await module.executeCapability({
+      id: 'exec_app_search',
+      intentId: 'intent_app_search',
+      moduleId: 'device',
+      capabilityId: 'device.apps.search',
+      input: { query: 'Photoshop', limit: 8 },
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'agent:test',
+    }, context);
+
+    expect(result).toMatchObject({
+      ok: true,
+      output: {
+        query: 'Photoshop',
+        count: 1,
+        matches: [{ name: 'Adobe Photoshop 2026' }],
+      },
+    });
+    expect(context.emit).toHaveBeenCalledWith('device.apps.searched', 'device', {
+      query: 'Photoshop',
+      count: 1,
+    });
+  });
+
+  it('lets a trusted Agent Task launch one resolved app without phrase-level authorization', async () => {
+    const runner = vi.fn(async () => JSON.stringify({
+      opened: true,
+      verified: true,
+      app: 'calculator',
+      displayName: 'Калькулятор',
+      processId: 42,
+      launcher: 'direct',
+    }));
+    const kernel = new MonarchKernel({
+      permissionProfile: {
+        sandboxMode: 'workspace-write',
+        approvalPolicy: 'on-request',
+        autonomyMode: 'workspace-autonomous',
+      },
+    });
+    kernel.registerModule(new DeviceModule(runner));
+    await kernel.start();
+    try {
+      const executed = await kernel.executeActionProposal({
+        capabilityId: 'device.app.open',
+        args: { app: 'calculator' },
+        expectedEffect: 'Launch the resolved application.',
+        verification: [{ kind: 'status', target: 'result.output.opened', value: true }],
+        provenance: { source: 'model-tool-call', model: 'fixture', skillIds: [] },
+      }, {
+        originatingUserText: 'Открой калькулятор.',
+        requestedBy: 'agent:agent_task_fixture',
+        executionMode: 'agent-runtime',
+      });
+
+      expect(executed.result, JSON.stringify(executed.result)).toMatchObject({
+        ok: true,
+        output: { opened: true, verified: true, performed: true },
+      });
+    } finally {
+      await kernel.stop();
+    }
   });
 
   it('reads and changes built-in display brightness only from verified Windows rereads', async () => {

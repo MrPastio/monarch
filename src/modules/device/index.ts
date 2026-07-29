@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
+  MonarchExecutionControl,
   MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
@@ -26,6 +27,7 @@ const execFileAsync = promisify(execFile);
 export type DevicePowerShellRunner = (
   script: string,
   extraEnv?: Record<string, string>,
+  signal?: AbortSignal,
 ) => Promise<string>;
 
 export class DeviceModule implements MonarchModule {
@@ -84,9 +86,6 @@ export class DeviceModule implements MonarchModule {
     }
     const emptyRecycleBin = /(?:empty|clear|очисти|опустоши).{0,32}(?:recycle\s*bin|корзин)/i.test(text);
     const closeActiveBrowser = /(?:close|закрой|выключи).{0,32}(?:active\s+browser|активн\w*\s+браузер|браузер)/i.test(text);
-    if (emptyRecycleBin && closeActiveBrowser) {
-      return route(intent, 'device.desktop.actions', 'device-control', { emptyRecycleBin, closeActiveBrowser }, 0.99);
-    }
     if (emptyRecycleBin) {
       return route(intent, 'device.recycle-bin.empty', 'delete', {}, 0.98);
     }
@@ -98,7 +97,8 @@ export class DeviceModule implements MonarchModule {
 
   async executeCapability(
     request: MonarchExecutionRequest,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    control: MonarchExecutionControl = {},
   ): Promise<MonarchExecutionResult> {
     if (request.capabilityId === 'device.system.time.get') {
       return this.readSystemTime(request.input, context);
@@ -106,48 +106,64 @@ export class DeviceModule implements MonarchModule {
     if (process.platform !== 'win32') {
       return { ok: false, summary: 'This device-control capability requires Windows.', error: 'platform-not-supported' };
     }
+    if (control.signal?.aborted) {
+      return {
+        ok: false,
+        summary: 'Действие остановлено до отправки в Windows.',
+        error: 'device-action-cancelled',
+        output: {
+          capabilityId: request.capabilityId,
+          verified: false,
+          authoritative: true,
+          reconciliation: 'not-dispatched',
+          cancellationObservedAfterDispatch: false,
+        },
+      };
+    }
     try {
+      if (request.capabilityId === 'device.apps.search') {
+        return await this.searchInstalledApplications(request.input, context, control.signal);
+      }
       if (request.capabilityId === 'device.app.open') {
-        return await this.openApplication(request.input, context);
+        return await this.openApplication(request.input, context, control.signal);
       }
       if (request.capabilityId === 'device.browser.open') {
-        return await this.openBrowser(request.input, context);
+        return await this.openBrowser(request.input, context, control.signal);
       }
       if (request.capabilityId === 'device.volume.get') {
-        return await this.controlVolume({ action: 'get' }, context, false);
+        return await this.controlVolume({ action: 'get' }, context, false, control.signal);
       }
       if (request.capabilityId === 'device.volume.set') {
-        return await this.controlVolume(normalizeVolumeRequest(request.input), context, true);
+        return await this.controlVolume(normalizeVolumeRequest(request.input), context, true, control.signal);
       }
       if (request.capabilityId === 'device.brightness.get') {
-        return await this.controlBrightness({}, context, false);
+        return await this.controlBrightness({}, context, false, control.signal);
       }
       if (request.capabilityId === 'device.brightness.set') {
-        return await this.controlBrightness(request.input, context, true);
+        return await this.controlBrightness(request.input, context, true, control.signal);
       }
       if (request.capabilityId === 'device.recycle-bin.empty') {
-        return await this.emptyRecycleBin(context);
+        return await this.emptyRecycleBin(context, control.signal);
       }
       if (request.capabilityId === 'device.browser.close-active') {
-        return await this.closeActiveBrowser(context);
-      }
-      if (request.capabilityId === 'device.desktop.actions') {
-        const input = readRecord(request.input);
-        const results: MonarchExecutionResult[] = [];
-        if (input.emptyRecycleBin === true) results.push(await this.emptyRecycleBin(context));
-        if (input.closeActiveBrowser === true) results.push(await this.closeActiveBrowser(context));
-        if (!results.length) {
-          return { ok: false, summary: 'No supported desktop action was selected.', error: 'empty-device-action-set' };
-        }
-        return {
-          ok: results.every((result) => result.ok),
-          summary: results.map((result) => result.summary).join(' '),
-          output: { results },
-          ...(results.every((result) => result.ok) ? {} : { error: 'device-action-partial-failure' }),
-        };
+        return await this.closeActiveBrowser(context, control.signal);
       }
       return { ok: false, summary: `Unsupported device capability: ${request.capabilityId}`, error: 'unsupported-capability' };
     } catch (error) {
+      if (isAbortError(error)) {
+        return {
+          ok: false,
+          summary: 'Действие остановлено во время отправки. Итоговое состояние Windows не подтверждено.',
+          error: 'device-action-state-uncertain',
+          output: {
+            capabilityId: request.capabilityId,
+            verified: false,
+            authoritative: true,
+            reconciliation: 'uncertain',
+            cancellationObservedAfterDispatch: control.signal?.aborted === true,
+          },
+        };
+      }
       return {
         ok: false,
         summary: `Windows action failed: ${safeError(error)}`,
@@ -188,11 +204,18 @@ export class DeviceModule implements MonarchModule {
     action: VoiceVolumeAction,
     context: MonarchKernelContext,
     mutating: boolean,
+    signal?: AbortSignal,
   ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const result = mutating
       ? await executeSystemVolumeAction(action, this.runVolume)
       : await executeVoiceVolumeStatus(this.runVolume);
-    const output = { ...result, authoritative: true };
+    const output = {
+      ...result,
+      authoritative: true,
+      verified: true,
+      cancellationObservedAfterDispatch: signal?.aborted === true,
+    };
     await context.emit(mutating ? 'device.volume.changed' : 'device.volume.read', this.manifest.id, output);
     return { ok: true, summary: result.text, output };
   }
@@ -201,7 +224,9 @@ export class DeviceModule implements MonarchModule {
     input: unknown,
     context: MonarchKernelContext,
     mutating: boolean,
+    signal?: AbortSignal,
   ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const request = normalizeBrightnessRequest(input, mutating);
     const output = await this.runPowerShell(`
 $ErrorActionPreference = 'Stop'
@@ -248,7 +273,7 @@ $verified = $levels.Count -gt 0 -and $mismatches.Count -eq 0
   performed = $true
   monitorCount = $levels.Count
 } | ConvertTo-Json -Compress
-`, deviceRequestEnv(request));
+`, deviceRequestEnv(request), signal);
     const payload = parsePowerShellJson(output);
     const before = readBrightnessLevel(payload.before);
     const level = readBrightnessLevel(payload.level);
@@ -283,21 +308,35 @@ $verified = $levels.Count -gt 0 -and $mismatches.Count -eq 0
         verified: true,
         authoritative: true,
         text,
+        cancellationObservedAfterDispatch: signal?.aborted === true,
       },
     };
   }
 
-  private async emptyRecycleBin(context: MonarchKernelContext): Promise<MonarchExecutionResult> {
+  private async emptyRecycleBin(
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
+  ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     await this.runPowerShell(`
 $ErrorActionPreference = 'Stop'
 Clear-RecycleBin -Force -ErrorAction Stop
-[pscustomobject]@{ emptied = $true } | ConvertTo-Json -Compress
-`);
-    await context.emit('device.recycle_bin.emptied', this.manifest.id, {});
-    return { ok: true, summary: 'Windows Recycle Bin emptied.', output: { emptied: true } };
+[pscustomobject]@{ emptied = $true; verified = $true } | ConvertTo-Json -Compress
+`, undefined, signal);
+    const payload = {
+      emptied: true,
+      verified: true,
+      cancellationObservedAfterDispatch: signal?.aborted === true,
+    };
+    await context.emit('device.recycle_bin.emptied', this.manifest.id, payload);
+    return { ok: true, summary: 'Windows Recycle Bin emptied.', output: payload };
   }
 
-  private async closeActiveBrowser(context: MonarchKernelContext): Promise<MonarchExecutionResult> {
+  private async closeActiveBrowser(
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
+  ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const output = await this.runPowerShell(`
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -306,6 +345,7 @@ using System.Runtime.InteropServices;
 public static class MonarchForegroundWindow {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
 }
 '@
 $handle = [MonarchForegroundWindow]::GetForegroundWindow()
@@ -317,10 +357,19 @@ if ($allowed -notcontains $process.ProcessName.ToLowerInvariant()) {
   throw "Foreground app is not a supported browser: $($process.ProcessName)"
 }
 $closed = $process.CloseMainWindow()
-[pscustomobject]@{ closed = $closed; process = $process.ProcessName; processId = $process.Id } | ConvertTo-Json -Compress
-`);
+if ($closed) {
+  $deadline = [DateTime]::UtcNow.AddSeconds(3)
+  do {
+    Start-Sleep -Milliseconds 100
+    $windowClosed = -not [MonarchForegroundWindow]::IsWindow($handle)
+  } while (-not $windowClosed -and [DateTime]::UtcNow -lt $deadline)
+} else {
+  $windowClosed = $false
+}
+[pscustomobject]@{ closed = $windowClosed; closeRequested = $closed; verified = $windowClosed; process = $process.ProcessName; processId = $process.Id; windowHandle = $handle.ToInt64() } | ConvertTo-Json -Compress
+`, undefined, signal);
     const payload = parsePowerShellJson(output);
-    if (payload.closed !== true) {
+    if (payload.closed !== true || payload.verified !== true) {
       return {
         ok: false,
         summary: `Active browser ${String(payload.process || '')} did not accept a graceful close request.`,
@@ -329,19 +378,49 @@ $closed = $process.CloseMainWindow()
       };
     }
     await context.emit('device.browser.closed', this.manifest.id, payload);
-    return { ok: true, summary: `Closed active browser ${String(payload.process || '')} gracefully.`, output: payload };
+    return {
+      ok: true,
+      summary: `Closed active browser ${String(payload.process || '')} gracefully.`,
+      output: {
+        ...payload,
+        cancellationObservedAfterDispatch: signal?.aborted === true,
+      },
+    };
   }
 
   private async openApplication(
     input: unknown,
     context: MonarchKernelContext,
+    signal?: AbortSignal,
   ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const app = normalizeApplicationRequest(readRecord(input).app);
     const output = await this.runPowerShell(`
 $ErrorActionPreference = 'Stop'
 $request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:MONARCH_DEVICE_REQUEST_B64)) | ConvertFrom-Json
 $requested = [string]$request.app
 $key = $requested.ToLowerInvariant().Trim()
+function Test-MonarchVisibleWindow([int]$launchedProcessId, [string[]]$labels) {
+  $deadline = [DateTime]::UtcNow.AddSeconds(6)
+  do {
+    $windows = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.MainWindowHandle -ne 0 -and -not [string]::IsNullOrWhiteSpace($_.MainWindowTitle)
+    })
+    if (@($windows | Where-Object { $_.Id -eq $launchedProcessId }).Count -gt 0) {
+      return $true
+    }
+    foreach ($label in $labels) {
+      $needle = ([string]$label).Trim()
+      if ($needle.Length -ge 3 -and @($windows | Where-Object {
+        $_.MainWindowTitle -like "*$needle*" -or $_.ProcessName -like "*$needle*"
+      }).Count -gt 0) {
+        return $true
+      }
+    }
+    Start-Sleep -Milliseconds 150
+  } while ([DateTime]::UtcNow -lt $deadline)
+  return $false
+}
 $direct = @{
   'calculator' = @('calc.exe', 'Калькулятор')
   'notepad' = @('notepad.exe', 'Блокнот')
@@ -359,13 +438,15 @@ $startHints = @{
 }
 if ($key -eq 'browser') {
   $process = Start-Process -FilePath 'https://www.google.com/' -PassThru -ErrorAction Stop
-  [pscustomobject]@{ opened = $true; app = 'browser'; displayName = 'Браузер'; processId = $process.Id; launcher = 'default-browser' } | ConvertTo-Json -Compress
+  $verified = Test-MonarchVisibleWindow $process.Id @('chrome', 'edge', 'firefox', 'brave', 'opera', 'vivaldi')
+  [pscustomobject]@{ opened = $verified; verified = $verified; app = 'browser'; displayName = 'Браузер'; processId = $process.Id; launcher = 'default-browser' } | ConvertTo-Json -Compress
   exit 0
 }
 if ($direct.ContainsKey($key)) {
   $entry = $direct[$key]
   $process = Start-Process -FilePath $entry[0] -PassThru -ErrorAction Stop
-  [pscustomobject]@{ opened = $true; app = $key; displayName = $entry[1]; processId = $process.Id; launcher = 'direct' } | ConvertTo-Json -Compress
+  $verified = Test-MonarchVisibleWindow $process.Id @([string]$entry[1], $requested, $key)
+  [pscustomobject]@{ opened = $verified; verified = $verified; app = $key; displayName = $entry[1]; processId = $process.Id; launcher = 'direct' } | ConvertTo-Json -Compress
   exit 0
 }
 $hints = if ($startHints.ContainsKey($key)) { @($startHints[$key]) } else { @($requested) }
@@ -381,14 +462,31 @@ if ($matches.Count -ne 1) {
     if ($matches.Count -eq 1) { break }
   }
 }
-if ($matches.Count -ne 1) { throw "Installed app was not resolved uniquely: $requested" }
+if ($matches.Count -ne 1) {
+  $resolutionError = if ($matches.Count -eq 0) { 'app-not-found' } else { 'app-ambiguous' }
+  [pscustomobject]@{ opened = $false; verified = $false; app = $key; displayName = $requested; error = $resolutionError; matchCount = $matches.Count; candidates = @($matches | Select-Object -First 8 -ExpandProperty Name) } | ConvertTo-Json -Compress
+  exit 0
+}
 $match = $matches[0]
 $process = Start-Process -FilePath 'explorer.exe' -ArgumentList @("shell:AppsFolder\\$($match.AppID)") -PassThru -ErrorAction Stop
-[pscustomobject]@{ opened = $true; app = $key; displayName = $match.Name; processId = $process.Id; launcher = 'start-apps' } | ConvertTo-Json -Compress
-`, deviceRequestEnv({ app }));
+$verified = Test-MonarchVisibleWindow $process.Id @([string]$match.Name, $requested, $key)
+[pscustomobject]@{ opened = $verified; verified = $verified; app = $key; displayName = $match.Name; processId = $process.Id; launcher = 'start-apps' } | ConvertTo-Json -Compress
+`, deviceRequestEnv({ app }), signal);
     const payload = parsePowerShellJson(output);
-    if (payload.opened !== true) {
-      return { ok: false, summary: 'Windows не подтвердил запуск приложения.', error: 'app-open-unverified', output: payload };
+    if (payload.opened !== true || payload.verified !== true) {
+      const resolutionError = payload.error === 'app-not-found' || payload.error === 'app-ambiguous'
+        ? payload.error
+        : 'app-open-unverified';
+      return {
+        ok: false,
+        summary: resolutionError === 'app-not-found'
+          ? 'Приложение не найдено в Windows.'
+          : resolutionError === 'app-ambiguous'
+            ? 'Найдено несколько приложений; нужен точный выбор.'
+            : 'Windows не подтвердил запуск приложения.',
+        error: resolutionError,
+        output: payload,
+      };
     }
     await context.emit('device.app.opened', this.manifest.id, payload);
     return {
@@ -400,6 +498,7 @@ $process = Start-Process -FilePath 'explorer.exe' -ArgumentList @("shell:AppsFol
         verified: true,
         authoritative: true,
         text: `Открыл ${String(payload.displayName || app)}.`,
+        cancellationObservedAfterDispatch: signal?.aborted === true,
       },
     };
   }
@@ -407,7 +506,9 @@ $process = Start-Process -FilePath 'explorer.exe' -ArgumentList @("shell:AppsFol
   private async openBrowser(
     input: unknown,
     context: MonarchKernelContext,
+    signal?: AbortSignal,
   ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const request = normalizeBrowserRequest(input);
     const output = await this.runPowerShell(`
 $ErrorActionPreference = 'Stop'
@@ -420,10 +521,18 @@ if ($browser -eq 'default') {
 } else {
   $process = Start-Process -FilePath $executables[$browser] -ArgumentList @($target) -PassThru -ErrorAction Stop
 }
-[pscustomobject]@{ opened = $true; browser = $browser; processId = $process.Id; targetOrigin = ([Uri]$target).GetLeftPart([UriPartial]::Authority) } | ConvertTo-Json -Compress
-`, deviceRequestEnv(request));
+$deadline = [DateTime]::UtcNow.AddSeconds(5)
+do {
+  $visibleBrowsers = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.MainWindowHandle -ne 0 -and @('chrome', 'msedge', 'firefox', 'brave', 'opera', 'vivaldi') -contains $_.ProcessName.ToLowerInvariant()
+  })
+  $verified = @($visibleBrowsers | Where-Object { $_.Id -eq $process.Id }).Count -gt 0
+  if (-not $verified) { Start-Sleep -Milliseconds 125 }
+} while (-not $verified -and [DateTime]::UtcNow -lt $deadline)
+[pscustomobject]@{ opened = $verified; verified = $verified; browser = $browser; processId = $process.Id; targetOrigin = ([Uri]$target).GetLeftPart([UriPartial]::Authority) } | ConvertTo-Json -Compress
+`, deviceRequestEnv(request), signal);
     const payload = parsePowerShellJson(output);
-    if (payload.opened !== true) {
+    if (payload.opened !== true || payload.verified !== true) {
       return { ok: false, summary: 'Windows не подтвердил открытие браузера.', error: 'browser-open-unverified', output: payload };
     }
     await context.emit('device.browser.opened', this.manifest.id, payload);
@@ -435,7 +544,51 @@ if ($browser -eq 'default') {
     return {
       ok: true,
       summary: text,
-      output: { ...payload, performed: true, verified: true, authoritative: true, text },
+      output: {
+        ...payload,
+        performed: true,
+        verified: true,
+        authoritative: true,
+        text,
+        cancellationObservedAfterDispatch: signal?.aborted === true,
+      },
+    };
+  }
+
+  private async searchInstalledApplications(
+    input: unknown,
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
+  ): Promise<MonarchExecutionResult> {
+    const record = readRecord(input);
+    const query = normalizeApplicationRequest(record.query);
+    const limitValue = Number(record.limit ?? 12);
+    const limit = Number.isInteger(limitValue) ? Math.max(1, Math.min(limitValue, 50)) : 12;
+    const output = await this.runPowerShell(`
+$ErrorActionPreference = 'Stop'
+$request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:MONARCH_DEVICE_REQUEST_B64)) | ConvertFrom-Json
+$query = [string]$request.query
+$limit = [int]$request.limit
+$apps = @(Get-StartApps | Where-Object {
+  $_.Name -ieq $query -or $_.Name -like "*$query*"
+} | Sort-Object Name, AppID -Unique | Select-Object -First $limit)
+$matches = @($apps | ForEach-Object {
+  [pscustomobject]@{ name = [string]$_.Name; appId = [string]$_.AppID }
+})
+[pscustomobject]@{ query = $query; matches = $matches; count = $matches.Count } | ConvertTo-Json -Compress -Depth 4
+`, deviceRequestEnv({ query, limit }), signal);
+    const payload = parsePowerShellJson(output);
+    const matches = Array.isArray(payload.matches) ? payload.matches : [];
+    await context.emit('device.apps.searched', this.manifest.id, {
+      query,
+      count: matches.length,
+    });
+    return {
+      ok: true,
+      summary: matches.length
+        ? `Нашёл установленные приложения: ${matches.map((entry) => String(readRecord(entry).name || '')).filter(Boolean).join(', ')}.`
+        : `Установленные приложения по запросу «${query}» не найдены.`,
+      output: { query, matches, count: matches.length },
     };
   }
 }
@@ -461,6 +614,7 @@ function route(
 async function runPowerShellCommand(
   script: string,
   extraEnv: Record<string, string> = {},
+  signal?: AbortSignal,
 ): Promise<string> {
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
   const { stdout } = await execFileAsync('powershell.exe', [
@@ -474,9 +628,64 @@ async function runPowerShellCommand(
     timeout: 15_000,
     maxBuffer: 256 * 1024,
     windowsHide: true,
-    env: { ...process.env, ...extraEnv },
+    env: createDevicePowerShellEnvironment(extraEnv),
+    ...(signal ? { signal } : {}),
   });
   return stdout.trim();
+}
+
+const DEVICE_POWERSHELL_ENV_ALLOWLIST = new Set([
+  'allusersprofile',
+  'appdata',
+  'commonprogramfiles',
+  'commonprogramfiles(x86)',
+  'commonprogramw6432',
+  'comspec',
+  'homedrive',
+  'homepath',
+  'localappdata',
+  'number_of_processors',
+  'os',
+  'path',
+  'pathext',
+  'processor_architecture',
+  'processor_identifier',
+  'processor_level',
+  'processor_revision',
+  'programdata',
+  'programfiles',
+  'programfiles(x86)',
+  'programw6432',
+  'psmodulepath',
+  'public',
+  'systemdrive',
+  'systemroot',
+  'temp',
+  'tmp',
+  'userdomain',
+  'userdomain_roamingprofile',
+  'username',
+  'userprofile',
+  'windir',
+]);
+
+export function createDevicePowerShellEnvironment(
+  extraEnv: Record<string, string> = {},
+  sourceEnv: Readonly<Record<string, string | undefined>> = process.env,
+): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(sourceEnv)) {
+    if (typeof value === 'string' && DEVICE_POWERSHELL_ENV_ALLOWLIST.has(key.toLowerCase())) {
+      result[key] = value;
+    }
+  }
+  for (const [key, value] of Object.entries(extraEnv)) {
+    if (key !== 'MONARCH_DEVICE_REQUEST_B64') {
+      throw new Error(`Unsupported Device PowerShell environment field: ${key}`);
+    }
+    result[key] = value;
+  }
+  return result;
 }
 
 export function normalizeApplicationRequest(value: unknown): string {
@@ -669,6 +878,10 @@ function safeError(error: unknown): string {
   const stderr = (error as Error & { stderr?: unknown }).stderr;
   const detail = typeof stderr === 'string' && stderr.trim() ? stderr.trim() : error.message;
   return detail.replace(/\s+/g, ' ').slice(0, 600);
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
 }
 
 export function createDeviceModule(): MonarchModule {

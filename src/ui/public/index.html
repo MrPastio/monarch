@@ -303,6 +303,9 @@
               </div>
               <div id="oscar-status-pills" class="status-pills"></div>
               <div class="topbar-actions" aria-label="Действия Oscar">
+                <button class="topbar-icon-button oscar-missions-toggle" id="oscar-missions-toggle" type="button" aria-label="Поручения" title="Поручения" aria-controls="oscar-missions-panel" aria-expanded="false">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h11"></path><path d="M8 12h11"></path><path d="M8 18h11"></path><path d="m3.5 6 1 1 2-2"></path><path d="m3.5 12 1 1 2-2"></path><circle cx="5" cy="18" r="1.5"></circle></svg>
+                </button>
                 <button class="topbar-icon-button" id="oscar-refresh" type="button" aria-label="Обновить статус" title="Обновить статус">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.1 6.6"></path><path d="M3 12A9 9 0 0 1 18.1 5.4"></path><path d="M3 18v-5h5"></path><path d="M21 6v5h-5"></path></svg>
                 </button>
@@ -328,32 +331,38 @@
               <header class="coder-workspace-bar">
                 <div class="coder-project-identity">
                   <span class="coder-live-dot" aria-hidden="true"></span>
-                  <div>
-                    <strong id="coder-project-name">Проект не выбран</strong>
+                  <label class="coder-project-switcher">
+                    <span class="coder-project-label">РАБОЧИЙ ПРОЕКТ</span>
+                    <select id="coder-project-select" aria-label="Активный Coder проект" title="Переключить проект"></select>
                     <span id="coder-project-path">Workspace Coder</span>
-                  </div>
+                  </label>
+                  <strong id="coder-project-name" class="coder-project-name-a11y">Проект не выбран</strong>
                 </div>
                 <div class="coder-workspace-actions">
-                  <select id="coder-project-select" aria-label="Активный Coder проект" title="Выбрать проект"></select>
-                  <button id="coder-project-new" type="button">Новый проект</button>
-                  <button id="coder-project-import" type="button">Открыть папку</button>
-                  <div class="coder-model-switch" aria-label="Модель кода">
+                  <div class="coder-model-switch coder-model-switch-inline" aria-label="Модель кода">
                     <button type="button" data-coder-model="qwen3-coder-30b-a3b-instruct" class="is-active" aria-pressed="true" title="Основная модель">Qwen</button>
                     <button type="button" data-coder-model="deepseek-coder-v2-lite-instruct" aria-pressed="false" title="Более лёгкая модель">DeepSeek</button>
                   </div>
-                  <select id="coder-safe-chat-select" aria-label="Зашифрованные Coder-чаты в Monarch Safe" hidden>
-                    <option value="">Safe-чаты</option>
-                  </select>
-                  <button id="coder-safe-encrypt" class="coder-safe-button" type="button" title="Зашифровать завершённую Coder-сессию в Monarch Safe" disabled>Safe</button>
-                  <button id="coder-fast-open" class="coder-fast-button" type="button" aria-controls="coder-fast-drawer" aria-expanded="false">Fast</button>
+                  <div id="coder-run-status" class="coder-run-status">idle</div>
+                  <details class="coder-action-menu coder-setup-menu">
+                    <summary aria-label="Дополнительные действия Coder">Ещё</summary>
+                    <div class="coder-action-menu-popover">
+                      <span class="coder-popover-label">ПРОЕКТ</span>
+                      <div class="coder-setup-actions">
+                        <button id="coder-project-new" type="button">Создать проект</button>
+                        <button id="coder-project-import" type="button">Открыть папку</button>
+                      </div>
+                      <select id="coder-safe-chat-select" aria-label="Зашифрованные Coder-чаты в Monarch Safe" hidden>
+                        <option value="">Safe-чаты</option>
+                      </select>
+                      <div class="coder-setup-actions coder-setup-tools">
+                        <button id="coder-safe-encrypt" class="coder-safe-button" type="button" title="Зашифровать завершённую Coder-сессию в Monarch Safe" disabled>Monarch Safe</button>
+                        <button id="coder-fast-open" class="coder-fast-button" type="button" aria-controls="coder-fast-drawer" aria-expanded="false">Fast-вопрос</button>
+                      </div>
+                    </div>
+                  </details>
                 </div>
               </header>
-
-              <nav class="coder-mobile-bar" aria-label="Панели Code Mode">
-                <button id="coder-mobile-project" type="button" aria-controls="coder-explorer" aria-expanded="false">Файлы проекта</button>
-                <button id="coder-mobile-history" type="button" aria-controls="coder-history-drawer" aria-expanded="false">История</button>
-                <button id="coder-mobile-result" type="button" aria-controls="coder-context-panel" aria-expanded="false">Результат</button>
-              </nav>
 
               <div id="coder-onboarding" class="coder-onboarding">
                 <div class="coder-onboarding-card">
@@ -376,7 +385,26 @@
 
               <div id="coder-workspace" class="coder-workspace" hidden>
                 <button id="coder-panel-backdrop" class="coder-panel-backdrop" type="button" aria-label="Закрыть панель Code Mode" hidden></button>
-                <aside id="coder-explorer" class="coder-panel coder-explorer" aria-label="Файлы проекта">
+                <nav class="coder-command-rail" aria-label="Разделы Coder">
+                  <button id="coder-workspace-focus" type="button" class="is-current" aria-current="page">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6.5h14"></path><path d="M5 12h9"></path><path d="M5 17.5h6"></path><path d="m16 15 3 2.5-3 2.5"></path></svg>
+                    <strong>Работа</strong>
+                  </button>
+                  <button id="coder-mobile-project" type="button" aria-controls="coder-explorer" aria-expanded="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5h6l1.5 2h9.5v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z"></path><path d="M3.5 8V6a2 2 0 0 1 2-2h4l1.5 2h7.5a2 2 0 0 1 2 2v1.5"></path></svg>
+                    <strong>Файлы</strong>
+                  </button>
+                  <button id="coder-mobile-result" type="button" aria-controls="coder-context-panel" aria-expanded="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3.5h10a2 2 0 0 1 2 2v15l-7-3-7 3v-15a2 2 0 0 1 2-2Z"></path><path d="m8.5 10.5 2.2 2.2 4.8-5"></path></svg>
+                    <strong>Итог</strong>
+                  </button>
+                  <button id="coder-history-open" class="coder-history-open" type="button" aria-controls="coder-history-drawer" aria-expanded="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 9a8 8 0 1 1-.2 6"></path><path d="M4.5 4v5h5"></path><path d="M12 8v4l2.5 1.5"></path></svg>
+                    <strong>История</strong>
+                    <b id="coder-history-count">0</b>
+                  </button>
+                </nav>
+                <aside id="coder-explorer" class="coder-panel coder-explorer" aria-label="Файлы проекта" hidden>
                   <div class="coder-panel-title">
                     <span>Файлы проекта</span>
                     <div>
@@ -395,18 +423,16 @@
                 <main class="coder-agent-stage">
                   <div class="coder-agent-header">
                     <div class="coder-run-heading">
-                      <span class="coder-kicker">АГЕНТСКАЯ СЕССИЯ</span>
+                      <span class="coder-kicker">ТЕКУЩАЯ ЦЕЛЬ</span>
                       <strong id="coder-run-title">Готов к задаче</strong>
                       <span id="coder-run-project-root" class="coder-run-project-root" hidden></span>
                     </div>
-                    <div class="coder-session-controls">
-                      <button id="coder-history-open" class="coder-history-open" type="button" aria-controls="coder-history-drawer" aria-expanded="false">
-                        <span>История</span><b id="coder-history-count">0</b>
-                      </button>
-                      <button id="coder-session-new" type="button">Новая задача</button>
-                      <div id="coder-run-status" class="coder-run-status">idle</div>
-                    </div>
                   </div>
+                  <ol id="coder-progress" class="coder-progress" aria-label="Прогресс задачи">
+                    <li id="coder-progress-brief" data-state="current"><i>1</i><span>Задача</span></li>
+                    <li id="coder-progress-work" data-state="idle"><i>2</i><span>Работа</span></li>
+                    <li id="coder-progress-verify" data-state="idle"><i>3</i><span>Проверка</span></li>
+                  </ol>
                   <section id="coder-run-summary" class="coder-run-summary" aria-live="polite" hidden>
                     <div>
                       <span id="coder-run-summary-kicker" class="coder-kicker">РЕЗУЛЬТАТ</span>
@@ -418,9 +444,9 @@
                   <div class="coder-activity-toolbar">
                     <span>Ход работы</span>
                     <span id="coder-event-count" class="coder-event-count"></span>
-                    <div role="group" aria-label="Подробность журнала">
-                      <button type="button" data-coder-event-filter="focus" aria-pressed="true">Основное</button>
-                      <button type="button" data-coder-event-filter="all" aria-pressed="false">Все события</button>
+                    <div class="coder-event-view-switch" role="group" aria-label="Подробность журнала">
+                      <button type="button" data-coder-event-filter="focus" aria-pressed="true">Главное</button>
+                      <button type="button" data-coder-event-filter="all" aria-pressed="false">Подробно</button>
                     </div>
                   </div>
                   <div id="coder-activity" class="coder-activity" role="log" aria-live="polite">
@@ -428,14 +454,13 @@
                   </div>
                   <form id="coder-composer" class="coder-composer">
                     <div id="coder-suggestions" class="coder-suggestions" aria-label="Примеры задач">
-                      <button type="button" data-coder-template="Проведи аудит проекта и перечисли приоритетные улучшения.">Аудит</button>
-                      <button type="button" data-coder-template="Найди причину проблемы, исправь её и запусти подходящие проверки.">Исправить</button>
-                      <button type="button" data-coder-template="Изучи проект и реализуй следующую функцию: ">Реализовать</button>
-                      <button type="button" data-coder-template="Запусти подходящие тесты, разберись с ошибками и исправь их.">Проверить</button>
+                      <button type="button" data-coder-template="Найди причину проблемы, исправь её и запусти подходящие проверки.">Исправить проблему</button>
+                      <button type="button" data-coder-template="Изучи проект и реализуй следующую функцию: ">Реализовать функцию</button>
+                      <button type="button" data-coder-template="Запусти подходящие тесты, разберись с ошибками и исправь их.">Проверить проект</button>
                     </div>
                     <div class="coder-composer-row">
                       <textarea id="coder-input" rows="1" placeholder="Опиши результат, который должен получить Coder…" aria-label="Задача Coder"></textarea>
-                      <button id="coder-run-submit" type="submit" class="coder-primary">Запустить</button>
+                      <button id="coder-run-submit" type="submit" class="coder-primary">Начать работу</button>
                       <button id="coder-run-cancel" type="button" hidden>Остановить</button>
                     </div>
                     <footer>
@@ -445,12 +470,11 @@
                   </form>
                 </main>
 
-                <aside id="coder-context-panel" class="coder-panel coder-context-panel" aria-label="Результат сессии">
+                <aside id="coder-context-panel" class="coder-panel coder-context-panel" aria-label="Результат сессии" hidden>
                   <div class="coder-panel-title">
-                    <span>Результат</span>
-                    <div><span id="coder-context-percent">0%</span><button id="coder-context-close" class="coder-panel-close" type="button" aria-label="Закрыть результат">Закрыть</button></div>
+                    <span>Итог</span>
+                    <button id="coder-context-close" class="coder-panel-close" type="button" aria-label="Закрыть результат">Закрыть</button>
                   </div>
-                  <div class="coder-context-meter"><i id="coder-context-fill"></i></div>
                   <section><h3>Изменённые файлы</h3><div id="coder-context-files" class="coder-context-list">Пока нет</div></section>
                   <section><h3>Проверки</h3><div id="coder-context-tests" class="coder-context-list">Пока нет</div></section>
                   <section><h3>Следом</h3><div id="coder-context-pending" class="coder-context-list">Жду задачу</div></section>
@@ -459,7 +483,8 @@
                     <pre id="coder-file-preview" class="coder-file-preview"></pre>
                   </section>
                   <details class="coder-context-technical">
-                    <summary>Технические данные</summary>
+                    <summary><span>Технические данные</span><span id="coder-context-percent">0%</span></summary>
+                    <div class="coder-context-meter"><i id="coder-context-fill"></i></div>
                     <dl class="coder-context-stats">
                       <div><dt>Контекст</dt><dd id="coder-context-budget">—</dd></div>
                       <div><dt>Сжатий</dt><dd id="coder-context-compactions">0</dd></div>
@@ -538,6 +563,25 @@
               </form>
               <div id="oscar-memory-items" class="memory-items"></div>
             </section>
+
+            <aside id="oscar-missions-panel" class="oscar-missions-panel" aria-label="Поручения Oscar" hidden>
+              <header class="oscar-missions-header">
+                <div>
+                  <span>AGENT RUNTIME</span>
+                  <strong>Поручения</strong>
+                </div>
+                <div class="oscar-missions-header-actions">
+                  <button type="button" id="oscar-missions-refresh" aria-label="Обновить поручения" title="Обновить поручения">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"></path><path d="M20 5v6h-6"></path></svg>
+                  </button>
+                  <button type="button" id="oscar-missions-close" aria-label="Закрыть поручения" title="Закрыть поручения">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12"></path><path d="m18 6-12 12"></path></svg>
+                  </button>
+                </div>
+              </header>
+              <div id="oscar-missions-summary" class="oscar-missions-summary" role="status"></div>
+              <div id="oscar-missions-list" class="oscar-missions-list" role="list"></div>
+            </aside>
 
             <div class="oscar-thread-shell">
               <div id="oscar-thread" class="claude-thread is-empty" role="log" aria-live="polite" aria-relevant="additions text" aria-atomic="false">

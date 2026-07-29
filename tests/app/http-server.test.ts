@@ -147,6 +147,37 @@ describe('Monarch HTTP server security', () => {
       await expect(authenticated.json()).resolves.toMatchObject({
         id: 'monarch.system.profile',
       });
+
+      const dispositionHeaders = {
+        'Content-Type': 'application/json',
+        'X-Monarch-Session': 'unit-session-token',
+      };
+      const ordinaryChat = await fetch(`${baseUrl}/api/oscar/request-disposition`, {
+        method: 'POST',
+        headers: dispositionHeaders,
+        body: JSON.stringify({ text: 'что делать в случае ракетного обстрела?' }),
+      });
+      expect(ordinaryChat.headers.get('cache-control')).toBe('no-store');
+      await expect(ordinaryChat.json()).resolves.toMatchObject({
+        ok: true,
+        disposition: { mode: 'chat', kind: 'explanation' },
+      });
+
+      const steamAction = await fetch(`${baseUrl}/api/oscar/request-disposition`, {
+        method: 'POST',
+        headers: dispositionHeaders,
+        body: JSON.stringify({ text: 'открой стим' }),
+      });
+      await expect(steamAction.json()).resolves.toMatchObject({
+        ok: true,
+        disposition: { mode: 'agent', kind: 'system_action' },
+      });
+
+      const promptInQuery = await fetch(
+        `${baseUrl}/api/oscar/request-disposition?text=${encodeURIComponent('открой стим')}`,
+        { headers: { 'X-Monarch-Session': 'unit-session-token' } },
+      );
+      expect(promptInQuery.status).toBe(405);
     } finally {
       await close(server);
     }

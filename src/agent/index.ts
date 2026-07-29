@@ -2,6 +2,7 @@ export * from './types';
 export * from './agent-task-store';
 export * from './agent-runtime';
 export * from './agent-loop';
+export * from './adaptive-calibration';
 export * from './budget-manager';
 export * from './capability-resolver';
 export * from './checkpoint-manager';

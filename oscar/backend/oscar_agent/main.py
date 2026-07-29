@@ -26,6 +26,11 @@ from .environment import EnvironmentScanner
 from .language import detect_requested_language, detect_user_language, has_reliable_language_sample
 from .config import get_settings
 from .hardware import get_hardware_info
+from .inference_coordinator import (
+    InferenceCoordinator,
+    InferenceLane,
+    InferenceSlotLease,
+)
 from .memory import MemoryStore, detect_memory_note, normalize_text, should_use_memory
 from .meta_templates import detect_meta_intent
 from .model_quality import ModelQualityLedger, assess_model_answer
@@ -168,25 +173,6 @@ CONTEXTUAL_GENERIC_TOKEN_PATTERN = re.compile(
 )
 
 
-class InferenceSlotLease:
-    """Own one acquired inference lock and expose an idempotent release."""
-
-    def __init__(self, lock: asyncio.Lock):
-        self._lock = lock
-        self._released = False
-
-    def locked(self) -> bool:
-        return not self._released and self._lock.locked()
-
-    def release(self) -> None:
-        if self._released:
-            return
-        self._released = True
-        if self._lock.locked():
-            self._lock.release()
-        finish_inference_activity()
-
-
 def cancel_pending_backend_recycle() -> None:
     global _backend_recycle_timer, _backend_recycle_epoch
     with _backend_recycle_state_lock:
@@ -211,26 +197,42 @@ def finish_inference_activity() -> None:
 
 
 def get_inference_lock() -> asyncio.Lock:
-    global inference_lock
+    global inference_lock, inference_coordinator
     running_loop = asyncio.get_running_loop()
     lock_loop = getattr(inference_lock, "_loop", None)
     if lock_loop is not None and lock_loop is not running_loop:
         inference_lock = asyncio.Lock()
+        inference_coordinator = None
     return inference_lock
 
 
-async def acquire_inference_slot() -> InferenceSlotLease | None:
-    lock = get_inference_lock()
-    timeout_seconds = max(settings.inference_queue_timeout_seconds, 0.0)
-    if timeout_seconds <= 0 and lock.locked():
-        return None
+inference_coordinator: InferenceCoordinator | None = None
 
-    try:
-        await asyncio.wait_for(lock.acquire(), timeout=max(timeout_seconds, 0.001))
-        begin_inference_activity()
-        return InferenceSlotLease(lock)
-    except asyncio.TimeoutError:
-        return None
+
+def get_inference_coordinator() -> InferenceCoordinator:
+    global inference_coordinator
+    lock = get_inference_lock()
+    if (
+        inference_coordinator is None
+        or inference_coordinator.lock is not lock
+        or inference_coordinator.loop is not asyncio.get_running_loop()
+    ):
+        inference_coordinator = InferenceCoordinator(
+            lock,
+            on_acquire=begin_inference_activity,
+            on_release=finish_inference_activity,
+        )
+    return inference_coordinator
+
+
+async def acquire_inference_slot(
+    lane: InferenceLane = "interactive",
+) -> InferenceSlotLease | None:
+    timeout_seconds = max(settings.inference_queue_timeout_seconds, 0.0)
+    return await get_inference_coordinator().acquire(
+        lane,
+        timeout_seconds=timeout_seconds,
+    )
 
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
@@ -1476,6 +1478,68 @@ def strip_hidden_monarch_commands(answer: str) -> str:
     ).strip()
 
 
+def visible_chat_content(request: ChatRequest, answer: str) -> str:
+    return str(answer or "") if is_coder_mode_request(request) else strip_hidden_monarch_commands(answer)
+
+
+HIDDEN_CHAT_PROTOCOL_PREFIXES = ("[[MONARCH_ACTION:", "[[MONARCH_COMMAND:")
+
+
+def filter_hidden_chat_protocol_chunk(state: dict, chunk: str, *, final: bool = False) -> str:
+    state["buffer"] = str(state.get("buffer") or "") + str(chunk or "")
+    hidden = bool(state.get("hidden"))
+    output: list[str] = []
+    while state["buffer"]:
+        buffer = str(state["buffer"])
+        if hidden:
+            end = buffer.find("]]")
+            if end < 0:
+                state["buffer"] = buffer[-1:] if buffer.endswith("]") else ""
+                state["hidden"] = True
+                return "".join(output)
+            state["buffer"] = buffer[end + 2:]
+            hidden = False
+            state["hidden"] = False
+            continue
+
+        lowered = buffer.lower()
+        starts = [
+            index
+            for prefix in HIDDEN_CHAT_PROTOCOL_PREFIXES
+            if (index := lowered.find(prefix.lower())) >= 0
+        ]
+        if starts:
+            start = min(starts)
+            output.append(buffer[:start])
+            matching_prefix = next(
+                prefix
+                for prefix in HIDDEN_CHAT_PROTOCOL_PREFIXES
+                if lowered.startswith(prefix.lower(), start)
+            )
+            state["buffer"] = buffer[start + len(matching_prefix):]
+            hidden = True
+            state["hidden"] = True
+            continue
+
+        if final:
+            output.append(buffer)
+            state["buffer"] = ""
+            break
+
+        keep = 0
+        for prefix in HIDDEN_CHAT_PROTOCOL_PREFIXES:
+            lowered_prefix = prefix.lower()
+            for length in range(1, min(len(buffer), len(prefix) - 1) + 1):
+                if lowered.endswith(lowered_prefix[:length]):
+                    keep = max(keep, length)
+        safe_length = len(buffer) - keep
+        output.append(buffer[:safe_length])
+        state["buffer"] = buffer[safe_length:]
+        break
+    state["hidden"] = hidden
+    return "".join(output)
+
+
 def is_coder_mode_request(request: ChatRequest) -> bool:
     return any(
         message.role == "system"
@@ -1516,6 +1580,8 @@ def expected_request_language(request: ChatRequest) -> str:
 
 def extract_action_proposals(answer: str, request: ChatRequest) -> tuple[str, list[dict]]:
     text = str(answer or "")
+    if not is_coder_mode_request(request):
+        return strip_hidden_monarch_commands(text), []
     matches = list(re.finditer(r"\[\[MONARCH_ACTION:([\s\S]*?)\]\]", text, flags=re.IGNORECASE))
     visible = strip_hidden_monarch_commands(text)
     source = "runtime-grammar"
@@ -1609,36 +1675,6 @@ def extract_native_coder_tool_calls(answer: str) -> tuple[str, list[dict] | None
             "expectedEffect": "Apply the requested Coder action and return a verified Kernel receipt.",
         })
     return visible, actions
-
-
-def extract_tool_result_action_proposals(results: list[WorkspaceToolResult], request: ChatRequest) -> list[dict]:
-    actions: list[dict] = []
-    for result in results:
-        details = result.details if isinstance(result.details, dict) else {}
-        commands = details.get("commands")
-        if result.error != "kernel-execution-required" or not isinstance(commands, list):
-            continue
-        for command in commands:
-            if not isinstance(command, dict):
-                continue
-            capability_id = str(command.get("capability") or "").strip()
-            args = command.get("parameters", {})
-            if not capability_id or not isinstance(args, dict):
-                continue
-            actions.append({
-                "capabilityId": capability_id,
-                "args": args,
-                "reason": "Workspace mutation requires Monarch Kernel policy enforcement.",
-                "expectedEffect": "Execute through Monarch Kernel and verify the actual result.",
-            })
-            if len(actions) >= 8:
-                break
-        if len(actions) >= 8:
-            break
-    if not actions:
-        return []
-    envelope = f"[[MONARCH_ACTION:{json.dumps({'actions': actions}, ensure_ascii=False)}]]"
-    return extract_action_proposals(envelope, request)[1]
 
 
 def run_scheduled_backend_recycle(epoch: int) -> None:
@@ -1815,31 +1851,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
     if continuation_source:
         apply_explicit_code_continuation(request, continuation_source)
 
-    tool_results = None if is_coder_mode_request(request) else maybe_execute_agent_tools(request)
-    if tool_results is not None:
-        tool_answer = render_tool_results_answer(tool_results)
-        visible_answer, action_proposals = extract_action_proposals(tool_answer, request)
-        if not action_proposals:
-            action_proposals = extract_tool_result_action_proposals(tool_results, request)
-        usage = build_chat_usage(request, [], visible_answer, started_at, model_tier="system")
-        complete_conversation(
-            conversation_id,
-            visible_answer,
-            usage,
-            model_tier="system",
-            action_proposals=action_proposals,
-        )
-        return ChatResponse(
-            answer=visible_answer,
-            outcome="action-proposed" if action_proposals else "completed",
-            conversation_id=conversation_id,
-            sources=[],
-            tool_results=tool_results,
-            action_proposals=action_proposals,
-            usage=usage,
-        )
-
-    inference_slot = await acquire_inference_slot()
+    inference_slot = await acquire_inference_slot(
+        "coder" if is_coder_mode_request(request) else request.inference_lane
+    )
     if inference_slot is None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -2053,7 +2067,10 @@ async def chat(request: ChatRequest) -> ChatResponse:
         quality_flags=quality_flags,
         regenerated=regenerated,
     )
-    visible_answer, action_proposals = extract_action_proposals(full_answer, request)
+    if is_coder_mode_request(request):
+        visible_answer, action_proposals = extract_action_proposals(full_answer, request)
+    else:
+        visible_answer, action_proposals = strip_hidden_monarch_commands(full_answer), []
     if is_coder_mode_request(request) and not action_proposals:
         unload_after_generation()
     complete_conversation(
@@ -2089,38 +2106,14 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
         if conversation_id:
             yield sse("conversation", {"id": conversation_id})
 
-        yield sse("status", {"message": "Проверяю инструменты"})
-        tool_results = None if is_coder_mode_request(request) else maybe_execute_agent_tools(request)
-        if tool_results is not None:
-            tool_answer = render_tool_results_answer(tool_results)
-            visible_answer, action_proposals = extract_action_proposals(tool_answer, request)
-            if not action_proposals:
-                action_proposals = extract_tool_result_action_proposals(tool_results, request)
-            for tool_result in tool_results:
-                yield sse("tool", {"result": tool_result.model_dump(mode="json")})
-            for token in visible_answer.split(" "):
-                yield sse("token", {"token": token + " "})
-            if action_proposals:
-                yield sse("action_proposal", {"proposals": action_proposals})
-            usage = build_chat_usage(request, [], visible_answer, started_at, model_tier="system")
-            complete_conversation(
-                conversation_id,
-                visible_answer,
-                usage,
-                model_tier="system",
-                action_proposals=action_proposals,
-            )
-            yield sse("done", {
-                "ok": bool(action_proposals) or all(result.ok for result in tool_results),
-                "outcome": "action-proposed" if action_proposals else "completed",
-                "usage": usage,
-            })
-            return
+        yield sse("status", {"message": "Готовлю ответ"})
 
         if get_inference_lock().locked():
             yield sse("status", {"message": "Жду очередь генерации"})
 
-        inference_slot = await acquire_inference_slot()
+        inference_slot = await acquire_inference_slot(
+            "coder" if is_coder_mode_request(request) else request.inference_lane
+        )
         if inference_slot is None:
             yield sse("error", {"message": "Очередь генерации занята. Попробуй еще раз через несколько секунд."})
             yield sse("done", {"ok": False})
@@ -2225,6 +2218,7 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                 )
 
                 full_answer_pieces = []
+                visible_stream_state = {"buffer": "", "hidden": False}
                 next_disconnect_check = 0.0
                 next_research_heartbeat = time.perf_counter() + RESEARCH_PROGRESS_HEARTBEAT_SECONDS
                 async for token in iterate_in_threadpool(generator):
@@ -2254,14 +2248,20 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                                 "total": len(research_queries),
                             })
                     else:
-                        yield sse("token", {"token": token})
+                        visible_token = (
+                            token
+                            if is_coder_mode_request(request)
+                            else filter_hidden_chat_protocol_chunk(visible_stream_state, token)
+                        )
+                        if visible_token:
+                            yield sse("token", {"token": visible_token})
 
                 full_answer = "".join(full_answer_pieces)
                 if model_runtime.generation_cancelled():
                     usage = {}
                     if full_answer.strip():
                         if deep_research_enabled(request):
-                            yield sse("replace", {"content": full_answer})
+                            yield sse("replace", {"content": visible_chat_content(request, full_answer)})
                         usage = build_chat_usage(request, sources, full_answer, started_at, model_tier=tier)
                         usage["partial"] = True
                         complete_conversation(conversation_id, full_answer, usage, model_tier=tier, sources=sources)
@@ -2338,7 +2338,13 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                         continuation_pieces.append(token)
                         full_answer_pieces.append(token)
                         if not deep_research_enabled(request):
-                            yield sse("token", {"token": token})
+                            visible_token = (
+                                token
+                                if is_coder_mode_request(request)
+                                else filter_hidden_chat_protocol_chunk(visible_stream_state, token)
+                            )
+                            if visible_token:
+                                yield sse("token", {"token": visible_token})
                     continuation = "".join(continuation_pieces)
                     if model_runtime.generation_cancelled():
                         full_answer += continuation
@@ -2361,11 +2367,16 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                         f"{continuation_source or ''}{full_answer}",
                     )
 
+                if not deep_research_enabled(request) and not is_coder_mode_request(request):
+                    visible_tail = filter_hidden_chat_protocol_chunk(visible_stream_state, "", final=True)
+                    if visible_tail:
+                        yield sse("token", {"token": visible_tail})
+
                 corrected_answer = await maybe_rewrite_answer_language(tier, request, sources, full_answer)
                 if corrected_answer:
                     yield sse("status", {"message": "Исправляю язык ответа"})
                     if not deep_research_enabled(request):
-                        yield sse("replace", {"content": corrected_answer})
+                        yield sse("replace", {"content": visible_chat_content(request, corrected_answer)})
                     full_answer = corrected_answer
 
                 if deep_research_enabled(request):
@@ -2391,7 +2402,7 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                     regenerated = regenerated or research_verified
                     yield sse("sources", {"sources": [source.model_dump(mode="json") for source in sources]})
                     if full_answer.strip():
-                        yield sse("replace", {"content": full_answer})
+                        yield sse("replace", {"content": visible_chat_content(request, full_answer)})
                     if research_stop_reason == "cancelled":
                         usage = build_chat_usage(request, sources, full_answer, started_at, model_tier=tier)
                         usage["partial"] = True
@@ -2419,7 +2430,7 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                 if registry_regenerated:
                     regenerated = True
                     yield sse("status", {"message": "Сверяю ответ с live-реестром Monarch"})
-                    yield sse("replace", {"content": grounded_answer})
+                    yield sse("replace", {"content": visible_chat_content(request, grounded_answer)})
                     full_answer = grounded_answer
 
                 if not is_explicit_gemma_override(request):
@@ -2435,18 +2446,21 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                         quality_flags = list(dict.fromkeys([*quality_flags, *regenerated_quality_flags]))
                         if quality_regenerated:
                             regenerated = True
-                            yield sse("status", {"message": "Повторяю ответ более сильной моделью"})
-                            yield sse("replace", {"content": regenerated_answer})
+                            yield sse("status", {"message": "Исправляю качество ответа"})
+                            yield sse("replace", {"content": visible_chat_content(request, regenerated_answer)})
                             full_answer = regenerated_answer
 
                 honest_answer = replace_unexecuted_tool_promise(request, full_answer)
                 if honest_answer != full_answer:
                     tool_promise_rewritten = True
                     yield sse("status", {"message": "Проверяю фактический результат инструмента"})
-                    yield sse("replace", {"content": honest_answer})
+                    yield sse("replace", {"content": visible_chat_content(request, honest_answer)})
                     full_answer = honest_answer
 
-                visible_answer, action_proposals = extract_action_proposals(full_answer, request)
+                if is_coder_mode_request(request):
+                    visible_answer, action_proposals = extract_action_proposals(full_answer, request)
+                else:
+                    visible_answer, action_proposals = strip_hidden_monarch_commands(full_answer), []
                 if visible_answer != full_answer:
                     yield sse("replace", {"content": visible_answer})
                     full_answer = visible_answer
@@ -2556,10 +2570,12 @@ def adaptive_generation_budget(request: ChatRequest, continuation_source: str | 
         return ceiling
     if research_decision_for_request(request).mode == "deep":
         return ceiling
+    if len(text) <= 240 and re.search(r"(?:одним словом|one word)", text):
+        return min(ceiling, 32)
+    if len(text) <= 240 and re.search(r"(?:\bкратко\b|\bshort\b|\bbrief(?:ly)?\b)", text):
+        return min(ceiling, 192)
     if request.reasoning_effort == "high" or re.search(r"(?:подроб|деталь|пошаг|deep|thorough|research|анализ)", text):
         return min(ceiling, 3072)
-    if len(text) <= 80 and re.search(r"(?:одним словом|кратко|short|brief|one word)", text):
-        return min(ceiling, 512)
     return min(ceiling, 1536)
 
 
@@ -2783,44 +2799,6 @@ def correct_truncation_signal(usage: dict, boundary_text: str) -> None:
     )
 
 
-def maybe_execute_agent_tools(request: ChatRequest):
-    if not request.allow_tools:
-        return None
-    latest_user = next((message.content for message in reversed(request.messages) if message.role == "user"), "")
-    if is_environment_diagnostic_request(latest_user):
-        return [environment.tool_result()]
-    if is_workspace_root_request(request.messages):
-        return [workspace.root_info()]
-    memory_note = detect_memory_note(latest_user)
-    if memory_note and not request.incognito:
-        return [memory.remember_note(memory_note)]
-
-    if requires_model_workspace_planning(latest_user):
-        return None
-
-    commands = (
-        detect_contextual_workspace_commands(request.messages)
-        or detect_workspace_audit_commands(latest_user)
-        or detect_workspace_commands(latest_user)
-    )
-    if not commands:
-        incomplete = detect_incomplete_workspace_command(latest_user)
-        return [incomplete] if incomplete is not None else None
-    if any(is_mutating_workspace_command(command) for command in commands):
-        return [kernel_execution_required_result(commands, include_proposal=True)]
-    previous_answer = next((message.content for message in reversed(request.messages[:-1]) if message.role == "assistant"), "")
-    results = []
-    for command in commands:
-        if command.action in {"write", "append"} and not command.content and previous_answer and refers_to_previous_answer(latest_user):
-            command.content = previous_answer
-        results.append(workspace.execute(command))
-    return results
-
-
-def is_mutating_workspace_command(command: WorkspaceCommand) -> bool:
-    return command.action in {"write", "append", "replace", "mkdir", "copy", "move", "trash", "restore"}
-
-
 def kernel_execution_required_result(
     value: WorkspaceCommand | list[WorkspaceCommand],
     *,
@@ -2907,22 +2885,6 @@ def requires_model_workspace_planning(text: str) -> bool:
         and not commands
         and detect_incomplete_workspace_command(normalized) is not None
     )
-
-
-def detect_workspace_audit_commands(text: str) -> list[WorkspaceCommand]:
-    normalized = " ".join((text or "").split())
-    lower = normalized.lower()
-    if not normalized:
-        return []
-    if not re.search(r"\b(?:audit)\b|аудит|проаудит|на\s+основе\s+аудит", lower):
-        return []
-    if not re.search(r"\b(?:oscar|монарх|monarch|workspace|project|repo|files?|architecture)\b|оскар|проект|репозитор|файл|архитектур", lower):
-        return []
-
-    paths = [".", "oscar", "oscar/backend/oscar_agent", "oscar/backend/tests", "src/modules/oscar"]
-    if re.search(r"ui|frontend|интерфейс|фронт", lower):
-        paths.extend(["oscar/frontend/src", "src/ui/public/modules"])
-    return [WorkspaceCommand(action="list", path=path) for path in dict.fromkeys(paths)]
 
 
 def detect_contextual_workspace_commands(messages: list[ChatMessage]) -> list[WorkspaceCommand]:
@@ -3079,17 +3041,13 @@ def render_tool_results_answer(results):
 
 
 def replace_unexecuted_tool_promise(request: ChatRequest, answer: str) -> str:
-    if not request.allow_tools or not answer.strip():
+    if not answer.strip():
         return answer
     raw_tool_call = extract_raw_tool_call(answer)
     if raw_tool_call:
-        if raw_tool_call == "environment.inspect":
-            return render_tool_results_answer([environment.tool_result()])
-        if raw_tool_call == "workspace.root.get":
-            return render_tool_results_answer([workspace.root_info()])
         return (
             "Служебный вызов инструмента не был выполнен контроллером, поэтому я не буду показывать его как результат. "
-            "Повтори запрос обычным текстом или уточни действие, чтобы Monarch выполнил его через capability-роутер."
+            "Системные действия выполняются только через Agent Runtime с проверяемым Kernel receipt."
         )
     has_capability_reference = bool(re.search(
         r"\b(?:workspace\.(?:files\.)?|memory\.|models\.|diagnostics\.|security\.|environment\.)[a-z0-9_.-]+",
@@ -3400,14 +3358,21 @@ async def maybe_regenerate_for_quality(
         return full_answer, quality_flags, False
 
     stronger_tier = next_stronger_tier(tier)
-    if stronger_tier == tier:
-        return full_answer, quality_flags, False
-    if stronger_tier in {"gemma4-deepthinking", "gemma4-31b"} and request.deep_thinking_consent != "allow":
-        return full_answer, quality_flags, False
-
+    retry_tier = stronger_tier
+    if (
+        stronger_tier == tier
+        or (
+            stronger_tier in {"gemma4-deepthinking", "gemma4-31b"}
+            and request.deep_thinking_consent != "allow"
+        )
+    ):
+        # A critical quality repair must still work when a stronger tier needs
+        # separate consent. Retry the current tier with a compact trusted
+        # correction instead of returning a known-bad draft.
+        retry_tier = tier
     try:
         retry_generator = model_runtime.stream_chat(
-            stronger_tier,
+            retry_tier,
             request.messages,
             sources,
             request.reasoning_effort,
@@ -3419,6 +3384,7 @@ async def maybe_regenerate_for_quality(
             request.capabilities,
             request.access,
             strict_tier=is_strict_tier_request(request),
+            trusted_retry_instruction=quality_retry_instruction(expected_lang, quality_flags),
         )
         retry_pieces = []
         async for piece in iterate_in_threadpool(retry_generator):
@@ -3438,10 +3404,34 @@ async def maybe_regenerate_for_quality(
         return full_answer, quality_flags, False
 
 
+def quality_retry_instruction(expected_lang: str, quality_flags: list[str]) -> str:
+    issue_list = ",".join(sorted(set(quality_flags)))[:240]
+    if expected_lang == "ru":
+        return (
+            "<oscar_quality_retry>"
+            f"Предыдущий черновик не прошёл внутреннюю проверку ({issue_list}). "
+            "Ответь на последнюю реплику заново, прямо и естественно, не повторяя старый ответ. "
+            "Сохрани активную тему и характер Oscar. Не заменяй вопрос об отношении или настрое "
+            "описанием AI-архитектуры или отсутствия эмоций, если пользователь буквально не спрашивал "
+            "о сознании или теле. Не упоминай эту проверку."
+            "</oscar_quality_retry>"
+        )
+    return (
+        "<oscar_quality_retry>"
+        f"The previous draft failed an internal quality check ({issue_list}). "
+        "Answer the latest turn again, directly and naturally, without repeating the draft. "
+        "Keep the active topic and Oscar's character. Do not replace an attitude or mood question "
+        "with AI architecture or emotion disclaimers unless the user literally asked about consciousness "
+        "or a body. Never mention this check."
+        "</oscar_quality_retry>"
+    )
+
+
 CRITICAL_QUALITY_FLAGS = {
     "stale_answer_repeat",
     "irrelevant_identity_fallback",
     "provider_identity_leak",
+    "sterile_persona_refusal",
 }
 
 DIRECT_IDENTITY_QUESTION_PATTERN = re.compile(
@@ -3466,6 +3456,40 @@ IDENTITY_CREATION_NARRATIVE_PATTERN = re.compile(
 IDENTITY_OTHER_PREDICATE_PATTERN = re.compile(
     r"\b(?:отнош\w*|дума\w*|мнени\w*|чувств\w*|оцени\w*|нрав\w*|"
     r"feel|think|opinion|regard|attitude|like|dislike)\b",
+    re.IGNORECASE,
+)
+SOCIAL_PERSPECTIVE_QUESTION_PATTERN = re.compile(
+    r"(?:\bты\s+(?:рад\w*|довол\w*|счастлив\w*|взволнован\w*|пережива\w*|"
+    r"груст\w*|боишься|гордишься|заинтересован\w*)\b|"
+    r"(?:^|[.!?]\s*)(?:ну\s+что[,\s]*)?(?:рад\w*|довол\w*|счастлив\w*|"
+    r"взволнован\w*|пережива\w*|груст\w*|гордишься|заинтересован\w*)\b|"
+    r"\bтебе\s+(?:нрав\w*|приятн\w*|интересн\w*)\b|"
+    r"\bкак\s+ты\s+(?:себя\s+чувствуешь|относишься)\b|"
+    r"\bчто\s+ты\s+(?:чувствуешь|думаешь)\b|"
+    r"\bare\s+you\s+(?:happy|glad|pleased|excited|sad|worried|proud|interested)\b|"
+    r"\bhow\s+do\s+you\s+feel\b|\bwhat\s+do\s+you\s+(?:feel|think)\b|"
+    r"\bdo\s+you\s+(?:like|enjoy|care)\b)",
+    re.IGNORECASE,
+)
+LITERAL_SENTIENCE_QUESTION_PATTERN = re.compile(
+    r"\b(?:буквальн\w*|на\s+самом\s+деле|реальн\w*)\b.{0,40}\b(?:эмоц\w*|чувств\w*|"
+    r"сознани\w*|тело\w*)\b|"
+    r"\b(?:есть|бывают|существуют)\s+(?:ли\s+)?у\s+тебя\s+(?:настоящ\w+\s+)?(?:эмоц\w*|"
+    r"чувств\w*|сознани\w*)\b|"
+    r"\b(?:actually|literally|really)\b.{0,40}\b(?:emotions?|feelings?|consciousness|"
+    r"sentien\w*|body)\b|\bdo\s+you\s+(?:actually\s+)?have\s+(?:real\s+)?(?:emotions?|"
+    r"feelings?|consciousness)\b",
+    re.IGNORECASE,
+)
+STERILE_PERSONA_REFUSAL_PATTERN = re.compile(
+    r"\b(?:у\s+меня\s+нет|я\s+не\s+(?:могу|способен\w*))\s+.{0,32}(?:эмоц\w*|"
+    r"испытыва\w*\s+чувств\w*)\b|"
+    r"\b(?:как|поскольку)\s+(?:ai|ии|искусственн\w+\s+интеллект\w*)\b.{0,64}"
+    r"\bне\s+(?:могу|испытыва\w*|облада\w*)\b|"
+    r"\bi\s+(?:do\s+not|don't)\s+have\s+emotions?\b|"
+    r"\bi\s+(?:cannot|can't|do\s+not|don't)\s+(?:experience|feel)\s+(?:emotions?|"
+    r"feelings?)\b|"
+    r"\bas\s+an?\s+ai\b.{0,64}\bi\s+(?:cannot|can't|do\s+not|don't)\b",
     re.IGNORECASE,
 )
 
@@ -3557,6 +3581,12 @@ def detect_quality_flags(
 
         latest_user = user_messages[-1] if user_messages else ""
         direct_identity_request = is_direct_identity_request(latest_user)
+        if (
+            SOCIAL_PERSPECTIVE_QUESTION_PATTERN.search(latest_user)
+            and not LITERAL_SENTIENCE_QUESTION_PATTERN.search(latest_user)
+            and STERILE_PERSONA_REFUSAL_PATTERN.search(answer)
+        ):
+            flags.append("sterile_persona_refusal")
         identity_only_answer = len(answer.strip()) <= 260 and bool(re.search(
             r"(?:^|[.!?]\s*)(?:меня\s+создал|я\s*[-—]?\s*(?:локальн|ai[- ]?ассистент|"
             r"искусственн\w*\s+интеллект)|i\s+was\s+created\s+by|i\s+am\s+(?:a\s+)?(?:local|ai)\s+assistant)",

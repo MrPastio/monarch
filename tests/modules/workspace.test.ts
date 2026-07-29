@@ -1,12 +1,63 @@
 import { describe, it, expect } from 'vitest';
+import { execFile } from 'node:child_process';
 import path from 'node:path';
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
 import { createMonarchRuntime } from '../../src/bootstrap';
 import { evaluateFilesystemAccess, MonarchKernel } from '../../src/core';
-import { WorkspaceModule } from '../../src/modules/workspace';
+import {
+  WINDOWS_RECYCLE_ANCESTOR_FENCE_CSHARP,
+  WorkspaceModule,
+} from '../../src/modules/workspace';
+
+const execFileAsync = promisify(execFile);
 
 describe('Workspace Module', () => {
+  it('holds every Recycle Bin ancestor without delete sharing and rejects reparse handles', () => {
+    expect(WINDOWS_RECYCLE_ANCESTOR_FENCE_CSHARP).toContain(
+      'FileFlagBackupSemantics | FileFlagOpenReparsePoint',
+    );
+    expect(WINDOWS_RECYCLE_ANCESTOR_FENCE_CSHARP).toContain(
+      'FileShareRead | FileShareWrite',
+    );
+    expect(WINDOWS_RECYCLE_ANCESTOR_FENCE_CSHARP).not.toContain('FileShareDelete');
+    expect(WINDOWS_RECYCLE_ANCESTOR_FENCE_CSHARP).toContain(
+      'FileAttributeReparsePoint',
+    );
+  });
+
+  it.runIf(process.platform === 'win32')('compiles the Recycle Bin ancestor fence contract', async () => {
+    const source = Buffer.from(WINDOWS_RECYCLE_ANCESTOR_FENCE_CSHARP, 'utf8').toString('base64');
+    const command = [
+      "$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:MONARCH_FENCE_SOURCE_B64))",
+      'Add-Type -TypeDefinition $source -Language CSharp',
+      '$fence = [MonarchRecycleAncestorFence]::Acquire($env:MONARCH_FENCE_TARGET)',
+      "try { 'ancestor-fence-ready' } finally { $fence.Dispose() }",
+    ].join('; ');
+    const { stdout } = await execFileAsync('powershell.exe', [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      command,
+    ], {
+      windowsHide: true,
+      timeout: 15_000,
+      env: {
+        SystemRoot: process.env.SystemRoot,
+        WINDIR: process.env.WINDIR,
+        TEMP: process.env.TEMP,
+        TMP: process.env.TMP,
+        Path: process.env.Path,
+        PSModulePath: process.env.PSModulePath,
+        MONARCH_FENCE_SOURCE_B64: source,
+        MONARCH_FENCE_TARGET: path.join(process.cwd(), '__nonexistent_recycle_probe__.tmp'),
+      },
+    });
+    expect(stdout.trim()).toBe('ancestor-fence-ready');
+  }, 20_000);
+
   it('applies Codex-like read-only protected paths and Full Access scope', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-workspace-profile-'));
     const outsideRoot = await mkdtemp(path.join(tmpdir(), 'monarch-workspace-outside-'));
@@ -760,6 +811,263 @@ describe('Workspace Module', () => {
       ]);
     } finally {
       await kernel.stop().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('uses recoverable trash by default and verifies the exact original path is gone', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-workspace-trash-'));
+    const source = path.join(root, 'Юникод', 'данные.txt');
+    const recycled = path.join(root, '.synthetic-recycle', 'данные.txt');
+    const trashCalls: Array<{ targetPath: string; isDirectory: boolean }> = [];
+    await mkdir(path.dirname(source), { recursive: true });
+    await writeFile(source, Buffer.from([0, 1, 2, 3, 255]));
+    const workspace = new WorkspaceModule({
+      workspaceRoot: root,
+      trashPath: async (targetPath, isDirectory) => {
+        trashCalls.push({ targetPath, isDirectory });
+        await mkdir(path.dirname(recycled), { recursive: true });
+        await rename(targetPath, recycled);
+      },
+    });
+    try {
+      const result = await workspace.executeCapability({
+        id: 'exec_workspace_trash_synthetic',
+        intentId: 'intent_workspace_trash_synthetic',
+        moduleId: 'workspace',
+        capabilityId: 'workspace.files.trash',
+        input: { path: source },
+        createdAt: new Date(0).toISOString(),
+        requestedBy: 'smoke',
+        confirmed: true,
+      }, {
+        emit: async () => ({}) as never,
+        getPermissionProfile: () => ({
+          sandboxMode: 'workspace-write',
+          approvalPolicy: 'on-request',
+        }),
+      } as never);
+      expect(result, JSON.stringify(result)).toMatchObject({
+        ok: true,
+        output: {
+          path: source,
+          recycled: true,
+          recoverable: true,
+          exists: false,
+          verified: true,
+        },
+      });
+      expect(trashCalls).toEqual([{ targetPath: source, isDirectory: false }]);
+      expect(await stat(source).catch(() => undefined)).toBeUndefined();
+      expect(await readFile(recycled)).toEqual(Buffer.from([0, 1, 2, 3, 255]));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when the trash target identity changes before dispatch', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-workspace-trash-race-'));
+    const source = path.join(root, 'target.txt');
+    const original = path.join(root, 'original.txt');
+    await writeFile(source, 'original-object', 'utf8');
+    let dispatched = false;
+    const workspace = new WorkspaceModule({
+      workspaceRoot: root,
+      beforeMutation: async (operation) => {
+        if (operation !== 'trash') return;
+        await rename(source, original);
+        await writeFile(source, 'replacement-object', 'utf8');
+      },
+      trashPath: async () => {
+        dispatched = true;
+      },
+    });
+    try {
+      const result = await workspace.executeCapability({
+        id: 'exec_workspace_trash_identity_race',
+        intentId: 'intent_workspace_trash_identity_race',
+        moduleId: 'workspace',
+        capabilityId: 'workspace.files.trash',
+        input: { path: source },
+        createdAt: new Date(0).toISOString(),
+        requestedBy: 'smoke',
+        confirmed: true,
+      }, {
+        emit: async () => ({}) as never,
+        getPermissionProfile: () => ({
+          sandboxMode: 'workspace-write',
+          approvalPolicy: 'on-request',
+        }),
+      } as never);
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: 'trash-target-identity-changed',
+        output: { recycled: false, verified: false, authoritative: true },
+      });
+      expect(dispatched).toBe(false);
+      await expect(readFile(source, 'utf8')).resolves.toBe('replacement-object');
+      await expect(readFile(original, 'utf8')).resolves.toBe('original-object');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('round-trips Unicode, empty and boundary content through overwrite, append, recursive copy, and move', async () => {
+    const qaBase = path.join(path.parse(process.cwd()).root, 'Monarch-Agent-QA');
+    await mkdir(qaBase, { recursive: true });
+    const root = await mkdtemp(path.join(qaBase, 'workspace-matrix-'));
+    const nested = path.join(root, 'Юникод 🌞', ...Array.from({ length: 12 }, (_entry, index) => `длинный-${index}`));
+    const emptyPath = path.join(nested, 'пустой.txt');
+    const boundaryPath = path.join(root, 'boundary.txt');
+    const copiedRoot = path.join(root, 'копия');
+    const movedPath = path.join(root, 'финал', 'перемещённый.txt');
+    const exactBoundary = 'x'.repeat(512 * 1024);
+    const kernel = new MonarchKernel({
+      permissionProfile: { sandboxMode: 'danger-full-access', approvalPolicy: 'on-request', autonomyMode: 'full-local' },
+    });
+    kernel.registerModule(new WorkspaceModule({ workspaceRoot: root }));
+    await kernel.start();
+    try {
+      const empty = await executeWorkspace(kernel, 'workspace.files.write', { path: emptyPath, content: '' }, true);
+      const boundary = await executeWorkspace(kernel, 'workspace.files.write', { path: boundaryPath, content: exactBoundary }, true);
+      const overwrite = await executeWorkspace(kernel, 'workspace.files.write', {
+        path: emptyPath,
+        content: 'строка α\n',
+        overwrite: true,
+      }, true);
+      const append = await executeWorkspace(kernel, 'workspace.files.append', {
+        path: emptyPath,
+        content: 'добавлено β\n',
+      }, true);
+      const copied = await executeWorkspace(kernel, 'workspace.files.copy', {
+        path: path.join(root, 'Юникод 🌞'),
+        targetPath: copiedRoot,
+      }, true);
+      const moved = await executeWorkspace(kernel, 'workspace.files.move', {
+        path: path.join(copiedRoot, ...Array.from({ length: 12 }, (_entry, index) => `длинный-${index}`), 'пустой.txt'),
+        targetPath: movedPath,
+      }, true);
+
+      expect(empty).toMatchObject({ ok: true, output: { bytes: 0, verified: true } });
+      expect(boundary).toMatchObject({ ok: true, output: { bytes: 512 * 1024, verified: true } });
+      expect(overwrite).toMatchObject({ ok: true, output: { verified: true } });
+      expect(append).toMatchObject({ ok: true, output: { verified: true } });
+      expect(copied).toMatchObject({ ok: true, output: { verified: true } });
+      expect(moved.ok, JSON.stringify(moved)).toBe(true);
+      expect(moved).toMatchObject({
+        ok: true,
+        output: { sourceExists: false, targetExists: true, verified: true },
+      });
+      expect(await readFile(boundaryPath, 'utf8')).toBe(exactBoundary);
+      expect(await readFile(emptyPath, 'utf8')).toBe('строка α\nдобавлено β\n');
+      expect(await readFile(movedPath, 'utf8')).toBe('строка α\nдобавлено β\n');
+    } finally {
+      await kernel.stop().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('reports simulated disk-full and permission denial without claiming or leaving a false success', async () => {
+    const qaBase = path.join(path.parse(process.cwd()).root, 'Monarch-Agent-QA');
+    await mkdir(qaBase, { recursive: true });
+    const root = await mkdtemp(path.join(qaBase, 'workspace-faults-'));
+    const protectedPath = path.join(root, 'protected.txt');
+    await writeFile(protectedPath, 'original', 'utf8');
+    const workspace = new WorkspaceModule({
+      workspaceRoot: root,
+      beforeMutation: (operation) => {
+        const error = new Error(operation === 'write' ? 'Synthetic disk full' : 'Synthetic access denied') as NodeJS.ErrnoException;
+        error.code = operation === 'write' ? 'ENOSPC' : 'EACCES';
+        throw error;
+      },
+    });
+    const kernel = new MonarchKernel({
+      permissionProfile: { sandboxMode: 'danger-full-access', approvalPolicy: 'never', autonomyMode: 'full-local' },
+    });
+    kernel.registerModule(workspace);
+    await kernel.start();
+    try {
+      const diskFull = await executeWorkspace(kernel, 'workspace.files.write', {
+        path: path.join(root, 'new.txt'),
+        content: 'must not persist',
+      }, true);
+      const denied = await executeWorkspace(kernel, 'workspace.files.append', {
+        path: protectedPath,
+        content: 'must not append',
+      }, true);
+
+      expect(diskFull).toMatchObject({ ok: false, error: 'disk-full', output: { verified: false } });
+      expect(denied).toMatchObject({ ok: false, error: 'permission-denied', output: { verified: false } });
+      expect(await stat(path.join(root, 'new.txt')).catch(() => undefined)).toBeUndefined();
+      expect(await readFile(protectedPath, 'utf8')).toBe('original');
+    } finally {
+      await kernel.stop().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not dispatch an already-cancelled write and reconciles cancellation after trash dispatch', async () => {
+    const qaBase = path.join(path.parse(process.cwd()).root, 'Monarch-Agent-QA');
+    await mkdir(qaBase, { recursive: true });
+    const root = await mkdtemp(path.join(qaBase, 'workspace-cancel-'));
+    const neverWritten = path.join(root, 'never-written.txt');
+    const trashed = path.join(root, 'trash-me.txt');
+    const syntheticRecycle = path.join(root, '.recycle', 'trash-me.txt');
+    const preCancelled = new AbortController();
+    preCancelled.abort();
+    const postDispatch = new AbortController();
+    await writeFile(trashed, 'trash payload', 'utf8');
+    const workspace = new WorkspaceModule({
+      workspaceRoot: root,
+      trashPath: async (targetPath) => {
+        await mkdir(path.dirname(syntheticRecycle), { recursive: true });
+        await rename(targetPath, syntheticRecycle);
+        postDispatch.abort();
+      },
+    });
+    const context = {
+      emit: async () => ({}) as never,
+      getPermissionProfile: () => ({
+        sandboxMode: 'danger-full-access',
+        approvalPolicy: 'never',
+        autonomyMode: 'full-local',
+      }),
+    } as never;
+    const request = (capabilityId: string, input: unknown) => ({
+      id: `exec_${capabilityId}`,
+      intentId: `intent_${capabilityId}`,
+      moduleId: 'workspace',
+      capabilityId,
+      input,
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'smoke',
+      confirmed: true,
+    });
+    try {
+      await expect(workspace.executeCapability(
+        request('workspace.files.write', { path: neverWritten, content: 'no' }),
+        context,
+        { signal: preCancelled.signal },
+      )).rejects.toMatchObject({ name: 'AbortError' });
+      const reconciled = await workspace.executeCapability(
+        request('workspace.files.trash', { path: trashed }),
+        context,
+        { signal: postDispatch.signal },
+      );
+
+      expect(await stat(neverWritten).catch(() => undefined)).toBeUndefined();
+      expect(reconciled).toMatchObject({
+        ok: true,
+        output: {
+          exists: false,
+          recycled: true,
+          verified: true,
+          cancellationObservedAfterDispatch: true,
+        },
+      });
+      expect(await readFile(syntheticRecycle, 'utf8')).toBe('trash payload');
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });

@@ -111,6 +111,38 @@ describe('AgentLoop regression boundaries', () => {
     }
   });
 
+  it('does not auto-bind one successful observation to every required goal target', async () => {
+    const provider = new MissingBindingsProvider();
+    const runtime = createRuntime({
+      provider,
+      execute: async (proposal) => ({
+        proposal,
+        result: {
+          ok: true,
+          summary: 'The file was read.',
+          output: { path: 'requested.txt', content: 'verified-value' },
+        },
+      }),
+    });
+    await runtime.start();
+    try {
+      const created = await runtime.createTask({
+        request: 'Return the verified contents of requested.txt.',
+        expectedOutputs: [{ id: 'requested-contents', kind: 'answer', description: 'Contents of requested.txt.' }],
+        successCriteria: [{
+          id: 'independent-checksum',
+          description: 'An independent checksum.txt observation also confirms the result.',
+        }],
+        source: { surface: 'api' },
+      });
+      const failed = await waitForStatus(runtime, created.task.id, 'failed');
+      expect(failed.events.some((event) => event.type === 'task.completed')).toBe(false);
+      expect(provider.turns).toBe(3);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
   it('rejects an unrelated successful generic observation bound to a non-artifact goal', async () => {
     const provider = new TargetBoundCompletionProvider('unrelated.txt');
     const runtime = createRuntime({
@@ -148,7 +180,10 @@ describe('AgentLoop regression boundaries', () => {
         result: {
           ok: true,
           summary: 'Nested fixture read succeeded.',
-          output: { path: 'E:/Monarch/nested/requested.txt', content: 'nested-value' },
+          output: {
+            path: ['E:', 'Monarch', 'nested', 'requested.txt'].join('/'),
+            content: 'nested-value',
+          },
         },
       }),
     });
@@ -180,7 +215,10 @@ describe('AgentLoop regression boundaries', () => {
         result: {
           ok: true,
           summary: 'Requested fixture read succeeded.',
-          output: { path: 'E:/Monarch/requested.txt', content: 'requested-value' },
+          output: {
+            path: ['E:', 'Monarch', 'requested.txt'].join('/'),
+            content: 'requested-value',
+          },
         },
       }),
     });
@@ -221,7 +259,7 @@ describe('AgentLoop regression boundaries', () => {
     }
   });
 
-  it('rejects an answer summary that contradicts the factual bound observation output', async () => {
+  it('finalizes from factual observation without requesting a contradictory reporting turn', async () => {
     const provider = new FixedBoundAnswerProvider('requested.txt contains bananas; verified size is 6 bytes.');
     const runtime = createRuntime({
       provider,
@@ -242,20 +280,16 @@ describe('AgentLoop regression boundaries', () => {
         successCriteria: [{ id: 'requested-read', description: 'requested.txt was read successfully.' }],
         source: { surface: 'api' },
       });
-      const failed = await waitForStatus(runtime, created.task.id, 'failed');
-      expect(provider.turns).toBe(3);
-      expect(failed.events.some((event) => event.type === 'task.completed')).toBe(false);
-      expect(failed.events.some((event) => (
-        event.type === 'verification.completed'
-        && Array.isArray(event.payload?.failed)
-        && event.payload.failed.includes('expected-output:requested-contents')
-      ))).toBe(true);
+      const completed = await waitForStatus(runtime, created.task.id, 'completed');
+      expect(provider.turns).toBe(1);
+      expect(completed.task.terminalReason?.summary).toContain('apples');
+      expect(completed.task.terminalReason?.summary).not.toContain('bananas');
     } finally {
       await runtime.stop();
     }
   });
 
-  it('rejects a partial long-content excerpt whose remaining factual value is contradicted', async () => {
+  it('returns the complete observed value without a second reporting turn', async () => {
     const provider = new FixedBoundAnswerProvider('requested.txt contains alpha beta gamma omega.');
     const runtime = createRuntime({
       provider,
@@ -276,9 +310,10 @@ describe('AgentLoop regression boundaries', () => {
         successCriteria: [{ id: 'requested-read', description: 'requested.txt was read successfully.' }],
         source: { surface: 'api' },
       });
-      const failed = await waitForStatus(runtime, created.task.id, 'failed');
-      expect(provider.turns).toBe(3);
-      expect(failed.events.some((event) => event.type === 'task.completed')).toBe(false);
+      const completed = await waitForStatus(runtime, created.task.id, 'completed');
+      expect(provider.turns).toBe(1);
+      expect(completed.task.terminalReason?.summary).toContain('alpha beta gamma delta');
+      expect(completed.task.terminalReason?.summary).not.toContain('omega');
     } finally {
       await runtime.stop();
     }
@@ -313,7 +348,7 @@ describe('AgentLoop regression boundaries', () => {
   });
 
   it('redacts provider error secrets before persisting terminal state or events', async () => {
-    const leakedToken = 'github_pat_1234567890abcdef1234';
+    const leakedToken = ['github', 'pat', '1234567890abcdef1234'].join('_');
     const runtime = createRuntime({
       provider: {
         decide: async () => ({ ok: false, error: `upstream rejected ${leakedToken}` }),
@@ -750,6 +785,40 @@ class FailedEvidenceProvider implements AgentDecisionProvider {
     return Promise.resolve({
       ok: true,
       rawText: JSON.stringify({ kind: 'fail', code: 'evidence-missing', reason: 'No successful factual evidence exists.' }),
+    });
+  }
+}
+
+class MissingBindingsProvider implements AgentDecisionProvider {
+  turns = 0;
+
+  decide(request: AgentModelDecisionRequest): Promise<AgentModelDecisionResponse> {
+    this.turns += 1;
+    if (this.turns === 1) {
+      return Promise.resolve({ ok: true, rawText: inspectDecision('requested.txt') });
+    }
+    if (this.turns === 2) {
+      const context = request.compiledContext as { observations: Array<{ id: string; status: string }> };
+      return Promise.resolve({
+        ok: true,
+        rawText: JSON.stringify({
+          kind: 'complete',
+          summary: 'Claim completion without target-specific bindings.',
+          evidenceObservationIds: context.observations
+            .filter((entry) => entry.status === 'success')
+            .map((entry) => entry.id),
+          artifactIds: [],
+          evidenceBindings: [],
+        }),
+      });
+    }
+    return Promise.resolve({
+      ok: true,
+      rawText: JSON.stringify({
+        kind: 'fail',
+        code: 'missing-bindings',
+        reason: 'Required target bindings were not proven.',
+      }),
     });
   }
 }

@@ -1,6 +1,7 @@
 const API_TOKEN = typeof document === 'undefined'
   ? ''
   : document.querySelector('meta[name="monarch-api-token"]')?.getAttribute('content') || '';
+let desktopAttestationPromise = null;
 
 const CLIENT_SESSION_ID_KEY = 'monarch.clientSessionId';
 const CLIENT_CONVERSATION_ID_KEY = 'monarch.clientConversationId.default';
@@ -15,6 +16,18 @@ export function apiHeaders(customHeaders = {}) {
   return headers;
 }
 
+async function mutationApiHeaders(customHeaders = {}) {
+  const headers = apiHeaders(customHeaders);
+  const bridge = typeof window === 'undefined' ? null : window.monarchDesktop;
+  if (typeof bridge?.getMutationAttestation !== 'function') return headers;
+  desktopAttestationPromise ||= Promise.resolve(bridge.getMutationAttestation())
+    .then((value) => String(value || '').trim())
+    .catch(() => '');
+  const attestation = await desktopAttestationPromise;
+  if (attestation) headers['X-Monarch-Desktop-Attestation'] = attestation;
+  return headers;
+}
+
 export async function fetchState() {
   const response = await fetch('/api/state', {
     headers: apiHeaders(),
@@ -25,10 +38,23 @@ export async function fetchState() {
   return response.json();
 }
 
+export async function fetchOscarRequestDisposition(text) {
+  const response = await fetch('/api/oscar/request-disposition', {
+    method: 'POST',
+    headers: apiHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ text: String(text || '').trim() }),
+  });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) {
+    throw new Error(formatMonarchHttpError(response.status, payload));
+  }
+  return payload.disposition;
+}
+
 export async function submitIntent(text, confirmed, confirmationToken = '') {
   const response = await fetch('/api/intent', {
     method: 'POST',
-    headers: apiHeaders({ 'Content-Type': 'application/json' }),
+    headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({
       text,
       confirmed,
@@ -71,6 +97,10 @@ export async function cancelCoderRun(runId) {
   return coderRequest(`/api/coder/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST', body: {} });
 }
 
+export async function resumeCoderRun(runId) {
+  return coderRequest(`/api/coder/runs/${encodeURIComponent(runId)}/resume`, { method: 'POST', body: {} });
+}
+
 export async function deleteCoderRun(runId) {
   return coderRequest(`/api/coder/runs/${encodeURIComponent(runId)}`, { method: 'DELETE', body: {} });
 }
@@ -93,7 +123,7 @@ async function coderRequest(url, options = {}) {
 export async function submitIntentJob(text, confirmed, confirmationToken = '', timeoutMs = 90000, context = {}) {
   const response = await fetch('/api/intent-jobs', {
     method: 'POST',
-    headers: apiHeaders({ 'Content-Type': 'application/json' }),
+    headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({
       text,
       confirmed,
@@ -175,7 +205,7 @@ export async function submitActionProposal({
 }) {
   const response = await fetch('/api/agent/proposals', {
     method: 'POST',
-    headers: apiHeaders({ 'Content-Type': 'application/json' }),
+    headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({
       proposal,
       originatingUserText,
@@ -330,6 +360,151 @@ export async function cancelIntentJob(jobId) {
   return payload;
 }
 
+export async function createAgentTask(request, options = {}) {
+  const trustedDesktopBridge = typeof window !== 'undefined'
+    && typeof window.monarchDesktop?.getMutationAttestation === 'function';
+  const requestedSource = options.source === 'voice' && trustedDesktopBridge
+    ? 'voice'
+    : trustedDesktopBridge ? 'desktop' : 'api';
+  return agentTaskRequest('/api/agent/tasks', {
+    method: 'POST',
+    body: {
+      version: 1,
+      request: String(request || '').trim(),
+      source: requestedSource,
+      clientRequestId: options.clientRequestId || createClientScopeId(),
+      ...(options.conversationId ? { conversationId: options.conversationId } : {}),
+      ...(Array.isArray(options.expectedOutputs) ? { expectedOutputs: options.expectedOutputs } : {}),
+      ...(Array.isArray(options.constraints) ? { constraints: options.constraints } : {}),
+      ...(Array.isArray(options.successCriteria) ? { successCriteria: options.successCriteria } : {}),
+      ...(options.budgets ? { budgets: options.budgets } : {}),
+      autoStart: options.autoStart !== false,
+    },
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+export function fetchAgentTask(taskId) {
+  return agentTaskRequest(`/api/agent/tasks/${encodeURIComponent(taskId)}`);
+}
+
+export function listAgentTasks(limit = 40) {
+  const normalized = Math.max(1, Math.min(Number(limit) || 40, 100));
+  return agentTaskRequest(`/api/agent/tasks?limit=${encodeURIComponent(normalized)}`);
+}
+
+export function sendAgentTaskMessage(taskId, content) {
+  return agentTaskRequest(`/api/agent/tasks/${encodeURIComponent(taskId)}/messages`, {
+    method: 'POST',
+    body: {
+      version: 1,
+      content,
+      messageId: createClientScopeId(),
+    },
+  });
+}
+
+export function resolveAgentTaskApproval(taskId, approvalId, decision, grantScope = 'once', binding = {}) {
+  return agentTaskRequest(
+    `/api/agent/tasks/${encodeURIComponent(taskId)}/approvals/${encodeURIComponent(approvalId)}`,
+    {
+      method: 'POST',
+      body: {
+        version: 1,
+        decision: decision === 'approve' ? 'approve' : 'deny',
+        grantScope: grantScope === 'task' ? 'task' : 'once',
+        requestId: createClientScopeId(),
+        ...(binding.canonicalProposalHash ? { canonicalProposalHash: binding.canonicalProposalHash } : {}),
+        ...(binding.capabilityId ? { capabilityId: binding.capabilityId } : {}),
+      },
+    },
+  );
+}
+
+export function cancelAgentTask(taskId) {
+  return agentTaskRequest(`/api/agent/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    method: 'POST',
+    body: { version: 1 },
+  });
+}
+
+export function pauseAgentTask(taskId) {
+  return agentTaskRequest(`/api/agent/tasks/${encodeURIComponent(taskId)}/pause`, {
+    method: 'POST',
+    body: { version: 1 },
+  });
+}
+
+export function resumeAgentTask(taskId) {
+  return agentTaskRequest(`/api/agent/tasks/${encodeURIComponent(taskId)}/resume`, {
+    method: 'POST',
+    body: { version: 1 },
+  });
+}
+
+export function repeatAgentTask(taskId, options = {}) {
+  return agentTaskRequest(`/api/agent/tasks/${encodeURIComponent(taskId)}/repeat`, {
+    method: 'POST',
+    body: {
+      version: 1,
+      clientRequestId: options.clientRequestId || createClientScopeId(),
+      autoStart: options.autoStart !== false,
+    },
+  });
+}
+
+export async function streamAgentTask(taskId, after = 0, options = {}) {
+  const response = await fetch(
+    `/api/agent/tasks/${encodeURIComponent(taskId)}/events?after=${encodeURIComponent(after)}`,
+    {
+      headers: apiHeaders({ Accept: 'text/event-stream' }),
+      signal: options.signal,
+    },
+  );
+  if (!response.ok) {
+    const payload = await readOptionalJson(response);
+    throw new Error(formatMonarchHttpError(response.status, payload));
+  }
+  if (!response.body) throw new Error('Monarch не открыл поток Agent Task.');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  return (async function* () {
+    let buffer = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+        const drained = drainSseBuffer(buffer, done);
+        buffer = drained.buffer;
+        yield* drained.events;
+        if (done) return;
+      }
+    } finally {
+      try {
+        await reader.cancel();
+      } catch {
+        // The task stream may already be closed after a terminal event.
+      }
+      reader.releaseLock();
+    }
+  })();
+}
+
+async function agentTaskRequest(url, options = {}) {
+  const method = options.method || 'GET';
+  const response = await fetch(url, {
+    method,
+    headers: method === 'GET'
+      ? apiHeaders(options.body === undefined ? {} : { 'Content-Type': 'application/json' })
+      : await mutationApiHeaders(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) throw new Error(formatMonarchHttpError(response.status, payload));
+  return payload;
+}
+
 export async function executeCapability(
   moduleId,
   capabilityId,
@@ -341,7 +516,7 @@ export async function executeCapability(
 ) {
   const response = await fetch('/api/execute', {
     method: 'POST',
-    headers: apiHeaders({ 'Content-Type': 'application/json' }),
+    headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }),
     ...(requestOptions.signal ? { signal: requestOptions.signal } : {}),
     body: JSON.stringify({
       moduleId,
@@ -543,184 +718,106 @@ export async function executeVoiceModeScripted(text, signal) {
 }
 
 export async function executeVoiceModeDeviceAction(text, signal) {
-  const input = { text: String(text || '').trim() };
-  let payload = await executeCapability(
-    'voice',
-    'voice.mode.execute-scripted',
-    input,
-    'ui:voice-mode',
-    false,
-    '',
-    { ...(signal ? { signal } : {}), includeState: false },
-  );
-  const result = payload?.result || payload || {};
-  if (result.error === 'confirmation-required') {
-    const token = result.metadata?.confirmation?.token;
-    if (typeof token === 'string' && token) {
-      // A spoken device command is explicit user intent. The retry remains
-      // bound to the exact capability and input by Monarch's one-time token.
-      payload = await executeCapability(
-        'voice',
-        'voice.mode.execute-scripted',
-        input,
-        'ui:voice-mode',
-        true,
-        token,
-        { ...(signal ? { signal } : {}), includeState: false },
-      );
-    }
+  return executeVoiceAgentTask(text, signal);
+}
+
+export async function executeVoiceModeAction(_candidate, text, signal) {
+  return executeVoiceAgentTask(text, signal);
+}
+
+async function executeVoiceAgentTask(text, signal) {
+  const request = String(text || '').trim();
+  if (!request) {
+    return { ok: false, text: '', error: 'voice-text-empty', message: 'Голосовой запрос пуст.' };
   }
-  const normalized = normalizeVoiceModeCapabilityResult(payload);
-  if (normalized.ok
-    && normalized.output?.actionId === 'device.volume'
-    && normalized.output?.verified !== true) {
+  let taskId = '';
+  try {
+    const created = await createAgentTask(request, {
+      source: 'voice',
+      signal,
+      expectedOutputs: [{
+        id: 'voice_verified_outcome',
+        description: `Выполни голосовой запрос и верни только проверенный результат: ${request}`,
+        kind: 'answer',
+        required: true,
+      }],
+      successCriteria: [{
+        id: 'voice_outcome_verified',
+        description: 'Любое выполненное действие подтверждено Kernel receipt и capability-owned verification.',
+      }],
+      budgets: {
+        maxSteps: 10,
+        maxModelTurns: 8,
+        maxToolCalls: 6,
+        maxWallTimeMs: 2 * 60 * 1000,
+        maxFailures: 3,
+        maxConsecutiveNoProgress: 2,
+        maxComputeClass: 'medium',
+      },
+    });
+    taskId = String(created?.task?.id || '');
+    if (!taskId) throw new Error('Voice Agent Runtime не вернул task id.');
+    for await (const event of await streamAgentTask(taskId, 0, { signal })) {
+      const payload = event?.data?.payload || {};
+      if (event.type === 'task.completed') {
+        const summary = String(payload.summary || '').trim() || 'Задача выполнена и проверена.';
+        return { ok: true, text: summary, error: '', message: summary, output: { taskId, status: 'completed', verified: true } };
+      }
+      if (event.type === 'approval.required') {
+        return {
+          ok: false,
+          text: '',
+          error: 'voice-approval-required',
+          message: 'Точное действие ждёт подтверждения в панели «Поручения».',
+          output: { taskId, status: 'waiting-for-approval' },
+        };
+      }
+      if (event.type === 'task.status.changed' && payload.to === 'waiting-for-user') {
+        const current = await fetchAgentTask(taskId);
+        const question = [...(current?.checkpoint?.task?.messages || [])]
+          .reverse()
+          .find((message) => message.kind === 'clarification')?.content;
+        return {
+          ok: true,
+          text: question || 'Нужно уточнение, чтобы продолжить.',
+          error: '',
+          message: question || 'Нужно уточнение, чтобы продолжить.',
+          output: { taskId, status: 'waiting-for-user', performed: false },
+        };
+      }
+      if (event.type === 'task.failed' || event.type === 'task.cancelled') {
+        const cancelled = event.type === 'task.cancelled';
+        const message = cancelled
+          ? 'Задача остановлена. Новые действия и повторные шаги не будут запущены.'
+          : String(payload.summary || '').trim() || 'Проверенный результат не получен.';
+        return {
+          ok: false,
+          text: '',
+          error: cancelled ? 'voice-agent-cancelled' : String(payload.code || 'voice-agent-failed'),
+          message,
+          output: { taskId, status: cancelled ? 'cancelled' : 'failed' },
+        };
+      }
+    }
+    const current = await fetchAgentTask(taskId);
+    const task = current?.checkpoint?.task;
+    const summary = String(task?.terminalReason?.summary || '').trim();
+    if (task?.status === 'completed') {
+      return { ok: true, text: summary || 'Задача выполнена и проверена.', error: '', message: summary, output: { taskId, status: task.status, verified: true } };
+    }
     return {
-      ...normalized,
       ok: false,
       text: '',
-      error: 'voice-volume-unverified',
-      message: 'Windows не подтвердил новый уровень громкости.',
+      error: `voice-agent-${String(task?.status || 'incomplete')}`,
+      message: summary || 'Agent Runtime не вернул проверенный результат.',
+      output: { taskId, status: String(task?.status || 'incomplete') },
     };
-  }
-  return normalized;
-}
-
-export async function executeVoiceModeAction(candidate, text, signal) {
-  const actionId = String(candidate?.actionId || '').trim();
-  const slots = candidate?.slots && typeof candidate.slots === 'object' ? candidate.slots : {};
-  if (actionId === 'time.query') {
-    return executeVoiceConfirmedCapability('device', 'device.system.time.get', { kind: 'time' }, signal);
-  }
-
-  if (actionId === 'device.volume.status') {
-    return executeVoiceConfirmedCapability('device', 'device.volume.get', {}, signal);
-  }
-
-  if (actionId === 'device.volume') {
-    const action = String(slots.operation || '').trim();
-    const value = Number(slots.value);
-    const delta = Number(slots.delta);
-    if (action === 'set' && Number.isFinite(value) && value >= 0 && value <= 100) {
-      return executeVoiceConfirmedCapability('device', 'device.volume.set', { action, value: Math.round(value) }, signal);
+  } catch (error) {
+    if (signal?.aborted && taskId) {
+      await cancelAgentTask(taskId).catch(() => undefined);
     }
-    if (action === 'change' && Number.isFinite(delta) && delta !== 0 && Math.abs(delta) <= 100) {
-      return executeVoiceConfirmedCapability('device', 'device.volume.set', { action, delta: Math.round(delta) }, signal);
-    }
-    if (action === 'mute' || action === 'unmute') {
-      return executeVoiceConfirmedCapability('device', 'device.volume.set', { action }, signal);
-    }
-    return voiceActionClarification('Как изменить громкость?');
+    throw error;
   }
-
-  if (actionId === 'device.brightness.status') {
-    return executeVoiceConfirmedCapability('device', 'device.brightness.get', {}, signal);
-  }
-
-  if (actionId === 'device.brightness') {
-    const operation = String(slots.operation || '').trim();
-    const value = Number(slots.value);
-    const delta = Number(slots.delta);
-    if (operation === 'set' && Number.isFinite(value) && value >= 0 && value <= 100) {
-      return executeVoiceConfirmedCapability('device', 'device.brightness.set', {
-        operation,
-        value: Math.round(value),
-      }, signal);
-    }
-    if (operation === 'change' && Number.isFinite(delta) && delta !== 0 && Math.abs(delta) <= 100) {
-      return executeVoiceConfirmedCapability('device', 'device.brightness.set', {
-        operation,
-        delta: Math.round(delta),
-      }, signal);
-    }
-    return voiceActionClarification('Какую яркость установить?');
-  }
-
-  if (actionId === 'device.app.open') {
-    const app = String(slots.app || '').trim();
-    if (!app) return voiceActionClarification('Какое приложение открыть?');
-    return executeVoiceConfirmedCapability('device', 'device.app.open', { app }, signal);
-  }
-
-  if (actionId === 'device.browser.open') {
-    return executeVoiceConfirmedCapability('device', 'device.browser.open', {
-      ...(String(slots.url || '').trim() ? { url: String(slots.url).trim() } : {}),
-      ...(String(slots.query || '').trim() ? { query: String(slots.query).trim() } : {}),
-      browser: ['chrome', 'edge', 'firefox'].includes(String(slots.browser)) ? String(slots.browser) : 'default',
-      provider: 'google',
-    }, signal);
-  }
-
-  if (actionId === 'device.media.open') {
-    return executeVoiceConfirmedCapability('device', 'device.browser.open', {
-      ...(String(slots.query || '').trim() ? { query: String(slots.query).trim() } : {}),
-      browser: 'default',
-      provider: slots.provider === 'youtube' ? 'youtube' : 'google',
-    }, signal);
-  }
-
-  if (actionId === 'workspace.create') {
-    const path = String(slots.path || '').trim();
-    if (!path) return voiceActionClarification('Как назвать файл или папку?');
-    const directory = slots.kind === 'directory';
-    const result = await executeVoiceConfirmedCapability(
-      'workspace',
-      directory ? 'workspace.files.mkdir' : 'workspace.files.write',
-      directory
-        ? { path, ensureUnique: false }
-        : { path, content: String(slots.content || ''), overwrite: false },
-      signal,
-    );
-    return result.ok
-      ? { ...result, text: directory ? `Создал папку ${path}.` : `Создал файл ${path}.` }
-      : result;
-  }
-
-  if (actionId === 'workspace.delete') {
-    const path = String(slots.path || '').trim();
-    if (!path) return voiceActionClarification('Какой файл удалить?');
-    const result = await executeVoiceConfirmedCapability(
-      'workspace',
-      'workspace.files.delete',
-      { path },
-      signal,
-    );
-    return result.ok ? { ...result, text: `Удалил файл ${path}.` } : result;
-  }
-
-  return executeVoiceModeScripted(String(text || '').trim(), signal);
-}
-
-async function executeVoiceConfirmedCapability(moduleId, capabilityId, input, signal) {
-  let payload = await executeCapability(
-    moduleId,
-    capabilityId,
-    input,
-    'ui:voice-mode',
-    false,
-    '',
-    { ...(signal ? { signal } : {}), includeState: false },
-  );
-  let result = payload?.result || payload || {};
-  if (result.error === 'confirmation-required') {
-    const token = result.metadata?.confirmation?.token;
-    if (typeof token === 'string' && token) {
-      payload = await executeCapability(
-        moduleId,
-        capabilityId,
-        input,
-        'ui:voice-mode',
-        true,
-        token,
-        { ...(signal ? { signal } : {}), includeState: false },
-      );
-      result = payload?.result || payload || {};
-    }
-  }
-  return normalizeVoiceModeCapabilityResult(payload);
-}
-
-function voiceActionClarification(message) {
-  return { ok: true, text: message, error: '', message, output: { status: 'clarification', performed: false } };
 }
 
 export async function respondVoiceMode(text, profile, signal) {
@@ -861,7 +958,7 @@ function throwCapabilityExecutionError(message, result, payload) {
 export async function executeCapabilityStream(moduleId, capabilityId, input, requestedBy, confirmed, confirmationToken = '') {
   const response = await fetch('/api/execute-stream', {
     method: 'POST',
-    headers: apiHeaders({ 'Content-Type': 'application/json' }),
+    headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({
       moduleId,
       capabilityId,

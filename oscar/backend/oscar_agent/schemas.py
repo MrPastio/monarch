@@ -158,7 +158,9 @@ class ChatRequest(BaseModel):
     # explicit user overrides; neither grants additional action authority.
     research_mode: Literal["auto", "off", "deep"] = "auto"
     use_memory: bool = True
-    allow_tools: bool = True
+    # Ordinary chat is answer-only. System effects are selected and verified
+    # by the TypeScript Agent Runtime, never by this legacy chat flag.
+    allow_tools: bool = False
     reasoning_effort: Literal["low", "medium", "high"] = "low"
     max_new_tokens: int = Field(default=65_536, ge=32, le=262_144)
     temperature: float = Field(default=0.3, ge=0.0, le=1.5)
@@ -170,6 +172,7 @@ class ChatRequest(BaseModel):
     skills: list[ChatSkillContext] = Field(default_factory=list, max_length=3)
     capabilities: list[ChatCapabilityContext] = Field(default_factory=list, max_length=80)
     access: ChatAccessContext | None = None
+    inference_lane: Literal["interactive", "agent", "coder", "background"] = "interactive"
 
     @model_validator(mode="after")
     def validate_user_message(self) -> "ChatRequest":

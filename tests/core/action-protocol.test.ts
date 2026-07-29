@@ -41,6 +41,21 @@ describe('Action Protocol v1', () => {
     expect(proposal.intentHash).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it('binds an explicit external path to its parent only when Full Access normalization allows it', () => {
+    const externalPath = path.resolve('D:\\Oscar Output\\note.txt');
+    const proposal = normalizeActionProposal({
+      capabilityId: workspaceWrite.id,
+      args: { content: 'hello', path: externalPath },
+    }, {
+      capability: workspaceWrite,
+      workspaceRoot: 'E:\\Monarch',
+      allowExternalPaths: true,
+    });
+
+    expect(proposal.scope.paths).toEqual([externalPath]);
+    expect(proposal.scope.roots).toEqual([path.dirname(externalPath)]);
+  });
+
   it('rejects prototype-bearing and non-JSON arguments before policy evaluation', () => {
     const args = JSON.parse('{"path":"ok.txt","__proto__":{"polluted":true}}') as Record<string, unknown>;
     expect(() => normalizeActionProposal({ capabilityId: workspaceWrite.id, args }, {

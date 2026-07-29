@@ -40,9 +40,19 @@ No production private key or invented public key is committed here. Until a real
 
 The key generator refuses to overwrite files. Keep the private key off `C:` and outside source, distribution, public snapshots, logs, artifacts, and command output.
 
-## Publishing v0.2.3.8
+## Arming a stable release
 
-`release/stable-release-spec.json` contains the accepted immutable runtime/environment IDs and an armed `available: true` stable release. Publish only from the exact reviewed commit by running `Stable release` with version `0.2.3.8`.
+Keep `release/stable-release-spec.json` at `available: false` while a release is
+still being prepared. Arm a concrete release only in the exact local
+commit-candidate that will pass post-commit export and security validation;
+do not push or dispatch that commit until those gates complete:
+
+1. Verify that the spec version, release URL, asset URL and file name match the product version.
+2. Verify the exact immutable runtime and backend component IDs.
+3. Set the compatible data and model catalog ranges.
+4. Set `available: true` and `withdrawnReason: null`.
+5. Finalize the matching `release/notes/v<version>.md`.
+6. Commit the release specification and run `Stable release` from that exact commit.
 
 The workflow builds from a clean tracked snapshot, signs exact manifest bytes, uploads to a draft release, downloads every asset back, verifies bytes/hash/signature, publishes the release, and only then fast-forwards the stable channel.
 

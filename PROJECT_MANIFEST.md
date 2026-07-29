@@ -13,7 +13,6 @@ Allowed in the normal source repo:
 - `scripts/`
 - `docs/`
 - `assets/voice/`
-- `showcase/monarch-video/` source and media (excluding its local build/dependencies)
 - `security/src/`, `security/tests/`, `security/config/`, `security/scripts/`
 - `oscar/backend/`, `oscar/frontend/src/`, `oscar/frontend/*.json`, `oscar/frontend/*.html`
 - root project files such as `package.json`, `package-lock.json`, `tsconfig.json`, `README.md`, `.gitignore`
@@ -26,6 +25,7 @@ Never upload these as normal source:
 - `node_modules/`
 - Python virtualenvs: `security/.venv/`, `oscar/.venv/`
 - generated/runtime state: `runtime/`, `logs/`, `data/local/`, `secrets/`, `artifacts/generated/`
+- internal media-production workspace: `showcase/`
 - local QA and automation output: `output/`, `tmp/`, `test_files/`, `.playwright-cli/`, `.oscar-trash/`, `Workspace Coder/`
 - agent run workspaces under `.agents/*/` except the durable orchestrator/sentinel records already tracked by the repository
 - nested scratch repositories: `monarch/`, `monarch-1/`, `marketing-site/`
@@ -39,10 +39,33 @@ Models must be handled as local install artifacts, not regular source files. Kee
 
 ## Upload Gate
 
-Before GitHub or cloud upload, run:
+Never upload the private working tree or reuse an older public directory. Build
+from one exact committed revision into a **new, non-existent** destination:
 
 ```powershell
-npm run upload:dry-run
+$revision = (git rev-parse HEAD).Trim()
+$snapshot = Join-Path ([IO.Path]::GetPathRoot((Get-Location).Path)) "Monarch-public-<version>-$revision"
+npm run export:public -- -Destination $snapshot -SourceRevision $revision
+npm run upload:dry-run -- -Snapshot $snapshot -SourceRevision $revision
 ```
 
-The dry-run must show no included source violations. Blocked local files may exist in the workspace; they are expected while developing locally.
+The exporter reads regular blobs from Git's object database, not from the
+working tree. It refuses dirty boundary scripts, symlink/reparse entries,
+hardlinks, alternate data streams, non-UTF-8/NUL text, changed reviewed
+binaries, a destination that already exists, or a source revision that is not
+`HEAD`/an exact full commit. It writes a manifest containing the full
+`sourceRevision`, `policyDigest`, and every exported file's path, Git mode,
+size, and SHA-256.
+
+Operational nested zones (`docs/`, `scripts/`, `tools/`, workflows, installer,
+release metadata and similar configuration roots) are structure-locked by
+`scripts/public-source-structure.json`. A new path cannot silently inherit a
+broad directory allowlist: it must be listed as a reviewed addition or the
+zone's compact count/SHA-256 baseline must be deliberately updated.
+
+The dry-run validates that exact snapshot against the pinned commit and rejects
+missing files, extra files/directories, changed bytes, secrets, local paths, or
+manifest drift. Only this verified fresh snapshot may be initialized as a new
+public repository/history or supplied to installer/release tooling. Existing
+snapshots stay untouched until the new snapshot and release are independently
+verified.

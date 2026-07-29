@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 2,
+  "zones": {
+    "__root__": {
+      "baseCount": 13,
+      "basePathDigest": "90fdf262ea40f052031f1fd7d3cbe70306350946564b9011c1a9c19111fcacf5"
+    },
+    ".github": {
+      "baseCount": 4,
+      "basePathDigest": "51e7afa0d37b8a9f1477742e9e7eb4fa71595e4276aa0556e18380abfbe55086"
+    },
+    ".monarch": {
+      "baseCount": 12,
+      "basePathDigest": "3b3213efbdabba0751bb8e1080defcc19c3ef7f8a090f772d2647d76f8ab29c7"
+    },
+    "assets": {
+      "baseCount": 7,
+      "basePathDigest": "496ac0ddfb4a5b4100fed2e087bb3b7654176215776d5431d406d3322c3356f8"
+    },
+    "desktop": {
+      "baseCount": 39,
+      "basePathDigest": "4a196370a3a7cefec7db8258fcf32c1c045e2ce7236e8806683c052b530b7a8a"
+    },
+    "docs": {
+      "baseCount": 54,
+      "basePathDigest": "994b9fc88450bbacedf9473638b36cfd87438239918cd60619107fa97ed62aae"
+    },
+    "installer": {
+      "baseCount": 9,
+      "basePathDigest": "79fcb864aa9b98e19674d2fc2d4f1867ca41e30af20b374d05ce8beb2f96d4af"
+    },
+    "oscar": {
+      "baseCount": 79,
+      "basePathDigest": "5b52f808027e2d2fe98e743ae6b24b62f40db5d002f38eb3a78c5a03ff0dfdf9"
+    },
+    "release": {
+      "baseCount": 12,
+      "basePathDigest": "ba95a0fd3f6aba4b53aa29e399e92e291ce861be38ec5e16f95074a40648012d"
+    },
+    "scripts": {
+      "baseCount": 11,
+      "basePathDigest": "9f24ec6b5f7938d314d7f45b824078e85b14052d5f553daee55235662f70a01b"
+    },
+    "security": {
+      "baseCount": 85,
+      "basePathDigest": "43fd5b9c9c4d588433c341068cd29858a44d717ded04eb0f0a121698a606cf20"
+    },
+    "shared": {
+      "baseCount": 1,
+      "basePathDigest": "20dba928733603f0fb653c788a6a7b1d2249615ba901e24d64e47f91a31915d0"
+    },
+    "src": {
+      "baseCount": 255,
+      "basePathDigest": "2fd5da8cd5bcc7d748af42e040bee7fc7c2efc9829de80e46ea19547c40b1cf0"
+    },
+    "tests": {
+      "baseCount": 153,
+      "basePathDigest": "089b108d22c45b23fb21ef2fd4da6ec2d7a09362f8d7bae960b81f3f4f220ecf"
+    },
+    "tools": {
+      "baseCount": 10,
+      "basePathDigest": "5fddb2f19b13a32da9dcd2b16471c07c7f6e5b84991f4736b5ad145915e4446e"
+    }
+  },
+  "additions": {
+    "assets/voice/PROVENANCE.md": {
+      "scope": "assets",
+      "objectId": "0aac24d61a055c8994b711d09569e8c35e5df111"
+    },
+    "assets/voice/generation-manifest.json": {
+      "scope": "assets",
+      "objectId": "62af4fae11f47f3082e088a8e1619148490c0cb8"
+    },
+    "assets/voice/reference-provenance.json": {
+      "scope": "assets",
+      "objectId": "d9c23ff3ddd5334cfc5ce61b337692829bf70bc4"
+    },
+    "oscar/backend/tests/test_sharing_tts_runtime.py": {
+      "scope": "oscar",
+      "objectId": "9b167246f5e2b5360c87a5f421725ad4950acdac"
+    },
+    "src/app/product-version.ts": {
+      "scope": "src",
+      "objectId": "16f22561fbcfb0eda7be02f2bf883ca0fbc053d0"
+    },
+    "tests/app/product-version.test.ts": {
+      "scope": "tests",
+      "objectId": "b19684359b35ee6f0f29cf7f9c2871902fae5bcf"
+    },
+    "tests/release/voice-reference-provenance.test.ts": {
+      "scope": "tests",
+      "objectId": "83ac4e1169e06d8326402acb3683fd41a34715d2"
+    },
+    "tests/release/voice-reference-release-gate.test.ts": {
+      "scope": "tests",
+      "objectId": "4dff755b19429e5759cf383a2b5338965715b5bc"
+    },
+    "tools/generate-voice-references.py": {
+      "scope": "tools",
+      "objectId": "39083de9c3ca5d78f4ddf85a65536571d050e56e"
+    }
+  }
+}

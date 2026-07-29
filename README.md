@@ -30,9 +30,12 @@ Monarch задуман как локальная AI-экосистема, а н�
 `Monarch-Setup.exe` собирается командой `npm run installer:build`; по умолчанию
 он предлагает `E:\Programs\Monarch`, затем `D:\Programs\Monarch`.
 
-Публичный snapshot создаётся через `npm run export:public`. В него не входят
-локальные чаты, память, секреты, runtime, модели, логи, agent-handoff и история
-рабочих запросов.
+Публичный snapshot создаётся из точного commit в новый каталог через
+`npm run export:public -- -Destination <fresh-path> -SourceRevision <full-commit>`,
+а затем проверяется `npm run upload:dry-run -- -Snapshot <fresh-path>
+-SourceRevision <full-commit>`. В него не входят локальные чаты, память,
+секреты, runtime, модели, логи, agent-handoff и история рабочих запросов.
+Полный fail-closed контракт описан в `PROJECT_MANIFEST.md`.
 
 ## Главная Идея
 

@@ -20,6 +20,21 @@ export function readUserFacingFailure(result, fallback = 'Не удалось в
     : fallback;
 }
 
+export function formatAgentTaskFailure(summary, code = '') {
+  const diagnostic = `${String(summary || '').trim()} ${String(code || '').trim()}`.trim();
+  if (/no-model-runtime-available|agent-decision-model-unavailable/i.test(diagnostic)) {
+    return 'Oscar не смог запустить локальную модель. Повтори команду — техническая причина сохранена в диагностике.';
+  }
+  if (/invalid-(json|decision)|model-decision-failed/i.test(diagnostic)) {
+    return 'Oscar не смог сформировать корректный план действия. Повтори команду.';
+  }
+  const visible = String(summary || '').trim();
+  if (visible && !/^[a-z0-9][a-z0-9._:-]*$/i.test(visible)) {
+    return visible;
+  }
+  return 'Oscar не смог завершить задачу. Техническая причина сохранена в диагностике.';
+}
+
 export function renderError(message) {
   return `
     <div class="error-state">
@@ -1230,14 +1245,20 @@ export function renderOscarMessage(message) {
       : '';
 
     const grantOptions = Array.isArray(message.action?.grantOptions) ? message.action.grantOptions : ['once'];
-    const actionButtons = grantOptions.map((scope) => `<button type="button" class="claude-primary-btn" data-oscar-confirm-action data-message-id="${escapeHtml(message.id)}" data-action-text="${escapeHtml(message.action?.text || '')}" data-confirmation-token="${escapeHtml(message.action?.confirmationToken || '')}" data-grant-scope="${scope === 'task' ? 'task' : 'once'}">${scope === 'task' ? 'Разрешить для задачи' : escapeHtml(message.action?.label || 'Разрешить один раз')}</button>`).join('');
-    const actionHtml = message.action?.confirmationToken
+    const agentApprovalAttrs = message.action?.agentTaskId && message.action?.agentApprovalId
+      ? ` data-agent-task-id="${escapeHtml(message.action.agentTaskId)}" data-agent-approval-id="${escapeHtml(message.action.agentApprovalId)}" data-agent-proposal-hash="${escapeHtml(message.action.agentApprovalHash || '')}" data-agent-capability-id="${escapeHtml(message.action.agentCapabilityId || '')}"`
+      : '';
+    const actionButtons = grantOptions.map((scope) => `<button type="button" class="claude-primary-btn" data-oscar-confirm-action data-message-id="${escapeHtml(message.id)}" data-action-text="${escapeHtml(message.action?.text || '')}" data-confirmation-token="${escapeHtml(message.action?.confirmationToken || '')}" data-grant-scope="${scope === 'task' ? 'task' : 'once'}"${agentApprovalAttrs}${agentApprovalAttrs ? ' data-agent-decision="approve"' : ''}>${scope === 'task' ? 'Разрешить для задачи' : escapeHtml(message.action?.label || 'Разрешить один раз')}</button>`).join('');
+    const denyAgentButton = agentApprovalAttrs
+      ? `<button type="button" class="claude-secondary-btn" data-oscar-confirm-action data-message-id="${escapeHtml(message.id)}"${agentApprovalAttrs} data-agent-decision="deny">Отклонить</button>`
+      : '';
+    const actionHtml = message.action?.confirmationToken || message.action?.agentTaskId
       ? `<div class="oscar-action-card">
            <div>
              <strong>Monarch Access</strong>
              <span>${escapeHtml(message.action.risk || 'действие')} · точная область, бюджет и срок контролируются Policy Kernel</span>
            </div>
-           <div class="oscar-action-buttons">${actionButtons}</div>
+           <div class="oscar-action-buttons">${actionButtons}${denyAgentButton}</div>
          </div>`
       : '';
 

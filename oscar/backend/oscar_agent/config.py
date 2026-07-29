@@ -150,6 +150,10 @@ class Settings(BaseSettings):
     gemma4_balanced_gpu_layers: int = 30
     gemma4_deep_gpu_layers: int = 18
     gemma4_31b_gpu_layers: int = 15
+    # Four layers shave prompt/decode latency while keeping the small Fast
+    # selector comfortably below the VRAM headroom left by Balanced Gemma.
+    # The global inference slot still prevents concurrent generation.
+    sharing_qwen_gpu_layers: int = 4
     qwen3_coder_gpu_layers: int = 12
     deepseek_coder_gpu_layers: int = 20
     require_gpu_offload: bool = True

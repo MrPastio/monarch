@@ -1,172 +1,84 @@
 param(
+  [string] $Snapshot = '',
+  [string] $SourceRevision = 'HEAD',
   [long] $MaxSourceBytes = 5242880,
-  [int] $Top = 20,
+  [long] $MaxTotalSourceBytes = 134217728,
+  [int] $MaxPublicFiles = 2000,
   [switch] $Json
 )
 
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$root = Resolve-Path (Join-Path $PSScriptRoot '..')
-$rootForUri = $root.Path.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
-$blockedDirectoryPatterns = @(
-  '^\.git($|/)',
-  '^\.agents($|/)',
-  '^\.codex($|/)',
-  '^\.tools($|/)',
-  '^node_modules($|/)',
-  '^showcase/[^/]+/node_modules($|/)',
-  '^showcase/[^/]+/out($|/)',
-  '^output($|/)',
-  '^dist($|/)',
-  '^vendor($|/)',
-  '^runtime($|/)',
-  '^installer/out($|[-/])',
-  '^installer/\.offline-build-cache($|/)',
-  '^installer/offline-payload($|/)',
-  '^logs($|/)',
-  '^secrets($|/)',
-  '^marketing-site($|/)',
-  '^data/local($|/)',
-  '^artifacts/generated($|/)',
-  '^LLM models($|/)',
-  '^models($|/)',
-  '^local-models($|/)',
-  '^runtime-models($|/)',
-  '^llama-runtime($|/)',
-  '^hf-runtime($|/)',
-  '^voice-runtime($|/)',
-  '^oscar/\.venv($|/)',
-  '^oscar/frontend/node_modules($|/)',
-  '^oscar/frontend/dist($|/)',
-  '^oscar/data($|/)',
-  '^oscar/model($|/)',
-  '^oscar/model-small($|/)',
-  '^oscar/runtime($|/)',
-  '^oscar/Oscar\.exe\.WebView2($|/)',
-  '^oscar/desktop/webview2_pkg($|/)',
-  '^security/\.venv($|/)',
-  '^security/data($|/)',
-  '^security/logs($|/)'
+$root = [System.IO.Path]::GetFullPath(
+  (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 )
+. (Join-Path $PSScriptRoot 'public-source-policy.ps1')
 
-$blockedFilePatterns = @(
-  '^(AI_HANDOFF|agent_notes|ORIGINAL_REQUEST|MARK_ALFA_FINDINGS|design-qa)\.md$',
-  '(^|/)\.env(\..*)?$',
-  '(^|/)__pycache__/',
-  '\.pyc$',
-  '\.pyo$',
-  '\.gguf$',
-  '\.safetensors$',
-  '\.sqlite3?$',
-  '\.db$',
-  '\.bin$',
-  '\.exe$',
-  '\.dll$',
-  '\.pyd$',
-  '\.zip$',
-  '\.7z$',
-  '\.rar$',
-  '\.tar\.gz$',
-  '\.lib$',
-  '\.tlb$',
-  '\.winmd$',
-  '\.onnx$'
-)
-
-function Get-RelativePath([string] $Path) {
-  $rootUri = New-Object System.Uri($rootForUri)
-  $pathUri = New-Object System.Uri($Path)
-  $relative = [System.Uri]::UnescapeDataString($rootUri.MakeRelativeUri($pathUri).ToString())
-  return $relative.Replace('\', '/')
-}
-
-function Test-BlockedPath([string] $RelativePath) {
-  foreach ($pattern in $blockedDirectoryPatterns) {
-    if ($RelativePath -match $pattern) {
-      return $true
-    }
+$temporarySnapshot = $null
+$temporarySnapshotValidated = $false
+$plan = $null
+try {
+  if ([string]::IsNullOrWhiteSpace($Snapshot)) {
+    $temporarySnapshot = Join-Path (
+      [System.IO.Path]::GetPathRoot($root)
+    ) ("Monarch-public-gate-" + [guid]::NewGuid().ToString('N'))
+    & (Join-Path $PSScriptRoot 'export-public.ps1') `
+      -Destination $temporarySnapshot `
+      -SourceRevision $SourceRevision `
+      -MaxSourceBytes $MaxSourceBytes `
+      -MaxTotalSourceBytes $MaxTotalSourceBytes `
+      -MaxPublicFiles $MaxPublicFiles
+    $Snapshot = $temporarySnapshot
   }
-  foreach ($pattern in $blockedFilePatterns) {
-    if ($RelativePath -match $pattern) {
-      return $true
-    }
+  $snapshotPath = [System.IO.Path]::GetFullPath(
+    (Resolve-Path -LiteralPath $Snapshot).Path
+  )
+  $plan = New-MonarchPublicSnapshotPlan `
+    $root `
+    $SourceRevision `
+    $MaxSourceBytes `
+    $MaxTotalSourceBytes `
+    $MaxPublicFiles
+  $result = Test-MonarchPublicSnapshot $snapshotPath $plan $MaxSourceBytes
+  $temporarySnapshotValidated = $null -ne $temporarySnapshot
+
+  if ($Json) {
+    $result | ConvertTo-Json -Depth 4
+  } else {
+    Write-Host 'Monarch exact public snapshot gate'
+    $result | Format-List | Out-String | Write-Host
   }
-  return $false
-}
-
-function Test-SensitiveSourceName([string] $RelativePath) {
-  if ($RelativePath -eq 'oscar/scripts/token.ps1') {
-    return $false
+} catch {
+  $snapshotDisplay = try {
+    [System.IO.Path]::GetFullPath($Snapshot)
+  } catch {
+    [string]$Snapshot
   }
-  return $RelativePath -match '(^|/)(secret|secrets|token|tokens|key|keys|credential|credentials|password|passwd)(\.|_|-|/|$)'
-}
-
-$included = New-Object System.Collections.Generic.List[object]
-$excluded = New-Object System.Collections.Generic.List[object]
-$violations = New-Object System.Collections.Generic.List[object]
-
-Get-ChildItem -LiteralPath $root -Recurse -Force -File -ErrorAction SilentlyContinue | ForEach-Object {
-  $relative = Get-RelativePath $_.FullName
-  $entry = [pscustomobject]@{
-    path = $relative
-    bytes = $_.Length
+  $failure = [pscustomobject]@{
+    snapshot = $snapshotDisplay
+    sourceRevision = $SourceRevision
+    files = 0
+    bytes = 0
+    violations = 1
+    reason = $_.Exception.Message
   }
-
-  if (Test-BlockedPath $relative) {
-    $excluded.Add($entry)
-    return
+  if ($Json) {
+    $failure | ConvertTo-Json -Depth 4
+  } else {
+    Write-Host 'Monarch exact public snapshot gate'
+    $failure | Format-List | Out-String | Write-Host
   }
-
-  $included.Add($entry)
-
-  if ($_.Length -gt $MaxSourceBytes) {
-    $violations.Add([pscustomobject]@{
-      path = $relative
-      bytes = $_.Length
-      reason = "included file exceeds $MaxSourceBytes bytes"
-    })
-  }
-
-  if (Test-SensitiveSourceName $relative) {
-    $violations.Add([pscustomobject]@{
-      path = $relative
-      bytes = $_.Length
-      reason = 'included file name looks sensitive'
-    })
-  }
-}
-
-$includedBytes = ($included | Measure-Object -Property bytes -Sum).Sum
-$excludedBytes = ($excluded | Measure-Object -Property bytes -Sum).Sum
-$summary = [pscustomobject]@{
-  root = $root.Path
-  included_files = $included.Count
-  included_mb = [math]::Round(($includedBytes / 1MB), 2)
-  excluded_files = $excluded.Count
-  excluded_gb = [math]::Round(($excludedBytes / 1GB), 2)
-  violations = $violations.Count
-}
-
-if ($Json) {
-  [pscustomobject]@{
-    summary = $summary
-    violations = $violations
-    largest_included = $included | Sort-Object bytes -Descending | Select-Object -First $Top
-    largest_excluded = $excluded | Sort-Object bytes -Descending | Select-Object -First $Top
-  } | ConvertTo-Json -Depth 5
-} else {
-  Write-Host 'Monarch upload dry-run'
-  $summary | Format-List | Out-String | Write-Host
-  if ($violations.Count -gt 0) {
-    Write-Host 'Violations:'
-    $violations | Sort-Object bytes -Descending | Format-Table -AutoSize | Out-String | Write-Host
-  }
-  Write-Host 'Largest included source candidates:'
-  $included | Sort-Object bytes -Descending | Select-Object -First $Top | Format-Table -AutoSize | Out-String | Write-Host
-  Write-Host 'Largest excluded local/runtime files:'
-  $excluded | Sort-Object bytes -Descending | Select-Object -First $Top | Format-Table -AutoSize | Out-String | Write-Host
-}
-
-if ($violations.Count -gt 0) {
   exit 2
+} finally {
+  if ($temporarySnapshot -and (Test-Path -LiteralPath $temporarySnapshot)) {
+    if ($temporarySnapshotValidated -and $null -ne $plan) {
+      Remove-MonarchValidatedSnapshot `
+        $temporarySnapshot `
+        $plan `
+        $MaxSourceBytes
+    } else {
+      Write-Warning "Disposable public snapshot was not validated and was preserved for inspection: $temporarySnapshot"
+    }
+  }
 }

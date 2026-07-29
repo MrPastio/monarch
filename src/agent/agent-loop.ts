@@ -15,7 +15,7 @@ import {
   type AgentDecision,
   type AgentExecutableDecision,
 } from './decision-schema';
-import type { AgentDecisionProvider } from './model-decision-provider';
+import type { AgentDecisionProvider, AgentModelDecisionResponse } from './model-decision-provider';
 import { AgentKernelExecutionAdapter, type AgentActionGatewayResult } from './kernel-execution-adapter';
 import { normalizeAgentObservation } from './observation-normalizer';
 import { currentAgentPlanStep, reviseAgentPlan, settleAgentPlanStep, startAgentPlanStep } from './plan-manager';
@@ -223,13 +223,13 @@ export class AgentLoop {
         return (await this.interruptTask(latest, 'Agent runtime stopped during an active stage.')).task;
       }
       if (latest.task.cancellationRequested || latest.task.status === 'cancelling') {
-        return (await this.cancelTask(latest, 'Cancellation settled after the active stage.')).task;
+        return (await this.cancelTask(latest, 'Задача остановлена после завершения активного шага.')).task;
       }
       if (abortKind(signal) === 'pause' || latest.task.pauseRequested || latest.task.status === 'paused') {
         return (await this.handleControl(latest, signal)).checkpoint.task;
       }
       if (signal.aborted) {
-        return (await this.cancelTask(latest, 'Cancellation settled after the active stage.')).task;
+        return (await this.cancelTask(latest, 'Задача остановлена после завершения активного шага.')).task;
       }
       const message = sanitizeError(error);
       return (await this.failTask(latest, 'unrecoverable-error', message)).task;
@@ -375,12 +375,16 @@ export class AgentLoop {
             ...(response.model ? { model: boundedDiagnostic(response.model) } : {}),
             ...(response.adapter ? { adapter: boundedDiagnostic(response.adapter) } : {}),
             ...(response.degraded !== undefined ? { degraded: response.degraded } : {}),
+            ...decisionTelemetry(response),
           }),
         }])).checkpoint;
         return { checkpoint, error: safeError };
       }
       try {
-        const decision = parseAgentDecision(response.rawText, { candidates: capabilities });
+        const serializedCandidates = Array.isArray(response.candidateCapabilityIds)
+          ? capabilities.filter((entry) => response.candidateCapabilityIds!.includes(entry.id))
+          : capabilities;
+        const decision = parseAgentDecision(response.rawText, { candidates: serializedCandidates });
         checkpoint = (await this.save(checkpoint, checkpoint.task, [{
           type: 'model.completed',
           payload: jsonObject({
@@ -394,6 +398,7 @@ export class AgentLoop {
             ...(response.model ? { model: boundedDiagnostic(response.model) } : {}),
             ...(response.adapter ? { adapter: boundedDiagnostic(response.adapter) } : {}),
             ...(response.degraded !== undefined ? { degraded: response.degraded } : {}),
+            ...decisionTelemetry(response),
           }),
         }])).checkpoint;
         return {
@@ -418,6 +423,7 @@ export class AgentLoop {
             ...(response.model ? { model: boundedDiagnostic(response.model) } : {}),
             ...(response.adapter ? { adapter: boundedDiagnostic(response.adapter) } : {}),
             ...(response.degraded !== undefined ? { degraded: response.degraded } : {}),
+            ...decisionTelemetry(response),
           }),
         }])).checkpoint;
       }
@@ -520,6 +526,7 @@ export class AgentLoop {
       proposal: proposalInput,
       originatingUserText: checkpoint.task.goal.originalRequest,
       requestedBy: `agent:${checkpoint.task.id}`,
+      source: checkpoint.task.source.surface,
       ...(model ? { model } : {}),
       ...(checkpoint.task.activeLeaseId ? { leaseId: checkpoint.task.activeLeaseId } : {}),
       signal,
@@ -694,6 +701,7 @@ export class AgentLoop {
         expectedCanonicalHash: approval.canonicalProposalHash,
         originatingUserText: checkpoint.task.goal.originalRequest,
         requestedBy: `agent:${checkpoint.task.id}`,
+        source: checkpoint.task.source.surface,
         grantScope: approval.grantScope || 'once',
         signal: stageSignal,
       }),
@@ -827,13 +835,23 @@ export class AgentLoop {
         ? [{ type: 'plan.revised' as const, payload: jsonObject({ revision: nextPlan?.revision || 1, reason: recovery.reason }) }]
         : []),
     ];
-    return (await this.save(checkpoint, task, events, { observations })).checkpoint;
+    const saved = (await this.save(checkpoint, task, events, { observations })).checkpoint;
+    if (meaningful && recovery.action === 'continue') {
+      const completionDecision = buildVerifiedActionCompletionDecision(saved, enrichedObservation, artifacts);
+      if (completionDecision) return this.completeTask(saved, completionDecision);
+    }
+    return saved;
   }
 
   private async completeTask(
     checkpoint: AgentTaskCheckpoint,
     decision: Extract<AgentDecision, { kind: 'complete' }>,
   ): Promise<AgentTaskCheckpoint> {
+    const canonicalDecision = canonicalizeCompletionEvidence(checkpoint, decision);
+    const groundedSummary = groundedAnswerCompletionSummary(checkpoint, canonicalDecision);
+    const verificationDecision = groundedSummary
+      ? { ...canonicalDecision, summary: groundedSummary }
+      : canonicalDecision;
     const verifications: AgentVerificationRecord[] = [];
     const declaredObservationIds = new Set(decision.evidenceObservationIds);
     const declaredArtifactIds = new Set(decision.artifactIds);
@@ -841,7 +859,7 @@ export class AgentLoop {
       if (output.required === false) continue;
       verifications.push(buildBoundGoalVerification(
         checkpoint,
-        decision,
+        verificationDecision,
         'expected-output',
         output.id,
         output.kind === 'artifact',
@@ -854,7 +872,7 @@ export class AgentLoop {
     for (const criterion of checkpoint.task.goal.successCriteria) {
       verifications.push(buildBoundGoalVerification(
         checkpoint,
-        decision,
+        verificationDecision,
         'success-criterion',
         criterion.id,
         false,
@@ -900,12 +918,25 @@ export class AgentLoop {
         ...(plan ? { plan } : {}),
         usage: recordAgentBudgetUsage(checkpoint.task.usage, { failures: 1, meaningfulProgress: false }),
       }, currentStepId), [
-        { type: 'verification.completed', payload: jsonObject({ status: completion.status, missing: completion.missing, failed: completion.failed }) },
+        {
+          type: 'verification.completed',
+          payload: jsonObject({
+            status: completion.status,
+            missing: completion.missing,
+            failed: completion.failed,
+            records: verifications.map((entry) => ({
+              targetType: entry.targetType,
+              targetId: entry.targetId,
+              status: entry.status,
+              summary: entry.summary,
+            })),
+          }),
+        },
         ...(plan ? [{ type: 'plan.revised' as const, payload: jsonObject({ revision: plan.revision, reason: completion.summary }) }] : []),
       ])).checkpoint;
     }
     const completedAt = nowIso();
-    const completionSummary = groundedAnswerCompletionSummary(checkpoint, decision) || decision.summary;
+    const completionSummary = groundedSummary || decision.summary;
     return (await this.save(checkpoint, clearActionState({
       ...checkpoint.task,
       status: 'completed',
@@ -1211,6 +1242,74 @@ export class AgentLoop {
     }
     throw new AgentRunnerClaimLostError('Agent checkpoint could not be rebased after repeated concurrent updates.');
   }
+}
+
+function canonicalizeCompletionEvidence(
+  checkpoint: AgentTaskCheckpoint,
+  decision: Extract<AgentDecision, { kind: 'complete' }>,
+): Extract<AgentDecision, { kind: 'complete' }> {
+  const observationIds = [...new Set([
+    ...decision.evidenceObservationIds,
+    ...decision.evidenceBindings.flatMap((entry) => entry.observationIds),
+  ])].filter((id) => checkpoint.observations.some((entry) => entry.id === id));
+  const artifactIds = [...new Set([
+    ...decision.artifactIds,
+    ...decision.evidenceBindings.flatMap((entry) => entry.artifactIds),
+  ])].filter((id) => checkpoint.task.artifacts.some((entry) => entry.id === id));
+  const bindings = [...decision.evidenceBindings];
+  return {
+    ...decision,
+    evidenceObservationIds: observationIds,
+    artifactIds,
+    evidenceBindings: bindings,
+  };
+}
+
+function buildVerifiedActionCompletionDecision(
+  checkpoint: AgentTaskCheckpoint,
+  observation: AgentObservation,
+  artifacts: AgentArtifactReference[],
+): Extract<AgentDecision, { kind: 'complete' }> | null {
+  if (observation.status !== 'success' || observation.evidence.length === 0) return null;
+  const requiredOutputs = checkpoint.task.goal.expectedOutputs.filter((entry) => entry.required !== false);
+  const criteria = checkpoint.task.goal.successCriteria;
+  if (requiredOutputs.length === 0 && criteria.length === 0) return null;
+  if (!requiredOutputs.every((output) => (
+    observationMatchesGoalTarget(checkpoint, 'expected-output', output.description, observation)
+    && (output.kind !== 'artifact' || artifacts.some((artifact) => artifactMatchesGoalDescription(artifact, output.description)))
+  ))) return null;
+  if (!criteria.every((criterion) => (
+    observationMatchesGoalTarget(checkpoint, 'success-criterion', criterion.description, observation)
+  ))) return null;
+
+  const artifactIds = artifacts.map((entry) => entry.id);
+  const evidenceBindings = [
+    ...requiredOutputs.map((output) => ({
+      targetType: 'expected-output' as const,
+      targetId: output.id,
+      observationIds: [observation.id],
+      artifactIds: output.kind === 'artifact' ? artifactIds : [],
+    })),
+    ...criteria.map((criterion) => ({
+      targetType: 'success-criterion' as const,
+      targetId: criterion.id,
+      observationIds: [observation.id],
+      artifactIds: [],
+    })),
+  ];
+  const decision: Extract<AgentDecision, { kind: 'complete' }> = {
+    kind: 'complete',
+    summary: artifacts.length === 1
+      ? `Создан и проверен файл ${artifacts[0]!.reference}.`
+      : observation.summary,
+    evidenceObservationIds: [observation.id],
+    artifactIds,
+    evidenceBindings,
+  };
+  const groundedSummary = groundedAnswerCompletionSummary(checkpoint, decision);
+  const answerOutputs = requiredOutputs.filter((entry) => entry.kind === 'answer');
+  if (answerOutputs.length > 0 && !groundedSummary) return null;
+  return groundedSummary ? { ...decision, summary: groundedSummary } : decision;
 }
 
 function pendingApproval(checkpoint: AgentTaskCheckpoint): AgentApproval | null {
@@ -1572,19 +1671,12 @@ function groundedAnswerCompletionSummary(
 }
 
 function observationMatchesGoalTarget(
-  checkpoint: AgentTaskCheckpoint,
-  targetType: AgentVerificationRecord['targetType'],
+  _checkpoint: AgentTaskCheckpoint,
+  _targetType: AgentVerificationRecord['targetType'],
   targetDescription: string,
   observation: AgentObservation,
 ): boolean {
-  const evidenceDescription = targetType === 'success-criterion'
-    ? [
-        targetDescription,
-        ...checkpoint.task.goal.expectedOutputs
-          .filter((entry) => entry.required !== false)
-          .map((entry) => entry.description),
-      ].join(' ')
-    : targetDescription;
+  const evidenceDescription = targetDescription;
   const capabilityId = normalizeEvidenceText(observation.capabilityId);
   const resourceAnchors = extractEvidenceResourceAnchors(evidenceDescription)
     .filter((entry) => entry !== capabilityId);
@@ -1595,17 +1687,31 @@ function observationMatchesGoalTarget(
   }
 
   const normalizedDescription = normalizeEvidenceText(evidenceDescription);
+  if (primaryActionTarget && containsEvidenceToken(normalizedDescription, primaryActionTarget)) return true;
   if (capabilityId.length >= 3 && containsEvidenceToken(normalizedDescription, capabilityId)) return true;
-  return observation.artifacts.some((artifact) => artifactMatchesGoalDescription(artifact, evidenceDescription));
+  if (observation.artifacts.some((artifact) => artifactMatchesGoalDescription(artifact, evidenceDescription))) return true;
+  // When the user goal contains no deterministic path, URL, or resource id,
+  // semantic target selection belongs to the model. Completion still requires
+  // an explicit binding plus a successful Kernel observation with provenance.
+  return observation.status === 'success' && observation.evidence.length > 0;
 }
 
 function extractEvidenceResourceAnchors(value: string): string[] {
-  const matches = String(value || '').match(
+  const description = String(value || '');
+  const matches = description.match(
     /https?:\/\/[^\s"'<>]+|(?:[A-Za-z]:)?(?:[\\/][\p{L}\p{N}._~:@%+,=-]+)+|[\p{L}\p{N}_-]+(?:[\\/][\p{L}\p{N}._~:@%+,=-]+)+|[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)+/gu,
   ) || [];
+  const pathLanguage = /\b(path|file|folder|directory|target|resource)\b|(?:путь|файл|папк|каталог|директор)/iu.test(description);
   return [...new Set(matches
     .map((entry) => normalizeEvidenceText(entry).replace(/^[.,;:!?]+|[.,;:!?]+$/g, ''))
-    .filter((entry) => entry.length >= 3))];
+    .filter((entry) => entry.length >= 3 && isLikelyResourceAnchor(entry, pathLanguage)))];
+}
+
+function isLikelyResourceAnchor(value: string, pathLanguage: boolean): boolean {
+  if (/^https?:\/\//iu.test(value)) return true;
+  if (/^[a-z]:[\\/]/iu.test(value) || /^[\\/]/u.test(value) || value.includes('\\')) return true;
+  if (/[\p{L}\p{N}_-]+\.[\p{L}\p{N}_-]+$/u.test(value)) return true;
+  return pathLanguage && value.includes('/');
 }
 
 function observationResourceTargets(observation: AgentObservation): string[] {
@@ -1638,7 +1744,9 @@ function evidenceTargetMatches(expected: string, actual: string): boolean {
 }
 
 function containsEvidenceToken(haystack: string, needle: string): boolean {
-  return (` ${haystack} `).includes(` ${needle} `);
+  if (!needle) return false;
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?:$|[^\\p{L}\\p{N}_])`, 'u').test(haystack);
 }
 
 function artifactMatchesGoalDescription(artifact: AgentArtifactReference, description: string): boolean {
@@ -1710,7 +1818,7 @@ function readObservationActionTarget(observation: AgentObservation): string {
 }
 
 function readActionTarget(input: Record<string, unknown>): string {
-  for (const key of ['path', 'targetPath', 'url', 'resourceId', 'id']) {
+  for (const key of ['path', 'targetPath', 'url', 'resourceId', 'id', 'app']) {
     const value = input[key];
     if (typeof value === 'string' && value.trim()) return value.trim();
   }
@@ -1737,6 +1845,21 @@ function sanitizeError(error: unknown): string {
 
 function boundedDiagnostic(value: string): string {
   return sanitizeError(value).replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
+}
+
+function decisionTelemetry(response: AgentModelDecisionResponse): AgentJsonObject {
+  return jsonObject({
+    ...(response.decisionProfile ? { decisionProfile: response.decisionProfile } : {}),
+    ...(response.initialTier ? { initialTier: response.initialTier } : {}),
+    ...(response.finalTier ? { finalTier: response.finalTier } : {}),
+    ...(response.escalationReason ? { escalationReason: response.escalationReason } : {}),
+    ...(response.attemptedTiers ? { attemptedTiers: response.attemptedTiers.slice(0, 4) } : {}),
+    ...(Number.isFinite(response.inputChars) ? { inputChars: response.inputChars } : {}),
+    ...(Number.isFinite(response.modelCalls) ? { modelCalls: response.modelCalls } : {}),
+    ...(Number.isFinite(response.queueLatencyMs) ? { queueLatencyMs: response.queueLatencyMs } : {}),
+    ...(Number.isFinite(response.loadLatencyMs) ? { loadLatencyMs: response.loadLatencyMs } : {}),
+    ...(Number.isFinite(response.generationLatencyMs) ? { generationLatencyMs: response.generationLatencyMs } : {}),
+  });
 }
 
 function abortKind(signal: AbortSignal): 'cancel' | 'pause' | 'shutdown' | null {

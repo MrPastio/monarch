@@ -517,6 +517,22 @@ html[data-startup-type="disabled"] .startup-motion {
   box-shadow: 0 9px 24px rgba(255,143,23,.15);
 }
 .claude-primary-btn:hover, .primary-button:hover { transform: translateY(-1px); filter: brightness(1.05); }
+.oscar-action-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.claude-secondary-btn {
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 9px;
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, .035);
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease, color 150ms ease;
+}
+.claude-secondary-btn:hover {
+  color: var(--text);
+  border-color: rgba(255, 184, 24, .22);
+  background: rgba(255, 184, 24, .06);
+}
 
 /* Context rail from the real sidebar summary */
 .sidebar-memory-summary {
@@ -3650,6 +3666,158 @@ select option:checked { color: var(--text); background: #242628; }
 #oscar-composer.intelligence-enabled .claude-voice-mode-btn,
 #oscar-composer.intelligence-enabled .claude-send-btn,
 #oscar-composer.intelligence-enabled .claude-stop-btn { grid-column: 5; }
+
+/* Oscar Agent Runtime missions */
+.oscar-missions-toggle[aria-expanded="true"] {
+  color: #17130a;
+  border-color: rgba(255, 195, 58, .7);
+  background: linear-gradient(145deg, #ffd267, #ffad21);
+  box-shadow: 0 8px 24px rgba(255, 165, 24, .24);
+}
+.oscar-missions-panel {
+  position: absolute;
+  z-index: 42;
+  top: 74px;
+  right: 18px;
+  width: min(410px, calc(100% - 36px));
+  max-height: calc(100% - 168px);
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgba(255, 184, 37, .22);
+  border-radius: 22px;
+  color: var(--text);
+  background:
+    linear-gradient(155deg, rgba(29, 28, 24, .94), rgba(9, 10, 11, .91)),
+    radial-gradient(circle at 92% 0, rgba(255, 179, 28, .14), transparent 40%);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, .58), inset 0 1px rgba(255, 255, 255, .07);
+  backdrop-filter: blur(26px) saturate(1.16);
+}
+.oscar-missions-panel[hidden] { display: none; }
+.oscar-missions-header {
+  min-height: 64px;
+  padding: 13px 14px 11px 17px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(255, 255, 255, .065);
+}
+.oscar-missions-header > div:first-child { display: grid; gap: 2px; }
+.oscar-missions-header span {
+  color: rgba(255, 189, 47, .78);
+  font-size: 8px;
+  font-weight: 760;
+  letter-spacing: .17em;
+}
+.oscar-missions-header strong { font-size: 15px; font-weight: 690; }
+.oscar-missions-header-actions { display: flex; gap: 5px; }
+.oscar-missions-header-actions button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 10px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, .035);
+}
+.oscar-missions-header-actions button:hover { color: var(--text); border-color: rgba(255, 185, 41, .28); }
+.oscar-missions-header-actions svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.oscar-missions-summary {
+  min-height: 28px;
+  padding: 8px 17px 5px;
+  color: var(--muted);
+  font-size: 9.5px;
+}
+.oscar-missions-list {
+  min-height: 0;
+  padding: 7px 9px 11px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+.oscar-mission {
+  position: relative;
+  padding: 12px;
+  display: grid;
+  gap: 9px;
+  border: 1px solid rgba(255, 255, 255, .075);
+  border-radius: 16px;
+  background: linear-gradient(145deg, rgba(255, 255, 255, .05), rgba(255, 255, 255, .018));
+}
+.oscar-mission.is-active { border-color: rgba(255, 184, 32, .22); box-shadow: inset 3px 0 rgba(255, 177, 27, .72); }
+.oscar-mission.is-compact .oscar-mission-plan { display: none; }
+.oscar-mission-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 8px; }
+.oscar-mission-state {
+  min-width: 50px;
+  padding: 3px 6px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, .16);
+  font-size: 8px;
+  font-weight: 700;
+  text-align: center;
+  text-transform: uppercase;
+}
+.oscar-mission.is-active .oscar-mission-state,
+.oscar-mission[data-status="waiting-for-approval"] .oscar-mission-state { color: #ffd16b; border-color: rgba(255, 187, 36, .25); }
+.oscar-mission-title { min-width: 0; }
+.oscar-mission-title strong { display: block; overflow: hidden; color: #f7f4ec; font-size: 11.5px; font-weight: 650; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.oscar-mission-title small { display: block; margin-top: 2px; color: var(--muted); font-size: 8.5px; }
+.oscar-mission-toggle-detail { border: 0; color: var(--muted); background: transparent; font-size: 13px; }
+.oscar-mission-detail { display: grid; gap: 8px; }
+.oscar-mission-detail[hidden] { display: none; }
+.oscar-mission-current,
+.oscar-mission-observation,
+.oscar-mission-approval {
+  padding: 8px 9px;
+  border-radius: 10px;
+  color: rgba(244, 240, 231, .8);
+  background: rgba(0, 0, 0, .18);
+  font-size: 9.5px;
+  line-height: 1.4;
+}
+.oscar-mission-current span,
+.oscar-mission-observation span,
+.oscar-mission-approval span { color: var(--muted); }
+.oscar-mission-approval {
+  border: 1px solid rgba(255, 183, 43, .2);
+  background: linear-gradient(145deg, rgba(255, 174, 28, .1), rgba(0, 0, 0, .2));
+  overflow-wrap: anywhere;
+}
+.oscar-mission-approval strong { color: #ffd168; }
+.oscar-mission-approval code {
+  color: #fff4d2;
+  font: inherit;
+}
+.oscar-mission-approval small { color: rgba(244, 240, 231, .5); }
+.oscar-mission-plan { display: grid; gap: 4px; }
+.oscar-mission-step { display: flex; gap: 7px; color: var(--muted); font-size: 9px; line-height: 1.35; }
+.oscar-mission-step::before { content: "○"; color: rgba(255, 255, 255, .24); }
+.oscar-mission-step.is-completed::before { content: "✓"; color: #f6c85d; }
+.oscar-mission-step.is-running::before,
+.oscar-mission-step.is-waiting-approval::before { content: "●"; color: #ffb72b; }
+.oscar-mission-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.oscar-mission-actions button {
+  min-height: 26px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 8px;
+  color: rgba(245, 242, 234, .76);
+  background: rgba(255, 255, 255, .035);
+  font-size: 8.5px;
+}
+.oscar-mission-actions button:hover { color: var(--text); border-color: rgba(255, 186, 38, .27); }
+.oscar-mission-actions button[data-mission-action="approve"] { color: #ffd168; background: rgba(255, 174, 28, .08); }
+.oscar-missions-empty { padding: 28px 16px; color: var(--muted); font-size: 10px; line-height: 1.5; text-align: center; }
+
+@media (max-width: 700px) {
+  .oscar-missions-panel { top: 68px; right: 8px; width: calc(100% - 16px); max-height: calc(100% - 150px); border-radius: 18px; }
+  .topbar-actions .oscar-missions-toggle { display: grid !important; }
+}
 
 /* Oscar has two surfaces: permanent central home mascot and user-controlled dialog mini-mascot. */
 .app-shell .inspector { display: none !important; }

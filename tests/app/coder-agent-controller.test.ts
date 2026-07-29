@@ -113,6 +113,112 @@ describe('CoderAgentController', () => {
     }
   }, CONTROLLER_TEST_TIMEOUT_MS);
 
+  it('stops an identical action repeat when no verified project-state change occurred', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-coder-repeat-guard-'));
+    const app = new MonarchApplication({ workspaceRoot: root });
+    await app.start();
+    try {
+      const controller = new CoderAgentController(app);
+      const snapshot = await controller.createProject('Repeat Guard');
+      await writeFile(path.join(snapshot.project.root, 'stable.txt'), 'verified once\n', 'utf8');
+      const executeCapability = app.executeCapability.bind(app);
+      let turn = 0;
+      app.executeCapability = (async (execution) => {
+        if (execution.moduleId !== 'oscar') return executeCapability(execution);
+        turn += 1;
+        const repeatedRead = {
+          capabilityId: 'coder.files.read',
+          args: { path: 'stable.txt' },
+          reason: 'inspect the same unchanged file',
+          expectedEffect: 'read stable.txt',
+        };
+        const response = turn <= 2
+          ? {
+              answer: turn === 1 ? 'Проверяю файл.' : 'Повторяю тот же неизменённый шаг.',
+              action_proposals: [repeatedRead],
+              usage: {},
+            }
+          : {
+              answer: 'stable.txt прочитан один раз; повтор был остановлен.',
+              action_proposals: [],
+              usage: {},
+            };
+        return { ok: true, summary: 'mock coder turn', output: { response } };
+      }) as typeof app.executeCapability;
+
+      const started = controller.start('Прочитай stable.txt и сообщи результат.', snapshot.project.id);
+      const completed = await controller.waitForTerminal(started.id);
+
+      expect(completed.status).toBe('completed');
+      expect(completed.events.filter((event) => event.capabilityId === 'coder.files.read' && event.kind === 'tool-result')).toHaveLength(1);
+      expect(completed.events.filter((event) => event.error === 'repeated-action')).toHaveLength(1);
+      expect(turn).toBe(3);
+    } finally {
+      await app.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, CONTROLLER_TEST_TIMEOUT_MS);
+
+  it('keeps DeepSeek sticky after Qwen fails during a Coder run', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-coder-sticky-fallback-'));
+    const app = new MonarchApplication({ workspaceRoot: root });
+    await app.start();
+    try {
+      const controller = new CoderAgentController(app);
+      const snapshot = await controller.createProject('Sticky Fallback');
+      await writeFile(path.join(snapshot.project.root, 'fallback.txt'), 'deepseek receipt\n', 'utf8');
+      const executeCapability = app.executeCapability.bind(app);
+      const requestedModels: string[] = [];
+      let deepSeekTurns = 0;
+      app.executeCapability = (async (execution) => {
+        if (execution.moduleId !== 'oscar') return executeCapability(execution);
+        const requestedModel = String((execution.input as any).requested_model || '');
+        requestedModels.push(requestedModel);
+        if (requestedModel === 'qwen3-coder-30b-a3b-instruct') {
+          return { ok: false, summary: 'Qwen failed before producing a turn.', error: 'model-unavailable' };
+        }
+        deepSeekTurns += 1;
+        return {
+          ok: true,
+          summary: 'mock DeepSeek turn',
+          output: {
+            response: deepSeekTurns === 1
+              ? {
+                  answer: 'Проверяю файл через резервную модель.',
+                  action_proposals: [{
+                    capabilityId: 'coder.files.read',
+                    args: { path: 'fallback.txt' },
+                    reason: 'inspect fallback evidence',
+                    expectedEffect: 'read fallback.txt',
+                  }],
+                  usage: {},
+                }
+              : {
+                  answer: 'fallback.txt проверен по Kernel receipt.',
+                  action_proposals: [],
+                  usage: {},
+                },
+          },
+        };
+      }) as typeof app.executeCapability;
+
+      const started = controller.start('Прочитай fallback.txt и сообщи результат.', snapshot.project.id);
+      const completed = await controller.waitForTerminal(started.id);
+
+      expect(completed.status).toBe('completed');
+      expect(requestedModels).toEqual([
+        'qwen3-coder-30b-a3b-instruct',
+        'deepseek-coder-v2-lite-instruct',
+        'deepseek-coder-v2-lite-instruct',
+      ]);
+      expect(completed.events.some((event) => event.title === 'qwen3-coder-30b-a3b-instruct unavailable')).toBe(true);
+      expect(completed.events.some((event) => event.title === 'deepseek-coder-v2-lite-instruct completed')).toBe(true);
+    } finally {
+      await app.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, CONTROLLER_TEST_TIMEOUT_MS);
+
   it('rejects narration-only completion until requested file and command receipts exist', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-coder-grounded-terminal-'));
     const app = new MonarchApplication({ workspaceRoot: root });
@@ -770,6 +876,77 @@ describe('CoderAgentController', () => {
       const controller = new CoderAgentController(app);
       await controller.createProject('Active But Implicit');
       expect(() => controller.start('Проверь проект.', '')).toThrow('Select an explicit Coder project');
+    } finally {
+      await app.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, CONTROLLER_TEST_TIMEOUT_MS);
+
+  it('resumes an interrupted checkpoint read-only and blocks semantically changed effectful dispatches without a receipt', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-coder-resume-checkpoint-'));
+    const app = new MonarchApplication({ workspaceRoot: root });
+    await app.start();
+    try {
+      const firstController = new CoderAgentController(app);
+      const snapshot = await firstController.createProject('Resume Checkpoint');
+      await writeFile(path.join(snapshot.project.root, 'state.txt'), 'unchanged', 'utf8');
+      const interrupted = firstController.runs.create(
+        snapshot.project.id,
+        'Inspect state.txt and report its current state.',
+        'qwen3-coder-30b-a3b-instruct',
+        { name: snapshot.project.name, root: snapshot.project.root },
+      );
+      firstController.runs.setStatus(interrupted.id, 'running', 'Started before simulated restart.');
+      firstController.runs.addEvent(
+        interrupted.id,
+        'tool-start',
+        'Run coder.files.write',
+        JSON.stringify({ projectId: snapshot.project.id, path: 'state.txt', content: 'must-not-repeat', overwrite: true }),
+        { capabilityId: 'coder.files.write' },
+      );
+
+      const controller = new CoderAgentController(app);
+      expect(controller.runs.require(interrupted.id).status).toBe('interrupted');
+      const executeCapability = app.executeCapability.bind(app);
+      let turn = 0;
+      app.executeCapability = (async (execution) => {
+        if (execution.moduleId !== 'oscar') return executeCapability(execution);
+        turn += 1;
+        const response = turn === 1
+          ? {
+              answer: 'Пробую изменить запись через другой вариант пути.',
+              action_proposals: [{
+                capabilityId: 'coder.files.write',
+                args: { path: './state.txt', content: 'must-not-repeat', overwrite: true },
+                reason: 'retry uncertain action with normalized path variant',
+                expectedEffect: 'replace state',
+              }],
+              usage: {},
+            }
+          : turn === 2
+            ? {
+                answer: 'Сначала сверяю текущее состояние.',
+                action_proposals: [{
+                  capabilityId: 'coder.files.read',
+                  args: { path: 'state.txt' },
+                  reason: 'reconcile current state',
+                  expectedEffect: 'read current content',
+                }],
+                usage: {},
+              }
+            : { answer: 'Проверено: state.txt не изменён.', action_proposals: [], usage: {} };
+        return { ok: true, summary: 'mock resumed coder turn', output: { response } };
+      }) as typeof app.executeCapability;
+
+      const resumed = controller.resume(interrupted.id);
+      expect(resumed.id).toBe(interrupted.id);
+      const completed = await controller.waitForTerminal(interrupted.id);
+
+      expect(completed.status).toBe('completed');
+      expect(completed.events.some((event) => event.error === 'receipt-missing-after-restart')).toBe(true);
+      expect(completed.events.some((event) => event.capabilityId === 'coder.files.write' && event.kind === 'tool-result')).toBe(false);
+      expect(completed.events.some((event) => event.capabilityId === 'coder.files.read' && event.ok)).toBe(true);
+      await expect(readFile(path.join(snapshot.project.root, 'state.txt'), 'utf8')).resolves.toBe('unchanged');
     } finally {
       await app.stop();
       await rm(root, { recursive: true, force: true });

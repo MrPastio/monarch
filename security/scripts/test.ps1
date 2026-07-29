@@ -18,3 +18,6 @@ if (-not $python) {
 
 $env:PYTHONPATH = Join-Path $securityRoot "src"
 & $python -m pytest (Join-Path $securityRoot "tests") -q
+if ($LASTEXITCODE -ne 0) {
+  exit $LASTEXITCODE
+}

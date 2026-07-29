@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from starlette.concurrency import iterate_in_threadpool
 
 from .model_runtime import LocalModelRuntime
+from .inference_coordinator import InferenceLane, InferenceSlotLease
 from .router import select_model_tier
 from .schemas import ChatMessage, MAX_CHAT_MESSAGE_CHARS, MAX_CHAT_MESSAGES
 from .sharing_qwen import (
@@ -93,6 +94,12 @@ class SharingStreamOptions(BaseModel):
     include_usage: bool = False
 
 
+class SharingResponseFormat(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["text", "json_object"]
+
+
 class SharingChatRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -104,6 +111,8 @@ class SharingChatRequest(BaseModel):
     top_p: float = Field(default=0.9, ge=0.1, le=1.0)
     max_tokens: int | None = Field(default=None, ge=32, le=8192)
     max_completion_tokens: int | None = Field(default=None, ge=32, le=8192)
+    response_format: SharingResponseFormat | None = None
+    inference_lane: InferenceLane = "interactive"
     reasoning_effort: Literal["low", "medium", "high"] = "low"
     n: int = Field(default=1, ge=1, le=1)
 
@@ -205,7 +214,7 @@ async def create_openai_chat_completion(
     http_request: Request,
     *,
     runtime: LocalModelRuntime,
-    acquire_inference_slot: Callable[[], Awaitable[asyncio.Lock | None]],
+    acquire_inference_slot: Callable[[InferenceLane], Awaitable[InferenceSlotLease | None]],
     unload_after_generation: Callable[[], None],
     qwen_runtime: QwenSharingRuntime | None = None,
 ):
@@ -215,13 +224,31 @@ async def create_openai_chat_completion(
     except SharingRequestError as exc:
         return exc.response()
 
-    inference_slot = await acquire_inference_slot()
+    inference_slot = await acquire_inference_slot(request.inference_lane)
     if inference_slot is None:
         return openai_error_response(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "Monarch Sharing inference queue is busy. Try again shortly.",
             error_type="rate_limit_error",
             code="inference_queue_busy",
+        )
+
+    try:
+        if target.provider == "qwen":
+            # The inference slot serializes generation, but it does not own
+            # native model residency. Release Gemma before Qwen can load.
+            runtime.unload()
+        else:
+            # Likewise, never let a warm Qwen context survive into a Gemma
+            # load. This is the one-resident-provider admission boundary.
+            qwen_runtime.unload()
+    except Exception as exc:
+        inference_slot.release()
+        return openai_error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            safe_generation_error(exc),
+            error_type="server_error",
+            code="provider_handoff_failed",
         )
 
     runtime.reset_generation_cancel()
@@ -252,12 +279,11 @@ async def create_openai_chat_completion(
     release_model = unload_after_generation
 
     if target.provider == "qwen":
-        unload = getattr(runtime, "unload", None)
-        if callable(unload):
-            unload()
-        release_model = qwen_runtime.unload
-    else:
-        qwen_runtime.unload()
+        release_model = (
+            qwen_runtime.unload
+            if bool(getattr(runtime.settings, "auto_unload_after_generation", True))
+            else (lambda: None)
+        )
 
     if request.stream:
         events = stream_openai_completion(
@@ -284,6 +310,7 @@ async def create_openai_chat_completion(
 
     generator = None
     pieces: list[str] = []
+    generation_started_at = time.perf_counter()
     try:
         generator = stream_target_chat(
             target,
@@ -293,6 +320,7 @@ async def create_openai_chat_completion(
             max_tokens=max_tokens,
             temperature=request.temperature,
             top_p=request.top_p,
+            response_format=request.response_format,
         )
         async for piece in iterate_in_threadpool(generator):
             pieces.append(piece)
@@ -306,6 +334,12 @@ async def create_openai_chat_completion(
             )
         active_model = active_public_model(target, runtime)
         usage = estimate_openai_usage(runtime, messages, answer, max_tokens)
+        total_generation_latency_ms = (time.perf_counter() - generation_started_at) * 1000
+        load_latency_ms = max(
+            0.0,
+            float(getattr(qwen_runtime if target.provider == "qwen" else runtime, "last_load_latency_ms", 0.0) or 0.0),
+        )
+        generation_latency_ms = max(0.0, total_generation_latency_ms - load_latency_ms)
         return {
             "id": completion_id,
             "object": "chat.completion",
@@ -319,6 +353,12 @@ async def create_openai_chat_completion(
                 }
             ],
             "usage": usage,
+            "monarch_runtime": {
+                "inference_lane": inference_slot.lane,
+                "queue_latency_ms": round(inference_slot.queue_latency_ms, 2),
+                "load_latency_ms": round(load_latency_ms, 2),
+                "generation_latency_ms": round(generation_latency_ms, 2),
+            },
         }
     except Exception as exc:
         logging.exception("Monarch Sharing generation failed")
@@ -344,7 +384,7 @@ async def stream_openai_completion(
     max_tokens: int,
     completion_id: str,
     created: int,
-    inference_slot: asyncio.Lock,
+    inference_slot: InferenceSlotLease,
     unload_after_generation: Callable[[], None],
 ):
     pieces: list[str] = []
@@ -361,6 +401,7 @@ async def stream_openai_completion(
             max_tokens=max_tokens,
             temperature=request.temperature,
             top_p=request.top_p,
+            response_format=request.response_format,
         )
         async for piece in iterate_in_threadpool(generator):
             now = time.monotonic()
@@ -470,6 +511,7 @@ def stream_target_chat(
     max_tokens: int,
     temperature: float,
     top_p: float,
+    response_format: SharingResponseFormat | None = None,
 ):
     if target.provider == "qwen":
         return qwen_runtime.stream_raw_chat(
@@ -478,6 +520,11 @@ def stream_target_chat(
             max_tokens,
             temperature,
             top_p,
+            response_format=(
+                {"type": "json_object"}
+                if response_format is not None and response_format.type == "json_object"
+                else None
+            ),
         )
     return runtime.stream_raw_chat(
         target.model_id,
@@ -486,6 +533,11 @@ def stream_target_chat(
         temperature,
         top_p,
         strict_tier=target.strict,
+        response_format=(
+            {"type": "json_object"}
+            if response_format is not None and response_format.type == "json_object"
+            else None
+        ),
     )
 
 
@@ -499,9 +551,9 @@ async def create_openai_speech(
     request: SharingSpeechRequest,
     *,
     tts_runtime: QwenTtsSharingRuntime,
-    acquire_inference_slot: Callable[[], Awaitable[asyncio.Lock | None]],
+    acquire_inference_slot: Callable[[InferenceLane], Awaitable[InferenceSlotLease | None]],
 ) -> Response | JSONResponse:
-    inference_slot = await acquire_inference_slot()
+    inference_slot = await acquire_inference_slot("interactive")
     if inference_slot is None:
         return openai_error_response(
             status.HTTP_429_TOO_MANY_REQUESTS,

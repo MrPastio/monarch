@@ -1,6 +1,7 @@
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
+  MonarchExecutionControl,
   MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
@@ -13,7 +14,7 @@ import {
   type MonarchModelRole,
   readModelCatalog,
 } from './model-catalog';
-import { modelsManifest } from './manifest';
+import { MAX_AGENT_RESPONSE_TOKENS, modelsManifest } from './manifest';
 import { createModelRuntimeReport } from './runtime-adapters';
 import {
   completeWithModelRole,
@@ -140,7 +141,11 @@ export class ModelsModule implements MonarchModule {
     };
   }
 
-  async executeCapability(request: MonarchExecutionRequest): Promise<MonarchExecutionResult> {
+  async executeCapability(
+    request: MonarchExecutionRequest,
+    _context?: MonarchKernelContext,
+    control: MonarchExecutionControl = {},
+  ): Promise<MonarchExecutionResult> {
     switch (request.capabilityId) {
     case 'models.catalog.list':
       return this.listCatalog();
@@ -151,7 +156,9 @@ export class ModelsModule implements MonarchModule {
     case 'models.router.pipeline':
       return this.describeRouterPipeline(request.input);
     case 'models.chat.complete':
-      return this.completeChat(request.input);
+      return this.completeChat(request.input, control.signal);
+    case 'models.agent.respond':
+      return this.completeChat(request.input, control.signal, MAX_AGENT_RESPONSE_TOKENS);
     case 'models.runtime.start':
       return this.startRuntime(request.input);
     case 'models.runtime.stop':
@@ -228,7 +235,11 @@ export class ModelsModule implements MonarchModule {
     };
   }
 
-  private async completeChat(input: unknown): Promise<MonarchExecutionResult> {
+  private async completeChat(
+    input: unknown,
+    signal?: AbortSignal,
+    maxTokensLimit?: number,
+  ): Promise<MonarchExecutionResult> {
     const text = readStringInput(input, 'text');
     if (!text) {
       return {
@@ -248,6 +259,7 @@ export class ModelsModule implements MonarchModule {
     const completionRequest = {
       role: requestedRole,
       messages,
+      ...(signal ? { signal } : {}),
     } as Parameters<typeof completeWithModelRole>[1];
     const temperature = readOptionalNumberInput(input, 'temperature');
     const maxTokens = readOptionalNumberInput(input, 'maxTokens');
@@ -257,7 +269,9 @@ export class ModelsModule implements MonarchModule {
       completionRequest.temperature = temperature;
     }
     if (maxTokens !== undefined) {
-      completionRequest.maxTokens = maxTokens;
+      completionRequest.maxTokens = maxTokensLimit === undefined
+        ? maxTokens
+        : normalizeAgentResponseMaxTokens(maxTokens);
     }
     if (responseFormat !== undefined) {
       completionRequest.responseFormat = responseFormat;
@@ -335,6 +349,11 @@ export class ModelsModule implements MonarchModule {
       output: result,
     };
   }
+}
+
+export function normalizeAgentResponseMaxTokens(value: number): number {
+  if (!Number.isFinite(value)) return MAX_AGENT_RESPONSE_TOKENS;
+  return Math.max(1, Math.min(MAX_AGENT_RESPONSE_TOKENS, Math.trunc(value)));
 }
 
 function mentionsModels(text: string, intentKind?: string): boolean {

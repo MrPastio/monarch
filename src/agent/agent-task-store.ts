@@ -125,6 +125,10 @@ interface AgentTaskStoreLockLease {
   release(): Promise<void>;
 }
 
+interface LocalJsonAgentTaskStoreTestHooks {
+  beforeReadLockClaim?: (filePath: string) => void | Promise<void>;
+}
+
 export interface LocalJsonAgentTaskStoreOptions {
   lockTimeoutMs?: number;
   lockTtlMs?: number;
@@ -132,6 +136,11 @@ export interface LocalJsonAgentTaskStoreOptions {
   now?: () => Date;
   pid?: number;
   isProcessAlive?: (pid: number) => boolean;
+  /**
+   * @internal Deterministic filesystem fault injection for store tests only.
+   * Production callers must leave this undefined.
+   */
+  __testHooks?: LocalJsonAgentTaskStoreTestHooks;
 }
 
 export class AgentTaskStoreError extends Error {
@@ -714,6 +723,7 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
   private readonly retryDelayMs: number;
   private readonly processId: number;
   private readonly processAlive: (pid: number) => boolean;
+  private readonly testHooks: LocalJsonAgentTaskStoreTestHooks | undefined;
   private queue: Promise<void> = Promise.resolve();
 
   constructor(filePathInput: string, options: LocalJsonAgentTaskStoreOptions = {}) {
@@ -729,6 +739,7 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
     this.retryDelayMs = normalizeDuration(options.retryDelayMs, 25, 'lock retry delay');
     this.processId = normalizeProcessId(options.pid ?? process.pid);
     this.processAlive = options.isProcessAlive ?? isProcessAlive;
+    this.testHooks = options.__testHooks;
   }
 
   protected readDocument(): Promise<AgentTaskStoreDocument> {
@@ -1023,6 +1034,28 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
     contenders: AgentTaskLockContender[];
     hasYoungMalformedClaim: boolean;
   }> {
+    const maximumAttempts = 4;
+    for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+      try {
+        return await this.readLockContendersOnce(ownerId);
+      } catch (error) {
+        const code = errorCode(error instanceof AgentTaskStoreError ? error.cause : error);
+        if (!isTransientWindowsLockReadError(code) || attempt === maximumAttempts - 1) {
+          throw error;
+        }
+        // A competing writer updates its claim in-place under Windows. Re-enumerate
+        // every time so a disappeared/replaced contender is never inferred stale
+        // from a path captured before the sharing violation.
+        await delay(Math.max(2, Math.min(this.retryDelayMs, 25)) * (attempt + 1));
+      }
+    }
+    throw new AgentTaskStoreError(`Unable to read agent task store lock contenders for ${this.lockPath}.`);
+  }
+
+  private async readLockContendersOnce(ownerId: string): Promise<{
+    contenders: AgentTaskLockContender[];
+    hasYoungMalformedClaim: boolean;
+  }> {
     const directory = path.dirname(this.lockPath);
     const prefix = `${path.basename(this.lockPath)}.`;
     let names: string[];
@@ -1040,6 +1073,7 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
       const contenderPath = path.join(directory, name);
       let raw: string;
       try {
+        await this.testHooks?.beforeReadLockClaim?.(contenderPath);
         raw = await readFile(contenderPath, 'utf8');
       } catch (error) {
         if (errorCode(error) === 'ENOENT') continue;
@@ -2019,6 +2053,10 @@ function errorCode(error: unknown): string | undefined {
   return error && typeof error === 'object' && 'code' in error
     ? String((error as { code?: unknown }).code ?? '')
     : undefined;
+}
+
+function isTransientWindowsLockReadError(code: string | undefined): boolean {
+  return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
 }
 
 async function unlinkLockClaim(filePath: string): Promise<void> {

@@ -23,6 +23,7 @@ export type CoderModelId =
 export type CoderRunStatus =
   | 'queued'
   | 'running'
+  | 'interrupted'
   | 'completed'
   | 'failed'
   | 'cancelled';

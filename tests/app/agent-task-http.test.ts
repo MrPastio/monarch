@@ -29,7 +29,7 @@ describe('Agent Task API v1', () => {
     }
   });
 
-  it('forces HTTP source=api, exposes versioned JSON replay, and streams durable dotted terminal events', async () => {
+  it('derives API source server-side, exposes versioned JSON replay, and streams durable dotted terminal events', async () => {
     const { app, server, baseUrl } = await setup(true);
     try {
       const invalidVersion = await fetch(`${baseUrl}/api/agent/tasks`, {
@@ -50,13 +50,19 @@ describe('Agent Task API v1', () => {
         body: JSON.stringify({
           version: 1,
           request: 'Create a paused API task.',
-          source: 'telegram',
           clientRequestId: 'http-agent-task-1',
           autoStart: false,
         }),
       });
       expect(createdResponse.status).toBe(202);
-      const created = await createdResponse.json() as { task: { id: string; source: { surface: string } } };
+      const created = await createdResponse.json() as {
+        task: {
+          id: string;
+          source: { surface: string };
+          goal: unknown;
+          budgets: unknown;
+        };
+      };
       expect(created.task.source.surface).toBe('api');
       const replayedCreate = await fetch(`${baseUrl}/api/agent/tasks`, {
         method: 'POST',
@@ -64,7 +70,6 @@ describe('Agent Task API v1', () => {
         body: JSON.stringify({
           version: 1,
           request: 'Create a paused API task.',
-          source: 'telegram',
           clientRequestId: 'http-agent-task-1',
           autoStart: false,
         }),
@@ -93,11 +98,157 @@ describe('Agent Task API v1', () => {
       expect(streamBody).toContain('event: task.status.changed');
       expect(streamBody).toContain('event: task.cancelled');
       expect(streamBody).toContain('"traceId"');
+
+      const repeatedResponse = await fetch(`${baseUrl}/api/agent/tasks/${created.task.id}/repeat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          version: 1,
+          clientRequestId: 'http-agent-repeat-1',
+          autoStart: false,
+        }),
+      });
+      expect(repeatedResponse.status).toBe(202);
+      const repeated = await repeatedResponse.json() as {
+        task: {
+          id: string;
+          parentTaskId: string;
+          source: { surface: string; requestId?: string };
+          goal: unknown;
+          budgets: unknown;
+          observations: unknown[];
+          artifacts: unknown[];
+          approvals: unknown[];
+        };
+      };
+      expect(repeated.task.id).not.toBe(created.task.id);
+      expect(repeated.task.parentTaskId).toBe(created.task.id);
+      expect(repeated.task.source).toEqual({ surface: 'api', remote: true });
+      expect(repeated.task.goal).toEqual(created.task.goal);
+      expect(repeated.task.budgets).toEqual(created.task.budgets);
+      expect(repeated.task.observations).toEqual([]);
+      expect(repeated.task.artifacts).toEqual([]);
+
+      const desktopOriginal = await app.createAgentTask({
+        request: 'Create a paused Desktop task.',
+        source: { surface: 'desktop', remote: false },
+        autoStart: false,
+      });
+      await app.agentRuntime!.cancel(desktopOriginal.task.id);
+      const apiRepeatedDesktop = await fetch(
+        `${baseUrl}/api/agent/tasks/${desktopOriginal.task.id}/repeat`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ version: 1, autoStart: false }),
+        },
+      );
+      expect(apiRepeatedDesktop.status).toBe(202);
+      await expect(apiRepeatedDesktop.json()).resolves.toMatchObject({
+        task: {
+          parentTaskId: desktopOriginal.task.id,
+          source: { surface: 'api', remote: true },
+        },
+      });
+      expect(repeated.task.approvals).toEqual([]);
     } finally {
       await close(server);
       await app.stop();
     }
   }, 30_000);
+
+  it('rejects privileged HTTP source spoofing and accepts desktop only from the trusted loopback UI origin', async () => {
+    const { app, server, baseUrl } = await setup(true);
+    try {
+      const spoofed = await postJson(`${baseUrl}/api/agent/tasks`, {
+        version: 1,
+        request: 'Do not trust this claimed desktop source.',
+        source: 'desktop',
+        autoStart: false,
+      });
+      expect(spoofed.status).toBe(403);
+      await expect(spoofed.json()).resolves.toMatchObject({
+        version: 1,
+        error: 'untrusted-agent-source',
+      });
+
+      const sameOriginWithoutAttestation = await fetch(`${baseUrl}/api/agent/tasks`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'http://127.0.0.1:4317',
+        },
+        body: JSON.stringify({
+          version: 1,
+          request: 'A spoofed Origin header is not desktop attestation.',
+          source: 'desktop',
+          autoStart: false,
+        }),
+      });
+      expect(sameOriginWithoutAttestation.status).toBe(403);
+      await expect(sameOriginWithoutAttestation.json()).resolves.toMatchObject({
+        error: 'untrusted-agent-source',
+      });
+
+      for (const source of ['system', 'smoke', 'coder']) {
+        const forbidden = await fetch(`${baseUrl}/api/agent/tasks`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: 'http://127.0.0.1:4317',
+          },
+          body: JSON.stringify({
+            version: 1,
+            request: `Reject ${source}.`,
+            source,
+            autoStart: false,
+          }),
+        });
+        expect(forbidden.status, source).toBe(403);
+      }
+
+      const trusted = await fetch(`${baseUrl}/api/agent/tasks`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'http://127.0.0.1:4317',
+          'X-Monarch-Desktop-Attestation': 'agent-http-desktop-test-token',
+        },
+        body: JSON.stringify({
+          version: 1,
+          request: 'Create a trusted desktop task.',
+          source: 'desktop',
+          autoStart: false,
+        }),
+      });
+      expect(trusted.status).toBe(202);
+      await expect(trusted.json()).resolves.toMatchObject({
+        task: { source: { surface: 'desktop' } },
+      });
+
+      const trustedVoice = await fetch(`${baseUrl}/api/agent/tasks`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'http://127.0.0.1:4317',
+          'X-Monarch-Desktop-Attestation': 'agent-http-desktop-test-token',
+        },
+        body: JSON.stringify({
+          version: 1,
+          request: 'Create a local voice Agent Task.',
+          source: 'voice',
+          autoStart: false,
+        }),
+      });
+      expect(trustedVoice.status).toBe(202);
+      await expect(trustedVoice.json()).resolves.toMatchObject({
+        task: { source: { surface: 'voice', remote: false } },
+      });
+    } finally {
+      await close(server);
+      await app.stop();
+    }
+  });
 
   it('rejects mistyped optional, nested, and budget fields before creating a task', async () => {
     const { app, server, baseUrl } = await setup(true);
@@ -142,7 +293,6 @@ describe('Agent Task API v1', () => {
         userPreferences: ['concise'],
         budgets: { maxSteps: 4, maxWallTimeMs: 2_000, maxComputeClass: 'light' },
         autoStart: false,
-        source: 'telegram',
       });
       expect(valid.status).toBe(202);
       await expect(valid.json()).resolves.toMatchObject({
@@ -208,6 +358,28 @@ describe('Agent Task API v1', () => {
       });
       expect(invalidApproval.status).toBe(400);
       await expect(invalidApproval.json()).resolves.toMatchObject({ version: 1, ok: false });
+
+      const unboundApproval = await postJson(`${baseUrl}/api/agent/tasks/${created.task.id}/approvals/fake_approval`, {
+        version: 1,
+        decision: 'approve',
+      });
+      expect(unboundApproval.status).toBe(400);
+      await expect(unboundApproval.json()).resolves.toMatchObject({
+        version: 1,
+        error: 'approval-binding-required',
+      });
+
+      const mismatchedApproval = await postJson(`${baseUrl}/api/agent/tasks/${created.task.id}/approvals/fake_approval`, {
+        version: 1,
+        decision: 'approve',
+        canonicalProposalHash: 'fixture-proposal-hash',
+        capabilityId: 'workspace.files.write',
+      });
+      expect(mismatchedApproval.status).toBe(409);
+      await expect(mismatchedApproval.json()).resolves.toMatchObject({
+        version: 1,
+        error: 'approval-binding-mismatch',
+      });
 
       const checkpointResponse = await fetch(`${baseUrl}/api/agent/tasks/${created.task.id}`);
       const checkpoint = await checkpointResponse.json() as { checkpoint: { task: { messages: unknown[] } } };
@@ -329,6 +501,7 @@ async function setup(
     host: '127.0.0.1',
     port: 4317,
     apiToken: 'agent-http-test-token',
+    desktopAttestationToken: 'agent-http-desktop-test-token',
     requireApiToken,
   });
   const baseUrl = await listen(server);

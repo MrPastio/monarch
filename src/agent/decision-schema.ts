@@ -160,14 +160,15 @@ function parseExecutable(
   assertExactKeys(value, [
     'kind', 'capabilityId', 'input', 'reason', 'expectedEffect', 'preconditions', 'verification',
   ]);
-  const capabilityId = boundedId(value.capabilityId, 'capabilityId');
-  const capability = context.candidates.find((entry) => entry.id === capabilityId);
+  const suppliedCapabilityId = boundedId(value.capabilityId, 'capabilityId');
+  const capability = resolveCandidateCapability(suppliedCapabilityId, context.candidates);
   if (!capability) {
     throw new AgentDecisionValidationError(
       'capability-not-in-candidate-set',
-      `Capability ${capabilityId} is not in the current resolver result.`,
+      `Capability ${suppliedCapabilityId} is not in the current resolver result.`,
     );
   }
+  const capabilityId = capability.id;
   if (!isRecord(value.input)) {
     throw new AgentDecisionValidationError('invalid-input', 'Executable decision input must be an object.');
   }
@@ -177,12 +178,17 @@ function parseExecutable(
     throw new AgentDecisionValidationError('input-schema-invalid', 'Capability input does not match its schema.', schemaResult.errors);
   }
 
-  const verification = value.verification === undefined
-    ? undefined
-    : parsePredicates(value.verification, 'verification');
   const metadata = resolveAgentCapabilityMetadata(capability);
+  const contractVerification = deriveRequiredCapabilityVerification(capability, value.input);
+  const contractOwnsVerification = requiredVerificationIsContractOwned(capability, value.input);
+  const proposedVerification = contractOwnsVerification || value.verification === undefined
+    ? []
+    : parsePredicates(value.verification, 'verification');
+  const verification = contractOwnsVerification
+    ? contractVerification
+    : canonicalizeRequiredCapabilityVerification(capability, value.input, proposedVerification);
   const mutating = metadata.effectProfile.mutation !== 'none';
-  if (mutating && (!verification || verification.length === 0)) {
+  if (mutating && verification.length === 0) {
     throw new AgentDecisionValidationError(
       'verification-required',
       `Mutating capability ${capabilityId} requires deterministic verification.`,
@@ -200,8 +206,28 @@ function parseExecutable(
     reason: boundedString(value.reason, 'reason', 1_000),
     expectedEffect: boundedString(value.expectedEffect, 'expectedEffect', 1_000),
     ...(preconditions ? { preconditions } : {}),
-    ...(verification ? { verification } : {}),
+    ...(verification.length > 0 ? { verification } : {}),
   };
+}
+
+function resolveCandidateCapability(
+  suppliedCapabilityId: string,
+  candidates: readonly MonarchCapability[],
+): MonarchCapability | undefined {
+  const exact = candidates.find((entry) => entry.id === suppliedCapabilityId);
+  if (exact) return exact;
+  const normalized = normalizeCapabilityIdSeparators(suppliedCapabilityId);
+  const matches = candidates.filter(
+    (entry) => normalizeCapabilityIdSeparators(entry.id) === normalized,
+  );
+  // Local models occasionally exchange '-' and '_' inside an otherwise exact
+  // supplied ID. Canonicalize only a unique current candidate; collisions and
+  // invented IDs remain fail-closed.
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function normalizeCapabilityIdSeparators(value: string): string {
+  return value.replace(/[-_]/gu, '-');
 }
 
 function parseCompletionBindings(value: unknown): AgentCompletionEvidenceBinding[] {
@@ -251,11 +277,17 @@ function assertRequiredCapabilityVerification(
   const targetPredicates = target
     ? predicates.filter((predicate) => normalizeTarget(predicate.target) === normalizeTarget(target))
     : predicates;
+  const contractPredicates = deriveRequiredCapabilityVerification(capability, input);
+  const hasCapabilityOwnedPredicate = contractPredicates.some((contractPredicate) => (
+    predicates.some((predicate) => samePredicate(predicate, contractPredicate))
+  ));
   for (const descriptor of required) {
     let satisfied = false;
     switch (descriptor.kind) {
     case 'predicate':
-      satisfied = targetPredicates.length > 0;
+      satisfied = descriptor.predicate
+        ? predicates.some((predicate) => samePredicate(predicate, descriptor.predicate as MonarchActionPredicate))
+        : targetPredicates.length > 0 || hasCapabilityOwnedPredicate;
       break;
     case 'read-after-write':
       satisfied = targetPredicates.some((predicate) => predicate.kind === 'exists')
@@ -266,7 +298,9 @@ function assertRequiredCapabilityVerification(
       break;
     case 'runtime-status':
     case 'external-receipt':
-      satisfied = targetPredicates.some((predicate) => predicate.kind === 'status');
+      satisfied = descriptor.predicate
+        ? predicates.some((predicate) => samePredicate(predicate, descriptor.predicate as MonarchActionPredicate))
+        : predicates.some((predicate) => predicate.kind === 'status');
       break;
     }
     if (!satisfied) {
@@ -276,6 +310,87 @@ function assertRequiredCapabilityVerification(
       );
     }
   }
+}
+
+function canonicalizeRequiredCapabilityVerification(
+  capability: MonarchCapability,
+  input: Record<string, unknown>,
+  predicates: MonarchActionPredicate[],
+): MonarchActionPredicate[] {
+  const derived = deriveRequiredCapabilityVerification(capability, input);
+  const required = resolveAgentCapabilityMetadata(capability).verification.filter((entry) => entry.required === true);
+  const target = actionTarget(input);
+  if (!target || !required.some((entry) => entry.kind === 'read-after-write')) {
+    return [...predicates, ...derived].filter(uniquePredicate);
+  }
+  const content = input.content;
+  if (typeof content !== 'string') return predicates;
+
+  // The capability contract, not model prose, owns the safety-critical
+  // postcondition. Replace potentially malformed file predicates with an
+  // exact read-after-write check derived from the schema-valid action input.
+  const retained = predicates.filter((predicate) => (
+    predicate.kind === 'status'
+    || predicate.target === 'result'
+    || predicate.target.startsWith('result.')
+  ));
+  return [
+    ...retained,
+    ...derived,
+  ];
+}
+
+function deriveRequiredCapabilityVerification(
+  capability: MonarchCapability,
+  input: Record<string, unknown>,
+): MonarchActionPredicate[] {
+  const required = resolveAgentCapabilityMetadata(capability).verification.filter((entry) => entry.required === true);
+  const target = actionTarget(input);
+  const predicates: MonarchActionPredicate[] = [];
+  for (const descriptor of required) {
+    if (descriptor.predicate) {
+      predicates.push(structuredClone(descriptor.predicate));
+      continue;
+    }
+    if (descriptor.kind === 'read-after-write' && target && typeof input.content === 'string') {
+      predicates.push(
+        { kind: 'exists', target },
+        { kind: 'equals', target, value: input.content },
+      );
+    }
+  }
+  return predicates.filter(uniquePredicate);
+}
+
+function requiredVerificationIsContractOwned(
+  capability: MonarchCapability,
+  input: Record<string, unknown>,
+): boolean {
+  const required = resolveAgentCapabilityMetadata(capability).verification.filter((entry) => entry.required === true);
+  const target = actionTarget(input);
+  const derived = deriveRequiredCapabilityVerification(capability, input);
+  return required.length > 0 && required.every((descriptor) => (
+    descriptor.kind === 'schema'
+    || (descriptor.kind === 'predicate' && derived.length > 0)
+    || Boolean(descriptor.predicate)
+    || (
+      descriptor.kind === 'read-after-write'
+      && Boolean(target)
+      && typeof input.content === 'string'
+    )
+  ));
+}
+
+function uniquePredicate(
+  predicate: MonarchActionPredicate,
+  index: number,
+  predicates: MonarchActionPredicate[],
+): boolean {
+  return predicates.findIndex((candidate) => samePredicate(candidate, predicate)) === index;
+}
+
+function samePredicate(left: MonarchActionPredicate, right: MonarchActionPredicate): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function actionTarget(input: Record<string, unknown>): string {

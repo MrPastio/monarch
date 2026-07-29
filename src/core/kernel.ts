@@ -285,6 +285,7 @@ export class MonarchKernel {
         input: route.input ?? { text: intent.text, context: intent.context || {} },
         createdAt: nowIso(),
         requestedBy: intent.source,
+        source: intent.source,
         confirmed: Boolean(intent.context?.confirmed),
       }, context);
       if (execution.error !== 'confirmation-required') {
@@ -354,7 +355,8 @@ export class MonarchKernel {
       confirmed?: boolean;
       securityOverrideConfirmed?: boolean;
       leaseId?: string;
-      executionMode?: 'coder';
+      source?: import('./contracts').MonarchAgentCapabilitySource;
+      executionMode?: 'coder' | 'agent-runtime';
       permissionProfileOverride?: MonarchPermissionProfile;
       signal?: AbortSignal;
     } = {},
@@ -377,6 +379,7 @@ export class MonarchKernel {
       input: proposal.args,
       createdAt: nowIso(),
       requestedBy: options.requestedBy || proposal.provenance.source,
+      ...(options.source ? { source: options.source } : {}),
       confirmed: options.confirmed === true,
       securityOverrideConfirmed: options.securityOverrideConfirmed === true,
       proposalId: proposal.proposalId,
@@ -415,6 +418,7 @@ export class MonarchKernel {
     return normalizeActionProposal(input, {
         capability,
         workspaceRoot: this.workspaceRoot,
+        allowExternalPaths: this.permissions.getProfile().sandboxMode === 'danger-full-access',
         ...(options.intentId ? { intentId: options.intentId } : {}),
         ...(options.originatingUserText ? { originatingUserText: options.originatingUserText } : {}),
         ...(options.requestedBy ? { requestedBy: options.requestedBy } : {}),
@@ -491,7 +495,7 @@ export class MonarchKernel {
   async rollbackAction(ledgerId: string): Promise<MonarchActionRollbackState | null> {
     const record = this.actionLedger.getByLedgerId(ledgerId);
     if (!record) return null;
-    const rollback = await this.mutationJournal.rollback(ledgerId);
+    const rollback = await this.mutationJournal.rollback(ledgerId, record.capabilityId);
     if (!rollback) return null;
     this.actionLedger.setRollback(record.idempotencyKey, rollback);
     this.auditLog.append('execution', 'Workspace action rollback evaluated.', {

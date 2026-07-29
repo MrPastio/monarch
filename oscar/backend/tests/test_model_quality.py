@@ -106,14 +106,14 @@ async def test_chat_stream_records_quality_penalty_without_sse_leak(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_quality_regeneration_cannot_escalate_to_deep_thinking_without_consent(monkeypatch):
+async def test_quality_regeneration_retries_balanced_without_deep_thinking_consent(monkeypatch):
     monkeypatch.setenv("OSCAR_ENABLE_QUALITY_REGENERATION", "1")
     monkeypatch.setattr(main_module, "next_stronger_tier", lambda _tier: "gemma4-deepthinking")
-    called = False
+    called_tier = ""
 
-    def stream_chat(*_args, **_kwargs):
-        nonlocal called
-        called = True
+    def stream_chat(tier, *_args, **_kwargs):
+        nonlocal called_tier
+        called_tier = tier
         return iter(["regenerated"])
 
     monkeypatch.setattr(main_module.model_runtime, "stream_chat", stream_chat)
@@ -129,7 +129,7 @@ async def test_quality_regeneration_cannot_escalate_to_deep_thinking_without_con
         "Я — это я, мой помощник отвечает.",
     )
 
-    assert answer == "Я — это я, мой помощник отвечает."
+    assert answer == "regenerated"
     assert flags
-    assert regenerated is False
-    assert called is False
+    assert regenerated is True
+    assert called_tier == "gemma4-balanced"

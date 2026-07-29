@@ -135,6 +135,7 @@ const safeIconPath = path.join(workspaceRoot, 'assets', 'safe', 'monarch-safe.ic
 const smokeMode = process.argv.includes('--smoke');
 const safeLaunchMode = process.argv.includes('--safe') && !safeEntryQaMode;
 const appName = updateDemoMode ? 'Monarch · безопасная демонстрация обновления' : 'Monarch';
+const desktopAttestationToken = randomBytes(32).toString('base64url');
 let mainWindow = null;
 let installerCoordinator = null;
 let postUpdateTrial = null;
@@ -264,6 +265,10 @@ app.on('activate', () => {
 });
 
 ipcMain.handle('monarch:get-runtime-url', () => runtimeUrl);
+ipcMain.handle('monarch:get-desktop-attestation', (event) => {
+  assertTrustedMainRenderer(event);
+  return desktopAttestationToken;
+});
 ipcMain.handle('monarch:get-app-info', () => ({
   name: appName,
   version: currentAppVersion,
@@ -1491,6 +1496,8 @@ async function startRuntime() {
     MONARCH_UI_PORT: String(port),
     MONARCH_STRICT_PORT: '1',
     MONARCH_STARTUP_TRACE: '1',
+    MONARCH_AGENT_RUNTIME_V2: '1',
+    MONARCH_DESKTOP_ATTESTATION_TOKEN: desktopAttestationToken,
   };
   // Voice Mode owns STT preparation after the shared Qwen warmup settles.
   // Do not let an inherited shell flag race Vosk/sherpa allocation with TTS.

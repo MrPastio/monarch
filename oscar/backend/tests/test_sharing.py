@@ -21,11 +21,14 @@ class FakeSharingRuntime:
         self.settings = SimpleNamespace(
             mock_model=False,
             sharing_qwen_models_dir=qwen_models_dir or Path(__file__).parent / "missing-qwen-models",
+            auto_unload_after_generation=False,
         )
         self.active_tier = None
         self.received_messages = []
+        self.received_response_format = None
         self.strict_tier = None
         self.cancelled = False
+        self.unloaded = False
 
     def available_gemma4_tiers(self):
         return {
@@ -41,6 +44,9 @@ class FakeSharingRuntime:
     def cancel_generation(self):
         self.cancelled = True
 
+    def unload(self):
+        self.unloaded = True
+
     def ram_assessment(self, _tier):
         return {"ram_warning": "none"}
 
@@ -53,10 +59,12 @@ class FakeSharingRuntime:
         _top_p,
         *,
         strict_tier=False,
+        response_format=None,
     ):
         self.active_tier = tier
         self.received_messages = messages
         self.strict_tier = strict_tier
+        self.received_response_format = response_format
         yield "local "
         yield "answer"
 
@@ -68,6 +76,7 @@ class FakeQwenRuntime:
     def __init__(self):
         self.unloaded = False
         self.received_model = None
+        self.received_response_format = None
         self.cancelled = False
 
     def reset_generation_cancel(self):
@@ -79,8 +88,17 @@ class FakeQwenRuntime:
     def unload(self):
         self.unloaded = True
 
-    def stream_raw_chat(self, model_id, _messages, _max_tokens, _temperature, _top_p):
+    def stream_raw_chat(
+        self,
+        model_id,
+        _messages,
+        _max_tokens,
+        _temperature,
+        _top_p,
+        response_format=None,
+    ):
         self.received_model = model_id
+        self.received_response_format = response_format
         yield "qwen "
         yield "answer"
 
@@ -161,6 +179,7 @@ def test_sharing_qwen_chat_uses_super_fast_runtime(monkeypatch, tmp_path):
         json={
             "model": "qwen2.5-0.5b-instruct",
             "messages": [{"role": "user", "content": "Answer locally."}],
+            "response_format": {"type": "json_object"},
         },
     )
 
@@ -168,7 +187,9 @@ def test_sharing_qwen_chat_uses_super_fast_runtime(monkeypatch, tmp_path):
     assert response.json()["model"] == "qwen2.5-0.5b-instruct"
     assert response.json()["choices"][0]["message"]["content"] == "qwen answer"
     assert qwen_runtime.received_model == "qwen2.5-0.5b-instruct"
-    assert qwen_runtime.unloaded is True
+    assert qwen_runtime.received_response_format == {"type": "json_object"}
+    assert qwen_runtime.unloaded is False
+    assert runtime.unloaded is True
     assert runtime.received_messages == []
 
 
@@ -196,7 +217,8 @@ def test_sharing_tts_lists_models_and_returns_wav(monkeypatch):
 
 
 def test_sharing_chat_uses_raw_caller_messages(monkeypatch):
-    client, runtime = configured_client(monkeypatch)
+    qwen_runtime = FakeQwenRuntime()
+    client, runtime = configured_client(monkeypatch, qwen_runtime=qwen_runtime)
 
     response = client.post(
         "/v1/chat/completions",
@@ -208,6 +230,7 @@ def test_sharing_chat_uses_raw_caller_messages(monkeypatch):
                 {"role": "user", "content": "Say hello locally."},
             ],
             "max_tokens": 64,
+            "response_format": {"type": "json_object"},
         },
     )
 
@@ -224,11 +247,16 @@ def test_sharing_chat_uses_raw_caller_messages(monkeypatch):
         "completion_tokens": 2,
         "total_tokens": 6,
     }
+    assert body["monarch_runtime"]["queue_latency_ms"] >= 0
+    assert body["monarch_runtime"]["load_latency_ms"] >= 0
+    assert body["monarch_runtime"]["generation_latency_ms"] >= 0
     assert [(message.role, message.content) for message in runtime.received_messages] == [
         ("system", "Caller-owned system rule."),
         ("user", "Say hello locally."),
     ]
     assert runtime.strict_tier is True
+    assert runtime.received_response_format == {"type": "json_object"}
+    assert qwen_runtime.unloaded is True
 
 
 def test_sharing_stream_uses_openai_sse_contract(monkeypatch):
