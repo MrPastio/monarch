@@ -206,8 +206,9 @@ class ResponseActionTests(unittest.TestCase):
                 root / "integrity.key",
                 command_runner=lambda _: None,
             )
-            with self.assertRaisesRegex(ResponseActionError, "elevated"):
-                service.reconcile()
+            with mock.patch("monarch_security.actions._is_elevated", return_value=False):
+                with self.assertRaisesRegex(ResponseActionError, "elevated"):
+                    service.reconcile()
 
     def test_firewall_command_registers_independent_system_rollback(self) -> None:
         completed = mock.Mock(returncode=0, stderr="", stdout="")
