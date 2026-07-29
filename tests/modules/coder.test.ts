@@ -279,17 +279,18 @@ describe('Coder Mode', () => {
     try {
       const project = (await execute(module, 'coder.projects.create', { name: 'Timeout Reconciliation' })).output as any;
       const marker = path.join(project.root, 'late-timeout-marker.txt');
-      await writeFile(path.join(project.root, 'timeout-parent.cjs'), [
-        "const { spawn } = require('node:child_process');",
-        "spawn(process.execPath, ['-e', 'setTimeout(() => require(\"node:fs\").writeFileSync(\"late-timeout-marker.txt\", \"SHOULD_NOT_SURVIVE\"), 3000)'], { stdio: 'ignore' });",
-        'setTimeout(() => {}, 30_000);',
+      await writeFile(path.join(project.root, 'timeout-child.cmd'), [
+        '@echo off',
+        'start "" /b cmd.exe /d /s /c "choice /d y /n /t 3 >nul & echo SHOULD_NOT_SURVIVE>late-timeout-marker.txt" >nul 2>&1',
+        ':wait',
+        'goto wait',
         '',
-      ].join('\n'), 'utf8');
+      ].join('\r\n'), 'utf8');
 
       const timedOut = await execute(module, 'coder.command.run', {
         projectId: project.id,
-        executable: process.execPath,
-        args: ['timeout-parent.cjs'],
+        executable: '.\\timeout-child.cmd',
+        args: [],
         timeoutMs: 1_000,
         allowNetwork: false,
       });
