@@ -45,36 +45,6 @@ const runGitBytes = (
   input,
 });
 
-const materializeFixtureObjectDatabase = (repo: string) => {
-  const gitDirectory = path.join(repo, '.git');
-  const objectDirectory = path.join(gitDirectory, 'objects');
-  const localRepositoryEnvironment = {
-    ...process.env,
-    GIT_DIR: gitDirectory,
-    GIT_WORK_TREE: repo,
-    GIT_OBJECT_DIRECTORY: objectDirectory,
-  };
-  execFileSync('git.exe', ['repack', '-a', '-d', '--quiet'], {
-    cwd: repo,
-    env: localRepositoryEnvironment,
-  });
-  execFileSync('git.exe', ['fsck', '--full', '--no-dangling'], {
-    cwd: repo,
-    env: {
-      ...Object.fromEntries(
-        Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
-      ),
-      GIT_DIR: gitDirectory,
-      GIT_WORK_TREE: repo,
-      GIT_OBJECT_DIRECTORY: objectDirectory,
-      GIT_ALTERNATE_OBJECT_DIRECTORIES: '',
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
-      GIT_NO_REPLACE_OBJECTS: '1',
-    },
-  });
-};
-
 const createPublicationFixture = (): PublicationFixture => {
   const temporaryRoot = process.platform === 'win32'
     ? path.join(path.parse(root).root, 'Monarch-Agent-QA')
@@ -172,7 +142,6 @@ const createPublicationFixture = (): PublicationFixture => {
   runGit(repo, ['config', 'user.email', 'publication-test@invalid.local']);
   runGit(repo, ['add', '--all']);
   runGit(repo, ['commit', '--quiet', '-m', 'fixture']);
-  materializeFixtureObjectDatabase(repo);
   return {
     fixtureRoot,
     repo,
@@ -499,8 +468,6 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(policy).toContain('taskkill.exe');
     expect(policy).toContain('Public Git blob exceeds preflight file limit');
     expect(policy).toContain('Git blob exceeded its preflight length while streaming');
-    expect(policy).toContain('$process.StandardInput.BaseStream');
-    expect(policy).toContain('[System.Text.Encoding]::ASCII.GetBytes');
     expect(policy).toContain('fresh unrelated history');
     expect(policy).toContain('rev-parse --absolute-git-dir');
     expect(policy).toContain('$MonarchPublicFileFlagOpenReparsePoint');

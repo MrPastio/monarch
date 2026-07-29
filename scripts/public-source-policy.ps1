@@ -891,7 +891,7 @@ function Get-MonarchGitTreeRecords {
   # The default -z format is deliberate: unlike %(path), it emits the path as
   # raw bytes instead of C-quoting non-ASCII names even when -z is present.
   $bytes = Invoke-MonarchGitRaw $SourceRoot (
-    "ls-tree -r -z --full-tree $SourceRevision"
+    "ls-tree -r -z --full-tree -l $SourceRevision"
   ) -MaxOutputBytes $MaxTreeBytes
   $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
   $records = New-Object System.Collections.Generic.List[object]
@@ -915,14 +915,20 @@ function Get-MonarchGitTreeRecords {
     } else {
       -1
     }
-    $pathSeparator = if ($secondSpace -ge 0) {
-      $recordText.IndexOf("`t", $secondSpace + 1)
+    $thirdSpace = if ($secondSpace -ge 0) {
+      $recordText.IndexOf(' ', $secondSpace + 1)
+    } else {
+      -1
+    }
+    $pathSeparator = if ($thirdSpace -ge 0) {
+      $recordText.IndexOf("`t", $thirdSpace + 1)
     } else {
       -1
     }
     if ($firstSpace -le 0 -or
         $secondSpace -le $firstSpace -or
-        $pathSeparator -le $secondSpace) {
+        $thirdSpace -le $secondSpace -or
+        $pathSeparator -le $thirdSpace) {
       throw "Git returned a malformed tree record: $recordText"
     }
     # Keep the exact Git pathname. A literal backslash is legal in a tree but
@@ -935,10 +941,17 @@ function Get-MonarchGitTreeRecords {
     if ($records.Count -ge $MaxTreeEntries) {
       throw "Git tree exceeds the bounded entry limit: $MaxTreeEntries"
     }
+    $objectType = $recordText.Substring($firstSpace + 1, $secondSpace - $firstSpace - 1)
+    $objectSizeText = $recordText.Substring($thirdSpace + 1, $pathSeparator - $thirdSpace - 1).Trim()
+    if (($objectType -ceq 'blob' -and $objectSizeText -notmatch '^\d+$') -or
+        ($objectType -cne 'blob' -and $objectSizeText -cne '-')) {
+      throw "Git returned an invalid tree object size: $recordText"
+    }
     [void]$records.Add([pscustomobject]@{
       mode = $recordText.Substring(0, $firstSpace)
-      objectType = $recordText.Substring($firstSpace + 1, $secondSpace - $firstSpace - 1)
-      objectId = $recordText.Substring($secondSpace + 1, $pathSeparator - $secondSpace - 1).ToLowerInvariant()
+      objectType = $objectType
+      objectId = $recordText.Substring($secondSpace + 1, $thirdSpace - $secondSpace - 1).ToLowerInvariant()
+      objectSize = if ($objectType -ceq 'blob') { [long]$objectSizeText } else { [long]-1 }
       path = $path
     })
     $recordStart = $index + 1
@@ -1085,62 +1098,6 @@ function Assert-MonarchPublicStructureRegistry {
   }
 }
 
-function Get-MonarchGitBlobSizes {
-  param(
-    [Parameter(Mandatory = $true)][string] $SourceRoot,
-    [Parameter(Mandatory = $true)][object[]] $Records
-  )
-
-  $uniqueObjectIds = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-  foreach ($record in $Records) {
-    if ([string]$record.objectId -notmatch '^[0-9a-f]{40}$') {
-      throw "Invalid Git blob id in publication plan: $($record.objectId)"
-    }
-    [void]$uniqueObjectIds.Add([string]$record.objectId)
-  }
-
-  $startInfo = New-MonarchGitProcessStartInfo $SourceRoot 'cat-file --batch-check="%(objectname) %(objecttype) %(objectsize)"'
-  $startInfo.RedirectStandardInput = $true
-  $process = New-Object System.Diagnostics.Process
-  $process.StartInfo = $startInfo
-  if (-not $process.Start()) {
-    throw 'Could not start Git blob-size preflight.'
-  }
-  try {
-    $outputTask = $process.StandardOutput.ReadToEndAsync()
-    $errorTask = $process.StandardError.ReadToEndAsync()
-    $inputText = (@($uniqueObjectIds) -join "`n") + "`n"
-    $inputBytes = [System.Text.Encoding]::ASCII.GetBytes($inputText)
-    $inputStream = $process.StandardInput.BaseStream
-    $inputStream.Write($inputBytes, 0, $inputBytes.Length)
-    $inputStream.Close()
-    $process.WaitForExit()
-    $outputText = $outputTask.Result
-    $errorText = $errorTask.Result
-    if ($process.ExitCode -ne 0) {
-      throw "Git blob-size preflight failed: $errorText"
-    }
-  } finally {
-    $process.Dispose()
-  }
-
-  $sizes = New-Object 'System.Collections.Generic.Dictionary[string,long]' ([System.StringComparer]::Ordinal)
-  foreach ($line in @($outputText.TrimEnd("`r", "`n").Split("`n"))) {
-    $parts = $line.TrimEnd("`r").Split(' ')
-    if ($parts.Count -ne 3 -or
-        $parts[0] -notmatch '^[0-9a-f]{40}$' -or
-        $parts[1] -cne 'blob' -or
-        $parts[2] -notmatch '^\d+$') {
-      throw "Git blob-size preflight returned a malformed record: $line"
-    }
-    $sizes.Add($parts[0], [long]$parts[2])
-  }
-  if ($sizes.Count -ne $uniqueObjectIds.Count) {
-    throw "Git blob-size preflight returned $($sizes.Count) of $($uniqueObjectIds.Count) objects."
-  }
-  return $sizes
-}
-
 function Read-MonarchGitBlobBytes {
   param(
     [Parameter(Mandatory = $true)][string] $SourceRoot,
@@ -1251,11 +1208,13 @@ function New-MonarchPublicSnapshotPlan {
     throw "Public candidate count exceeds preflight limit: $($included.Count) > $MaxPublicFiles"
   }
 
-  $blobSizes = Get-MonarchGitBlobSizes $root $included.ToArray()
   $plannedFiles = New-Object System.Collections.Generic.List[object]
   [long]$plannedTotalBytes = 0
   foreach ($record in $included) {
-    $blobSize = [long]$blobSizes[[string]$record.objectId]
+    $blobSize = [long]$record.objectSize
+    if ($blobSize -lt 0) {
+      throw "Public Git blob has an invalid preflight size: $($record.path)"
+    }
     if ($blobSize -gt $MaxSourceBytes) {
       throw "Public Git blob exceeds preflight file limit: $($record.path) ($blobSize > $MaxSourceBytes)"
     }
