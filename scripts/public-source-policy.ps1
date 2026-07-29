@@ -1109,6 +1109,7 @@ function Get-MonarchGitBlobSizes {
   try {
     $outputTask = $process.StandardOutput.ReadToEndAsync()
     $errorTask = $process.StandardError.ReadToEndAsync()
+    $process.StandardInput.NewLine = "`n"
     foreach ($objectId in $uniqueObjectIds) {
       $process.StandardInput.WriteLine($objectId)
     }
