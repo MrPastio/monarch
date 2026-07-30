@@ -80,7 +80,7 @@ describe('Monarch distribution workflows', () => {
       'npm run test:raw -- --exclude tests/modules/coder.test.ts --exclude tests/app/coder-agent-controller.test.ts --maxWorkers=1',
     );
     expect(workflow).toContain(
-      "$env:MONARCH_CODER_SANDBOX_ROOT = Join-Path $qa 'coder-sandbox'",
+      "$env:MONARCH_CODER_SANDBOX_ROOT = 'C:\\monarch-release-smoke-sandbox'",
     );
   });
 
