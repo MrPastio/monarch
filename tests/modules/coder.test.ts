@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -6,6 +7,7 @@ import path from 'node:path';
 import { MonarchKernel } from '../../src/core';
 import { CoderModule } from '../../src/modules/coder';
 import { CoderRunStore } from '../../src/modules/coder/context-manager';
+import { CoderSandboxRunner } from '../../src/modules/coder/sandbox-runner';
 
 const context = {
   emit: async () => undefined,
@@ -13,6 +15,39 @@ const context = {
 } as any;
 
 describe('Coder Mode', () => {
+  it.runIf(process.platform === 'win32')('keeps the stable AppContainer fallback available without the optional BFS DLL', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-coder-status-'));
+    const sourcePath = path.join(root, 'MonarchCoderSandbox.cs');
+    const binaryPath = path.join(root, 'bin', 'monarch-coder-sandbox.exe');
+    const source = 'sealed class Program { static void Main() {} }\n';
+    const previousSystemRoot = process.env.SystemRoot;
+    await mkdir(path.dirname(binaryPath), { recursive: true });
+    await writeFile(sourcePath, source, 'utf8');
+    await writeFile(binaryPath, 'fixture', 'utf8');
+    await writeFile(`${binaryPath}.source.sha256`, `${JSON.stringify({
+      sourceHash: createHash('sha256').update(source).digest('hex'),
+      sharedAcl: 'all-app-packages-read-v1',
+    })}\n`, 'utf8');
+    process.env.SystemRoot = path.join(root, 'windows-without-processmodel');
+    try {
+      const sandbox = new CoderSandboxRunner({
+        monarchRoot: root,
+        runtimeRoot: root,
+        sourcePath,
+        binaryPath,
+      });
+      await expect(sandbox.status()).resolves.toMatchObject({
+        available: true,
+        enforced: true,
+        kind: 'windows-appcontainer-bfs-or-acl',
+      });
+    } finally {
+      if (previousSystemRoot === undefined) delete process.env.SystemRoot;
+      else process.env.SystemRoot = previousSystemRoot;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('creates projects under Workspace Coder and keeps Monarch and OS paths immutable', async () => {
     const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-host-'));
     const module = new CoderModule({ monarchRoot });

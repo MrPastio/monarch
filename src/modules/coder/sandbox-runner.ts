@@ -77,10 +77,6 @@ export class CoderSandboxRunner {
     if (process.platform !== 'win32') {
       return { available: false, enforced: true, reason: 'Coder command execution requires the Windows AppContainer broker.' };
     }
-    const apiPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'processmodel.dll');
-    if (!existsSync(apiPath)) {
-      return { available: false, enforced: true, reason: 'Windows processmodel.dll sandbox API is unavailable.' };
-    }
     try {
       await this.ensureBinary();
       return {
