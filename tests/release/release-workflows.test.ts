@@ -79,6 +79,9 @@ describe('Monarch distribution workflows', () => {
     expect(workflow).toContain(
       'npm run test:raw -- --exclude tests/modules/coder.test.ts --exclude tests/app/coder-agent-controller.test.ts --maxWorkers=1',
     );
+    expect(workflow).toContain(
+      "$env:MONARCH_CODER_SANDBOX_ROOT = Join-Path $qa 'coder-sandbox'",
+    );
   });
 
   it('serializes the broad Windows source suite in CI and stable release jobs', async () => {
