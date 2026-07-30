@@ -119,7 +119,7 @@ jobs:
           $env:MONARCH_CONFIG_ROOT = Join-Path $qa 'config'
           $env:MONARCH_SECRETS_ROOT = Join-Path $qa 'secrets'
           $env:MONARCH_MODELS_ROOT = Join-Path $qa 'models'
-          $env:MONARCH_CODER_SANDBOX_ROOT = Join-Path $qa 'coder-sandbox'
+          $env:MONARCH_CODER_SANDBOX_ROOT = 'C:\monarch-release-smoke-sandbox'
           npm run smoke:raw
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run desktop:smoke
