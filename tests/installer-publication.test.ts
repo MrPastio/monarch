@@ -1135,24 +1135,26 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(definition.match(/Filename: "\{sys\}\\WindowsPowerShell/g)).toBeNull();
     expect(definition).toContain('function RunCriticalStep');
     expect(definition).toContain('procedure FinalizeOfflinePayload');
-    expect(definition).toContain('procedure CurStepChanged');
+    expect(definition).not.toContain('procedure CurStepChanged');
     expect(definition).toContain('function GetCustomSetupExitCode');
     expect(definition).toContain('CriticalExitCode := 20');
     expect(definition).toContain('CriticalExitCode := 21');
+    expect(definition.match(/Check: CriticalInstallSucceeded/g)).toHaveLength(3);
+    expect(definition.match(/RaiseException\(/g)).toHaveLength(2);
     expect(definition).toContain('AfterInstall: FinalizeOfflinePayload');
     expect(definition).toContain('Monarch.next.exe');
     expect(definition).toContain('GetLauncherSwapParameters');
-    expect(definition).toContain('-LauncherVersion "1.0.2"');
+    expect(definition).toContain('-LauncherVersion "1.0.3"');
     expect(definition).toContain('versions\\{#AppVersion}');
     expect(definition).toContain('CloseApplications=no');
     expect(read('tools/launcher/MonarchLauncher.cs')).toContain(
-      'private const string LauncherVersion = "1.0.2"',
+      'private const string LauncherVersion = "1.0.3"',
     );
     expect(read('installer/layout.ps1')).toContain(
-      'candidateLauncherVersion = "1.0.2"',
+      'candidateLauncherVersion = "1.0.3"',
     );
     expect(read('installer/layout.ps1')).toContain(
-      'minimumLauncherVersion = "1.0.2"',
+      'minimumLauncherVersion = "1.0.3"',
     );
     expect(read('installer/layout.ps1')).toContain(
       'Remove-MonarchLegacyVersionJunction',
@@ -1161,7 +1163,12 @@ describe('Windows installer and public snapshot boundary', () => {
       'New-Item -ItemType Junction',
     );
     expect(read('installer/swap-launcher.ps1')).toContain(
-      '[string]$LauncherVersion = "1.0.2"',
+      '[string]$LauncherVersion = "1.0.3"',
+    );
+    expect(read('installer/swap-launcher.ps1')).toContain('-Argument "--verify-install"');
+    expect(read('installer/swap-launcher.ps1')).toContain('"install-health.json"');
+    expect(read('tools/launcher/MonarchLauncher.cs')).toContain(
+      'var verifyInstall = HasArgument(args, "--verify-install")',
     );
   });
 

@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)][string]$InstallRoot,
-  [string]$LauncherVersion = "1.0.2"
+  [string]$LauncherVersion = "1.0.3"
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,15 +15,18 @@ if (-not (Test-Path -LiteralPath $next -PathType Leaf)) {
 }
 
 function Invoke-LauncherSelfTest {
-  param([Parameter(Mandatory = $true)][string]$Path)
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [string]$Argument = "--self-test"
+  )
   $process = Start-Process `
     -FilePath $Path `
-    -ArgumentList "--self-test" `
+    -ArgumentList $Argument `
     -Wait `
     -PassThru `
     -WindowStyle Hidden
   if ($process.ExitCode -ne 0) {
-    throw "Launcher self-test failed with exit code $($process.ExitCode)."
+    throw "Launcher validation '$Argument' failed with exit code $($process.ExitCode)."
   }
 }
 
@@ -40,9 +43,12 @@ if (Test-Path -LiteralPath $current -PathType Leaf) {
 
 try {
   Invoke-LauncherSelfTest -Path $current
+  Invoke-LauncherSelfTest -Path $current -Argument "--verify-install"
 } catch {
   if (Test-Path -LiteralPath $previous -PathType Leaf) {
     [System.IO.File]::Replace($previous, $current, $failed, $true)
+  } elseif (Test-Path -LiteralPath $current -PathType Leaf) {
+    [System.IO.File]::Move($current, $failed)
   }
   throw
 }
@@ -54,4 +60,13 @@ Write-MonarchAtomicJson `
     schemaVersion = 1
     version = $LauncherVersion
     updatedAt = [DateTimeOffset]::UtcNow.ToString("o")
+  })
+Write-MonarchAtomicJson `
+  -Path (Join-Path $root "install-health.json") `
+  -Value ([ordered]@{
+    schemaVersion = 1
+    status = "healthy"
+    verification = "launcher-installed-layout"
+    launcherVersion = $LauncherVersion
+    verifiedAt = [DateTimeOffset]::UtcNow.ToString("o")
   })
