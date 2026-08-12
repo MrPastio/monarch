@@ -1,7 +1,7 @@
 param(
   [string]$InstallDirectory = "",
   [string]$InstallRoot = "",
-  [string]$AppVersion = "0.2.4.0",
+  [string]$AppVersion = "0.2.4.1",
   [string]$RuntimeVersion = "2026.07.7",
   [string]$BackendEnvironment = "backend-0.1.5-offline5",
   [int]$DataSchemaVersion = 1,

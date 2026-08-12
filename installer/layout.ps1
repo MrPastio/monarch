@@ -315,7 +315,7 @@ function Write-MonarchVersionDescriptor {
     descriptorVersion = 1
     appVersion = $AppVersion
     layoutSchemaVersion = 1
-    minimumLauncherVersion = "1.0.2"
+    minimumLauncherVersion = "1.0.3"
     runtimeVersion = $RuntimeVersion
     backendEnvironment = $BackendEnvironment
     dataSchemaVersion = $DataSchemaVersion
@@ -379,7 +379,7 @@ function New-MonarchPendingUpdate {
     previousVersion = $PreviousVersion
     candidateVersion = $CandidateVersion
     previousLauncherVersion = $previousLauncherVersion
-    candidateLauncherVersion = "1.0.2"
+    candidateLauncherVersion = "1.0.3"
     previousRuntimeVersion = [string]$previousDescriptor.runtimeVersion
     expectedRuntimeVersion = $CandidateRuntimeVersion
     previousBackendEnvironment = [string]$previousDescriptor.backendEnvironment

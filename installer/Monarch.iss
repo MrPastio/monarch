@@ -7,7 +7,7 @@
 
 #define AppName "Monarch"
 #ifndef AppVersion
-  #define AppVersion "0.2.4.0"
+  #define AppVersion "0.2.4.1"
 #endif
 #ifndef RuntimeVersion
 #define RuntimeVersion "2026.07.7"
@@ -73,8 +73,8 @@ Source: "{#SourceRoot}\installer\offline-payload\payload-manifest.json"; DestDir
 Source: "{#SourceRoot}\installer\offline-payload\Monarch.exe"; DestDir: "{app}"; DestName: "Monarch.next.exe"; Flags: ignoreversion; AfterInstall: FinalizeOfflinePayload
 
 [Icons]
-Name: "{group}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"
-Name: "{autodesktop}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Check: CriticalInstallSucceeded
+Name: "{autodesktop}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; Check: CriticalInstallSucceeded
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Запустить Monarch"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Check: CriticalInstallSucceeded
@@ -86,7 +86,7 @@ begin
     '-NoProfile -ExecutionPolicy Bypass -File "' +
     ExpandConstant('{app}\versions\{#AppVersion}\installer\swap-launcher.ps1') +
     '" -InstallRoot "' + ExpandConstant('{app}') +
-    '" -LauncherVersion "1.0.2"';
+    '" -LauncherVersion "1.0.3"';
 end;
 
 function GetFinalizeParameters(Param: String): String;
@@ -146,6 +146,7 @@ end;
 var
   CriticalExitCode: Integer;
   CriticalFinalizerCompleted: Boolean;
+  CriticalLauncherCompleted: Boolean;
 
 procedure FinalizeOfflinePayload;
 begin
@@ -154,30 +155,26 @@ begin
     GetFinalizeParameters(''),
     ExpandConstant('{app}')
   );
-  if not CriticalFinalizerCompleted then
-    CriticalExitCode := 20;
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if CurStep <> ssPostInstall then
-    Exit;
   if not CriticalFinalizerCompleted then begin
-    if CriticalExitCode = 0 then
-      CriticalExitCode := 22;
-    Exit;
+    CriticalExitCode := 20;
+    RaiseException('Monarch не смог проверить и установить встроенные компоненты. Установка отменена.');
   end;
-  if not RunCriticalStep(
+
+  CriticalLauncherCompleted := RunCriticalStep(
     'Обновляется безопасный загрузчик Monarch...',
     GetLauncherSwapParameters(''),
     ExpandConstant('{app}\versions\{#AppVersion}')
-  ) then
+  );
+  if not CriticalLauncherCompleted then begin
     CriticalExitCode := 21;
+    RaiseException('Monarch не смог проверить загрузчик и установленную среду. Установка отменена.');
+  end;
 end;
 
 function CriticalInstallSucceeded: Boolean;
 begin
-  Result := CriticalFinalizerCompleted and (CriticalExitCode = 0);
+  Result := CriticalFinalizerCompleted and CriticalLauncherCompleted and
+    FileExists(ExpandConstant('{app}\{#AppExeName}')) and (CriticalExitCode = 0);
 end;
 
 function GetCustomSetupExitCode: Integer;

@@ -79,6 +79,10 @@
       "scope": "oscar",
       "objectId": "9b167246f5e2b5360c87a5f421725ad4950acdac"
     },
+    "release/notes/v0.2.4.1.md": {
+      "scope": "release",
+      "objectId": "27161705a99fddfafecd15818be33350d42c8d07"
+    },
     "src/app/product-version.ts": {
       "scope": "src",
       "objectId": "16f22561fbcfb0eda7be02f2bf883ca0fbc053d0"

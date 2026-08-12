@@ -85,11 +85,55 @@ describe('Monarch launcher terminal update phases', () => {
   }, 15_000);
 });
 
+describe('Monarch launcher installed layout verification', () => {
+  it('accepts a complete self-contained installation without starting Electron', () => {
+    const fixture = createFixture('committed');
+    expect(runLauncherStatus(fixture.installRoot, ['--verify-install'])).toBe(0);
+    expect(existsSync(fixture.markerPath)).toBe(false);
+  });
+
+  it('rejects a missing bundled component before the installer can create shortcuts', () => {
+    const fixture = createFixture('committed');
+    rmSync(path.join(fixture.payloadRoot, 'runtimes', 'runtime-qa-runtime', 'electron', 'electron.exe'));
+    expect(runLauncherStatus(fixture.installRoot, ['--verify-install'])).toBe(3);
+    expect(existsSync(fixture.markerPath)).toBe(false);
+  });
+
+  it('publishes the launcher and health receipt only after full verification', () => {
+    const fixture = createFixture('committed');
+    rmSync(path.join(fixture.installRoot, 'Monarch.exe'));
+    copyFileSync(launcherPath, path.join(fixture.installRoot, 'Monarch.next.exe'));
+    const result = runLauncherSwap(fixture.installRoot);
+    expect(result.status).toBe(0);
+    expect(existsSync(path.join(fixture.installRoot, 'Monarch.exe'))).toBe(true);
+    expect(existsSync(path.join(fixture.installRoot, 'Monarch.next.exe'))).toBe(false);
+    expect(readJson(path.join(fixture.installRoot, 'install-health.json'))).toMatchObject({
+      status: 'healthy',
+      verification: 'launcher-installed-layout',
+      launcherVersion: '1.0.3',
+    });
+  }, 30_000);
+
+  it('leaves no launchable Monarch.exe when fresh-install verification fails', () => {
+    const fixture = createFixture('committed');
+    rmSync(path.join(fixture.installRoot, 'Monarch.exe'));
+    copyFileSync(launcherPath, path.join(fixture.installRoot, 'Monarch.next.exe'));
+    rmSync(path.join(fixture.payloadRoot, 'runtimes', 'runtime-qa-runtime', 'electron', 'electron.exe'));
+    const result = runLauncherSwap(fixture.installRoot);
+    expect(result.status).not.toBe(0);
+    expect(existsSync(path.join(fixture.installRoot, 'Monarch.exe'))).toBe(false);
+    expect(existsSync(path.join(fixture.installRoot, 'Monarch.failed.exe'))).toBe(true);
+    expect(existsSync(path.join(fixture.installRoot, 'install-health.json'))).toBe(false);
+  }, 30_000);
+});
+
 function createFixture(phase: 'committed' | 'rollback-required') {
   const fixtureRoot = path.join(suiteRoot, phase);
+  rmSync(fixtureRoot, { recursive: true, force: true });
   const installRoot = path.join(fixtureRoot, 'install');
   const payloadRoot = path.join(fixtureRoot, 'payload');
   const dataRoot = path.join(fixtureRoot, 'data');
+  const logsRoot = path.join(fixtureRoot, 'logs');
   const markerPath = path.join(dataRoot, 'launched-version.txt');
   const environmentPath = path.join(dataRoot, 'launched-environment.json');
   const runtimeRoot = path.join(payloadRoot, 'runtimes', 'runtime-qa-runtime');
@@ -103,14 +147,17 @@ function createFixture(phase: 'committed' | 'rollback-required') {
   mkdirSync(environmentRoot, { recursive: true });
   mkdirSync(transactionRoot, { recursive: true });
   mkdirSync(dataRoot, { recursive: true });
+  mkdirSync(logsRoot, { recursive: true });
   copyFileSync(process.execPath, path.join(runtimeRoot, 'electron', 'electron.exe'));
-  writeFileSync(path.join(runtimeRoot, 'node', 'node.exe'), '');
-  writeFileSync(path.join(runtimeRoot, 'python', 'python.exe'), '');
+  writeFileSync(path.join(runtimeRoot, 'node', 'node.exe'), 'node-stub');
+  writeFileSync(path.join(runtimeRoot, 'python', 'python.exe'), 'python-stub');
 
   for (const version of ['0.2.3.4', '0.2.3.5']) {
     const versionRoot = path.join(installRoot, 'versions', version);
     const mainPath = path.join(versionRoot, 'desktop', 'electron', 'main.mjs');
+    const serverPath = path.join(versionRoot, 'dist', 'monarch-server.mjs');
     mkdirSync(path.dirname(mainPath), { recursive: true });
+    mkdirSync(path.dirname(serverPath), { recursive: true });
     writeFileSync(mainPath, [
       "import { mkdirSync, writeFileSync } from 'node:fs';",
       "import path from 'node:path';",
@@ -120,6 +167,7 @@ function createFixture(phase: 'committed' | 'rollback-required') {
       "writeFileSync(path.join(dataRoot, 'launched-environment.json'), JSON.stringify({ generatedRoot: process.env.MONARCH_GENERATED_ROOT, modelsRoot: process.env.MONARCH_MODELS_ROOT, workspaceRoot: process.env.MONARCH_WORKSPACE_ROOT, secretsRoot: process.env.MONARCH_SECRETS_ROOT, oscarWorkspaceRoot: process.env.OSCAR_WORKSPACE_ROOT, oscarPython: process.env.OSCAR_PYTHON }));",
       '',
     ].join('\n'));
+    writeFileSync(serverPath, 'export {};\n');
     writeJson(path.join(versionRoot, 'version.json'), {
       descriptorVersion: 1,
       appVersion: version,
@@ -139,7 +187,7 @@ function createFixture(phase: 'committed' | 'rollback-required') {
     payloadRoot,
     configRoot: path.join(fixtureRoot, 'config'),
     dataRoot,
-    logsRoot: path.join(fixtureRoot, 'logs'),
+    logsRoot,
     transactionsRoot: transactionRoot,
   });
   const committed = phase === 'committed';
@@ -172,12 +220,28 @@ function createFixture(phase: 'committed' | 'rollback-required') {
 }
 
 function runLauncher(installRoot: string) {
-  const result = spawnSync(path.join(installRoot, 'Monarch.exe'), [], {
+  expect(runLauncherStatus(installRoot)).toBe(0);
+}
+
+function runLauncherStatus(installRoot: string, args: string[] = []) {
+  const result = spawnSync(path.join(installRoot, 'Monarch.exe'), args, {
     cwd: installRoot,
     encoding: 'utf8',
     timeout: 10_000,
   });
-  expect(result.status).toBe(0);
+  return result.status;
+}
+
+function runLauncherSwap(installRoot: string) {
+  return spawnSync('powershell.exe', [
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    path.join(repositoryRoot, 'installer', 'swap-launcher.ps1'),
+    '-InstallRoot', installRoot,
+  ], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+    timeout: 20_000,
+  });
 }
 
 async function waitForLaunchMarker(markerPath: string) {

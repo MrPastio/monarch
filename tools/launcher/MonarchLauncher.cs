@@ -10,7 +10,7 @@ namespace MonarchLauncher
 {
     internal static class Program
     {
-        private const string LauncherVersion = "1.0.2";
+        private const string LauncherVersion = "1.0.3";
         private const int HealthTimeoutSeconds = 120;
         private const int MaximumCandidateAttempts = 2;
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
@@ -26,11 +26,18 @@ namespace MonarchLauncher
         {
             try { SetCurrentProcessExplicitAppUserModelID("Monarch.App"); } catch { }
 
+            var verifyInstall = HasArgument(args, "--verify-install");
             try
             {
                 if (HasArgument(args, "--self-test"))
                 {
                     return SelfTest();
+                }
+
+                if (verifyInstall)
+                {
+                    VerifyInstalledLayout();
+                    return 0;
                 }
 
                 var installRoot = AppDomain.CurrentDomain.BaseDirectory
@@ -74,6 +81,10 @@ namespace MonarchLauncher
             }
             catch (Exception error)
             {
+                if (verifyInstall)
+                {
+                    return 3;
+                }
                 ShowFailure(error.Message);
                 return 1;
             }
@@ -87,6 +98,66 @@ namespace MonarchLauncher
                 return 2;
             }
             return 0;
+        }
+
+        private static void VerifyInstalledLayout()
+        {
+            var installRoot = AppDomain.CurrentDomain.BaseDirectory
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var currentPath = Path.Combine(installRoot, "current.json");
+            var layoutPath = Path.Combine(installRoot, "install-layout.json");
+            RequireNonEmptyFile(currentPath, "The active Monarch version pointer is missing.");
+            RequireNonEmptyFile(layoutPath, "The Monarch install layout is missing.");
+
+            var layout = ReadJson(layoutPath);
+            RequireInteger(layout, "schemaVersion", 1);
+            var declaredInstallRoot = Path.GetFullPath(RequireString(layout, "installRoot"))
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (!String.Equals(installRoot, declaredInstallRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("The Monarch install layout belongs to a different directory.");
+            }
+
+            var payloadRoot = RequireExistingDirectory(RequireString(layout, "payloadRoot"));
+            RequireExistingDirectory(RequireString(layout, "dataRoot"));
+            RequireExistingDirectory(RequireString(layout, "logsRoot"));
+            RequireCanonicalDirectory(RequireString(layout, "transactionsRoot"), payloadRoot);
+
+            var pointer = ReadJson(currentPath);
+            RequireInteger(pointer, "schemaVersion", 1);
+            var currentVersion = RequireSafeVersion(pointer, "currentVersion");
+            var versionsRoot = Path.GetFullPath(Path.Combine(installRoot, "versions"));
+            var versionRoot = RequireExistingDirectory(RequireCanonicalDirectory(
+                Path.Combine(versionsRoot, currentVersion),
+                versionsRoot
+            ));
+            var descriptorPath = Path.Combine(versionRoot, "version.json");
+            RequireNonEmptyFile(descriptorPath, "The installed Monarch version descriptor is missing.");
+            var descriptor = ReadJson(descriptorPath);
+            RequireInteger(descriptor, "descriptorVersion", 1);
+            RequireInteger(descriptor, "layoutSchemaVersion", 1);
+            if (!String.Equals(RequireSafeVersion(descriptor, "appVersion"), currentVersion, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("The active Monarch version descriptor does not match its directory.");
+            }
+            if (CompareVersions(LauncherVersion, RequireSafeVersion(descriptor, "minimumLauncherVersion")) < 0)
+            {
+                throw new InvalidDataException("The installed Monarch version requires a newer launcher.");
+            }
+
+            var runtimeRoot = ValidatePayloadComponent(
+                payloadRoot,
+                Path.Combine(payloadRoot, "runtimes", "runtime-" + RequireSafeIdentifier(descriptor, "runtimeVersion"))
+            );
+            ValidatePayloadComponent(
+                payloadRoot,
+                Path.Combine(payloadRoot, "environments", RequireSafeIdentifier(descriptor, "backendEnvironment"))
+            );
+            RequireNonEmptyFile(Path.Combine(runtimeRoot, "electron", "electron.exe"), "The bundled Electron runtime is missing or empty.");
+            RequireNonEmptyFile(Path.Combine(runtimeRoot, "node", "node.exe"), "The bundled Node.js runtime is missing or empty.");
+            RequireNonEmptyFile(Path.Combine(runtimeRoot, "python", "python.exe"), "The bundled Python runtime is missing or empty.");
+            RequireNonEmptyFile(Path.Combine(versionRoot, "desktop", "electron", "main.mjs"), "The Monarch desktop entrypoint is missing or empty.");
+            RequireNonEmptyFile(Path.Combine(versionRoot, "dist", "monarch-server.mjs"), "The Monarch server entrypoint is missing or empty.");
         }
 
         private static int RunCandidateTrial(
@@ -257,22 +328,11 @@ namespace MonarchLauncher
             var nodeExe = Path.Combine(runtimeRoot, "node", "node.exe");
             var pythonExe = Path.Combine(runtimeRoot, "python", "python.exe");
             var electronMain = Path.Combine(versionRoot, "desktop", "electron", "main.mjs");
-            if (!File.Exists(electronExe))
-            {
-                throw new FileNotFoundException("Electron runtime is missing.", electronExe);
-            }
-            if (!File.Exists(nodeExe))
-            {
-                throw new FileNotFoundException("Node.js runtime is missing.", nodeExe);
-            }
-            if (!File.Exists(pythonExe))
-            {
-                throw new FileNotFoundException("Python runtime is missing.", pythonExe);
-            }
-            if (!File.Exists(electronMain))
-            {
-                throw new FileNotFoundException("Monarch desktop entrypoint is missing.", electronMain);
-            }
+            RequireNonEmptyFile(electronExe, "Electron runtime is missing or empty.");
+            RequireNonEmptyFile(nodeExe, "Node.js runtime is missing or empty.");
+            RequireNonEmptyFile(pythonExe, "Python runtime is missing or empty.");
+            RequireNonEmptyFile(electronMain, "Monarch desktop entrypoint is missing or empty.");
+            RequireNonEmptyFile(Path.Combine(versionRoot, "dist", "monarch-server.mjs"), "Monarch server entrypoint is missing or empty.");
 
             var startInfo = new ProcessStartInfo();
             startInfo.FileName = electronExe;
@@ -422,6 +482,25 @@ namespace MonarchLauncher
                 throw new DirectoryNotFoundException("A versioned Monarch runtime component is missing.");
             }
             return canonical;
+        }
+
+        private static string RequireExistingDirectory(string path)
+        {
+            var canonical = Path.GetFullPath(path);
+            if (!Directory.Exists(canonical))
+            {
+                throw new DirectoryNotFoundException("A required Monarch directory is missing: " + canonical);
+            }
+            return canonical;
+        }
+
+        private static void RequireNonEmptyFile(string path, string message)
+        {
+            var file = new FileInfo(path);
+            if (!file.Exists || file.Length <= 0)
+            {
+                throw new FileNotFoundException(message, path);
+            }
         }
 
         private static void RequireOutsideVersionRoot(string candidate, string versionRoot)
