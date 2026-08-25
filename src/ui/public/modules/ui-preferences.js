@@ -8,6 +8,7 @@ export function normalizeUiPreferences(value) {
   return {
     density: ['comfortable', 'compact'].includes(source.density) ? source.density : 'comfortable',
     inspector: mascotVisible ? 'open' : 'closed',
+    contextMeterVisible: source.contextMeterVisible !== false,
   };
 }
 
@@ -16,5 +17,6 @@ export function serializeUiPreferences(preferences) {
     ...preferences,
     mascotVisible: preferences?.inspector !== 'closed',
     mascotPreferenceVersion: MASCOT_PREFERENCE_VERSION,
+    contextMeterVisible: preferences?.contextMeterVisible !== false,
   };
 }

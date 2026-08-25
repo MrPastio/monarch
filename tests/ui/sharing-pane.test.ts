@@ -31,12 +31,15 @@ describe('Monarch Sharing UI', () => {
     expect(paneSource).toContain("Super Fast — Qwen");
     expect(paneSource).toContain("'qwen2.5-0.5b-instruct'");
     expect(paneSource).toContain("'qwen3-1.7b-instruct'");
-    expect(paneSource).toContain('TTS Models');
+    expect(paneSource).toContain('Голосовые модели');
     expect(paneSource).toContain('sharing-tts-model-select');
     expect(paneSource).toContain('data-sharing-copy="tts-snippet"');
     expect(paneSource).toContain('buildTtsSnippet');
     expect(paneSource).toContain('Только этот компьютер');
-    expect(paneSource).toContain('Без облака');
+    expect(paneSource).toContain("renderSharingTab('connection', 'Подключение')");
+    expect(paneSource).toContain("renderSharingTab('examples', 'Примеры')");
+    expect(paneSource).toContain("renderSharingTab('models', 'Модели')");
+    expect(paneSource).toContain("renderSharingTab('voice', 'Голос')");
   });
 
   it('copies the API key through a bounded desktop bridge without returning it', () => {

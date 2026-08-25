@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { AssistantModule } from '../../src/modules/assistant';
 
 describe('assistant model override routing', () => {
-  it('passes explicit Deep Thinking Extended override from intent context', async () => {
+  it('migrates an explicit retired Extra override to Qwen Pro', async () => {
     const module = new AssistantModule();
 
     const decision = await module.handleIntent({
@@ -14,7 +14,7 @@ describe('assistant model override routing', () => {
     });
 
     expect(decision?.capabilityId).toBe('assistant.reply');
-    expect((decision?.input as any)?.model_override).toBe('gemma4-31b');
+    expect((decision?.input as any)?.model_override).toBe('qwen3.8-27b-pro');
   });
 
   it('drops invalid model overrides before assistant execution', async () => {

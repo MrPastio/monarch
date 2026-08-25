@@ -12,34 +12,15 @@ import type {
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
-  MonarchRisk,
   MonarchRouteDecision,
 } from '../../core';
 import { permissionModeForRisk } from '../../core';
 import { voiceManifest } from './manifest';
 import {
-  VoiceModeModelManager,
-  type VoiceModeModelManagerPort,
-} from './voice-mode-model-manager';
-import {
-  VoiceModeRuntimeError,
-} from './voice-lite-runtime';
-import { classifyVoiceModeCommand, type VoiceModeCommandCandidate } from './voice-mode';
-import { executeVoiceModeScripted, VoiceScriptedError } from './voice-scripted';
-import {
-  executeVoiceVolumeAction,
-  executeVoiceVolumeStatus,
-  VoiceVolumeError,
-} from './voice-device-volume';
-import {
   VoiceSttRuntimeError,
   type VoiceSttRuntimePort,
 } from './voice-stt-runtime';
 import { VoiceStreamingSttRuntime } from './voice-streaming-stt-runtime';
-import {
-  VoiceSessionError,
-  VoiceSessionStore,
-} from './voice-session';
 
 type VoiceBridgeKind = 'stt' | 'tts';
 const MAX_TRANSCRIBE_AUDIO_BYTES = 32 * 1024 * 1024;
@@ -79,20 +60,12 @@ interface VoiceSttSession {
 export class VoiceModule implements MonarchModule {
   readonly manifest = voiceManifest;
   private readonly bridges = new Map<VoiceBridgeKind, VoiceBridgeRecord>();
-  private readonly voiceModeModels: VoiceModeModelManagerPort;
   private readonly sttRuntime: VoiceSttRuntimePort;
-  private readonly sessions: VoiceSessionStore;
   private readonly sttSessions = new Map<string, VoiceSttSession>();
   private readonly sttSessionByClient = new Map<string, string>();
 
-  constructor(
-    voiceModeModels: VoiceModeModelManagerPort = new VoiceModeModelManager(),
-    sttRuntime: VoiceSttRuntimePort = new VoiceStreamingSttRuntime(),
-    sessions: VoiceSessionStore = new VoiceSessionStore(),
-  ) {
-    this.voiceModeModels = voiceModeModels;
+  constructor(sttRuntime: VoiceSttRuntimePort = new VoiceStreamingSttRuntime()) {
     this.sttRuntime = sttRuntime;
-    this.sessions = sessions;
   }
 
   async activate(context: MonarchKernelContext): Promise<void> {
@@ -114,11 +87,7 @@ export class VoiceModule implements MonarchModule {
     await Promise.allSettled(Array.from(this.sttSessions.values(), (session) => (
       this.closeSttSession(session, true)
     )));
-    await Promise.all([
-      this.voiceModeModels.shutdown(),
-      this.sttRuntime.shutdown(),
-    ]);
-    this.sessions.clear();
+    await this.sttRuntime.shutdown();
   }
 
   async health(): Promise<MonarchExecutionResult> {
@@ -127,18 +96,6 @@ export class VoiceModule implements MonarchModule {
       summary: 'Voice module ready.',
       output: this.statusPayload(),
     };
-  }
-
-  resolveCapabilityRisk(request: MonarchExecutionRequest): MonarchRisk | undefined {
-    if (request.capabilityId !== 'voice.mode.execute-scripted') return undefined;
-    const text = readVoiceModeText(request.input);
-    if (!text) return undefined;
-    const candidate = classifyVoiceModeCommand(text);
-    // System volume is a reversible, deterministic local executable action.
-    // Keep it above read/write, but do not classify it as sensitive device
-    // enrollment/control, which would make Full Access + approvalPolicy=never
-    // permanently unusable even for the user's direct spoken gesture.
-    return candidate.actionId === 'device.volume' ? 'execute' : undefined;
   }
 
   async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
@@ -202,73 +159,8 @@ export class VoiceModule implements MonarchModule {
       return this.finishSttStream(request, context);
     case 'voice.transcribe.stream.cancel':
       return this.cancelSttStream(request);
-    case 'voice.mode.classify': {
-      const text = readVoiceModeText(request.input);
-      if (!text) {
-        return {
-          ok: false,
-          summary: 'Voice mode needs a non-empty transcript.',
-          error: 'voice-mode-text-empty',
-        };
-      }
-      const sessionId = readVoiceSessionId(request.input);
-      let turnContext;
-      try {
-        turnContext = sessionId ? this.sessions.beginTurn(sessionId, text) : undefined;
-      } catch (error) {
-        return voiceModeFailure(error);
-      }
-      const classified = classifyVoiceModeCommand(text);
-      const routed: VoiceModeCommandCandidate = turnContext?.contextDependent && classified.lane === 'voice-lite'
-        ? {
-          ...classified,
-          lane: 'fast-llm',
-          modelRoute: 'gemma4-fast',
-          maxNewTokens: 192,
-          reason: 'Context-dependent transformations need the bounded Fast lane with Voice session history.',
-        }
-        : classified;
-      const candidate = turnContext
-        ? {
-          ...routed,
-          slots: routed.actionId === 'web.search'
-            && turnContext.contextDependent
-            && isWeakContextualSearchQuery(routed.slots.query)
-            ? { ...routed.slots, query: turnContext.contextualText }
-            : routed.actionId === 'device.browser.open'
-              && turnContext.contextDependent
-              && !routed.slots.url
-              ? { ...routed.slots, query: turnContext.contextualText }
-              : routed.slots,
-          context: turnContext,
-        }
-        : classified;
-      await context.emit('voice.mode.classified', this.manifest.id, {
-        actionId: candidate.actionId,
-        lane: candidate.lane,
-        modelRoute: candidate.modelRoute,
-        risk: candidate.risk,
-      });
-      return {
-        ok: true,
-        summary: `Voice turn routed to ${candidate.lane}.`,
-        output: candidate,
-      };
-    }
-    case 'voice.mode.session.start':
-      return this.startVoiceSession(context);
-    case 'voice.mode.session.complete':
-      return this.completeVoiceSessionTurn(request.input, context);
-    case 'voice.mode.session.close':
-      return this.closeVoiceSession(request.input, context);
-    case 'voice.mode.prepare':
-      return this.prepareVoiceMode(request.input, context);
-    case 'voice.mode.release':
-      return this.releaseVoiceMode(request.input, context);
-    case 'voice.mode.respond':
-      return this.respondVoiceMode(request.input, context);
-    case 'voice.mode.execute-scripted':
-      return this.executeScriptedVoice(request.input, context);
+    case 'voice.transcribe.prepare':
+      return this.prepareTranscription(context);
     case 'voice.bridge.start':
       return this.startBridge(readBridge(request.input), context);
     case 'voice.bridge.stop':
@@ -282,171 +174,19 @@ export class VoiceModule implements MonarchModule {
     }
   }
 
-  private async startVoiceSession(context: MonarchKernelContext): Promise<MonarchExecutionResult> {
-    const session = this.sessions.start();
-    await context.emit('voice.mode.session.started', this.manifest.id, {
-      sessionId: session.sessionId,
-      expiresAt: session.expiresAt,
-    });
+  private async prepareTranscription(context: MonarchKernelContext): Promise<MonarchExecutionResult> {
+    const stt = await this.sttRuntime.prepare(defaultSttLanguage()).catch((error) => ({
+      status: 'failed' as const,
+      error: error instanceof VoiceSttRuntimeError ? error.code : 'voice-stt-runtime-failed',
+    }));
+    await context.emit('voice.transcribe.ready', this.manifest.id, stt);
     return {
       ok: true,
-      summary: 'Voice conversation session started.',
-      output: session,
+      summary: stt.status === 'ready'
+        ? `Voice STT ready via ${stt.engine}.`
+        : 'Voice STT warmup failed; recorded-audio fallback remains available.',
+      output: { stt },
     };
-  }
-
-  private async completeVoiceSessionTurn(
-    input: unknown,
-    context: MonarchKernelContext,
-  ): Promise<MonarchExecutionResult> {
-    const record = readObject(input);
-    const sessionId = readVoiceSessionId(record);
-    const turnId = typeof record.turnId === 'string' ? record.turnId.trim() : '';
-    const response = typeof record.response === 'string' ? record.response.trim() : '';
-    const actionId = typeof record.actionId === 'string' ? record.actionId.trim() : undefined;
-    try {
-      const result = this.sessions.completeTurn(sessionId, turnId, response, actionId);
-      await context.emit('voice.mode.session.completed', this.manifest.id, {
-        sessionId,
-        turnId,
-        actionId,
-        messageCount: result.messageCount,
-      });
-      return { ok: true, summary: 'Voice conversation turn committed.', output: result };
-    } catch (error) {
-      return voiceModeFailure(error);
-    }
-  }
-
-  private async closeVoiceSession(
-    input: unknown,
-    context: MonarchKernelContext,
-  ): Promise<MonarchExecutionResult> {
-    const sessionId = readVoiceSessionId(input);
-    const closed = this.sessions.close(sessionId);
-    await context.emit('voice.mode.session.closed', this.manifest.id, { sessionId, closed });
-    return {
-      ok: true,
-      summary: closed ? 'Voice conversation session closed.' : 'Voice conversation session was already closed.',
-      output: { sessionId, closed },
-    };
-  }
-
-  private async prepareVoiceMode(
-    input: unknown,
-    context: MonarchKernelContext,
-  ): Promise<MonarchExecutionResult> {
-    try {
-      // Keep Qwen TTS' completed warmup allocation safe: prepare the one STT
-      // runtime first, then (only when explicitly requested) the single Lite
-      // profile. The UI default never preloads a local LLM.
-      const stt = await this.sttRuntime.prepare(defaultSttLanguage()).catch((error) => ({
-        status: 'failed' as const,
-        error: error instanceof VoiceSttRuntimeError ? error.code : 'voice-stt-runtime-failed',
-      }));
-      const result = await this.voiceModeModels.prepare(input);
-      await context.emit('voice.mode.ready', this.manifest.id, result);
-      return {
-        ok: true,
-        summary: stt.status === 'ready'
-          ? `Voice STT ready via ${stt.engine}; local LLM remains ${result.profiles.length ? 'explicitly prepared' : 'lazy'}.`
-          : 'Voice STT warmup failed; recorded-audio fallback remains available and local LLM remains lazy.',
-        output: {
-          ...result,
-          stt,
-        },
-      };
-    } catch (error) {
-      return voiceModeFailure(error);
-    }
-  }
-
-  private async releaseVoiceMode(
-    input: unknown,
-    context: MonarchKernelContext,
-  ): Promise<MonarchExecutionResult> {
-    try {
-      const result = await this.voiceModeModels.release(input);
-      await context.emit('voice.mode.released', this.manifest.id, result);
-      return {
-        ok: true,
-        summary: result.profiles.length
-          ? `Released voice profiles: ${result.profiles.join(', ')}.`
-          : 'No resident voice LLM profile needed release.',
-        output: result,
-      };
-    } catch (error) {
-      return voiceModeFailure(error);
-    }
-  }
-
-  private async respondVoiceMode(
-    input: unknown,
-    context: MonarchKernelContext,
-  ): Promise<MonarchExecutionResult> {
-    try {
-      const result = await this.voiceModeModels.respond(input);
-      await context.emit('voice.mode.responded', this.manifest.id, {
-        profile: result.profile,
-        backend: result.backend,
-        model: result.model,
-        loadMs: result.loadMs,
-        generationMs: result.generationMs,
-        ttftMs: result.ttftMs,
-        responseLength: result.text.length,
-      });
-      return {
-        ok: true,
-        summary: `Voice ${result.profile} response generated locally.`,
-        output: result,
-      };
-    } catch (error) {
-      return voiceModeFailure(error);
-    }
-  }
-
-  private async executeScriptedVoice(
-    input: unknown,
-    context: MonarchKernelContext,
-  ): Promise<MonarchExecutionResult> {
-    const text = readVoiceModeText(input);
-    try {
-      if (!text) {
-        throw new VoiceScriptedError(
-          'voice-scripted-input-invalid',
-          'Scripted voice execution requires a non-empty transcript.',
-        );
-      }
-      const candidate = classifyVoiceModeCommand(text);
-      const result = candidate.actionId === 'device.volume'
-        ? await executeVoiceVolumeAction(text)
-        : candidate.actionId === 'device.volume.status'
-          ? await executeVoiceVolumeStatus()
-        : executeVoiceModeScripted(text);
-      const eventName = result.status === 'unsupported'
-        ? 'voice.mode.scripted.unsupported'
-        : result.status === 'clarification'
-          ? 'voice.mode.scripted.clarification'
-          : 'voice.mode.scripted.executed';
-      await context.emit(eventName, this.manifest.id, {
-        actionId: result.actionId,
-        lane: result.lane,
-        model: result.model,
-        performed: result.performed,
-        status: result.status,
-      });
-      return {
-        ok: true,
-        summary: result.status === 'unsupported'
-          ? `Scripted voice action is unsupported and was not performed: ${result.actionId}.`
-          : result.status === 'clarification'
-            ? `Scripted voice action needs clarification: ${result.actionId}.`
-            : `Scripted voice action executed: ${result.actionId}.`,
-        output: result,
-      };
-    } catch (error) {
-      return voiceModeFailure(error);
-    }
   }
 
   private async startBridge(
@@ -914,8 +654,6 @@ export class VoiceModule implements MonarchModule {
           || (usesDefaultVoskWorker() ? 'sherpa-onnx-t-one+vosk-fallback' : 'custom'),
         tts: process.env.MONARCH_TTS_ENGINE || 'piper',
       },
-      voiceMode: this.voiceModeModels.snapshot(),
-      voiceSessions: this.sessions.snapshot(),
       sttRuntime: this.sttRuntime.snapshot(),
     };
   }
@@ -1048,63 +786,6 @@ function sttStreamFailure(error: unknown): MonarchExecutionResult {
     summary: `Streaming STT failed: ${error instanceof Error ? error.message : String(error)}`,
     error: 'voice-stt-stream-failed',
   };
-}
-
-function voiceModeFailure(error: unknown): MonarchExecutionResult {
-  if (error instanceof VoiceSessionError) {
-    return {
-      ok: false,
-      summary: error.message,
-      error: error.code,
-    };
-  }
-  if (error instanceof VoiceModeRuntimeError) {
-    return {
-      ok: false,
-      summary: error.message,
-      error: error.code,
-      ...(Object.keys(error.details).length > 0 ? { output: error.details } : {}),
-    };
-  }
-  if (error instanceof VoiceScriptedError) {
-    return {
-      ok: false,
-      summary: error.message,
-      error: error.code,
-      ...(error.actionId ? { output: { actionId: error.actionId, lane: 'scripted', model: 'none' } } : {}),
-    };
-  }
-  if (error instanceof VoiceVolumeError) {
-    return {
-      ok: false,
-      summary: error.message,
-      error: error.code,
-      output: { actionId: 'device.volume', lane: 'scripted', model: 'none', verified: false },
-    };
-  }
-  return {
-    ok: false,
-    summary: `Voice-lite runtime failed: ${error instanceof Error ? error.message : String(error)}`,
-    error: 'voice-lite-runtime-failed',
-  };
-}
-
-function readVoiceModeText(input: unknown): string {
-  if (!input || typeof input !== 'object') return '';
-  const value = (input as Record<string, unknown>).text;
-  return typeof value === 'string' ? value.trim().slice(0, 4000) : '';
-}
-
-function readVoiceSessionId(input: unknown): string {
-  const record = readObject(input);
-  return typeof record.sessionId === 'string' ? record.sessionId.trim().slice(0, 96) : '';
-}
-
-function isWeakContextualSearchQuery(value: unknown): boolean {
-  const query = typeof value === 'string' ? value.trim().toLowerCase().replace(/ё/g, 'е') : '';
-  return !query
-    || query.length < 20
-    || /^(?:это|его|ее|её|их|там|подробнее|еще|ещё|дальше|про это|об этом)$/u.test(query);
 }
 
 function waitForBridgeSpawn(child: ChildProcessWithoutNullStreams): Promise<void> {

@@ -3,13 +3,14 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Monarch Workspace</title>
+    <title>Monarch</title>
     <link rel="icon" href="/favicon.ico" />
     <link rel="stylesheet" href="/styles-v2.css">
     <link rel="stylesheet" href="/sharing.css">
     <link rel="stylesheet" href="/coder.css">
     <link rel="stylesheet" href="/studio.css">
     <link rel="stylesheet" href="/startup/monarch-startup.css">
+    <link rel="stylesheet" href="/ui-refresh.css">
     <script>
       const startupTypes = new Set(['classic', 'generated', 'model', 'test', 'disabled']);
       let startupType = 'generated';
@@ -73,6 +74,58 @@
     <script>
       document.getElementById('startup-motion').dataset.startupVariant = startupType;
     </script>
+    <section class="model-setup" id="model-setup" aria-labelledby="model-setup-title" aria-modal="true" role="dialog" hidden>
+      <div class="model-setup-ambient" aria-hidden="true"></div>
+      <header class="model-setup-brand">
+        <img src="/assets/brand/monarch-icon.png" alt="">
+        <strong>MONARCH</strong>
+      </header>
+      <div class="model-setup-panel">
+        <p class="section-kicker">Первый запуск</p>
+        <h1 id="model-setup-title">Выберем модель для тебя</h1>
+        <p class="model-setup-lead">Monarch оценил возможности компьютера и уже выбрал подходящий вариант. При желании можно выбрать любую другую модель.</p>
+        <div class="model-setup-hardware" id="model-setup-hardware" aria-label="Возможности компьютера"></div>
+        <div class="model-setup-list" id="model-setup-list"></div>
+        <button class="model-setup-reveal" id="model-setup-reveal" type="button" aria-expanded="false">Показать все модели</button>
+        <label class="model-setup-all" id="model-setup-all" hidden>
+          <input type="checkbox" id="model-setup-all-input">
+          <span><strong>Скачать все три</strong><small>Можно переключаться под разные задачи</small></span>
+          <b id="model-setup-total-size">—</b>
+        </label>
+        <div class="model-setup-actions">
+          <button class="model-setup-primary" id="model-setup-install" type="button">Скачать и продолжить</button>
+          <button class="model-setup-skip" id="model-setup-skip" type="button">Пропустить установку моделей</button>
+        </div>
+        <p class="model-setup-feedback" id="model-setup-feedback" aria-live="polite"></p>
+        <div class="model-setup-progress" id="model-setup-progress" hidden></div>
+        <details class="model-setup-manual" id="model-setup-manual">
+          <summary>Если автоматическая установка не работает :(</summary>
+          <div class="model-setup-manual-body">
+            <p>Не переживай. Сделай всё по порядку — Monarch сам проверит файлы после перезапуска.</p>
+            <ol>
+              <li>Ниже нажми <strong>«Открыть папку моделей»</strong>. Не закрывай её.</li>
+              <li>У нужной модели нажми каждую кнопку <strong>«Скачать»</strong> и дождись конца загрузки.</li>
+              <li>В открытой папке создай указанные подпапки. Названия должны совпадать буква в букву.</li>
+              <li>Перенеси скачанные файлы в указанные подпапки. Имена файлов не меняй.</li>
+              <li>Полностью закрой Monarch через значок в трее и запусти снова. Готовые модели появятся в Настройки → Модели.</li>
+            </ol>
+            <button class="model-setup-folder" id="model-setup-open-folder" type="button">Открыть папку моделей</button>
+            <p class="model-setup-manual-feedback" id="model-setup-manual-feedback" aria-live="polite"></p>
+            <div class="model-setup-manual-models" id="model-setup-manual-models"></div>
+          </div>
+        </details>
+      </div>
+    </section>
+    <section class="model-setup-welcome" id="model-setup-welcome" aria-label="Добро пожаловать в Monarch" hidden>
+      <div class="model-setup-welcome-brand" aria-hidden="true">
+        <span class="model-setup-welcome-logo"><img src="/assets/brand/monarch-startup-3d.png" alt=""></span>
+        <strong>Monarch</strong>
+      </div>
+      <div class="model-setup-welcome-message" role="status">
+        <p>Не судите строго,это только BETA,приятного использования</p>
+      </div>
+      <span class="model-setup-welcome-skip">Нажми в любом месте, чтобы продолжить</span>
+    </section>
     <div class="app-shell mascot-empty-home" id="app-shell">
       
       <!-- 1. Minimal Left Sidebar -->
@@ -104,9 +157,9 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
             <span>Память</span>
           </button>
-          <button class="nav-item" type="button" data-scroll-target="workspace-section" aria-label="Открыть проект" title="Проект">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect></svg>
-            <span>Проект</span>
+          <button class="nav-item" type="button" data-scroll-target="images-section" aria-label="Открыть генератор изображений" title="Изображения">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"></rect><circle cx="8.5" cy="9" r="1.5"></circle><path d="m4 17 5-5 4 4 2-2 5 5"></path></svg>
+            <span>Изображения</span>
           </button>
           <button class="nav-item monarch-modules-nav" type="button" data-scroll-target="modules-section" aria-label="Открыть Monarch Modules" title="Monarch Modules">
             <img class="nav-library-icon" src="/assets/icons/phosphor/circles-four.svg" alt="">
@@ -120,17 +173,13 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><rect x="8.5" y="10" width="7" height="6" rx="1"></rect><path d="M10 10V8.5a2 2 0 0 1 4 0V10"></path></svg>
             <span>Safe</span>
           </button>
-          <button class="nav-item optional-nav" type="button" data-scroll-target="models-section" aria-label="Открыть модели" title="Модели">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
-            <span>Модели</span>
-          </button>
           <button class="nav-item optional-nav" type="button" data-scroll-target="sharing-section" aria-label="Открыть Monarch Sharing" title="Monarch Sharing">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2"></circle><circle cx="19" cy="5" r="2"></circle><circle cx="19" cy="19" r="2"></circle><path d="m7 11 10-5"></path><path d="m7 13 10 5"></path></svg>
             <span>Sharing</span>
           </button>
-          <button class="nav-item optional-nav" type="button" data-scroll-target="settings-section" aria-label="Открыть контроль" title="Контроль">
+          <button class="nav-item optional-nav" type="button" data-scroll-target="settings-section" aria-label="Открыть настройки" title="Настройки">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-            <span>Контроль</span>
+            <span>Настройки</span>
           </button>
           <button class="nav-item optional-nav" type="button" data-scroll-target="settings-section" data-settings-open="telegram" aria-label="Открыть настройки Telegram-бота" title="Telegram-бот">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13"></path><path d="m22 2-7 20-4-9-9-4Z"></path></svg>
@@ -162,6 +211,9 @@
             <span id="oscar-history-count">0 чатов</span>
           </div>
           <div class="sidebar-history-controls">
+            <button type="button" id="oscar-history-clear" class="sidebar-icon-btn sidebar-icon-btn-danger" aria-label="Очистить всю историю" title="Очистить всю историю">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="m6 7 1 13h10l1-13"></path><path d="M9 7V4h6v3"></path></svg>
+            </button>
             <button type="button" id="oscar-history-refresh" class="sidebar-icon-btn" aria-label="Обновить историю" title="Обновить историю">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.1 6.6"></path><path d="M3 12A9 9 0 0 1 18.1 5.4"></path><path d="M3 18v-5h5"></path><path d="M21 6v5h-5"></path></svg>
             </button>
@@ -179,7 +231,17 @@
 
       <!-- 2. Main Center Stage -->
       <main class="main-canvas">
-        
+        <aside class="computer-use-control" id="computer-use-control" data-state="unknown" aria-label="Управление Computer Use" aria-hidden="true">
+          <span class="computer-use-control-dot" aria-hidden="true"></span>
+          <span class="computer-use-control-copy" aria-live="polite" aria-atomic="true">
+            <strong id="computer-use-control-title">Computer Use</strong>
+            <small id="computer-use-control-detail">Проверка · Ctrl+Alt+Esc</small>
+          </span>
+          <button id="computer-use-stop" type="button" class="computer-use-stop" title="Мгновенно остановить Computer Use (Ctrl+Alt+Escape)">
+            <span aria-hidden="true">■</span>
+            <span>Стоп</span>
+          </button>
+        </aside>
         <div id="top-status" aria-live="polite" class="global-status"></div>
         <aside id="safe-launch-feedback" class="safe-launch-feedback" role="status" aria-live="polite" hidden>
           <span class="safe-launch-feedback-mark" aria-hidden="true">M</span>
@@ -211,6 +273,7 @@
                   <textarea
                     id="intent-input"
                     data-testid="intent-input"
+                    data-composer-type-to-focus
                     name="intent"
                     rows="1"
                     autocomplete="off"
@@ -257,25 +320,9 @@
                       <div class="item-title">Medium <span class="checkmark">✓</span></div>
                       <div class="item-sub">Баланс скорости и качества</div>
                     </div>
-                  </div>
-                </div>
-
-                <div class="custom-dropdown" id="reasoning-dropdown-container">
-                  <button class="mode-chip dropdown-trigger" type="button" id="reasoning-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="reasoning-popover" aria-label="Выбрать Deep Thinking: выкл" title="Выбрать Deep Thinking: выкл">
-                    Deep Thinking: выкл
-                  </button>
-                  <div class="dropdown-popover hidden" id="reasoning-popover" role="listbox" aria-labelledby="reasoning-dropdown-btn" aria-hidden="true">
-                    <div class="dropdown-item active" data-value="none" role="option" aria-selected="true" tabindex="0">
-                      <div class="item-title">Выкл <span class="checkmark">✓</span></div>
-                      <div class="item-sub">Обычный режим ответа</div>
-                    </div>
-                    <div class="dropdown-item" data-value="gemma4-deepthinking" role="option" aria-selected="false" tabindex="-1">
-                    <div class="item-title">Pro <span class="checkmark">✓</span></div>
-                      <div class="item-sub">Сложный анализ и разработка</div>
-                    </div>
-                    <div class="dropdown-item" data-value="gemma4-31b" role="option" aria-selected="false" tabindex="-1">
-                    <div class="item-title">Extra <span class="checkmark">✓</span></div>
-                      <div class="item-sub">Максимальная глубина для редких задач</div>
+                    <div class="dropdown-item" data-value="qwen3.8-27b-pro" role="option" aria-selected="false" tabindex="-1">
+                      <div class="item-title">Pro <span class="checkmark">✓</span></div>
+                      <div class="item-sub">Qwen3.8 27B · полный Agent</div>
                     </div>
                   </div>
                 </div>
@@ -319,7 +366,7 @@
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="M9.5 12.5 11 14l3.5-4"></path></svg>
                 </button>
                 <button class="topbar-icon-button" id="oscar-incognito-toggle" type="button" aria-label="Начать инкогнито-чат" title="Начать инкогнито-чат" aria-pressed="false">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 6.5 6h11l2.5 4.5"></path><path d="M3 11.5h18"></path><path d="M7.5 14.5h.01M16.5 14.5h.01"></path><path d="M5.5 11.5v5.2A3.3 3.3 0 0 0 8.8 20h6.4a3.3 3.3 0 0 0 3.3-3.3v-5.2"></path></svg>
+                  <img class="oscar-incognito-icon" src="/assets/brand/monarch-incognito-hooded.png" alt="" draggable="false">
                 </button>
                 <button class="topbar-icon-button" id="oscar-clear" type="button" aria-label="Новый чат" title="Новый чат">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
@@ -459,7 +506,7 @@
                       <button type="button" data-coder-template="Запусти подходящие тесты, разберись с ошибками и исправь их.">Проверить проект</button>
                     </div>
                     <div class="coder-composer-row">
-                      <textarea id="coder-input" rows="1" placeholder="Опиши результат, который должен получить Coder…" aria-label="Задача Coder"></textarea>
+                      <textarea id="coder-input" data-composer-type-to-focus rows="1" placeholder="Опиши результат, который должен получить Coder…" aria-label="Задача Coder"></textarea>
                       <button id="coder-run-submit" type="submit" class="coder-primary">Начать работу</button>
                       <button id="coder-run-cancel" type="button" hidden>Остановить</button>
                     </div>
@@ -567,7 +614,7 @@
             <aside id="oscar-missions-panel" class="oscar-missions-panel" aria-label="Поручения Oscar" hidden>
               <header class="oscar-missions-header">
                 <div>
-                  <span>AGENT RUNTIME</span>
+                  <span>РАБОЧИЙ РЕЖИМ</span>
                   <strong>Поручения</strong>
                 </div>
                 <div class="oscar-missions-header-actions">
@@ -587,7 +634,7 @@
               <div id="oscar-thread" class="claude-thread is-empty" role="log" aria-live="polite" aria-relevant="additions text" aria-atomic="false">
                 <div class="oscar-empty-focus oscar-empty-boot">
                   <div class="empty-mark" aria-hidden="true"><img src="/assets/brand/monarch-mark.png" alt="" /></div>
-                  <span class="empty-kicker">Oscar Workspace</span>
+                  <span class="empty-kicker">Oscar</span>
                   <h1>Чем займёмся?</h1>
                   <p>Спроси, создай или проверь что-нибудь в рабочем пространстве</p>
                 </div>
@@ -598,8 +645,12 @@
           <div class="claude-bottom-composer">
             <form id="oscar-composer" class="claude-composer">
               <div id="oscar-ram-warning" class="ram-pressure-warning" role="status" aria-live="polite" hidden>
-                <strong>Нужен запас RAM</strong>
-                <span></span>
+                <strong data-ram-warning-title></strong>
+                <span data-ram-warning-message></span>
+                <div class="ram-pressure-actions">
+                  <button type="button" data-oscar-ram-action="use-balanced" hidden>Выбрать Balanced</button>
+                  <button type="button" data-oscar-ram-action="refresh">Перепроверить</button>
+                </div>
               </div>
               <div class="composer-inner">
                 <div id="oscar-editing-banner" class="oscar-editing-banner" hidden>
@@ -608,6 +659,11 @@
                 </div>
                 <input type="file" id="oscar-image-upload" accept="image/png, image/jpeg, image/webp" style="display: none;" multiple>
                 <div id="oscar-attachments-preview" class="attachments-preview hidden"></div>
+                <div id="oscar-selected-skill" class="oscar-selected-skill hidden" aria-live="polite">
+                  <img src="/assets/icons/phosphor/sparkle.svg" alt="">
+                  <span><small>Выбран навык</small><strong id="oscar-selected-skill-name"></strong></span>
+                  <button type="button" id="oscar-selected-skill-remove" aria-label="Убрать выбранный навык" title="Убрать навык">×</button>
+                </div>
                 <div class="composer-input-row">
                   <details class="composer-options oscar-composer-menu" id="oscar-composer-menu">
                     <summary class="claude-attach-btn" aria-label="Открыть меню добавления и режимов" title="Добавить и настроить" aria-controls="oscar-composer-menu-popover">
@@ -620,82 +676,139 @@
                         </span>
                         <span class="composer-menu-copy"><strong>Прикрепить фото</strong><small>PNG, JPG или WebP</small></span>
                       </button>
+                      <button class="composer-menu-action computer-use-menu-action" id="oscar-computer-use-toggle" type="button" aria-label="Добавить Computer Use" aria-pressed="false">
+                        <span class="composer-menu-icon" aria-hidden="true"><img src="/assets/icons/phosphor/magic-wand.svg" alt=""></span>
+                        <span class="composer-menu-copy"><strong>Computer Use</strong><small id="oscar-computer-use-menu-detail">Экран и собственный курсор Oscar · или набрать @</small></span>
+                        <span class="composer-option-state" id="oscar-computer-use-menu-state">Включить</span>
+                      </button>
+                      <div class="computer-use-permission-picker" role="radiogroup" aria-label="Как подтверждать действия Computer Use">
+                        <span class="computer-use-permission-title">Подтверждение действий</span>
+                        <button type="button" role="radio" data-computer-use-permission="ask" aria-checked="false" tabindex="-1">
+                          <span aria-hidden="true"></span>
+                          <strong>Запрашивать</strong>
+                          <small>Разрешение перед изменениями, сетью и внешними файлами</small>
+                        </button>
+                        <button type="button" role="radio" data-computer-use-permission="guard" aria-checked="true" class="is-selected">
+                          <span aria-hidden="true"></span>
+                          <strong>Подтверждать за меня</strong>
+                          <small>Спрашивать только перед потенциально опасными действиями</small>
+                        </button>
+                        <button type="button" role="radio" data-computer-use-permission="full" aria-checked="false" tabindex="-1">
+                          <span aria-hidden="true"></span>
+                          <strong>Полный доступ</strong>
+                          <small>Обычные локальные действия без запросов; Kernel всё ещё блокирует опасное</small>
+                        </button>
+                      </div>
+                      <button class="composer-menu-action skill-picker-action" id="oscar-skill-picker-toggle" type="button" aria-label="Выбрать навык" aria-expanded="false" aria-pressed="false" aria-controls="oscar-skill-picker" title="Выбрать навык · можно также набрать $">
+                        <span class="composer-menu-icon" aria-hidden="true"><img src="/assets/icons/phosphor/sparkle.svg" alt=""></span>
+                        <span class="composer-menu-copy"><strong>Навыки</strong><small>Выбрать для этого сообщения · или набрать $</small></span>
+                        <span class="composer-option-state" id="oscar-skill-menu-state">Выбрать</span>
+                      </button>
                       <button class="composer-menu-action composer-intelligence-toggle" type="button" id="oscar-intelligence-toggle" aria-pressed="false">
                         <span class="composer-menu-icon" aria-hidden="true">
                           <svg viewBox="0 0 24 24"><path d="M12 3v3"></path><path d="M12 18v3"></path><path d="M3 12h3"></path><path d="M18 12h3"></path><path d="m5.6 5.6 2.1 2.1"></path><path d="m16.3 16.3 2.1 2.1"></path><path d="m18.4 5.6-2.1 2.1"></path><path d="m7.7 16.3-2.1 2.1"></path><circle cx="12" cy="12" r="4"></circle></svg>
                         </span>
-                        <span class="composer-menu-copy"><strong>Интеллект</strong><small>Показывает ручной выбор модели</small></span>
+                        <span class="composer-menu-copy"><strong>Интеллект</strong><small>Настроить скорость и глубину ответа</small></span>
                         <span class="composer-option-state" data-intelligence-state>Выкл</span>
                       </button>
-                      <div class="composer-menu-divider" aria-hidden="true"></div>
-
-                      <div class="custom-dropdown" id="oscar-reasoning-dropdown-container">
-                        <button class="mode-chip dropdown-trigger" type="button" id="oscar-reasoning-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-reasoning-popover" aria-label="Выбрать Deep Thinking Oscar: выкл" title="Выбрать Deep Thinking Oscar: выкл">
-                          Deep Thinking · выкл
-                        </button>
-                        <div class="dropdown-popover hidden" id="oscar-reasoning-popover" role="listbox" aria-labelledby="oscar-reasoning-dropdown-btn" aria-hidden="true">
-                          <div class="dropdown-item active" data-value="none" role="option" aria-selected="true" tabindex="0">
-                            <div class="item-title">Выкл <span class="checkmark">✓</span></div>
-                            <div class="item-sub">Обычный режим ответа</div>
-                          </div>
-                          <div class="dropdown-item" data-value="gemma4-deepthinking" role="option" aria-selected="false" tabindex="-1">
-                            <div class="item-title">Pro <span class="checkmark">✓</span></div>
-                            <div class="item-sub">Сложный анализ и разработка</div>
-                          </div>
-                          <div class="dropdown-item" data-value="gemma4-31b" role="option" aria-selected="false" tabindex="-1">
-                            <div class="item-title">Extra <span class="checkmark">✓</span></div>
-                            <div class="item-sub">Максимальная глубина для редких задач</div>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div class="custom-dropdown" id="oscar-research-dropdown-container">
-                        <button class="mode-chip dropdown-trigger" type="button" id="oscar-research-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-research-popover" aria-label="Выбрать исследование Oscar: Авто" title="Выбрать исследование Oscar: Авто">
-                          Исследование · Авто
-                        </button>
-                        <div class="dropdown-popover hidden" id="oscar-research-popover" role="listbox" aria-labelledby="oscar-research-dropdown-btn" aria-hidden="true">
-                          <div class="dropdown-item active" data-value="auto" role="option" aria-selected="true" tabindex="0">
-                            <div class="item-title">Авто <span class="checkmark">✓</span></div>
-                            <div class="item-sub">Oscar сам распознаёт сложное исследование</div>
-                          </div>
-                          <div class="dropdown-item" data-value="off" role="option" aria-selected="false" tabindex="-1">
-                            <div class="item-title">Выкл <span class="checkmark">✓</span></div>
-                            <div class="item-sub">Ответ без автоматического deep research</div>
-                          </div>
-                          <div class="dropdown-item" data-value="deep" role="option" aria-selected="false" tabindex="-1">
-                            <div class="item-title">Глубокое <span class="checkmark">✓</span></div>
-                            <div class="item-sub">План, несколько веток поиска и проверка</div>
-                          </div>
-                        </div>
-                      </div>
+                      <button class="composer-menu-action context-meter-toggle is-active" type="button" id="oscar-context-meter-toggle" aria-pressed="true">
+                        <span class="composer-menu-icon" aria-hidden="true"><img src="/assets/icons/phosphor/circles-four.svg" alt=""></span>
+                        <span class="composer-menu-copy"><strong>Контекст</strong><small>Показывать заполнение текущего диалога</small></span>
+                        <span class="composer-option-state" data-context-meter-state>Вкл</span>
+                      </button>
                     </div>
                   </details>
                   <textarea
                     id="oscar-input"
                     data-testid="oscar-input"
+                    data-composer-type-to-focus
                     name="message"
                     rows="1"
                     autocomplete="off"
                     placeholder="Сообщение Oscar..."
                     aria-label="Сообщение Oscar"
                   ></textarea>
-                  <div class="custom-dropdown oscar-inline-model" id="oscar-model-dropdown-container" hidden>
-                    <button class="mode-chip dropdown-trigger" type="button" id="oscar-model-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-model-popover" aria-label="Выбрать модель Oscar: Авто" title="Выбрать модель Oscar: Авто">
+                  <div class="oscar-context-controls" id="oscar-context-controls" hidden>
+                    <div class="oscar-context-meter" id="oscar-context-meter" role="progressbar" aria-label="Контекстное окно: данные появятся после ответа" aria-describedby="oscar-context-tooltip" aria-valuemin="0" aria-valuemax="100" tabindex="0" hidden>
+                      <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <circle class="oscar-context-meter-track" cx="10" cy="10" r="7" pathLength="100"></circle>
+                        <circle class="oscar-context-meter-value" cx="10" cy="10" r="7" pathLength="100"></circle>
+                      </svg>
+                      <span class="oscar-context-tooltip" id="oscar-context-tooltip" role="tooltip">
+                        <strong>Контекстное окно</strong>
+                        <span data-context-meter-percent>Данные появятся после ответа</span>
+                        <span data-context-meter-tokens>Использование пока не измерено</span>
+                        <small data-context-meter-note></small>
+                      </span>
+                    </div>
+                    <div class="custom-dropdown oscar-inline-model" id="oscar-model-dropdown-container" hidden>
+                    <button class="mode-chip dropdown-trigger" type="button" id="oscar-model-dropdown-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="oscar-model-popover" aria-label="Настроить модель Oscar: Авто" title="Настроить модель Oscar">
                       Авто
                     </button>
-                    <div class="dropdown-popover hidden" id="oscar-model-popover" role="listbox" aria-labelledby="oscar-model-dropdown-btn" aria-hidden="true">
-                      <div class="dropdown-item active" data-value="none" role="option" aria-selected="true" tabindex="0">
-                        <div class="item-title">Авто <span class="checkmark">✓</span></div>
-                        <div class="item-sub">Умный выбор модели</div>
+                    <div class="dropdown-popover hidden oscar-intelligence-popover" id="oscar-model-popover" role="dialog" aria-labelledby="oscar-model-dropdown-btn" aria-hidden="true">
+                      <div class="oscar-intelligence-quick">
+                        <div class="oscar-intelligence-head">
+                          <span class="oscar-intelligence-title">
+                            <strong>Выбор модели</strong>
+                            <small data-intelligence-model-caption>Oscar подбирает под задачу</small>
+                          </span>
+                          <button type="button" class="dropdown-item oscar-intelligence-auto active" data-value="none" role="option" aria-selected="true" tabindex="0">
+                            <span class="oscar-intelligence-auto-dot" aria-hidden="true"></span>
+                            <span class="oscar-intelligence-auto-copy"><strong>Авто</strong><small>под задачу</small></span>
+                            <span class="checkmark" aria-hidden="true">✓</span>
+                          </button>
+                        </div>
+                        <div class="oscar-intelligence-ends" aria-hidden="true"><span>Быстрее</span><span>Умнее</span></div>
+                        <div class="oscar-intelligence-slider" id="oscar-intelligence-scale" data-selection="none">
+                          <div class="oscar-intelligence-power" aria-hidden="true">
+                            <span></span><span></span><span></span>
+                          </div>
+                          <div class="oscar-intelligence-range-shell">
+                            <span class="oscar-intelligence-pro-aura" aria-hidden="true"></span>
+                            <input id="oscar-intelligence-range" type="range" min="0" max="2" step="1" value="1" autocomplete="off" aria-label="Выбрать модель Oscar" aria-valuetext="Авто">
+                          </div>
+                          <div class="oscar-intelligence-models" role="listbox" aria-label="Модели Oscar">
+                            <button type="button" class="dropdown-item oscar-intelligence-model" data-value="gemma4-fast" data-range-value="0" role="option" aria-selected="false" aria-describedby="oscar-model-detail-fast" tabindex="-1">
+                              <strong>Basic</strong><small>2B</small><span class="oscar-model-summary">Быстро · базово</span>
+                              <span class="oscar-model-tooltip" id="oscar-model-detail-fast" role="tooltip">Для коротких ответов и простых команд. Минимальная задержка, базовое рассуждение.</span>
+                            </button>
+                            <button type="button" class="dropdown-item oscar-intelligence-model" data-value="gemma4-balanced" data-range-value="1" role="option" aria-selected="false" aria-describedby="oscar-model-detail-balanced" tabindex="-1">
+                              <strong>Basic</strong><small>12B</small><span class="oscar-model-summary">Быстро · умнее</span>
+                              <span class="oscar-model-tooltip" id="oscar-model-detail-balanced" role="tooltip">Для обычных вопросов и несложных действий. Баланс скорости и качества.</span>
+                            </button>
+                            <button type="button" class="dropdown-item oscar-intelligence-model" data-value="qwen3.8-27b-pro" data-range-value="2" role="option" aria-selected="false" aria-describedby="oscar-model-detail-pro" tabindex="-1">
+                              <strong>Pro</strong><small>27B</small><span class="oscar-model-summary">Медленно · умнее</span>
+                              <span class="oscar-model-tooltip" id="oscar-model-detail-pro" role="tooltip">Для сложного анализа, кода и многошаговых задач. Максимум интеллекта, но выше задержка.</span>
+                            </button>
+                          </div>
+                        </div>
                       </div>
-                      <div class="dropdown-item" data-value="gemma4-fast" role="option" aria-selected="false" tabindex="-1">
-                        <div class="item-title">Fast <span class="checkmark">✓</span></div>
-                        <div class="item-sub">Быстрые повседневные ответы</div>
-                      </div>
-                      <div class="dropdown-item" data-value="gemma4-balanced" role="option" aria-selected="false" tabindex="-1">
-                        <div class="item-title">Medium <span class="checkmark">✓</span></div>
-                        <div class="item-sub">Баланс скорости и качества</div>
-                      </div>
+
+                      <details class="oscar-intelligence-advanced">
+                        <summary>Расширенные</summary>
+                        <div class="oscar-intelligence-settings">
+                          <div class="custom-dropdown oscar-intelligence-setting" id="oscar-research-dropdown-container">
+                            <button class="mode-chip dropdown-trigger" type="button" id="oscar-research-dropdown-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="oscar-research-popover" aria-label="Выбрать исследование Oscar: Авто" title="Выбрать исследование Oscar: Авто">
+                              <span>Исследование</span><strong data-dropdown-value>Авто</strong>
+                            </button>
+                            <div class="dropdown-popover hidden" id="oscar-research-popover" role="listbox" aria-labelledby="oscar-research-dropdown-btn" aria-hidden="true">
+                              <div class="dropdown-item active" data-value="auto" role="option" aria-selected="true" tabindex="0">
+                                <div class="item-title">Авто <span class="checkmark">✓</span></div>
+                                <div class="item-sub">Oscar сам распознаёт сложное исследование</div>
+                              </div>
+                              <div class="dropdown-item" data-value="off" role="option" aria-selected="false" tabindex="-1">
+                                <div class="item-title">Выкл <span class="checkmark">✓</span></div>
+                                <div class="item-sub">Ответ без автоматического исследования</div>
+                              </div>
+                              <div class="dropdown-item" data-value="deep" role="option" aria-selected="false" tabindex="-1">
+                                <div class="item-title">Глубокое <span class="checkmark">✓</span></div>
+                                <div class="item-sub">План, несколько веток поиска и проверка</div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </details>
+                    </div>
                     </div>
                   </div>
                   <button class="claude-voice-btn" id="oscar-voice-input" type="button" aria-label="Голосовой ввод" aria-pressed="false" title="Голосовой ввод">
@@ -711,6 +824,32 @@
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"></circle><rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor" stroke="none"></rect></svg>
                   </button>
                 </div>
+                <section id="oscar-function-picker" class="oscar-function-picker hidden" aria-labelledby="oscar-function-picker-title">
+                  <div class="oscar-skill-picker-heading">
+                    <div>
+                      <strong id="oscar-function-picker-title">Функции и приложения</strong>
+                      <small>Выбери функцию и продолжи писать задачу</small>
+                    </div>
+                    <button type="button" id="oscar-function-picker-close" aria-label="Закрыть выбор функции" title="Закрыть">×</button>
+                  </div>
+                  <div id="oscar-function-picker-results" class="oscar-function-picker-results" role="listbox" aria-label="Функции Oscar"></div>
+                  <p class="oscar-skill-picker-hint">Быстрый вызов: набери <kbd>@</kbd> прямо в сообщении.</p>
+                </section>
+                <section id="oscar-skill-picker" class="oscar-skill-picker hidden" aria-labelledby="oscar-skill-picker-title">
+                  <div class="oscar-skill-picker-heading">
+                    <div>
+                      <strong id="oscar-skill-picker-title">Выбери навык</strong>
+                      <small>После выбора просто опиши задачу</small>
+                    </div>
+                    <button type="button" id="oscar-skill-picker-close" aria-label="Закрыть выбор навыка" title="Закрыть">×</button>
+                  </div>
+                  <label class="oscar-skill-picker-search">
+                    <span class="sr-only">Найти навык</span>
+                    <input id="oscar-skill-picker-search" type="search" placeholder="Файлы, безопасность, документы…" autocomplete="off">
+                  </label>
+                  <div id="oscar-skill-picker-results" class="oscar-skill-picker-results" role="listbox" aria-label="Доступные навыки"></div>
+                  <p class="oscar-skill-picker-hint">Быстрый способ: набери <kbd>$</kbd> прямо в сообщении.</p>
+                </section>
                 <div id="oscar-voice-status" class="voice-input-status" role="status" aria-live="polite" hidden>
                   <span class="voice-input-wave" aria-hidden="true"><i></i><i></i><i></i></span>
                   <strong data-voice-title>Слушаю</strong>
@@ -728,26 +867,27 @@
         <!-- C. SECURITY VIEW -->
         <section class="claude-view view-hidden" id="security-section">
           <div class="document-feed security-feed">
-            <div class="security-page-header">
-              <div class="security-title-block">
-                <p class="section-kicker">Monarch Security</p>
-                <h2 id="security-protection-title">Состояние защиты загружается</h2>
-                <p id="security-protection-copy">Проверяем фоновые датчики и локальные политики.</p>
-                <div id="security-status-pills" class="status-pills" aria-live="polite"></div>
+            <div class="security-chrome">
+              <strong class="security-chrome-title">Monarch Security</strong>
+              <div class="security-tabs" role="tablist" aria-label="Разделы Monarch Security">
+                <button type="button" role="tab" data-security-tab="overview" aria-selected="true">Обзор</button>
+                <button type="button" role="tab" data-security-tab="incidents" aria-selected="false">События <span id="security-incident-tab-count"></span></button>
+                <button type="button" role="tab" data-security-tab="network" aria-selected="false">Сеть</button>
+                <button type="button" role="tab" data-security-tab="quarantine" aria-selected="false">Изоляция</button>
+                <button type="button" role="tab" data-security-tab="settings" aria-selected="false">Настройки</button>
               </div>
               <div class="security-protection-control">
-                <label class="security-level-control" for="security-level">
-                  <span>Строгость</span>
-                  <select id="security-level" aria-label="Уровень строгости Monarch Security">
-                    <option value="off">Отключён</option>
-                    <option value="minimal">Минимальный</option>
-                    <option value="balanced" selected>Средний</option>
-                    <option value="strict">Строгий</option>
-                    <option value="maximum">Максимальный</option>
-                  </select>
-                </label>
-                <button class="claude-primary-btn" id="security-start">Включить защиту</button>
-                <button class="claude-ghost-btn" id="security-stop" hidden>Приостановить защиту</button>
+                <span id="security-protection-state" class="security-protection-state" aria-live="polite">Проверяю защиту</span>
+                <button class="claude-primary-btn" id="security-start">Включить</button>
+                <button class="claude-ghost-btn" id="security-stop" hidden>Приостановить</button>
+              </div>
+            </div>
+
+            <div class="security-page-header">
+              <div class="security-title-block">
+                <h2 id="security-protection-title">Состояние защиты загружается</h2>
+                <p id="security-protection-copy">Проверяем состояние защиты.</p>
+                <div id="security-status-pills" class="status-pills" aria-live="polite"></div>
               </div>
             </div>
 
@@ -764,24 +904,21 @@
               <small id="security-emergency-feedback" class="security-response-feedback"></small>
             </section>
 
-            <div class="security-tabs" role="tablist" aria-label="Разделы Monarch Security">
-              <button type="button" role="tab" data-security-tab="overview" aria-selected="true">Обзор</button>
-              <button type="button" role="tab" data-security-tab="incidents" aria-selected="false">Инциденты <span id="security-incident-tab-count"></span></button>
-              <button type="button" role="tab" data-security-tab="network" aria-selected="false">Сеть</button>
-              <button type="button" role="tab" data-security-tab="quarantine" aria-selected="false">Карантин</button>
-              <button type="button" role="tab" data-security-tab="settings" aria-selected="false">Настройки</button>
-            </div>
-
             <div class="doc-content security-page-content">
               <div id="security-overview-panel" class="security-tab-panel" role="tabpanel">
-                <section class="security-scan-lab" id="security-file-drop" tabindex="0" aria-label="Перетащите файл для проверки">
-                  <div class="security-scan-lab-copy">
-                    <strong>Перетащите файл для проверки</strong>
-                    <span>Monarch проверит тип, содержимое, подпись и локальную репутацию.</span>
-                  </div>
-                  <button class="claude-primary-btn" type="button" id="security-file-choose">Выбрать файл</button>
-                  <small>Проверка локально. Отправка в интернет выключена.</small>
-                </section>
+                <div class="security-overview-primary">
+                  <section class="security-scan-lab" id="security-file-drop" tabindex="0" aria-label="Перетащите файл для проверки">
+                    <div class="security-scan-lab-copy">
+                      <strong>Проверить файл</strong>
+                      <span>Перетащи файл сюда или выбери его на компьютере.</span>
+                    </div>
+                    <button class="claude-primary-btn" type="button" id="security-file-choose">Выбрать файл</button>
+                  </section>
+                  <button class="security-incident-summary" id="security-open-incidents" type="button">
+                    <span><strong>Требуют внимания</strong><small id="security-incident-summary-copy">Проверяем события</small></span>
+                    <b id="security-incident-summary-count">0</b>
+                  </button>
+                </div>
 
                 <div id="security-scan-feedback" aria-live="polite"></div>
 
@@ -793,13 +930,6 @@
                     </div>
                     <div id="security-recent-scans" class="security-simple-list"></div>
                   </div>
-                  <button class="security-incident-summary" id="security-open-incidents" type="button">
-                    <span>
-                      <strong>Инциденты</strong>
-                      <small id="security-incident-summary-copy">Загружаем очередь решений</small>
-                    </span>
-                    <b id="security-incident-summary-count">0</b>
-                  </button>
                 </section>
               </div>
 
@@ -807,7 +937,7 @@
                 <div class="security-incident-workspace">
                   <section>
                     <div class="security-section-heading">
-                      <strong>Инциденты</strong>
+                      <strong>События</strong>
                       <button class="claude-ghost-btn" id="security-incidents-refresh" type="button">Обновить</button>
                     </div>
                     <div class="security-incident-filters" role="group" aria-label="Фильтр инцидентов">
@@ -823,13 +953,13 @@
               <div id="security-network-panel" class="security-tab-panel" role="tabpanel" hidden>
                 <div class="security-network-center">
                   <div class="security-section-heading">
-                    <span><strong>Network Center</strong><small>Локальные подключения, открытые порты и доверенные профили</small></span>
+                    <span><strong>Сеть</strong><small>Подключения, открытые порты и доверенные сети</small></span>
                     <button class="claude-primary-btn" id="security-scan-network" type="button">Обновить</button>
                   </div>
                   <div id="security-network-result" class="security-network-result" aria-live="polite"></div>
                   <div id="security-network-metrics" class="security-network-metrics"></div>
                   <section class="security-network-section">
-                    <div class="security-section-heading"><span><strong>Сетевые профили</strong><small>Доверие меняет оценку риска, но не отключает наблюдение</small></span></div>
+                    <div class="security-section-heading"><span><strong>Доверенные сети</strong><small>Пометь знакомые сети, чтобы уменьшить лишние предупреждения</small></span></div>
                     <div id="security-network-profiles" class="security-network-list"></div>
                   </section>
                   <div class="security-network-columns">
@@ -843,11 +973,11 @@
                     </section>
                   </div>
                   <section class="security-network-section">
-                    <div class="security-section-heading"><span><strong>Активная реакция</strong><small id="security-response-service">Проверяем отдельный исполнитель</small></span></div>
+                    <div class="security-section-heading"><span><strong>Автоматические действия</strong><small id="security-response-service">Проверяем готовность</small></span></div>
                     <div id="security-response-actions" class="security-network-list"></div>
                   </section>
                   <section class="security-network-section">
-                    <div class="security-section-heading"><span><strong>История наблюдений</strong><small>Подписана HMAC и хранится локально</small></span></div>
+                    <div class="security-section-heading"><span><strong>История наблюдений</strong><small>Защищена от незаметных изменений</small></span></div>
                     <div id="security-network-history" class="security-network-list"></div>
                   </section>
                 </div>
@@ -856,7 +986,7 @@
               <div id="security-quarantine-panel" class="security-tab-panel" role="tabpanel" hidden>
                 <div class="security-coming-section">
                   <div class="security-section-heading">
-                    <span><strong>Карантин</strong><small>Локальное хранилище с проверкой целостности</small></span>
+                    <span><strong>Изолированные файлы</strong><small>Опасные файлы не смогут запуститься</small></span>
                     <button class="claude-ghost-btn" id="security-quarantine-refresh" type="button">Обновить</button>
                   </div>
                   <div id="security-quarantine-list" class="security-quarantine-list"></div>
@@ -883,7 +1013,7 @@
                   </div>
                   <div class="security-pin-fields security-pin-recovery-fields">
                     <label>
-                      <span>Забыл PIN · одноразовый recovery-код</span>
+                      <span>Забыл PIN · запасной код</span>
                       <input id="security-pin-recovery-code" type="password" maxlength="64" autocomplete="off" spellcheck="false">
                     </label>
                     <button class="claude-ghost-btn" id="security-pin-recover" type="button">Восстановить PIN</button>
@@ -898,41 +1028,90 @@
                 <section class="security-settings-shell">
                   <header class="security-settings-header">
                     <div>
-                      <h3>Настройки защиты</h3>
-                      <p>Здесь собраны постоянное наблюдение, реакция на угрозы и обслуживание Security.</p>
+                      <h3>Режим защиты</h3>
+                      <p>Обычный подходит большинству. Более строгие режимы проверяют чаще и требуют больше ресурсов.</p>
                     </div>
-                    <span id="security-settings-status" class="security-settings-status">Средний профиль</span>
                   </header>
+
+                  <div class="security-level-grid" role="radiogroup" aria-label="Режим защиты Security">
+                    <button type="button" role="radio" data-security-level-choice="minimal"><strong>Лёгкая</strong><small>Реже проверяет · меньше нагрузки</small></button>
+                    <button type="button" role="radio" data-security-level-choice="balanced"><strong>Обычная</strong><small>Для каждого дня · советуем</small></button>
+                    <button type="button" role="radio" data-security-level-choice="strict"><strong>Усиленная</strong><small>Проверяет чаще · реагирует осторожнее</small></button>
+                    <button type="button" role="radio" data-security-level-choice="maximum"><strong>Максимальная</strong><small>Самая частая проверка · выше нагрузка</small></button>
+                  </div>
+
+                  <section class="security-settings-section security-model-policy">
+                    <div class="security-settings-heading">
+                      <span><strong>Контроль действий Oscar</strong><small>Локальная оценка опасности без отдельного модельного прохода.</small></span>
+                      <label class="security-switch">
+                        <input id="security-model-commands-enabled" type="checkbox" checked>
+                        <span aria-hidden="true"></span>
+                        <em>Разрешить действия</em>
+                      </label>
+                    </div>
+                    <div class="security-policy-row">
+                      <label>
+                        <span>Режим наблюдения</span>
+                        <select id="security-model-confirmation">
+                          <option value="off">Off — только неизменяемые границы</option>
+                          <option value="observe">Observe — считать и журналировать, не вмешиваться</option>
+                          <option value="guard">Guard — вмешиваться с 70%</option>
+                          <option value="strict">Strict — вмешиваться с 50%</option>
+                        </select>
+                      </label>
+                      <button id="security-model-policy-save" class="claude-primary-btn" type="button">Сохранить режим</button>
+                    </div>
+                    <p class="security-policy-note">Full Access по умолчанию использует Observe. Monarch Safe остаётся недоступен во всех режимах.</p>
+                    <small id="security-model-policy-feedback" class="security-response-feedback" aria-live="polite"></small>
+                  </section>
 
                   <section class="security-settings-section">
                     <div class="security-settings-heading">
-                      <span><strong>Уровень наблюдения</strong><small>Меняет частоту фоновых проверок и строгость реакции.</small></span>
+                      <span><strong>Журнал danger score</strong><small>Действие, вероятность, факторы, реакция и Kernel receipt.</small></span>
                     </div>
-                    <div class="security-level-grid" role="radiogroup" aria-label="Уровень наблюдения Security">
-                      <button type="button" data-security-level-choice="off"><strong>Отключён</strong><small>Фоновое наблюдение остановлено</small></button>
-                      <button type="button" data-security-level-choice="minimal"><strong>Минимальный</strong><small>Редкие спокойные проверки</small></button>
-                      <button type="button" data-security-level-choice="balanced"><strong>Средний</strong><small>Рекомендуемый баланс</small></button>
-                      <button type="button" data-security-level-choice="strict"><strong>Строгий</strong><small>Более частое наблюдение</small></button>
-                      <button type="button" data-security-level-choice="maximum"><strong>Максимальный</strong><small>Самая пристальная защита</small></button>
-                    </div>
+                    <div id="security-danger-log" class="agency-control-list"><span class="setting-note">Оценённых действий пока нет</span></div>
                   </section>
+
+                  <details class="security-settings-section" data-owner-dev hidden>
+                    <summary><strong>Owner Unrestricted Override</strong> · локальный аварийный доступ</summary>
+                    <p class="security-policy-note">Недоступен Oscar, Voice, Telegram и внешнему API. Не снимает изоляцию Monarch Safe и ограничения Windows.</p>
+                    <div class="security-policy-row">
+                      <label class="security-switch">
+                        <input id="security-owner-override-enabled" type="checkbox">
+                        <span aria-hidden="true"></span><em>Включён</em>
+                      </label>
+                      <label><span>Срок</span><select id="security-owner-override-lifetime">
+                        <option value="task">Одна задача</option>
+                        <option value="session">До перезапуска</option>
+                        <option value="persistent">До ручного отключения</option>
+                      </select></label>
+                      <label><span>Task ID</span><input id="security-owner-override-task-id" type="text" spellcheck="false" placeholder="agent_task_..."></label>
+                      <label><span>Shell action-card</span><select id="security-owner-shell-policy">
+                        <option value="always">Всегда</option>
+                        <option value="risk-based">По danger score</option>
+                        <option value="never">Никогда</option>
+                      </select></label>
+                      <button id="security-owner-override-save" class="claude-primary-btn" type="button">Применить локально</button>
+                    </div>
+                    <small id="security-owner-override-feedback" class="security-response-feedback" aria-live="polite"></small>
+                  </details>
 
                 </section>
               </div>
 
               <details class="security-maintenance">
                 <summary>
-                  <span><strong>Датчики и обслуживание</strong><small>Состояние сенсоров, целостность, baseline и журнал</small></span>
+                  <span><strong>Дополнительно</strong><small>Состояние защиты, проверка файлов и журнал</small></span>
                 </summary>
                 <div class="action-bar">
-                  <button class="claude-ghost-btn" id="security-refresh">Обновить статус</button>
+                  <button class="claude-ghost-btn" id="security-refresh">Обновить</button>
                   <button class="claude-ghost-btn" id="security-scan-system">Быстрая проверка</button>
-                  <button class="claude-ghost-btn" id="security-integrity">Проверка целостности</button>
-                  <button class="claude-ghost-btn" id="security-audit">Журнал аудита</button>
-                  <button class="claude-ghost-btn" id="security-baseline">Проверить baseline</button>
-                  <button class="claude-ghost-btn" id="security-replay">Replay lab</button>
-                  <button class="claude-ghost-btn" id="security-benchmark-start">Бенчмарк · 5 минут</button>
-                  <button class="claude-ghost-btn" id="security-benchmark-cancel" hidden>Остановить бенчмарк</button>
+                  <button class="claude-ghost-btn" id="security-integrity">Проверить файлы защиты</button>
+                  <button class="claude-ghost-btn" id="security-audit">Открыть журнал</button>
+                  <button class="claude-ghost-btn" id="security-baseline">Сравнить автозапуск</button>
+                  <button class="claude-ghost-btn" id="security-replay">Проверить распознавание</button>
+                  <button class="claude-ghost-btn" id="security-benchmark-start">Измерить нагрузку · 5 минут</button>
+                  <button class="claude-ghost-btn" id="security-benchmark-cancel" hidden>Остановить измерение</button>
                 </div>
                 <div id="security-replay-metrics" class="security-replay-metrics"></div>
                 <div id="security-baseline-preview" class="security-baseline-preview"></div>
@@ -948,33 +1127,241 @@
           </div>
         </section>
 
-        <!-- D. WORKSPACE VIEW -->
-        <section class="claude-view view-hidden" id="workspace-section">
-          <div class="document-feed">
-            <div class="view-header">
-              <h2>Monarch Workspace</h2>
-            </div>
-            <div class="doc-content">
-              <div id="workspace-summary" class="workspace-overview"></div>
-              <div class="file-tree-container">
-                <p class="section-subtitle">Ядро проекта</p>
-                <div id="workspace-module-list" class="file-tree-mock"></div>
+        <!-- D. IMAGES -->
+        <section class="claude-view view-hidden images-view" id="images-section">
+          <div class="images-workspace">
+            <header class="images-header">
+              <div class="images-tabs" role="tablist" aria-label="Изображения">
+                <button type="button" class="active" role="tab" aria-selected="true" data-images-tab="perchance">
+                  <span aria-hidden="true">◈</span>
+                  Perchance
+                  <span class="image-beta-chip">BETA</span>
+                </button>
+                <button type="button" role="tab" aria-selected="false" data-images-tab="create" id="image-emergency-tab" hidden>
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.3 3.7L7 8l3.7 1.3L12 13l1.3-3.7L17 8l-3.7-1.3L12 3Z"></path><path d="m5 14-.8 2.2L2 17l2.2.8L5 20l.8-2.2L8 17l-2.2-.8L5 14Z"></path></svg>
+                  Аварийный AI Horde
+                </button>
+                <button type="button" role="tab" aria-selected="false" data-images-tab="gallery">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
+                  Галерея
+                </button>
               </div>
-            </div>
+              <div class="images-policy-state" id="images-policy-state" data-mode="safe">
+                <span aria-hidden="true"></span><strong>Perchance · BETA</strong><small>тестовая внешняя функция · 18+</small>
+              </div>
+            </header>
+
+            <section class="images-panel image-perchance-panel" data-images-panel="perchance" data-provider-state="idle">
+              <div class="image-perchance-shell">
+                <header class="image-perchance-toolbar">
+                  <div class="image-perchance-identity">
+                    <span class="image-provider-ready" aria-hidden="true"></span>
+                    <span><span class="image-perchance-title-line"><strong>Perchance</strong><em>TEST BETA</em></span><small>Экспериментальная интеграция внешнего генератора</small></span>
+                  </div>
+                  <div class="image-perchance-controls">
+                    <button type="button" class="claude-ghost-btn" id="image-perchance-back" title="Назад">←</button>
+                    <button type="button" class="claude-ghost-btn" id="image-perchance-reload">Обновить</button>
+                    <label class="image-perchance-zoom"><span>Масштаб</span><select id="image-perchance-zoom"><option value="0.8">80%</option><option value="0.9" selected>90%</option><option value="1">100%</option><option value="1.1">110%</option></select></label>
+                    <button type="button" class="claude-ghost-btn" id="image-perchance-external">Открыть отдельно</button>
+                  </div>
+                </header>
+                <section class="image-perchance-prompt-assistant" aria-labelledby="image-perchance-prompt-title">
+                  <div class="image-prompt-language-note">
+                    <span aria-hidden="true">EN</span>
+                    <p><strong id="image-perchance-prompt-title">Perchance лучше понимает английский текст</strong><small>Fast переведёт запрос отдельно — без истории, памяти и поиска в интернете.</small></p>
+                  </div>
+                  <label class="image-perchance-prompt-field">
+                    <span class="sr-only">Запрос для Perchance</span>
+                    <textarea id="image-perchance-prompt" maxlength="4000" rows="2" placeholder="Опиши изображение на русском или другом языке…"></textarea>
+                  </label>
+                  <div class="image-perchance-prompt-actions">
+                    <button type="button" class="claude-primary-btn" id="image-perchance-translate">Перевести → EN</button>
+                    <button type="button" class="claude-secondary-btn" id="image-perchance-copy">Скопировать</button>
+                    <label><span>Download сохранить как</span><select id="image-perchance-download-rating"><option value="safe">Обычное</option><option value="nsfw">NSFW</option><option value="unknown">Неизвестно</option></select></label>
+                    <label><span>Хранение</span><select id="image-perchance-download-privacy"><option value="persistent">В галерею</option><option value="incognito">По правилу инкогнито</option></select></label>
+                  </div>
+                </section>
+                <div class="image-perchance-bridge" id="image-perchance-bridge">
+                  <div class="image-perchance-placeholder" id="image-perchance-placeholder">
+                    <span aria-hidden="true">◈</span>
+                    <strong>Тестовая BETA-функция</strong>
+                    <p>Интеграция Perchance находится в тестировании: интерфейс, Download и доступность могут измениться или временно не работать. Сторонний сайт откроется здесь в изолированной сессии; Monarch не нажимает Generate и не читает содержимое страницы.</p>
+                    <button type="button" class="image-generate-button" id="image-perchance-connect">Открыть Perchance</button>
+                  </div>
+                </div>
+                <footer class="image-perchance-footer">
+                  <p id="image-perchance-status" aria-live="polite">Нажми Download у готового изображения внутри Perchance — Monarch проверит файл и добавит его в Галерею.</p>
+                  <button type="button" class="claude-ghost-btn" id="image-perchance-unavailable">Perchance не работает</button>
+                </footer>
+              </div>
+            </section>
+
+            <section class="images-panel" data-images-panel="create" hidden>
+              <div class="image-generation-heading">
+                <div><h2>Аварийная генерация</h2><p>AI Horde используется только когда Perchance недоступен. Качество и модель не гарантируются.</p></div>
+              </div>
+              <div class="image-emergency-warning"><strong>Запасной сервис</strong><span>Запрос будет отправлен независимому исполнителю AI Horde, а не в Perchance. Используй это только при сбое основного сервиса.</span></div>
+              <div class="image-generation-layout">
+                <div class="image-result-stage" id="image-result-stage" data-state="empty">
+                  <div class="monarch-genesis-field" id="monarch-genesis-field" aria-hidden="true" hidden>
+                    <canvas></canvas>
+                    <div class="genesis-grid"></div>
+                    <div class="genesis-scan"></div>
+                    <div class="genesis-status"><span class="genesis-activity" aria-hidden="true"><i></i><i></i><i></i></span><strong id="genesis-status-label">Генерация</strong></div>
+                  </div>
+                  <img class="image-resolved-preview" id="image-resolved-preview" alt="Результат генерации" hidden>
+                  <div class="image-result-actions" id="image-result-actions" hidden>
+                    <button type="button" id="image-result-prev" aria-label="Предыдущее изображение">←</button>
+                    <span id="image-result-counter">1 / 1</span>
+                    <button type="button" id="image-result-next" aria-label="Следующее изображение">→</button>
+                  </div>
+                  <div class="image-result-empty">
+                    <svg width="76" height="76" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="3" y="4" width="18" height="16" rx="2"></rect><circle cx="8.5" cy="9" r="1.5"></circle><path d="m4 17 5-5 4 4 2-2 5 5"></path></svg>
+                    <strong>Изображение появится здесь</strong>
+                    <span>Настрой запрос и нажми «Создать»</span>
+                  </div>
+                  <div class="image-provider-handoff" id="image-provider-handoff" hidden>
+                    <span class="image-provider-mark" aria-hidden="true">↗</span>
+                    <strong>Ручной fallback открыт отдельно</strong>
+                    <p>Запрос скопирован. Вставь его в Perchance и при необходимости импортируй результат.</p>
+                    <button type="button" class="claude-secondary-btn" id="image-provider-open-again">Открыть снова</button>
+                  </div>
+                </div>
+
+                <form class="image-generation-form" id="image-generation-form">
+                  <div class="image-provider-line">
+                    <span class="image-provider-ready" aria-hidden="true"></span>
+                    <strong>AI Horde · anonymous · аварийный</strong>
+                    <span class="image-rating-badge" id="image-rating-badge">PG-13</span>
+                  </div>
+                  <label class="image-prompt-field">
+                    <span class="sr-only">Запрос</span>
+                    <textarea id="image-prompt" maxlength="4000" required placeholder="Опиши изображение…"></textarea>
+                    <small><span id="image-prompt-count">0</span> / 4000</small>
+                  </label>
+                  <details class="image-negative-disclosure">
+                    <summary>Чего не должно быть <span>необязательно</span></summary>
+                    <label><textarea id="image-negative-prompt" maxlength="2000" placeholder="Что не должно появиться…"></textarea></label>
+                  </details>
+                  <div class="image-control-grid">
+                    <label><span>Стиль</span><select id="image-style"><option value="none">Без стиля</option><option value="photo">Фото</option><option value="cinematic">Кинематографичный</option><option value="anime">Аниме</option><option value="illustration">Иллюстрация</option></select></label>
+                    <label><span>Формат</span><select id="image-aspect-ratio"><option value="1:1">1:1</option><option value="16:9">16:9</option><option value="9:16">9:16</option><option value="4:5">4:5</option><option value="3:2">3:2</option></select></label>
+                    <label><span>Количество</span><select id="image-count"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label>
+                    <label><span>Seed</span><input id="image-seed" type="text" maxlength="64" placeholder="Авто"></label>
+                  </div>
+                  <label class="image-incognito-control">
+                    <input id="image-incognito-mode" type="checkbox">
+                    <span><strong>Разовая генерация</strong><small>Применить правило хранения для инкогнито</small></span>
+                  </label>
+                  <div class="image-generation-actions">
+                    <button type="submit" class="image-generate-button" id="image-generate-button">
+                      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.3 3.7L7 8l3.7 1.3L12 13l1.3-3.7L17 8l-3.7-1.3L12 3Z"></path><path d="m5 14-.8 2.2L2 17l2.2.8L5 20l.8-2.2L8 17l-2.2-.8L5 14Z"></path></svg>
+                      Создать через AI Horde
+                    </button>
+                    <button type="button" class="claude-secondary-btn" id="image-generation-cancel" hidden>Отменить</button>
+                  </div>
+                  <button type="button" class="claude-secondary-btn" id="image-generation-save" hidden>Сохранить в галерею</button>
+                  <button type="button" class="claude-ghost-btn image-manual-fallback" id="image-manual-fallback">Вернуться в Perchance</button>
+                  <p class="image-generation-status" id="image-generation-status" aria-live="polite"></p>
+                  <div class="image-egress-note"><span aria-hidden="true">⌁</span><p><strong>Запрос уходит только после «Создать»</strong><small>AI Horde передаст его независимому исполнителю; обезличенный результат может попасть в LAION.</small></p></div>
+                </form>
+              </div>
+            </section>
+
+            <section class="images-panel" data-images-panel="gallery" hidden>
+              <div class="image-gallery-heading">
+                <div><h2>Галерея</h2><p>Локальные изображения Monarch. NSFW скрыты при каждом новом запуске.</p></div>
+                <div class="image-gallery-actions">
+                  <label class="image-import-rating"><span>Тип импорта</span><select id="image-import-rating"><option value="safe">Обычное</option><option value="nsfw">NSFW</option><option value="unknown">Неизвестно</option></select></label>
+                  <label class="claude-secondary-btn image-import-button">Импортировать<input id="image-import-input" type="file" accept="image/png,image/jpeg,image/webp" hidden></label>
+                  <label class="image-nsfw-visibility" id="image-nsfw-visibility" hidden><input type="checkbox" id="image-nsfw-visible"><span>Показывать NSFW</span></label>
+                </div>
+              </div>
+              <div class="image-gallery-grid" id="image-gallery-grid"></div>
+              <p class="image-gallery-status" id="image-gallery-status" aria-live="polite"></p>
+            </section>
           </div>
+
         </section>
 
+          <dialog class="image-confirm-dialog" id="image-perchance-age-dialog">
+            <form method="dialog">
+              <span class="image-dialog-icon" aria-hidden="true">18+</span>
+              <h3>Возрастное требование Perchance</h3>
+              <p>Perchance разрешает использовать сервис только лицам от 18 лет. Это правило самого стороннего сайта и действует даже для обычных изображений. Интеграция в Monarch является тестовой BETA-функцией.</p>
+              <label class="image-adult-attestation"><input type="checkbox" id="image-perchance-adult-attestation"><span><strong>Мне уже исполнилось 18 лет</strong><small>Я подтверждаю, что могу использовать Perchance по его актуальным правилам.</small></span></label>
+              <div class="image-dialog-actions"><button value="cancel" class="claude-secondary-btn">Отмена</button><button value="confirm" class="claude-primary-btn" id="image-perchance-age-confirm" disabled>Продолжить</button></div>
+            </form>
+          </dialog>
+
+          <dialog class="image-confirm-dialog image-perchance-intro-dialog" id="image-perchance-intro-dialog">
+            <form method="dialog">
+              <div class="image-perchance-intro-heading">
+                <span class="image-dialog-icon" aria-hidden="true">↗</span>
+                <div><p class="section-kicker">Тестовая BETA-функция · перед открытием</p><h3>Экспериментальная интеграция Perchance</h3><p>Это настоящий независимый сайт в изолированной временной сессии, а не часть интерфейса или инфраструктуры Monarch.</p></div>
+              </div>
+              <div class="image-perchance-beta-notice" role="note"><strong>Не готовая production-функция</strong><p>Интеграция проходит тестирование. Она может работать нестабильно, перестать открываться после изменений Perchance, не сохранить отдельный Download или быть временно отключена. Не рассчитывай на неё как на гарантированный сервис или хранилище.</p></div>
+              <div class="image-perchance-intro-grid">
+                <article><span aria-hidden="true">0</span><div><strong>Бесплатный режим сервиса</strong><p>Perchance сейчас позиционирует генератор как бесплатный, без регистрации и заявленного дневного лимита. Это условие независимого сайта, а не вечная гарантия Monarch.</p></div></article>
+                <article><span aria-hidden="true">AD</span><div><strong>На странице есть реклама</strong><p>Рекламные блоки размещает и контролирует Perchance. Monarch не выбирает рекламодателей, не получает рекламную оплату, не проверяет предложения и не скрывает рекламу вмешательством в чужую страницу.</p></div></article>
+                <article><span aria-hidden="true">NET</span><div><strong>Сеть принадлежит стороннему сервису</strong><p>Страница напрямую обращается к Perchance и его инфраструктуре. Сервис может видеть стандартные сетевые данные, включая IP, cookies временной сессии и технические параметры браузера, по собственным правилам.</p></div></article>
+                <article><span aria-hidden="true">↓</span><div><strong>Готовый файл сохраняешь ты</strong><p>Monarch не читает результаты из DOM. Нажми Download у выбранной картинки: файл будет локально проверен как PNG, JPEG или WebP и только после этого попадёт в Галерею.</p></div></article>
+              </div>
+              <div class="image-perchance-intro-boundary"><strong>Почему интерфейс отличается</strong><p>Perchance — независимый сайт. Monarch не меняет его кнопки и рекламу, а только добавляет безопасную рамку, перевод запроса и сохранение скачанного файла.</p></div>
+              <div class="image-dialog-actions"><button value="cancel" class="claude-secondary-btn">Не открывать</button><button value="confirm" class="claude-primary-btn" id="image-perchance-intro-confirm">Понятно, открыть Perchance</button></div>
+            </form>
+          </dialog>
+
+          <dialog class="image-confirm-dialog image-provider-consent-dialog" id="image-provider-consent-dialog">
+            <form method="dialog">
+              <span class="image-dialog-icon" aria-hidden="true">↗</span>
+              <div class="image-agreement-heading">
+                <p class="section-kicker">Тестовая BETA-функция · однократно перед первой генерацией</p>
+                <h3>Сторонняя облачная генерация</h3>
+                <p>Без обоих подтверждений Monarch не откроет встроенный Perchance и не позволит внешнюю генерацию ни здесь, ни через Oscar.</p>
+              </div>
+              <div class="image-perchance-beta-notice" role="note"><strong>Экспериментальная функция без SLA</strong><p>Интеграция ещё тестируется и может содержать ошибки, временно не работать, измениться или быть удалена. Используй её только понимая этот BETA-статус и сохраняй важные результаты отдельно.</p></div>
+              <div class="image-agreement-boundary" role="note">
+                <strong>Граница ответственности</strong>
+                <p>MrPastio отвечает за Monarch. Внешний сервис сам отвечает за сбор данных, обработку в интернете и созданный контент.</p>
+              </div>
+              <div class="image-provider-agreement-content" id="image-provider-agreement-content" tabindex="0" aria-label="Полный текст пользовательского соглашения">
+                <p>Загружаю актуальную версию соглашения…</p>
+              </div>
+              <p class="image-agreement-version" id="image-provider-agreement-version"></p>
+              <fieldset class="image-agreement-checks">
+                <legend>Обязательные подтверждения</legend>
+                <label>
+                  <input id="image-cloud-processing-consent" type="checkbox">
+                  <span><strong>Я разрешаю подключение внешних сервисов</strong><small>Perchance получит данные после моих действий. AI Horde получит запрос только после отдельной кнопки.</small></span>
+                </label>
+                <label>
+                  <input id="image-third-party-terms-consent" type="checkbox">
+                  <span><strong>Я принимаю полное соглашение сторонних сервисов</strong><small>Включая требование Perchance 18+, возможный внешний сбор данных, anonymous sharing AI Horde с LAION и законную границу ответственности Разработчика.</small></span>
+                </label>
+              </fieldset>
+              <p class="image-agreement-error" id="image-provider-agreement-error" aria-live="polite"></p>
+              <div class="image-dialog-actions"><button value="cancel" class="claude-ghost-btn">Отмена</button><button value="confirm" class="claude-primary-btn" id="image-provider-consent-confirm" disabled>Принять и продолжить</button></div>
+            </form>
+          </dialog>
+          <dialog class="image-confirm-dialog" id="image-mature-confirmation-dialog">
+            <form method="dialog">
+              <span class="image-dialog-icon warning" aria-hidden="true">18+</span>
+              <h3>Подтвердить эту генерацию?</h3>
+              <p>В запросе найден контент 18+. Подтверждение действует только для этого запроса и истечёт через несколько минут.</p>
+              <div class="image-dialog-actions"><button value="cancel" class="claude-ghost-btn">Отмена</button><button value="confirm" class="claude-primary-btn">Отправить запрос</button></div>
+            </form>
+          </dialog>
         <!-- E. MONARCH MODULES / STUDIO -->
         <section class="claude-view view-hidden modules-view" id="modules-section">
           <div class="modules-workspace" id="modules-workspace">
             <header class="modules-tabs" role="tablist" aria-label="Monarch Modules">
-              <button class="modules-tab active" type="button" role="tab" aria-selected="true" data-modules-tab="studio">Studio <span class="modules-stage-badge">alpha</span></button>
+              <button class="modules-tab active" type="button" role="tab" aria-selected="true" data-modules-tab="library">Мои модули</button>
               <button class="modules-tab" type="button" role="tab" aria-selected="false" data-modules-tab="builder">Создать модуль</button>
-              <button class="modules-tab" type="button" role="tab" aria-selected="false" data-modules-tab="library">Мои модули</button>
-              <span class="modules-runtime-badge"><span></span> Modules · alpha · local-first</span>
+              <button class="modules-tab" type="button" role="tab" aria-selected="false" data-modules-tab="studio">Studio <span class="modules-stage-badge">alpha</span></button>
             </header>
 
-            <section class="modules-panel studio-panel" data-modules-panel="studio">
+            <section class="modules-panel studio-panel" data-modules-panel="studio" hidden>
               <div class="studio-editor" data-editor-mode="photo">
                 <div class="studio-canvas-column">
                   <div class="studio-stage" id="studio-stage">
@@ -1002,7 +1389,7 @@
                       <div class="studio-video-empty" id="studio-video-empty">
                         <img src="/assets/icons/phosphor/video.svg" alt="">
                         <strong>Добавь видео</strong>
-                        <span>MP4, WebM или MOV — всё останется локально</span>
+                        <span>MP4, WebM или MOV</span>
                         <button type="button" class="studio-secondary-action" data-studio-open-media="video">Выбрать файл</button>
                       </div>
                       <div class="studio-video-overlay" id="studio-video-overlay" hidden></div>
@@ -1177,14 +1564,14 @@
                   <button class="studio-save-action" type="button" id="studio-save"><img src="/assets/icons/phosphor/download-simple.svg" alt=""><span>Сохранить</span></button>
                 </div>
               </footer>
-              <p class="studio-status" id="studio-status" aria-live="polite">Фото готово к обработке · всё работает локально</p>
+              <p class="studio-status" id="studio-status" aria-live="polite">Фото готово к обработке</p>
             </section>
 
             <section class="modules-panel module-builder-panel" data-modules-panel="builder" hidden>
               <div class="module-builder-copy">
                 <span class="modules-eyebrow">Monarch Module Builder</span>
                 <h2>Новый модуль без ручной рутины</h2>
-                <p>Три понятных шага: опиши задачу, проверь будущие файлы и только потом создай scaffold.</p>
+                <p>Три понятных шага: опиши задачу, проверь будущие файлы и только потом создай модуль.</p>
                 <ol class="module-builder-steps" aria-label="Этапы создания модуля">
                   <li class="active"><span>1</span><strong>Основа</strong><small>Название и назначение</small></li>
                   <li><span>2</span><strong>Предпросмотр</strong><small>Контракты и файлы</small></li>
@@ -1210,9 +1597,9 @@
               </form>
             </section>
 
-            <section class="modules-panel module-library-panel" data-modules-panel="library" hidden>
+            <section class="modules-panel module-library-panel" data-modules-panel="library">
               <div class="module-library-header">
-                <div><span class="modules-eyebrow">Suite</span><h2>Мои модули</h2><p>Инструменты, которые живут внутри Monarch Modules.</p></div>
+                <div><h2>Мои модули</h2><p>Установленные инструменты Monarch.</p></div>
                 <button class="studio-secondary-action" type="button" id="module-library-refresh"><img src="/assets/icons/phosphor/arrow-counter-clockwise.svg" alt="">Обновить</button>
               </div>
               <div class="module-library-grid" id="module-library-grid">
@@ -1223,25 +1610,12 @@
                 </article>
                 <article class="module-library-card create-card">
                   <div class="module-card-icon"><img src="/assets/icons/phosphor/magic-wand.svg" alt=""></div>
-                  <div><span>Guided Builder</span><h3>Создать следующий</h3><p>Выбери рецепт, посмотри каждый файл и создай безопасный scaffold.</p></div>
+                  <div><span>Пошаговое создание</span><h3>Создать модуль</h3><p>Выбери основу, проверь будущие файлы и создай модуль.</p></div>
                   <button type="button" data-open-builder>Начать</button>
                 </article>
               </div>
               <p class="studio-status" id="module-library-status" aria-live="polite"></p>
             </section>
-          </div>
-        </section>
-
-        <!-- E. MODELS VIEW -->
-        <section class="claude-view view-hidden" id="models-section">
-          <div class="document-feed models-document-feed">
-            <div class="view-header">
-              <div>
-                <h2>Модели Monarch</h2>
-                <p class="view-subtitle">Локальные роли, runtime и готовность.</p>
-              </div>
-            </div>
-            <div class="doc-content models-page-content" id="models-page-list"></div>
           </div>
         </section>
 
@@ -1251,7 +1625,7 @@
             <div class="view-header sharing-page-header">
               <div>
                 <h2>Monarch Sharing</h2>
-                <p class="view-subtitle">Подключай локальные модели к приложениям через OpenAI-compatible API.</p>
+                <p class="view-subtitle">Подключение моделей к другим приложениям.</p>
               </div>
             </div>
             <div id="sharing-page-root" class="sharing-page-root" aria-live="polite">
@@ -1263,63 +1637,92 @@
         <!-- G. SETTINGS VIEW (Now contains Logs) -->
         <section class="claude-view view-hidden" id="settings-section">
           <div class="document-feed">
-            <div class="view-header">
+            <div class="view-header settings-view-header">
               <div>
-                <h2>Monarch Control</h2>
-                <p class="settings-intro">Личность, голос, постоянная память и локальные подключения.</p>
+                <h2>Настройки</h2>
+                <p class="settings-intro">Всё важное в одном месте.</p>
               </div>
             </div>
             <div class="doc-content settings-content">
-              <div class="settings-tabs" role="tablist" aria-label="Настройки Monarch">
-                <button type="button" data-settings-tab="general" role="tab" aria-selected="true">Общие</button>
-                <button type="button" data-settings-tab="memory" role="tab" aria-selected="false">Память</button>
-                <button type="button" data-settings-tab="skills" role="tab" aria-selected="false">Навыки</button>
-                <button type="button" data-settings-tab="telegram" role="tab" aria-selected="false">Telegram</button>
-                <button type="button" data-settings-tab="safe" role="tab" aria-selected="false">Monarch Safe</button>
-                <button type="button" data-settings-tab="system" role="tab" aria-selected="false">Система</button>
-              </div>
+              <div class="settings-workspace">
+                <aside class="settings-rail" aria-label="Разделы настроек Monarch">
+                  <div class="settings-rail-heading">
+                    <strong>Настройки</strong>
+                    <small>Выбери нужный раздел.</small>
+                  </div>
+                  <div class="settings-tabs" role="tablist" aria-label="Настройки Monarch">
+                    <button type="button" data-settings-tab="general" role="tab" aria-selected="true"><strong>Личность и голос</strong><small>Как Oscar отвечает и звучит</small></button>
+                    <button type="button" data-settings-tab="images" role="tab" aria-selected="false"><strong>Изображения</strong><small>Создание и хранение</small></button>
+                    <button type="button" data-settings-tab="models" role="tab" aria-selected="false"><strong>Модели</strong><small>Выбор и готовность</small></button>
+                    <button type="button" data-settings-tab="memory" role="tab" aria-selected="false"><strong>Память</strong><small>Что Oscar запоминает</small></button>
+                    <button type="button" data-settings-tab="skills" role="tab" aria-selected="false"><strong>Навыки</strong><small>Готовые действия</small></button>
+                    <button type="button" data-settings-tab="telegram" role="tab" aria-selected="false"><strong>Telegram</strong><small>Удалённый доступ</small></button>
+                    <button type="button" data-settings-tab="safe" role="tab" aria-selected="false"><strong>Monarch Safe</strong><small>Защищённые данные</small></button>
+                    <button type="button" data-settings-tab="system" role="tab" aria-selected="false"><strong>Система</strong><small>Доступ и обновления</small></button>
+                    <button type="button" data-settings-tab="dev" data-owner-dev role="tab" aria-selected="false" hidden><strong>DEV</strong><small>Расширенные настройки</small></button>
+                  </div>
+                </aside>
 
-              <section class="settings-group settings-feature" data-settings-panel="general" aria-labelledby="personality-settings-title">
+                <div class="settings-panel-stack">
+                  <nav class="settings-general-switcher" data-settings-panel="general" aria-label="Личность и голос">
+                    <button type="button" data-settings-general="personality" aria-pressed="true"><strong>Личность</strong><small>Форма и стиль ответов</small></button>
+                    <button type="button" data-settings-general="voice" aria-pressed="false"><strong>Голос</strong><small>Тембр, диктовка и произношение</small></button>
+                  </nav>
+
+              <section class="settings-group settings-feature" data-settings-panel="general" data-settings-general-panel="personality" aria-labelledby="personality-settings-title">
                 <div class="settings-group-heading">
                   <div>
                     <p class="section-kicker">Личность</p>
                     <h3 id="personality-settings-title">Как Monarch общается с тобой</h3>
                   </div>
-                  <span class="settings-save-state" id="profile-save-state" aria-live="polite">Загрузка</span>
+                  <span class="settings-save-state" id="personality-save-state" aria-live="polite">Загрузка</span>
                 </div>
-                <form id="profile-settings-form" class="settings-form">
-                  <fieldset class="settings-fieldset">
-                    <legend>Стиль общения</legend>
-                    <div class="communication-presets" role="radiogroup" aria-label="Стиль общения">
-                      <button type="button" class="communication-preset" data-settings-preset="balanced" aria-pressed="false">
-                        <strong>Спокойный</strong><span>Живо и по делу</span>
-                      </button>
-                      <button type="button" class="communication-preset" data-settings-preset="concise" aria-pressed="false">
-                        <strong>Коротко</strong><span>Только главное</span>
-                      </button>
-                      <button type="button" class="communication-preset" data-settings-preset="warm" aria-pressed="false">
-                        <strong>Теплее</strong><span>Больше характера</span>
-                      </button>
-                      <button type="button" class="communication-preset" data-settings-preset="technical" aria-pressed="false">
-                        <strong>Технический</strong><span>Факты и проверка</span>
-                      </button>
-                    </div>
-                  </fieldset>
-                  <label class="settings-field">
-                    <span>Что Monarch должен знать о тебе</span>
-                    <textarea id="profile-adaptive-summary" rows="4" maxlength="1600" placeholder="Например: я предпочитаю практичные решения и работаю над Monarch один."></textarea>
+                <p class="settings-section-copy">Личность управляет только формой ответа. Факты о тебе хранятся отдельно во вкладке «Память» и не смешиваются с характером.</p>
+                <div class="personality-scope-bar">
+                  <label class="settings-field personality-scope-field">
+                    <span>Где действует набор</span>
+                    <select id="personality-scope-select" aria-label="Область личности">
+                      <option value="chat">Обычный Chat</option>
+                    </select>
                   </label>
-                  <label class="settings-field">
-                    <span>Свои правила общения <small>по одному на строку</small></span>
-                    <textarea id="profile-style-rules" rows="5" maxlength="3000" placeholder="Обращайся на ты.&#10;Сначала показывай результат.&#10;Не растягивай очевидное."></textarea>
+                  <button type="button" class="claude-ghost-btn" id="personality-copy-chat" hidden>Скопировать из Chat</button>
+                  <label class="toggle-control personality-master-toggle monarch-switch-row">
+                    <span><strong>Использовать личность</strong><small>Oscar будет отвечать в выбранном стиле</small></span>
+                    <input id="personality-enabled" type="checkbox">
+                    <i class="monarch-switch" aria-hidden="true"></i>
                   </label>
-                  <div class="settings-actions">
-                    <button type="submit" class="claude-primary-btn">Сохранить характер</button>
+                </div>
+                <form id="personality-settings-form" class="settings-form personality-questionnaire">
+                  <div class="personality-section-heading">
+                    <div><strong>Твоя базовая настройка</strong><span>Из неё детерминированно создаются три варианта.</span></div>
+                    <button type="submit" class="claude-primary-btn" id="personality-generate">Создать 3 варианта</button>
+                  </div>
+                  <div class="personality-dimension-grid">
+                    <label class="personality-dimension"><span>Краткость <output data-personality-output="brevity">62</output></span><input id="personality-brevity" data-personality-dimension="brevity" type="range" min="0" max="100" value="62"><small>Подробно — сжато</small></label>
+                    <label class="personality-dimension"><span>Теплота <output data-personality-output="warmth">52</output></span><input id="personality-warmth" data-personality-dimension="warmth" type="range" min="0" max="100" value="52"><small>Сдержанно — тепло</small></label>
+                    <label class="personality-dimension"><span>Прямота <output data-personality-output="directness">68</output></span><input id="personality-directness" data-personality-dimension="directness" type="range" min="0" max="100" value="68"><small>Мягко — прямо</small></label>
+                    <label class="personality-dimension"><span>Инициативность <output data-personality-output="initiative">52</output></span><input id="personality-initiative" data-personality-dimension="initiative" type="range" min="0" max="100" value="52"><small>Только запрос — следующий шаг</small></label>
+                    <label class="personality-dimension"><span>Юмор <output data-personality-output="humor">28</output></span><input id="personality-humor" data-personality-dimension="humor" type="range" min="0" max="100" value="28"><small>Серьёзно — живо</small></label>
+                    <label class="personality-dimension"><span>Скептичность <output data-personality-output="skepticism">62</output></span><input id="personality-skepticism" data-personality-dimension="skepticism" type="range" min="0" max="100" value="62"><small>Доверять — перепроверять</small></label>
+                    <label class="personality-dimension"><span>Техническая глубина <output data-personality-output="technicalDepth">68</output></span><input id="personality-technicalDepth" data-personality-dimension="technicalDepth" type="range" min="0" max="100" value="68"><small>Просто — инженерно</small></label>
+                    <label class="personality-dimension"><span>Структура <output data-personality-output="structure">66</output></span><input id="personality-structure" data-personality-dimension="structure" type="range" min="0" max="100" value="66"><small>Свободно — по разделам</small></label>
+                  </div>
+                  <div class="personality-language-row">
+                    <label class="settings-field"><span>Форма обращения</span><select id="personality-address-form"><option value="ты">На «ты»</option><option value="вы">На «вы»</option><option value="neutral">Нейтрально</option></select></label>
+                    <label class="settings-field"><span>Язык по умолчанию</span><select id="personality-language"><option value="auto">Как в запросе</option><option value="ru">Русский</option><option value="en">English</option><option value="uk">Українська</option><option value="bg">Български</option></select></label>
                   </div>
                 </form>
+                <div class="personality-profile-list" id="personality-profile-list" aria-live="polite"></div>
+                <section class="personality-preview" aria-labelledby="personality-preview-title">
+                  <div class="personality-section-heading">
+                    <div><strong id="personality-preview-title">Проверить личность</strong><span>Без истории, памяти и инструментов; разговор не сохраняется.</span></div>
+                    <button type="button" class="claude-ghost-btn" id="personality-preview-button">Показать пример</button>
+                  </div>
+                  <div id="personality-preview-output" class="personality-preview-output" aria-live="polite">Выбери профиль и включи личность, чтобы услышать разницу.</div>
+                </section>
               </section>
 
-              <section class="settings-group settings-feature oscar-voice-settings" data-settings-panel="general" aria-labelledby="oscar-voice-settings-title">
+              <section class="settings-group settings-feature oscar-voice-settings" data-settings-panel="general" data-settings-general-panel="voice" aria-labelledby="oscar-voice-settings-title" hidden>
                 <div class="settings-group-heading">
                   <div>
                     <p class="section-kicker">Нейросетевой голос</p>
@@ -1327,7 +1730,10 @@
                   </div>
                   <span class="settings-save-state" id="oscar-voice-save-state" aria-live="polite">Локально</span>
                 </div>
-                <p class="settings-section-copy">Три синтетических русских тембра работают локально. Манера и своя инструкция применяются к следующей озвучке.</p>
+                <p class="settings-section-copy">Три синтетических русских тембра работают локально. Изменения сохраняются автоматически и применяются к следующей озвучке.</p>
+                <div class="voice-runtime-strip" id="oscar-voice-runtime" aria-live="polite">
+                  <span>Проверяю голос…</span>
+                </div>
                 <form id="oscar-voice-settings-form" class="settings-form voice-settings-form">
                   <div class="voice-studio">
                     <div class="voice-portrait-panel" id="oscar-voice-visual" data-voice="oscar" aria-live="polite">
@@ -1347,18 +1753,27 @@
                     <div class="voice-preset-area">
                       <span class="settings-label">Заготовленные голоса</span>
                       <div class="voice-preset-grid" role="radiogroup" aria-label="Заготовленные голоса Оскара">
-                        <button type="button" class="voice-preset-card" data-voice-preset="oscar" aria-pressed="true">
-                          <span class="voice-preset-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-                          <strong>Баритон</strong><small>Низкий и уверенный</small>
-                        </button>
-                        <button type="button" class="voice-preset-card" data-voice-preset="oscar-clear" aria-pressed="false">
-                          <span class="voice-preset-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-                          <strong>Ясный</strong><small>Легче и отчётливее</small>
-                        </button>
-                        <button type="button" class="voice-preset-card" data-voice-preset="aurora" aria-pressed="false">
-                          <span class="voice-preset-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-                          <strong>Аврора</strong><small>Тёплый женский</small>
-                        </button>
+                        <div class="voice-preset-shell">
+                          <button type="button" class="voice-preset-card" data-voice-preset="oscar" role="radio" aria-checked="true">
+                            <span class="voice-preset-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+                            <strong>Баритон</strong><small>Низкий и уверенный</small>
+                          </button>
+                          <button type="button" class="voice-card-preview" data-voice-preview="oscar" aria-label="Проверить голос Баритон">▶</button>
+                        </div>
+                        <div class="voice-preset-shell">
+                          <button type="button" class="voice-preset-card" data-voice-preset="oscar-clear" role="radio" aria-checked="false">
+                            <span class="voice-preset-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+                            <strong>Ясный</strong><small>Легче и отчётливее</small>
+                          </button>
+                          <button type="button" class="voice-card-preview" data-voice-preview="oscar-clear" aria-label="Проверить голос Ясный">▶</button>
+                        </div>
+                        <div class="voice-preset-shell">
+                          <button type="button" class="voice-preset-card" data-voice-preset="aurora" role="radio" aria-checked="false">
+                            <span class="voice-preset-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+                            <strong>Аврора</strong><small>Тёплый женский</small>
+                          </button>
+                          <button type="button" class="voice-card-preview" data-voice-preview="aurora" aria-label="Проверить голос Аврора">▶</button>
+                        </div>
                       </div>
                       <input id="oscar-voice-preset" type="hidden" value="oscar">
                       <label class="settings-field voice-style-field">
@@ -1371,6 +1786,10 @@
                           <option value="energetic">Энергично</option>
                         </select>
                       </label>
+                      <div class="voice-custom-presets">
+                        <div class="voice-subsection-heading"><span class="settings-label">Мои пресеты</span><small>Именованные снимки текущих параметров</small></div>
+                        <div id="oscar-voice-custom-presets" class="voice-custom-preset-list" aria-live="polite"><span class="voice-empty-copy">Пока нет своих пресетов</span></div>
+                      </div>
                     </div>
                   </div>
                   <div class="voice-tuning">
@@ -1409,76 +1828,294 @@
                       </label>
                     </div>
                   </div>
-                  <label class="settings-field">
+                  <label class="settings-field" id="oscar-voice-instruction-field">
                     <span>Своя подача <small>необязательно, до 300 символов</small></span>
                     <textarea id="oscar-voice-instruction" rows="3" maxlength="300" placeholder="Например: объясняй мягко, с короткими паузами перед важными выводами."></textarea>
+                  </label>
+                  <p class="voice-capability-note" id="oscar-voice-instruction-note" hidden>Текущая Qwen3-TTS 0.6B Base не поддерживает честное управление свободной инструкцией. Манера и выразительность работают через проверяемые параметры генерации.</p>
+
+                  <section class="voice-pronunciation" aria-labelledby="voice-pronunciation-title">
+                    <div class="voice-subsection-heading">
+                      <div><strong id="voice-pronunciation-title">Произношение</strong><small id="voice-pronunciation-support">Проверяю поддержку текущего voice engine</small></div>
+                      <span id="voice-stress-status">Проверка совместимости</span>
+                    </div>
+                    <div class="voice-pronunciation-create">
+                      <label class="settings-field compact-field"><span>Слово</span><input id="voice-pronunciation-word" maxlength="80" placeholder="замок"></label>
+                      <label class="settings-field compact-field"><span>С ударением</span><input id="voice-pronunciation-value" maxlength="100" placeholder="замо́к"></label>
+                      <label class="settings-field"><span>Пример контекста</span><input id="voice-pronunciation-context" maxlength="240" placeholder="дверной замок"></label>
+                      <button type="button" class="claude-ghost-btn" id="voice-pronunciation-add">Добавить</button>
+                    </div>
+                    <p class="voice-pronunciation-hint">Правила применяются только если активный voice engine подтвердил поддержку stress markup. Regex не принимается.</p>
+                    <div id="voice-pronunciation-list" class="voice-pronunciation-list" aria-live="polite"><span class="voice-empty-copy">Пользовательских правил пока нет</span></div>
+                  </section>
+
+                  <label class="voice-input-preference">
+                    <span><strong>Отправлять после ручной остановки диктовки</strong><small>Повторное нажатие на микрофон отправит итоговый текст ровно один раз. По умолчанию выключено.</small></span>
+                    <input id="voice-input-auto-send" type="checkbox">
                   </label>
                   <div class="voice-settings-note" role="note">
                     <span aria-hidden="true">●</span>
                     <p>Выбранный тембр не меняет личность и содержание ответа — только звучание.</p>
                   </div>
-                  <div class="settings-actions voice-settings-actions">
-                    <button type="button" class="claude-secondary-btn" id="oscar-voice-test">Проверить голос</button>
-                    <button type="submit" class="claude-primary-btn">Сохранить голос</button>
+                  <div class="voice-sticky-toolbar" aria-label="Проверка и пресеты голоса">
+                    <div class="voice-toolbar-actions">
+                      <button type="button" class="claude-secondary-btn" id="oscar-voice-test">Проверить</button>
+                      <button type="button" class="claude-ghost-btn" id="oscar-voice-stop">Стоп</button>
+                      <button type="button" class="claude-ghost-btn" id="oscar-voice-retry" hidden>Повторить сохранение</button>
+                    </div>
+                    <div class="voice-preset-save">
+                      <input id="oscar-voice-preset-name" maxlength="80" placeholder="Название пресета" aria-label="Название нового пресета">
+                      <button type="button" class="claude-primary-btn" id="oscar-voice-save-preset">Сохранить как пресет</button>
+                    </div>
                   </div>
                 </form>
               </section>
 
-              <section class="settings-group settings-feature" data-settings-panel="memory" aria-labelledby="memory-settings-title">
+              <section class="settings-group settings-feature image-settings-panel" data-settings-panel="images" aria-labelledby="image-settings-title">
                 <div class="settings-group-heading">
+                  <div><p class="section-kicker">Image Generation</p><h3 id="image-settings-title">Генерация и хранение</h3></div>
+                  <span class="settings-save-state" id="image-settings-state" aria-live="polite">Загрузка</span>
+                </div>
+                <p class="settings-section-copy">Perchance — основной независимый интерактивный сервис, но его интеграция является тестовой BETA-функцией без гарантии стабильности. AI Horde доступен только как аварийный резерв. Без актуального соглашения внешняя генерация полностью недоступна.</p>
+                <div class="image-settings-overview">
+                  <article><span>Основной сервис · TEST BETA</span><strong>Perchance</strong><small id="image-provider-consent-state">Нет разрешения</small></article>
+                  <article><span>Контент</span><strong id="image-mature-mode-state">PG-13</strong><small id="image-mature-mode-expiry">По умолчанию</small></article>
+                </div>
+                <div class="image-settings-row">
+                  <span><strong>Соглашение внешнего сервиса</strong><small>Два обязательных подтверждения · повтор при смене обработки данных · можно отозвать.</small></span>
+                  <button type="button" class="claude-secondary-btn" id="image-provider-consent-toggle">Разрешить</button>
+                </div>
+                <label class="image-settings-row">
+                  <span><strong>Изображения в инкогнито</strong><small>Результат можно сохранить явно даже при запрете автосохранения.</small></span>
+                  <select id="image-incognito-persistence">
+                    <option value="never">Не сохранять</option>
+                    <option value="ask">Спрашивать каждый раз</option>
+                    <option value="always">Сохранять автоматически</option>
+                  </select>
+                </label>
+                <details class="image-mature-settings" id="image-mature-settings">
+                  <summary><span><strong>Расширенная политика контента</strong><small>Не влияет на обычную генерацию</small></span><span aria-hidden="true">›</span></summary>
+                  <div class="image-mature-settings-body">
+                    <p>Режим 18+ по умолчанию выключен. Каждый такой запрос подтверждается отдельно. Контент с несовершеннолетними всегда блокируется.</p>
+                    <label class="image-adult-attestation"><input id="image-adult-attestation" type="checkbox"><span><strong>Мне исполнилось 18 лет</strong><small>Обязательное подтверждение для активации.</small></span></label>
+                    <div class="image-mature-actions">
+                      <button type="button" class="claude-secondary-btn" data-image-mature-mode="one-hour">Включить на 1 час</button>
+                      <button type="button" class="claude-secondary-btn" data-image-mature-mode="persistent">Включить постоянно</button>
+                      <button type="button" class="claude-ghost-btn" data-image-mature-mode="off">Вернуться к PG-13</button>
+                    </div>
+                    <p class="image-settings-feedback" id="image-mature-feedback" aria-live="polite"></p>
+                  </div>
+                </details>
+              </section>
+
+              <section class="settings-group settings-feature models-settings-panel" data-settings-panel="models" aria-labelledby="models-settings-title">
+                <div class="settings-group-heading">
+                  <div><p class="section-kicker">Модели</p><h3 id="models-settings-title">Модели Monarch</h3></div>
+                  <span class="settings-save-state">Локально</span>
+                </div>
+                <p class="settings-section-copy">Выбери скорость и глубину ответа. Здесь же видно, какие модели готовы.</p>
+                <div class="models-page-content" id="models-page-list"></div>
+              </section>
+
+              <section class="settings-group settings-feature memory-control-center" data-settings-panel="memory" aria-labelledby="memory-settings-title">
+                <header class="memory-hero">
                   <div>
-                    <p class="section-kicker">Постоянная память</p>
-                    <h3 id="memory-settings-title">Что стоит помнить всегда</h3>
+                    <p class="section-kicker">Память Oscar</p>
+                    <h3 id="memory-settings-title">Что Oscar знает о тебе</h3>
+                    <p>Проверяй, откуда взялась каждая запись, быстро находи нужное и решай, что учитывать всегда.</p>
                   </div>
-                  <span class="settings-count" id="memory-count">0 записей</span>
-                </div>
-                <form id="memory-create-form" class="memory-create-form">
-                  <label class="settings-field memory-input-field">
-                    <span>Новая запись</span>
-                    <textarea id="memory-create-text" rows="3" maxlength="1200" required placeholder="Например: не удалять существующие изменения в рабочей ветке."></textarea>
+                  <span class="settings-count memory-count-pill" id="memory-count">0 записей</span>
+                </header>
+
+                <div class="memory-overview" aria-label="Состояние памяти">
+                  <article class="memory-overview-card">
+                    <span>Область</span>
+                    <strong>Обычный Chat</strong>
+                    <small>Не смешивается с Coder-проектами</small>
+                  </article>
+                  <article class="memory-overview-card">
+                    <span>Явные записи</span>
+                    <strong id="memory-explicit-count">0</strong>
+                    <small>Созданы тобой или командой «запомни»</small>
+                  </article>
+                  <label class="memory-cross-chat-card">
+                    <span>
+                      <small>Контекст прошлых чатов</small>
+                      <strong id="memory-cross-chat-label">Включён</strong>
+                      <em>До 4 релевантных эпизодов, локально</em>
+                    </span>
+                    <span class="control-switch" aria-hidden="true"></span>
+                    <input id="memory-cross-chat-enabled" type="checkbox" checked aria-label="Контекст прошлых чатов">
                   </label>
-                  <div class="memory-create-options">
-                    <label class="settings-field compact-field">
-                      <span>Категория</span>
-                      <select id="memory-create-category">
-                        <option value="preference">Предпочтение</option>
-                        <option value="project">Проект</option>
-                        <option value="fact">Факт</option>
-                        <option value="correction">Исправление</option>
-                        <option value="note">Заметка</option>
-                      </select>
-                    </label>
-                    <label class="toggle-control memory-pin-control"><input id="memory-create-pinned" type="checkbox" checked> Всегда учитывать</label>
-                    <button type="submit" class="claude-primary-btn">Запомнить</button>
-                  </div>
-                </form>
-                <p class="settings-feedback" id="memory-feedback" aria-live="polite"></p>
-                <div class="memory-settings-list" id="memory-settings-list">
-                  <div class="settings-loading">Загрузка памяти…</div>
                 </div>
+
+                <div class="memory-toolbar">
+                  <label class="memory-search-field">
+                    <span class="sr-only">Поиск по памяти</span>
+                    <input id="memory-search" type="search" placeholder="Найти факт, правило или проект…" autocomplete="off">
+                  </label>
+                  <label class="memory-filter-field">
+                    <span class="sr-only">Фильтр категории</span>
+                    <select id="memory-category-filter" aria-label="Фильтр категории памяти">
+                      <option value="all">Все категории</option>
+                      <option value="preference">Предпочтения</option>
+                      <option value="project">Проекты</option>
+                      <option value="fact">Факты</option>
+                      <option value="correction">Исправления</option>
+                      <option value="note">Заметки</option>
+                    </select>
+                  </label>
+                  <button type="button" class="claude-primary-btn memory-compose-toggle" id="memory-compose-toggle" aria-expanded="false" aria-controls="memory-compose-panel">Новая запись</button>
+                </div>
+
+                <section class="memory-compose-panel" id="memory-compose-panel" hidden aria-labelledby="memory-compose-title">
+                  <div class="memory-subheading">
+                    <span><strong id="memory-compose-title">Добавить в постоянную память</strong><small>Запись начнёт влиять на следующие ответы только после подтверждённого сохранения.</small></span>
+                    <button type="button" class="claude-ghost-btn" id="memory-compose-close">Закрыть</button>
+                  </div>
+                  <form id="memory-create-form" class="memory-create-form">
+                    <label class="settings-field memory-input-field">
+                      <span>Что нужно помнить</span>
+                      <textarea id="memory-create-text" rows="4" maxlength="1200" required placeholder="Например: сначала показывай итог, затем детали."></textarea>
+                    </label>
+                    <div class="memory-create-options">
+                      <label class="settings-field compact-field">
+                        <span>Категория</span>
+                        <select id="memory-create-category">
+                          <option value="preference">Предпочтение</option>
+                          <option value="project">Проект</option>
+                          <option value="fact">Факт</option>
+                          <option value="correction">Исправление</option>
+                          <option value="note">Заметка</option>
+                        </select>
+                      </label>
+                      <label class="memory-pin-control"><input id="memory-create-pinned" type="checkbox" checked><span class="control-switch" aria-hidden="true"></span><span><strong>Всегда учитывать</strong><small>Повышает приоритет записи</small></span></label>
+                      <button type="submit" class="claude-primary-btn">Запомнить</button>
+                    </div>
+                  </form>
+                </section>
+
+                <p class="settings-feedback memory-feedback" id="memory-feedback" aria-live="polite"></p>
+
+                <section class="memory-library" aria-labelledby="memory-library-title">
+                  <div class="memory-subheading">
+                    <span><strong id="memory-library-title">Записи</strong><small id="memory-library-summary">Сортировка: сначала закреплённые</small></span>
+                  </div>
+                  <div class="memory-settings-list" id="memory-settings-list">
+                    <div class="settings-loading memory-loading-state"><span></span><strong>Загружаю память</strong></div>
+                  </div>
+                </section>
               </section>
 
               <section class="settings-group settings-feature skills-settings" data-settings-panel="skills" aria-labelledby="skills-settings-title">
                 <div class="settings-group-heading">
                   <div>
-                    <p class="section-kicker">Monarch Skills</p>
-                    <h3 id="skills-settings-title">Локальные навыки Oscar</h3>
+                    <p class="section-kicker">Навыки Oscar</p>
+                    <h3 id="skills-settings-title">Готовые способы выполнить задачу</h3>
                   </div>
                   <span class="settings-count" id="skills-count">Загрузка</span>
                 </div>
-                <p class="settings-section-copy">Astra видит только метаданные, а инструкции и ресурсы открывает при активации. Облако для этого не используется.</p>
-                <div class="skills-overview" aria-label="Сводка каталога навыков">
-                  <div><strong id="skills-workspace-count">0</strong><span>в проекте</span></div>
-                  <div><strong id="skills-user-count">0</strong><span>пользовательских</span></div>
-                  <div><strong id="skills-compatible-count">0</strong><span>доступно здесь</span></div>
+                <section class="skills-quick-start" aria-labelledby="skills-quick-start-title">
+                  <div>
+                    <strong id="skills-quick-start-title">Выбери навык в чате и опиши задачу</strong>
+                    <p>Нажми «+» в чате, выбери навык и напиши, что нужно сделать.</p>
+                  </div>
+                  <button type="button" class="primary-button" id="skills-open-chat-picker">Выбрать в чате</button>
+                </section>
+                <details class="skills-catalog-summary">
+                  <summary>Что хранится локально</summary>
+                  <div class="skills-overview" aria-label="Сводка каталога навыков">
+                    <div><strong id="skills-workspace-count">0</strong><span>в этом проекте</span></div>
+                    <div><strong id="skills-user-count">0</strong><span>для тебя</span></div>
+                    <div><strong id="skills-compatible-count">0</strong><span>доступно сейчас</span></div>
+                  </div>
+                  <p>Astra читает описание навыка локально. Сам навык не получает новых прав и не обходит подтверждения.</p>
+                </details>
+                <div class="skills-list-heading">
+                  <div><strong id="skills-list-title">Твои навыки</strong><small id="skills-list-hint">Остальные появятся, когда начнёшь поиск.</small></div>
                 </div>
                 <div class="skills-toolbar">
                   <label class="settings-field">
-                    <span>Поиск по навыкам</span>
-                    <input id="skills-search" type="search" placeholder="Файлы, безопасность, документы…" autocomplete="off">
+                    <span>Найти навык</span>
+                    <input id="skills-search" type="search" placeholder="Например: файлы или безопасность" autocomplete="off">
                   </label>
-                  <button type="button" class="claude-ghost-btn" id="skills-refresh">Обновить</button>
+                  <div class="skills-toolbar-actions">
+                    <button type="button" class="claude-ghost-btn" id="skills-refresh">Обновить</button>
+                    <button type="button" class="primary-button" id="skill-create-toggle" aria-expanded="false" aria-controls="skill-authoring-panel">Создать свой</button>
+                  </div>
                 </div>
+                <section class="skill-authoring-panel" id="skill-authoring-panel" aria-labelledby="skill-authoring-title" hidden>
+                  <div class="skill-authoring-heading">
+                    <div>
+                      <span class="settings-label">Свой навык</span>
+                      <strong id="skill-authoring-title">Научи Oscar повторяемой работе</strong>
+                      <small>Опиши результат обычными словами. Oscar подготовит правила, но ничего не запишет без твоей проверки.</small>
+                    </div>
+                    <button type="button" class="claude-ghost-btn" id="skill-authoring-close">Закрыть</button>
+                  </div>
+                  <form class="skill-authoring-form" id="skill-authoring-form">
+                    <div class="skill-purpose-row">
+                      <label class="settings-field skill-purpose-field">
+                        <span>Что Oscar должен уметь</span>
+                        <textarea id="skill-purpose" rows="2" maxlength="2000" placeholder="Например: проверять релиз перед публикацией и подтверждать результат тестами"></textarea>
+                      </label>
+                      <button type="submit" class="primary-button" id="skill-auto-draft">Подготовить черновик</button>
+                    </div>
+                    <details class="skill-authoring-advanced skill-authoring-storage">
+                      <summary>Где будет доступен навык</summary>
+                      <label class="settings-field skill-scope-field">
+                        <span>Область</span>
+                        <select id="skill-scope">
+                          <option value="project">Только в этом проекте</option>
+                          <option value="user">Во всех моих проектах</option>
+                        </select>
+                      </label>
+                    </details>
+                    <div class="skill-editor" id="skill-editor" hidden>
+                      <label class="settings-field">
+                        <span>Название навыка</span>
+                        <input id="skill-display-name" maxlength="80" autocomplete="off">
+                      </label>
+                      <label class="settings-field">
+                        <span>Когда предлагать этот навык</span>
+                        <textarea id="skill-description" rows="2" maxlength="500"></textarea>
+                      </label>
+                      <label class="settings-field">
+                        <span>Как Oscar должен работать</span>
+                        <textarea id="skill-instructions" class="skill-instructions-editor" rows="10" maxlength="8001" spellcheck="true"></textarea>
+                      </label>
+                      <label class="settings-field">
+                        <span>Примеры задач · по одному в строке</span>
+                        <textarea id="skill-examples" rows="3" maxlength="3200"></textarea>
+                      </label>
+                      <label class="skill-implicit-control">
+                        <input id="skill-implicit" type="checkbox">
+                        <span><strong>Предлагать автоматически</strong><small>Oscar сможет показать этот навык по смыслу задачи. Новых прав это не выдаёт.</small></span>
+                      </label>
+                      <details class="skill-authoring-advanced">
+                        <summary>Технические настройки</summary>
+                        <div class="skill-editor-grid">
+                          <label class="settings-field">
+                            <span>Системное имя</span>
+                            <input id="skill-name" maxlength="63" autocomplete="off" spellcheck="false">
+                          </label>
+                          <label class="settings-field">
+                            <span>Нужные capability</span>
+                            <textarea id="skill-capabilities" rows="3" maxlength="4096" placeholder="workspace.files.read"></textarea>
+                          </label>
+                        </div>
+                      </details>
+                      <div class="skill-validation-summary" id="skill-validation-summary" aria-live="polite"></div>
+                      <div class="skill-authoring-actions">
+                        <span id="skill-authoring-state">Просмотри правила перед созданием</span>
+                        <div>
+                          <button type="button" class="claude-ghost-btn" id="skill-validate">Проверить</button>
+                          <button type="button" class="primary-button" id="skill-publish" disabled>Создать навык</button>
+                        </div>
+                      </div>
+                    </div>
+                  </form>
+                </section>
                 <p class="settings-feedback" id="skills-feedback" aria-live="polite"></p>
                 <div class="skill-settings-list" id="skills-settings-list">
                   <div class="settings-loading">Собираю локальный каталог…</div>
@@ -1554,6 +2191,42 @@
                 </details>
               </section>
 
+              <section class="settings-group settings-feature owner-dev-panel" data-settings-panel="dev" data-owner-dev aria-labelledby="owner-dev-title" hidden>
+                <div class="settings-group-heading owner-dev-heading">
+                  <div><p class="section-kicker">Только для Owner</p><h3 id="owner-dev-title">Расширенные настройки Oscar</h3></div>
+                  <span class="settings-save-state" id="owner-dev-state" aria-live="polite">Загрузка</span>
+                </div>
+                <p class="settings-section-copy">Эти параметры меняют работу Oscar. Если не уверен — оставь значения по умолчанию.</p>
+                <div class="owner-public-mode">
+                  <span><strong>Вернуться в обычный режим</strong><small>Owner будет приостановлен, Monarch перезапустится с обычными правилами.</small></span>
+                  <button type="button" class="claude-ghost-btn" id="owner-mode-disable">Перейти в Public</button>
+                </div>
+
+                <article class="dev-zero-retention-card">
+                  <div><strong>Не сохранять новые чаты</strong><p>Новые сообщения и вложения исчезнут после завершения сессии. Старые чаты останутся на месте.</p></div>
+                  <label class="dev-switch" aria-label="Полная незапись чатов"><input type="checkbox" data-dev-setting="zeroRetentionEnabled"><span></span></label>
+                </article>
+
+                <div class="dev-toggle-grid" aria-label="Политики Oscar DEV">
+                  <label class="dev-toggle-card"><span><strong>Интернет</strong><small>Поиск и исследование в сети</small></span><input type="checkbox" data-dev-setting="internetEnabled"><i></i></label>
+                  <label class="dev-toggle-card"><span><strong>Память</strong><small>Запоминать полезные факты</small></span><input type="checkbox" data-dev-setting="memoryEnabled"><i></i></label>
+                  <label class="dev-toggle-card"><span><strong>История чата</strong><small>Учитывать предыдущие сообщения</small></span><input type="checkbox" data-dev-setting="historyContextEnabled"><i></i></label>
+                  <label class="dev-toggle-card"><span><strong>Личность</strong><small>Использовать выбранный стиль</small></span><input type="checkbox" data-dev-setting="personalityEnabled"><i></i></label>
+                  <label class="dev-toggle-card"><span><strong>Навыки</strong><small>Использовать готовые сценарии</small></span><input type="checkbox" data-dev-setting="skillsEnabled"><i></i></label>
+                  <label class="dev-toggle-card"><span><strong>Сведения о системе</strong><small>Учитывать доступные инструменты</small></span><input type="checkbox" data-dev-setting="runtimeContextEnabled"><i></i></label>
+                  <label class="dev-toggle-card"><span><strong>Повтор ответа</strong><small>Пробовать ещё раз при плохом результате</small></span><input type="checkbox" data-dev-setting="qualityRegenerationEnabled"><i></i></label>
+                </div>
+                <div class="dev-policy-actions">
+                  <p id="owner-dev-diagnostic" aria-live="polite"></p>
+                  <button type="button" class="claude-ghost-btn" id="owner-dev-reset">Сбросить DEV-политики</button>
+                </div>
+
+                <section class="dev-prompts-section" aria-labelledby="dev-prompts-title">
+                  <div class="dev-prompts-heading"><div><span>Инструкции Oscar</span><h4 id="dev-prompts-title">Как Oscar отвечает</h4><p>Можно изменить стиль каждой модели. Основные правила безопасности останутся включены.</p></div><button type="button" class="claude-ghost-btn" id="owner-prompts-reset-all">Сбросить все</button></div>
+                  <div id="owner-prompt-list" class="dev-prompt-list" aria-live="polite"></div>
+                </section>
+              </section>
+
               <section class="settings-group settings-feature monarch-safe-settings" data-settings-panel="safe" aria-labelledby="monarch-safe-settings-title">
                 <div class="settings-group-heading safe-settings-heading">
                   <div class="safe-settings-identity">
@@ -1562,7 +2235,7 @@
                   </div>
                   <span class="integration-status" id="safe-shortcut-status">Проверка</span>
                 </div>
-                <p class="settings-section-copy">Управляй отдельным запуском и политикой сессии. Чувствительные параметры открываются в изолированном окне Safe и сохраняются только после повторного ввода действующего PIN.</p>
+                <p class="settings-section-copy">Настрой блокировку и доступ. Важные изменения подтверждаются PIN в отдельном окне Safe.</p>
                 <div class="safe-settings-overview">
                   <article><strong>Автоблокировка</strong><span>От 30 секунд до ручного режима</span></article>
                   <article><strong>Сворачивание</strong><span>Закрыть, заблокировать или оставить открытым</span></article>
@@ -1571,7 +2244,7 @@
                 </div>
                 <div class="safe-fixed-boundaries" role="note">
                   <span>Всегда включено</span>
-                  <strong>AES-GCM · device binding · сеть отключена · защита снимков экрана</strong>
+                  <strong>Шифрование · привязка к устройству · без сети · защита экрана</strong>
                 </div>
                 <div class="settings-actions safe-settings-actions">
                   <button id="safe-open-security-settings" class="claude-primary-btn" type="button">Открыть настройки безопасности</button>
@@ -1587,7 +2260,7 @@
                   <div>
                     <p class="section-kicker">Обновления</p>
                     <h3 id="monarch-update-title">Monarch остаётся целым</h3>
-                    <p id="monarch-update-description">Проверка подписанного stable-канала. Модели, память, чаты и Safe не входят в установщик.</p>
+                    <p id="monarch-update-description">Проверяет официальные обновления. Модели, память, чаты и Safe остаются на месте.</p>
                   </div>
                   <span class="monarch-update-status" id="monarch-update-status" data-state="idle" aria-live="polite">Готово к проверке</span>
                 </div>
@@ -1609,13 +2282,29 @@
                   <div><span id="monarch-update-progress-label">Загрузка</span><strong id="monarch-update-progress-value">0%</strong></div>
                   <progress id="monarch-update-progress-bar" max="100" value="0">0%</progress>
                 </div>
-                <p class="monarch-update-message" id="monarch-update-message">UpdateService не отправляет идентификаторы, историю, запросы или hardware inventory.</p>
+                <p class="monarch-update-message" id="monarch-update-message">При проверке не отправляются история, запросы и сведения о компьютере.</p>
                 <div class="monarch-update-actions">
                   <button class="claude-primary-btn" type="button" id="monarch-update-primary">Проверить обновления</button>
                   <button class="claude-secondary-btn" type="button" id="monarch-update-cancel" hidden>Отменить</button>
                   <button class="claude-ghost-btn" type="button" id="monarch-update-discard" hidden>Удалить загрузку</button>
                   <a class="claude-ghost-btn monarch-update-notes" id="monarch-update-notes" href="#" target="_blank" rel="noreferrer" hidden>Что изменилось</a>
                 </div>
+              </section>
+
+              <section class="settings-group monarch-docs-panel" data-settings-panel="system" aria-labelledby="monarch-docs-title">
+                <div class="settings-group-heading">
+                  <div>
+                    <p class="section-kicker">Справка</p>
+                    <h3 id="monarch-docs-title">Официальная документация</h3>
+                  </div>
+                  <span class="integration-status">Online</span>
+                </div>
+                <p class="settings-section-copy">Архитектура, статусы Stable / Preview / TEST BETA, границы сети и проверенный статус текущего обновления.</p>
+                <div class="settings-actions monarch-docs-actions">
+                  <a class="claude-primary-btn" id="monarch-open-documentation" href="https://monarch-local-ai.mrpastio.chatgpt.site/ru/documentation" target="_blank" rel="noreferrer">Открыть документацию</a>
+                  <a class="claude-ghost-btn" href="https://github.com/MrPastio/monarch/blob/main/docs/official/MONARCH_WIKI_RU.md" target="_blank" rel="noreferrer">Исходный Markdown</a>
+                </div>
+                <p class="monarch-docs-note">Откроется официальный сайт. Monarch не прикладывает к ссылке чаты, историю, проекты или содержимое Safe.</p>
               </section>
 
               <details class="settings-group settings-system" data-settings-panel="system" open>
@@ -1659,34 +2348,76 @@
                       </small>
                     </div>
                   </div>
+                  <div class="authority-status-card" id="authority-status-card" data-tier="public" role="status" aria-live="polite">
+                    <span class="authority-status-mark" aria-hidden="true"></span>
+                    <span class="authority-status-copy">
+                      <small>Режим доступа</small>
+                      <strong id="authority-tier">Public</strong>
+                    </span>
+                    <span class="authority-status-detail" id="authority-detail">Стандартная публичная политика</span>
+                  </div>
+                  <section class="owner-enrollment-card" id="owner-enrollment-card" aria-labelledby="owner-enrollment-title">
+                    <div class="owner-enrollment-heading">
+                    <span><small>OWNER</small><strong id="owner-enrollment-title">Owner на этом устройстве</strong></span>
+                      <span class="owner-entitlement-state" id="owner-enrollment-entitlement" data-state="absent">Проверяю устройство…</span>
+                    </div>
+                    <p id="owner-enrollment-device">Проверяем, что доступ выдан именно этому устройству.</p>
+                    <div class="owner-transfer-matrix">
+                      <span><b>Этот компьютер</b><small>После обновления ничего переносить не нужно.</small></span>
+                      <span><b>Другой компьютер</b><small>Создай новый запрос доступа. Старые ключи не копируй.</small></span>
+                    </div>
+                    <ol class="owner-enrollment-steps">
+                      <li>
+                        <span><b>1</b><strong>Создай запрос доступа</strong><small>Секретный ключ останется защищённым на этом устройстве.</small></span>
+                        <div class="owner-enrollment-actions">
+                          <button type="button" class="claude-secondary-btn" id="owner-request-create">Создать запрос</button>
+                          <button type="button" class="claude-ghost-btn" id="owner-request-export" disabled>Экспортировать запрос</button>
+                        </div>
+                      </li>
+                      <li>
+                        <span><b>2</b><strong>Подпиши запрос на доверенном компьютере</strong><small>Передаётся только файл запроса. Секретный ключ подписи никуда не переносится.</small></span>
+                        <code class="owner-issuer-command">node .\scripts\owner-authority.mjs issue --request X:\OwnerTransfer\device-request.json --out X:\OwnerTransfer\owner-entitlement.json</code>
+                      </li>
+                      <li>
+                        <span><b>3</b><strong>Импортируй доступ и перезапусти</strong><small>Monarch проверит файл до сохранения.</small></span>
+                        <div class="owner-enrollment-actions">
+                          <button type="button" class="claude-primary-btn" id="owner-entitlement-import" disabled>Импортировать доступ</button>
+                          <button type="button" class="claude-secondary-btn" id="owner-enrollment-restart" hidden>Полностью перезапустить</button>
+                        </div>
+                      </li>
+                    </ol>
+                    <p class="owner-enrollment-feedback" id="owner-enrollment-feedback" aria-live="polite">До успешной проверки работает обычный Public-режим.</p>
+                    <button type="button" class="claude-primary-btn" id="owner-mode-enable" hidden>Вернуться в Owner</button>
+                  </section>
                   <div class="setting-row">
-                    <label for="autonomy-mode-select">Автономность модели</label>
+                    <label for="autonomy-mode-select">Самостоятельность</label>
                     <select id="autonomy-mode-select">
-                      <option value="guided">Под контролем</option>
-                      <option value="workspace-autonomous">Автономно в workspace</option>
-                      <option value="full-local">Полная локальная</option>
+                      <option value="guided">Всегда спрашивать</option>
+                      <option value="workspace-autonomous">Самостоятельно в проекте</option>
+                      <option value="full-local">Самостоятельно на устройстве</option>
                     </select>
                   </div>
-                  <p class="setting-note" id="permission-profile-note">Локальные чтения свободны, обратимые изменения внутри workspace выполняются без лишних церемоний. Внешние и необратимые действия остаются под точным разрешением.</p>
-                  <div class="agency-control-panel">
+                  <p class="setting-note" id="permission-profile-note">Безопасные действия внутри проекта можно выполнять сразу. Всё внешнее или необратимое требует подтверждения.</p>
+                  <div class="agency-control-panel" hidden aria-hidden="true">
                     <section class="security-settings-section security-model-policy agency-model-policy">
                       <div class="security-settings-heading">
                         <span><strong>Предложения действий Oscar</strong><small>Внутренние typed-команды отделены от видимого ответа и получают один итоговый verdict.</small></span>
                         <label class="security-switch">
-                          <input id="security-model-commands-enabled" type="checkbox" checked>
+                          <input id="legacy-security-model-commands-enabled" type="checkbox" checked>
                           <span aria-hidden="true"></span>
                           <em>Разрешить предложения</em>
                         </label>
                       </div>
                       <div class="security-policy-row">
                         <label>
-                          <span>Когда спрашивать подтверждение</span>
-                          <select id="security-model-confirmation">
-                            <option value="adaptive">Адаптивно — только при риске</option>
-                            <option value="always">Всегда — перед каждым действием</option>
+                          <span>Как Security реагирует на действия Oscar</span>
+                          <select id="legacy-security-model-confirmation">
+                            <option value="observe">Наблюдать — фиксировать риск, не мешать обычным действиям</option>
+                            <option value="guard">Защищать — останавливать только при конкретной опасности</option>
+                            <option value="confirm-all">Подтверждать всё — карточка перед каждым действием</option>
                           </select>
                         </label>
-                        <button id="security-model-policy-save" class="claude-primary-btn" type="button">Сохранить правила Oscar</button>
+                        <button id="legacy-security-model-policy-save" class="claude-primary-btn" type="button">Сохранить правила Oscar</button>
                       </div>
                       <div class="security-command-flow" aria-label="Как Monarch обрабатывает действия Oscar">
                         <span><b>1</b>Oscar предлагает</span><i></i>
@@ -1695,7 +2426,7 @@
                         <span><b>4</b>Monarch проверяет результат</span>
                       </div>
                       <p class="security-policy-note">Hard boundaries нельзя снять подтверждением. Разрешение задачи ограничено scope, бюджетом и сроком и отзывается здесь же.</p>
-                      <small id="security-model-policy-feedback" class="security-response-feedback" aria-live="polite"></small>
+                      <small id="legacy-security-model-policy-feedback" class="security-response-feedback" aria-live="polite"></small>
                     </section>
                     <div class="agency-control-heading">
                       <div><strong>Активные разрешения</strong><span>Ограничены задачей, областью, бюджетом и сроком</span></div>
@@ -1705,14 +2436,14 @@
                     <div class="agency-control-heading"><div><strong>Журнал действий</strong><span>Последние решения и результаты Policy Kernel</span></div></div>
                     <div id="action-ledger-list" class="agency-control-list"><span class="setting-note">Действий пока нет</span></div>
                   </div>
-                  <div class="setting-row">
+                  <div class="setting-row" hidden aria-hidden="true">
                     <label for="gemma-mode-setting">Режим Gemma (Vision)</label>
                     <label class="toggle-control"><input id="gemma-mode-setting" type="checkbox"> Включить принудительно</label>
                   </div>
                 </div>
               </details>
 
-              <details class="settings-group settings-system" data-settings-panel="system">
+              <details class="settings-group settings-system legacy-system-diagnostics" data-settings-panel="system" hidden aria-hidden="true">
                 <summary>Разработка и журнал</summary>
                 <div class="settings-system-content">
                   <div class="system-endpoint-grid">
@@ -1722,6 +2453,8 @@
                   <pre class="audit-output" id="logs-audit-output">Загрузка логов...</pre>
                 </div>
               </details>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -1748,8 +2481,8 @@
           </button>
           <div class="mascot-quick-actions" aria-label="Быстрые действия Oscar">
             <button type="button" aria-label="Проверить диагностику Oscar" title="Проверить диагностику Oscar" data-mascot-prompt="Проверь локальное окружение Monarch/Oscar: workspace, backend, модели, CLI, RAM и доступы.">Проверка</button>
-            <button type="button" aria-label="Открыть рабочие файлы" title="Открыть рабочие файлы" data-mascot-target="workspace-section">Файлы</button>
-            <button type="button" aria-label="Открыть модели Monarch" title="Открыть модели Monarch" data-mascot-target="models-section">Модели</button>
+            <button type="button" aria-label="Открыть изображения" title="Открыть изображения" data-mascot-target="images-section">Изображения</button>
+            <button type="button" aria-label="Открыть настройки Monarch" title="Открыть настройки Monarch" data-mascot-target="settings-section">Настройки</button>
           </div>
         </div>
         <div class="inspector-header" id="inspector-header-default">
@@ -1798,6 +2531,21 @@
       </aside>
 
     </div>
+
+    <dialog id="oscar-attachment-viewer" class="attachment-viewer" aria-labelledby="oscar-attachment-viewer-title">
+      <div class="attachment-viewer-shell">
+        <header class="attachment-viewer-header">
+          <div>
+            <strong id="oscar-attachment-viewer-title">Прикреплённое изображение</strong>
+            <span id="oscar-attachment-viewer-meta">Локальное вложение</span>
+          </div>
+          <button id="oscar-attachment-viewer-close" class="glass-button" type="button">Закрыть</button>
+        </header>
+        <div class="attachment-viewer-stage">
+          <img id="oscar-attachment-viewer-image" alt="Прикреплённое изображение">
+        </div>
+      </div>
+    </dialog>
 
     <section
       id="oscar-voice-mode-surface"

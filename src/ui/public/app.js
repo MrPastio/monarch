@@ -1,13 +1,16 @@
 import { MonarchStartup } from '/startup/monarch-startup.js';
 import { mountMonarchLogo3D } from '/startup/monarch-logo-3d.js';
 import { state, updateState, subscribeState } from './modules/state.js';
-import { fetchState, revokeCapabilityLease, rollbackAction, updateAutonomyMode } from './modules/api.js';
+import { executeCapability, fetchState, revokeCapabilityLease, rollbackAction, updateAutonomyMode } from './modules/api.js';
 import './modules/test-suite.js';
-import { readErrorMessage, renderError } from './modules/utils.js';
+import { readErrorMessage, readOscarModelStatus, renderError } from './modules/utils.js';
+import { formatOscarContextTokenCount, resolveOscarContextMeterState } from './modules/oscar-context-meter.js';
 import { cancelIntentJobAction, initChatPane, renderChatPane, submitIntentAction, renderThread } from './modules/chat-pane.js';
 import { initOscarPane, loadOscarConversations, loadOscarStatus, renderOscar, startNewOscarConversation } from './modules/oscar-pane.js';
 import { initSecurityPane, loadSecurityStatus, renderSecurity, renderSecurityPolicyControls } from './modules/security-pane.js';
-import { renderModelManager } from './modules/model-manager.js';
+import { initModelManager, renderModelManager } from './modules/model-manager.js';
+import { initModelOnboarding, renderModelOnboarding } from './modules/model-onboarding.js';
+import { initModelSetupWelcome, renderModelSetupWelcome } from './modules/model-setup-welcome.js';
 import { initSharingPane, renderSharingPane } from './modules/sharing-pane.js';
 import { initMascotInteraction, syncMascotFromRuntime } from './modules/mascot-controller.js';
 import { initSettingsPane } from './modules/settings-pane.js';
@@ -18,7 +21,15 @@ import { installOscarSnakeEasterEgg } from './modules/oscar-snake-game.js';
 import { installMonarchBrandEasterEgg } from './modules/brand-easter-egg.js';
 import { initCoderPane } from './modules/coder-pane.js';
 import { initStudioPane, setStudioActive } from './modules/studio-pane.js';
+import { initImageGenerationPane, renderImageGenerationPane } from './modules/image-generation-pane.js';
 import { normalizeUiPreferences, serializeUiPreferences } from './modules/ui-preferences.js';
+import { initComputerUseControl, syncComputerUsePermissionProfile } from './modules/computer-use-control.js';
+import { installComposerTypeToFocus } from './modules/composer-type-to-focus.js';
+import { copyTextToClipboard } from './modules/clipboard.js';
+import {
+  filterSelectableOscarModelScale,
+  resolveSelectableOscarModelAvailability,
+} from './modules/oscar-model-availability.js';
 
 // Elements
 const elements = {
@@ -36,14 +47,52 @@ const elements = {
   oscarDiagnosticsToggle: document.querySelector('#oscar-diagnostics-toggle'),
   modelDropdownBtn: document.querySelector('#model-dropdown-btn'),
   modelPopover: document.querySelector('#model-popover'),
-  reasoningDropdownBtn: document.querySelector('#reasoning-dropdown-btn'),
-  reasoningPopover: document.querySelector('#reasoning-popover'),
   autonomyModeSelect: document.querySelector('#autonomy-mode-select'),
   permissionProfileNote: document.querySelector('#permission-profile-note'),
+  authorityStatusCard: document.querySelector('#authority-status-card'),
+  authorityTier: document.querySelector('#authority-tier'),
+  authorityDetail: document.querySelector('#authority-detail'),
   activeLeasesList: document.querySelector('#active-leases-list'),
   actionLedgerList: document.querySelector('#action-ledger-list'),
   revokeAllLeases: document.querySelector('#revoke-all-leases'),
 };
+
+const MODEL_LABELS = Object.freeze({
+  auto: 'Авто',
+  none: 'Авто',
+  'gemma4-fast': 'Basic 2B',
+  'gemma4-balanced': 'Basic 12B',
+  'qwen3.8-27b-pro': 'Pro 27B',
+  'gemma4-deepthinking': 'Pro 27B',
+  'gemma4-31b': 'Pro 27B',
+});
+const OSCAR_MODEL_SCALE = Object.freeze([
+  'gemma4-fast',
+  'gemma4-balanced',
+  'qwen3.8-27b-pro',
+]);
+
+async function copyOscarCodeBlock(button) {
+  const code = button.closest('.oscar-code-block')?.querySelector('code')?.textContent;
+  const label = button.querySelector('.oscar-copy-label');
+  if (code === undefined || !label) return;
+
+  window.clearTimeout(Number(button.dataset.resetTimer || 0));
+  button.disabled = true;
+  button.dataset.copyState = 'pending';
+  const copied = await copyTextToClipboard(code);
+  button.disabled = false;
+  button.dataset.copyState = copied ? 'copied' : 'error';
+  label.textContent = copied ? 'Готово' : 'Ошибка';
+  button.setAttribute('aria-label', copied ? 'Код скопирован' : 'Не удалось скопировать код');
+
+  button.dataset.resetTimer = String(window.setTimeout(() => {
+    button.dataset.copyState = 'idle';
+    label.textContent = 'Копировать';
+    button.setAttribute('aria-label', 'Скопировать весь код');
+    delete button.dataset.resetTimer;
+  }, 1400));
+}
 
 const STARTUP_TYPE_LABELS = Object.freeze({
   classic: 'Классическая',
@@ -66,9 +115,15 @@ const animatedMotionKeys = new Set();
 let typingTimer = 0;
 let safeLaunchFeedbackTimer = 0;
 let securityStatusRequested = false;
+let componentStateTimer = 0;
 
 // Render Coordinator
 function render() {
+  if (state.data?.permissions) syncComputerUsePermissionProfile(state.data.permissions);
+  renderModelOnboarding();
+  renderModelSetupWelcome();
+  scheduleComponentStateRefresh(state.data?.components);
+  renderModelManager();
   renderActiveView(readActiveViewId());
   renderMascot();
 }
@@ -83,8 +138,8 @@ function renderActiveView(activeView) {
     renderSecurity();
     return;
   }
-  if (activeView === 'models-section' || activeView === 'workspace-section') {
-    renderModelManager();
+  if (activeView === 'images-section') {
+    renderImageGenerationPane();
     return;
   }
   if (activeView === 'sharing-section') {
@@ -168,18 +223,32 @@ document.addEventListener('click', (event) => {
     return;
   }
 
+  const oscarRamAction = event.target.closest('[data-oscar-ram-action]');
+  if (oscarRamAction) {
+    const action = oscarRamAction.getAttribute('data-oscar-ram-action');
+    if (action === 'use-balanced') {
+      state.oscar = state.oscar || {};
+      state.oscar.intelligenceEnabled = true;
+      state.oscar.modelSelection = 'gemma4-balanced';
+      syncOscarModelDropdowns();
+      renderOscar();
+      requestAnimationFrame(() => document.querySelector('#oscar-model-dropdown-btn')?.focus());
+    } else if (action === 'refresh') {
+      oscarRamAction.disabled = true;
+      oscarRamAction.setAttribute('aria-busy', 'true');
+      void loadOscarStatus(render).finally(() => {
+        oscarRamAction.disabled = false;
+        oscarRamAction.removeAttribute('aria-busy');
+      });
+    }
+    return;
+  }
+
 
   const modelDropdownTrigger = event.target.closest('#model-dropdown-btn');
   if (modelDropdownTrigger) {
     toggleDropdown(elements.modelPopover);
     closeOtherDropdowns(elements.modelPopover);
-    return;
-  }
-
-  const reasoningDropdownTrigger = event.target.closest('#reasoning-dropdown-btn');
-  if (reasoningDropdownTrigger) {
-    toggleDropdown(elements.reasoningPopover);
-    closeOtherDropdowns(elements.reasoningPopover);
     return;
   }
 
@@ -197,14 +266,20 @@ document.addEventListener('click', (event) => {
     state.oscar.intelligenceEnabled = state.oscar.intelligenceEnabled !== true;
     syncOscarModelDropdowns();
     renderOscar();
+    const popover = document.querySelector('#oscar-model-popover');
+    if (state.oscar.intelligenceEnabled) {
+      document.querySelector('#oscar-composer-menu')?.removeAttribute('open');
+      openDropdown(popover);
+      closeOtherDropdowns(popover);
+    }
     return;
   }
 
-  const oscarReasoningDropdownTrigger = event.target.closest('#oscar-reasoning-dropdown-btn');
-  if (oscarReasoningDropdownTrigger) {
-    const popover = document.querySelector('#oscar-reasoning-popover');
-    toggleDropdown(popover);
-    closeOtherDropdowns(popover);
+  const oscarContextMeterToggle = event.target.closest('#oscar-context-meter-toggle');
+  if (oscarContextMeterToggle) {
+    preferences.contextMeterVisible = preferences.contextMeterVisible === false;
+    savePreferences();
+    syncOscarModelDropdowns();
     return;
   }
 
@@ -226,34 +301,21 @@ document.addEventListener('click', (event) => {
     return;
   }
 
-  const reasoningDropdownItem = event.target.closest('#reasoning-popover .dropdown-item');
-  if (reasoningDropdownItem) {
-    if (reasoningDropdownItem.getAttribute('aria-disabled') === 'true') return;
-    state.chat = state.chat || {};
-    state.chat.deepThinking = reasoningDropdownItem.getAttribute('data-value') || 'none';
-    syncChatModelDropdowns();
-    closeDropdown(elements.reasoningPopover);
-    return;
-  }
-
+  const oscarModelPopover = document.querySelector('#oscar-model-popover');
   const oscarModelDropdownItem = event.target.closest('#oscar-model-popover .dropdown-item');
-  if (oscarModelDropdownItem) {
+  if (oscarModelDropdownItem?.closest('.dropdown-popover') === oscarModelPopover) {
     if (oscarModelDropdownItem.getAttribute('aria-disabled') === 'true') return;
     state.oscar = state.oscar || {};
-    state.oscar.modelSelection = oscarModelDropdownItem.getAttribute('data-value') || 'none';
+    const currentSelection = state.oscar.modelSelection || 'none';
+    let nextSelection = oscarModelDropdownItem.getAttribute('data-value') || 'none';
+    if (nextSelection === 'none' && currentSelection === 'none') {
+      nextSelection = resolveOscarManualModelSelection(state.oscar.lastManualModelSelection);
+    } else if (nextSelection === 'none' && currentSelection !== 'none') {
+      state.oscar.lastManualModelSelection = currentSelection;
+    }
+    state.oscar.modelSelection = nextSelection;
+    if (nextSelection !== 'none') state.oscar.lastManualModelSelection = nextSelection;
     syncOscarModelDropdowns();
-    closeDropdown(document.querySelector('#oscar-model-popover'));
-    import('./modules/oscar-pane.js').then(m => m.renderOscar && m.renderOscar());
-    return;
-  }
-
-  const oscarReasoningDropdownItem = event.target.closest('#oscar-reasoning-popover .dropdown-item');
-  if (oscarReasoningDropdownItem) {
-    if (oscarReasoningDropdownItem.getAttribute('aria-disabled') === 'true') return;
-    state.oscar = state.oscar || {};
-    state.oscar.deepThinking = oscarReasoningDropdownItem.getAttribute('data-value') || 'none';
-    syncOscarModelDropdowns();
-    closeDropdown(document.querySelector('#oscar-reasoning-popover'));
     import('./modules/oscar-pane.js').then(m => m.renderOscar && m.renderOscar());
     return;
   }
@@ -278,15 +340,8 @@ document.addEventListener('click', (event) => {
   // D. Prompt Mode Chips Delegate
   const copyBtn = event.target.closest('.oscar-copy-btn');
   if (copyBtn) {
-    const codeBlock = copyBtn.closest('.oscar-code-block');
-    const codeEl = codeBlock?.querySelector('code');
-    if (codeEl) {
-      navigator.clipboard.writeText(codeEl.textContent || '').then(() => {
-        const originalText = copyBtn.textContent;
-        copyBtn.textContent = 'Скопировано';
-        setTimeout(() => { copyBtn.textContent = originalText; }, 2000);
-      });
-    }
+    event.preventDefault();
+    void copyOscarCodeBlock(copyBtn);
     return;
   }
 
@@ -310,7 +365,12 @@ document.addEventListener('click', (event) => {
     if (elements.intentInput) {
       elements.intentInput.value = intent;
     }
-    void submitIntentAction(intent, confirmed, confirmationToken);
+    if (confirmed || confirmationToken) {
+      intentButton.disabled = true;
+      intentButton.title = 'Текстовое подтверждение отключено. Используй точную Agent action-card.';
+      return;
+    }
+    void submitIntentAction(intent, false);
     return;
   }
 
@@ -328,56 +388,69 @@ document.addEventListener('click', (event) => {
   // G. Single-Page View Switcher Router
   const navItem = event.target.closest('.nav-item');
   if (navItem) {
-    const targetId = navItem.getAttribute('data-scroll-target') || '';
-    const target = document.getElementById(targetId);
-    if (target) {
-      hideSafeLaunchFeedback();
-      closeAllDropdowns();
-      closeComposerOptions();
-      setActiveNavItem(navItem);
-
-      const views = [
-        'command-center',
-        'oscar-section',
-        'security-section',
-        'workspace-section',
-        'modules-section',
-        'models-section',
-        'sharing-section',
-        'logs-section',
-        'settings-section'
-      ];
-      views.forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.classList.add('view-hidden');
-      });
-      target.classList.remove('view-hidden');
-      elements.shell?.classList.toggle('modules-active', targetId === 'modules-section');
-      setStudioActive(targetId === 'modules-section');
-      resetViewScroll(target);
-      renderActiveView(targetId);
-      target.classList.remove('view-entering');
-      window.requestAnimationFrame(() => {
-        resetViewScroll(target);
-        target.classList.add('view-entering');
-      });
-      window.setTimeout(() => target.classList.remove('view-entering'), 160);
-      window.dispatchEvent(new CustomEvent('monarch:view-change', { detail: { view: targetId } }));
-      const settingsTab = navItem.getAttribute('data-settings-open');
-      if (targetId === 'settings-section') {
-        window.dispatchEvent(new CustomEvent('monarch:settings-tab', { detail: { tab: settingsTab || 'general' } }));
-      }
-      if ((targetId === 'security-section' || targetId === 'settings-section') && !securityStatusRequested) {
-        securityStatusRequested = true;
-        void loadSecurityStatus(render);
-      }
-      
-      renderMascot(targetId);
-
-      window.scrollTo(0, 0);
-    }
+    activatePrimaryView(navItem);
   }
 });
+
+window.addEventListener('monarch:navigate', (event) => {
+  const targetId = String(event.detail?.view || '');
+  if (!targetId) return;
+  const navItem = [...document.querySelectorAll('.nav-item')]
+    .find((item) => item.getAttribute('data-scroll-target') === targetId);
+  if (navItem) activatePrimaryView(navItem);
+});
+
+function activatePrimaryView(navItem) {
+  const targetId = navItem.getAttribute('data-scroll-target') || '';
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  hideSafeLaunchFeedback();
+  closeAllDropdowns();
+  closeComposerOptions();
+  const applyViewChange = () => {
+    setActiveNavItem(navItem);
+    const views = [
+      'command-center',
+      'oscar-section',
+      'security-section',
+      'images-section',
+      'modules-section',
+      'sharing-section',
+      'logs-section',
+      'settings-section'
+    ];
+    views.forEach(id => {
+      const element = document.getElementById(id);
+      if (element) element.classList.add('view-hidden');
+    });
+    target.classList.remove('view-hidden');
+    elements.shell?.classList.toggle('modules-active', targetId === 'modules-section');
+    setStudioActive(targetId === 'modules-section');
+    resetViewScroll(target);
+    renderActiveView(targetId);
+    window.dispatchEvent(new CustomEvent('monarch:view-change', { detail: { view: targetId } }));
+    const settingsTab = navItem.getAttribute('data-settings-open');
+    if (targetId === 'settings-section') {
+      window.dispatchEvent(new CustomEvent('monarch:settings-tab', { detail: { tab: settingsTab || 'general' } }));
+    }
+    if ((targetId === 'security-section' || targetId === 'settings-section') && !securityStatusRequested) {
+      securityStatusRequested = true;
+      void loadSecurityStatus(render);
+    }
+    renderMascot(targetId);
+    window.scrollTo(0, 0);
+  };
+
+  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+  if (!reduceMotion && typeof document.startViewTransition === 'function') {
+    document.startViewTransition(applyViewChange);
+  } else {
+    applyViewChange();
+    target.classList.remove('view-entering');
+    window.requestAnimationFrame(() => target.classList.add('view-entering'));
+    window.setTimeout(() => target.classList.remove('view-entering'), 460);
+  }
+}
 
 elements.shell?.addEventListener('monarch:mascot-surface-changed', () => {
   updateInspectorToggleControls(preferences.inspector === 'closed');
@@ -454,6 +527,25 @@ function resetViewScroll(target) {
     node.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   }
 }
+
+document.addEventListener('input', (event) => {
+  const range = event.target instanceof Element
+    ? event.target.closest('#oscar-intelligence-range')
+    : null;
+  if (!(range instanceof HTMLInputElement)) return;
+  const availableScale = readAvailableOscarModelScale();
+  const modelSelection = availableScale[Number(range.value)] || availableScale[0] || 'none';
+  const available = readSelectableOscarModelAvailability();
+  if (available?.[modelSelection] === false) {
+    syncOscarModelDropdowns();
+    return;
+  }
+  state.oscar = state.oscar || {};
+  state.oscar.modelSelection = modelSelection;
+  state.oscar.lastManualModelSelection = modelSelection;
+  syncOscarModelDropdowns();
+  renderOscar();
+});
 
 document.addEventListener('keydown', (event) => {
   if (!(event.target instanceof Element)) return;
@@ -541,6 +633,13 @@ elements.autonomyModeSelect?.addEventListener('change', () => {
   void savePermissionProfile();
 });
 
+window.addEventListener('monarch:permission-profile-changed', (event) => {
+  const profile = event.detail && typeof event.detail === 'object' ? event.detail : null;
+  if (!profile) return;
+  if (state.data) state.data.permissions = profile;
+  renderPermissionSettings();
+});
+
 elements.activeLeasesList?.addEventListener('click', (event) => {
   const button = event.target.closest('[data-revoke-lease]');
   if (button) void revokeLeaseAndRefresh(button.getAttribute('data-revoke-lease') || '');
@@ -593,16 +692,22 @@ function init() {
 
   // Bind module pane event listeners
   initChatPane();
+  initModelManager();
+  initModelOnboarding();
+  initModelSetupWelcome();
   initOscarPane(render);
+  initComputerUseControl();
   initCoderPane();
   initSecurityPane(render);
   initSharingPane();
   initSettingsPane();
   initStudioPane();
+  initImageGenerationPane();
   initUpdatePane();
   initMascotInteraction();
   initVoiceInput();
   initOscarVoiceMode();
+  installComposerTypeToFocus();
   installOscarSnakeEasterEgg({
     isConversationEmpty: () => state.oscar.messages.length === 0,
   });
@@ -655,6 +760,18 @@ function initStartupMotion() {
       completeShell: true,
     });
   }
+}
+
+function scheduleComponentStateRefresh(components) {
+  if (componentStateTimer) window.clearTimeout(componentStateTimer);
+  componentStateTimer = 0;
+  const activeInstall = Boolean(components?.activeInstall);
+  const legacyRepair = Boolean(components?.autoRepairEnabled && !components.ready);
+  if (!activeInstall && !legacyRepair) return;
+  componentStateTimer = window.setTimeout(() => {
+    componentStateTimer = 0;
+    void loadState();
+  }, components.requiredModel?.phase === 'failed' ? 5_000 : 750);
 }
 
 function normalizeStartupType(value) {
@@ -830,7 +947,7 @@ function initMotionSystem() {
   }, { passive: true });
 
   document.addEventListener('input', (event) => {
-    if (!(event.target instanceof Element) || !event.target.matches('input, textarea')) return;
+    if (!(event.target instanceof Element) || !event.target.matches('textarea, input:not([type]), input[type="text"], input[type="search"]')) return;
     const composer = event.target.closest('form, .claude-composer');
     if (!composer) return;
     composer.classList.add('is-typing');
@@ -970,11 +1087,13 @@ async function savePermissionProfile() {
 }
 
 function renderPermissionSettings() {
+  renderAuthorityStatus();
   const profile = state.data?.permissions;
   if (!profile) return;
   const autonomyMode = profile.autonomyMode
     || (profile.sandboxMode === 'read-only' ? 'guided' : profile.sandboxMode === 'danger-full-access' ? 'full-local' : 'workspace-autonomous');
   if (elements.autonomyModeSelect) elements.autonomyModeSelect.value = autonomyMode;
+  syncComputerUsePermissionProfile(profile);
   if (!elements.permissionProfileNote) return;
   elements.permissionProfileNote.classList.remove('error-text');
   const descriptions = {
@@ -985,6 +1104,20 @@ function renderPermissionSettings() {
   elements.permissionProfileNote.textContent = descriptions[autonomyMode] || '';
   renderSecurityPolicyControls();
   renderAgencyControls();
+}
+
+function renderAuthorityStatus() {
+  const authority = state.data?.authority;
+  const owner = authority?.tier === 'owner' && authority?.source === 'signed-device-entitlement';
+  if (elements.authorityStatusCard) elements.authorityStatusCard.dataset.tier = owner ? 'owner' : 'public';
+  if (elements.authorityTier) elements.authorityTier.textContent = owner ? 'Owner' : 'Public';
+  if (elements.authorityDetail) {
+    const device = owner && authority.deviceIdPrefix ? ` · устройство ${authority.deviceIdPrefix}` : '';
+    const diagnostic = !owner && authority?.diagnostic ? ` · ${authority.diagnostic}` : '';
+    elements.authorityDetail.textContent = owner
+      ? `Подписанное локальное право активно${device}`
+      : `Стандартная публичная политика${diagnostic}`;
+  }
 }
 
 function renderAgencyControls() {
@@ -1068,9 +1201,7 @@ function readActiveViewId() {
 function getDropdownPopovers() {
   return [
     elements.modelPopover,
-    elements.reasoningPopover,
     document.querySelector('#oscar-model-popover'),
-    document.querySelector('#oscar-reasoning-popover'),
     document.querySelector('#oscar-research-popover'),
   ].filter(Boolean);
 }
@@ -1120,7 +1251,7 @@ function closeDropdown(popover) {
 
 function closeOtherDropdowns(activePopover) {
   getDropdownPopovers().forEach((popover) => {
-    if (popover !== activePopover) closeDropdown(popover);
+    if (popover !== activePopover && !popover.contains(activePopover)) closeDropdown(popover);
   });
 }
 
@@ -1130,7 +1261,7 @@ function closeAllDropdowns() {
 
 function getEnabledDropdownItems(popover) {
   return [...popover.querySelectorAll('.dropdown-item[data-value]')]
-    .filter((item) => item.getAttribute('aria-disabled') !== 'true');
+    .filter((item) => item.closest('.dropdown-popover') === popover && item.getAttribute('aria-disabled') !== 'true');
 }
 
 function focusDropdownItem(popover, preference = 'active') {
@@ -1160,77 +1291,99 @@ function syncChatModelDropdowns() {
     value: (state.chat && state.chat.modelSelection) || 'auto',
     prefix: 'Модель',
     labelPrefix: 'Выбрать модель',
-    labels: {
-      auto: 'Авто',
-      'gemma4-fast': 'Fast',
-      'gemma4-balanced': 'Medium',
-    },
-  });
-  syncDropdown({
-    button: elements.reasoningDropdownBtn,
-    popover: elements.reasoningPopover,
-    value: (state.chat && state.chat.deepThinking) || 'none',
-    prefix: 'Deep Thinking',
-    labelPrefix: 'Выбрать Deep Thinking',
-    labels: {
-      none: 'выкл',
-      'gemma4-deepthinking': 'Pro',
-      'gemma4-31b': 'Extra',
-    },
+    labels: MODEL_LABELS,
   });
 }
 
+function syncOscarContextMeter(visible, contextWindow) {
+  const meter = document.querySelector('#oscar-context-meter');
+  if (!meter) return;
+  meter.hidden = !visible;
+
+  const meterState = resolveOscarContextMeterState(contextWindow);
+  const { hasTelemetry, percent, remainingPercent, total, used } = meterState;
+  const valueCircle = meter.querySelector('.oscar-context-meter-value');
+  const percentLabel = meter.querySelector('[data-context-meter-percent]');
+  const tokensLabel = meter.querySelector('[data-context-meter-tokens]');
+  const note = meter.querySelector('[data-context-meter-note]');
+
+  meter.classList.toggle('has-telemetry', hasTelemetry);
+  meter.dataset.usage = meterState.usage;
+  if (valueCircle) valueCircle.style.strokeDashoffset = String(100 - percent);
+  if (hasTelemetry) {
+    meter.setAttribute('aria-valuenow', String(percent));
+    meter.setAttribute('aria-valuetext', `${percent}% использовано, осталось ${remainingPercent}%`);
+    meter.setAttribute('aria-label', `Контекстное окно: ${percent}% использовано, ${formatOscarContextTokenCount(used)} из ${formatOscarContextTokenCount(total)} токенов`);
+    if (percentLabel) percentLabel.textContent = `${percent}% использовано · осталось ${remainingPercent}%`;
+    if (tokensLabel) tokensLabel.textContent = `${formatOscarContextTokenCount(used)} / ${formatOscarContextTokenCount(total)} токенов`;
+    const contextNote = meterState.contextTrimmed
+      ? `История сжата${meterState.droppedMessages ? ` · исключено сообщений: ${meterState.droppedMessages}` : ''}`
+      : '';
+    if (note) {
+      note.textContent = contextNote;
+      note.hidden = !contextNote;
+    }
+  } else {
+    meter.removeAttribute('aria-valuenow');
+    meter.setAttribute('aria-valuetext', 'Данные появятся после ответа');
+    meter.setAttribute('aria-label', 'Контекстное окно: данные появятся после ответа');
+    if (percentLabel) percentLabel.textContent = 'Данные появятся после ответа';
+    if (tokensLabel) tokensLabel.textContent = 'Использование пока не измерено';
+    if (note) {
+      note.textContent = '';
+      note.hidden = true;
+    }
+  }
+}
+
 function syncOscarModelDropdowns() {
-  const available = state.oscar?.status?.backend?.modelStatus?.available_tiers || null;
-  syncModelAvailability(document.querySelector('#oscar-model-popover'), available);
-  syncModelAvailability(document.querySelector('#oscar-reasoning-popover'), available);
-  syncModelAvailability(elements.modelPopover, available);
-  syncModelAvailability(elements.reasoningPopover, available);
+  if (['gemma4-deepthinking', 'gemma4-31b', 'powerful', 'reasoning', 'pro', 'extra'].includes(
+    String(state.oscar?.modelSelection || '').toLowerCase(),
+  )) {
+    state.oscar.modelSelection = 'qwen3.8-27b-pro';
+  }
+  const modelStatus = readOscarModelStatus(state.oscar);
+  const available = readSelectableOscarModelAvailability() || modelStatus?.available_tiers || null;
+  const installedOnly = state.data?.components?.schemaVersion === 2;
+  syncModelAvailability(document.querySelector('#oscar-model-popover'), available, installedOnly);
+  syncModelAvailability(elements.modelPopover, available, installedOnly);
 
   if (available && state.oscar?.modelSelection !== 'none' && available[state.oscar.modelSelection] === false) {
     state.oscar.modelSelection = 'none';
   }
-  if (available && state.oscar?.deepThinking !== 'none' && available[state.oscar.deepThinking] === false) {
-    state.oscar.deepThinking = 'none';
-  }
   const intelligenceEnabled = state.oscar?.intelligenceEnabled === true;
+  const contextMeterVisible = preferences.contextMeterVisible !== false;
+  const contextControls = document.querySelector('#oscar-context-controls');
   const modelContainer = document.querySelector('#oscar-model-dropdown-container');
   const intelligenceToggle = document.querySelector('#oscar-intelligence-toggle');
   const intelligenceState = intelligenceToggle?.querySelector('[data-intelligence-state]');
+  const contextMeterToggle = document.querySelector('#oscar-context-meter-toggle');
+  const contextMeterState = contextMeterToggle?.querySelector('[data-context-meter-state]');
+  if (contextControls) contextControls.hidden = !intelligenceEnabled && !contextMeterVisible;
   if (modelContainer) modelContainer.hidden = !intelligenceEnabled;
   elements.oscarComposer?.classList.toggle('intelligence-enabled', intelligenceEnabled);
+  elements.oscarComposer?.classList.toggle('context-meter-enabled', contextMeterVisible);
   if (intelligenceToggle) {
     intelligenceToggle.classList.toggle('is-active', intelligenceEnabled);
     intelligenceToggle.setAttribute('aria-pressed', String(intelligenceEnabled));
   }
   if (intelligenceState) intelligenceState.textContent = intelligenceEnabled ? 'Вкл' : 'Выкл';
+  if (contextMeterToggle) {
+    contextMeterToggle.classList.toggle('is-active', contextMeterVisible);
+    contextMeterToggle.setAttribute('aria-pressed', String(contextMeterVisible));
+  }
+  if (contextMeterState) contextMeterState.textContent = contextMeterVisible ? 'Вкл' : 'Выкл';
   if (!intelligenceEnabled) closeDropdown(document.querySelector('#oscar-model-popover'));
+  const modelValue = (state.oscar && state.oscar.modelSelection) || 'none';
   syncDropdown({
     button: document.querySelector('#oscar-model-dropdown-btn'),
     popover: document.querySelector('#oscar-model-popover'),
-    value: (state.oscar && state.oscar.modelSelection) || 'none',
+    value: modelValue,
     prefix: 'Модель',
     separator: ' · ',
     displayPrefix: false,
     labelPrefix: 'Выбрать модель Oscar',
-    labels: {
-      none: 'Авто',
-      'gemma4-fast': 'Fast',
-      'gemma4-balanced': 'Medium',
-    },
-  });
-  syncDropdown({
-    button: document.querySelector('#oscar-reasoning-dropdown-btn'),
-    popover: document.querySelector('#oscar-reasoning-popover'),
-    value: (state.oscar && state.oscar.deepThinking) || 'none',
-    prefix: 'Deep Thinking',
-    separator: ' · ',
-    labelPrefix: 'Выбрать Deep Thinking Oscar',
-    labels: {
-      none: 'выкл',
-      'gemma4-deepthinking': 'Pro',
-      'gemma4-31b': 'Extra',
-    },
+    labels: MODEL_LABELS,
   });
   syncDropdown({
     button: document.querySelector('#oscar-research-dropdown-btn'),
@@ -1245,14 +1398,61 @@ function syncOscarModelDropdowns() {
       deep: 'Глубокое',
     },
   });
+
+  const modelButton = document.querySelector('#oscar-model-dropdown-btn');
+  const modelLabel = MODEL_LABELS[modelValue] || modelValue;
+  if (modelButton) {
+    modelButton.textContent = modelLabel;
+    modelButton.dataset.modelPower = modelValue === 'qwen3.8-27b-pro' ? 'max' : 'standard';
+    const accessibleLabel = `Настроить модель Oscar: ${modelLabel}`;
+    modelButton.setAttribute('aria-label', accessibleLabel);
+    modelButton.title = accessibleLabel;
+  }
+  const modelCaption = document.querySelector('[data-intelligence-model-caption]');
+  if (modelCaption) {
+    const descriptions = {
+      none: 'Oscar подбирает под задачу',
+      'gemma4-fast': 'Быстрые ответы и простые команды',
+      'gemma4-balanced': 'Баланс скорости и качества',
+      'qwen3.8-27b-pro': 'Сложные задачи и полный Agent',
+    };
+    modelCaption.textContent = descriptions[modelValue] || 'Ручной выбор модели';
+  }
+  const intelligenceScale = document.querySelector('#oscar-intelligence-scale');
+  const availableScale = readAvailableOscarModelScale();
+  if (intelligenceScale) {
+    intelligenceScale.dataset.selection = modelValue;
+    intelligenceScale.dataset.power = String(Math.max(0, OSCAR_MODEL_SCALE.indexOf(modelValue) + 1));
+    intelligenceScale.dataset.availableCount = String(availableScale.length);
+  }
+  const intelligenceRange = document.querySelector('#oscar-intelligence-range');
+  if (intelligenceRange instanceof HTMLInputElement) {
+    const modelIndex = availableScale.indexOf(modelValue);
+    const rangeIndex = modelIndex >= 0 ? modelIndex : Math.max(0, Math.floor((availableScale.length - 1) / 2));
+    const progress = availableScale.length > 1 ? (rangeIndex / (availableScale.length - 1)) * 100 : 50;
+    intelligenceRange.max = String(Math.max(0, availableScale.length - 1));
+    intelligenceRange.disabled = availableScale.length <= 1;
+    intelligenceRange.value = String(rangeIndex);
+    intelligenceRange.closest('.oscar-intelligence-range-shell')?.style.setProperty('--intelligence-progress', `${progress}%`);
+    intelligenceRange.dataset.auto = String(modelIndex < 0);
+    intelligenceRange.setAttribute('aria-valuetext', modelLabel);
+    intelligenceRange.title = `Модель: ${modelLabel}`;
+  }
+  const conversationId = String(state.oscar?.conversationId || '').trim();
+  const contextWindow = conversationId
+    ? state.oscar?.contextWindows?.[conversationId] || null
+    : null;
+  syncOscarContextMeter(contextMeterVisible, contextWindow);
 }
 
-function syncModelAvailability(popover, available) {
+function syncModelAvailability(popover, available, hideUnavailable = false) {
   if (!popover || !available) return;
   popover.querySelectorAll('.dropdown-item[data-value]').forEach((item) => {
+    if (item.closest('.dropdown-popover') !== popover) return;
     const value = item.getAttribute('data-value');
     if (!value || value === 'auto' || value === 'none') return;
     const disabled = available[value] === false;
+    item.hidden = hideUnavailable && disabled;
     item.setAttribute('aria-disabled', String(disabled));
     if (disabled) item.tabIndex = -1;
     item.title = disabled ? 'Файл этой модели отсутствует или повреждён' : '';
@@ -1262,6 +1462,20 @@ function syncModelAvailability(popover, available) {
       subtitle.textContent = disabled ? 'Недоступна · проверь файл модели' : subtitle.dataset.availableLabel;
     }
   });
+}
+
+function readSelectableOscarModelAvailability() {
+  return resolveSelectableOscarModelAvailability(state.data, OSCAR_MODEL_SCALE);
+}
+
+function readAvailableOscarModelScale() {
+  return filterSelectableOscarModelScale(OSCAR_MODEL_SCALE, readSelectableOscarModelAvailability());
+}
+
+function resolveOscarManualModelSelection(preferredModel = '') {
+  const availableScale = readAvailableOscarModelScale();
+  if (preferredModel && availableScale.includes(preferredModel)) return preferredModel;
+  return availableScale[Math.max(0, Math.floor((availableScale.length - 1) / 2))] || 'none';
 }
 
 function setActiveNavItem(activeItem) {
@@ -1280,12 +1494,15 @@ function syncDropdown({ button, popover, value, prefix, labels, separator = ': '
   if (button) {
     const buttonLabel = displayPrefix ? prefix + separator + selectedLabel : selectedLabel;
     const accessibleLabel = (labelPrefix || `Выбрать ${prefix.toLowerCase()}`) + ': ' + selectedLabel;
-    button.textContent = buttonLabel;
+    const valueTarget = button.querySelector('[data-dropdown-value]');
+    if (valueTarget) valueTarget.textContent = selectedLabel;
+    else button.textContent = buttonLabel;
     button.setAttribute('aria-label', accessibleLabel);
     button.title = accessibleLabel;
   }
   if (!popover) return;
   popover.querySelectorAll('.dropdown-item').forEach((item) => {
+    if (item.closest('.dropdown-popover') !== popover) return;
     const isActive = item.getAttribute('data-value') === value;
     if (isActive) item.classList.add('active');
     else item.classList.remove('active');

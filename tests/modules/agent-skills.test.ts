@@ -85,8 +85,14 @@ description: Check a release manually.
 
 Run the release checklist.
 `);
-    await writeSkill(root, '.agents/skills/manual-check/agents/openai.yaml', `policy:
+    await writeSkill(root, '.agents/skills/manual-check/agents/openai.yaml', `interface:
+  display_name: "Release Manual Check"
+policy:
   allow_implicit_invocation: false
+monarch:
+  source: auto
+  required_capabilities:
+    - workspace.files.read
 `);
 
     const registry = new AgentSkillRegistry(root);
@@ -94,7 +100,12 @@ Run the release checklist.
     const implicit = await registry.match('check this release manually');
     const explicit = await registry.match('$manual-check');
 
-    expect(skills.find((skill) => skill.name === 'manual-check')?.allowImplicitInvocation).toBe(false);
+    expect(skills.find((skill) => skill.name === 'manual-check')).toMatchObject({
+      displayName: 'Release Manual Check',
+      allowImplicitInvocation: false,
+      creationSource: 'auto',
+      requiredCapabilities: ['workspace.files.read'],
+    });
     expect(implicit.some((match) => match.skill.name === 'manual-check')).toBe(false);
     expect(explicit[0]).toMatchObject({ skill: { name: 'manual-check' }, explicit: true });
   });

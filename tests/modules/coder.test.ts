@@ -8,6 +8,7 @@ import { MonarchKernel } from '../../src/core';
 import { CoderModule } from '../../src/modules/coder';
 import { CoderRunStore } from '../../src/modules/coder/context-manager';
 import { CoderSandboxRunner } from '../../src/modules/coder/sandbox-runner';
+import { createDeterministicSecurityModule } from '../fixtures/agent/deterministic-security-module';
 
 const context = {
   emit: async () => undefined,
@@ -105,6 +106,56 @@ describe('Coder Mode', () => {
         expect(credentialRead.error).toBe('coder-policy-blocked');
         expect(credentialRead.summary).toContain('Credential stores');
       }
+    } finally {
+      await rm(monarchRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes same-file creates, patches, and replacements without lost updates', async () => {
+    const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-file-races-'));
+    const module = new CoderModule({ monarchRoot });
+    await module.activate(context);
+    try {
+      const project = (await execute(module, 'coder.projects.create', { name: 'File Races' })).output as any;
+      const relativePath = 'src/race.txt';
+      const absolutePath = path.join(project.root, relativePath);
+
+      const exclusiveCreates = await Promise.all([
+        execute(module, 'coder.files.write', { projectId: project.id, path: relativePath, content: 'first', overwrite: false }),
+        execute(module, 'coder.files.write', { projectId: project.id, path: relativePath, content: 'second', overwrite: false }),
+      ]);
+      expect(exclusiveCreates.filter((result) => result.ok)).toHaveLength(1);
+      expect(exclusiveCreates.filter((result) => !result.ok)).toHaveLength(1);
+
+      await execute(module, 'coder.files.write', {
+        projectId: project.id,
+        path: relativePath,
+        content: 'alpha\nomega\n',
+        overwrite: true,
+      });
+      const patches = await Promise.all([
+        execute(module, 'coder.files.patch', {
+          projectId: project.id,
+          path: relativePath,
+          replacements: [{ oldText: 'alpha', newText: 'ALPHA' }],
+        }),
+        execute(module, 'coder.files.patch', {
+          projectId: project.id,
+          path: relativePath,
+          replacements: [{ oldText: 'omega', newText: 'OMEGA' }],
+        }),
+      ]);
+      expect(patches.every((result) => result.ok)).toBe(true);
+      expect(await readFile(absolutePath, 'utf8')).toBe('ALPHA\nOMEGA\n');
+
+      const replacements = await Promise.all(Array.from({ length: 24 }, (_, index) => execute(
+        module,
+        'coder.files.write',
+        { projectId: project.id, path: relativePath, content: `replacement-${index}`, overwrite: true },
+      )));
+      expect(replacements.every((result) => result.ok)).toBe(true);
+      expect(await readFile(absolutePath, 'utf8')).toMatch(/^replacement-(?:[0-9]|1[0-9]|2[0-3])$/);
+      expect((await readdir(path.dirname(absolutePath))).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
     } finally {
       await rm(monarchRoot, { recursive: true, force: true });
     }
@@ -361,6 +412,41 @@ describe('Coder Mode', () => {
     }
   }, 25_000);
 
+  it.runIf(process.platform === 'win32')('forwards cooperative cancellation into the sandbox job and leaves no child process behind', async () => {
+    const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-cancel-'));
+    const module = new CoderModule({ monarchRoot });
+    await module.activate(context);
+    try {
+      const project = (await execute(module, 'coder.projects.create', { name: 'Cancellation' })).output as any;
+      const started = path.join(project.root, 'started.txt');
+      const orphan = path.join(project.root, 'late-cancel-marker.txt');
+      await writeFile(path.join(project.root, 'cancel-child.cmd'), [
+        '@echo off',
+        'echo STARTED>started.txt',
+        'start "" /b cmd.exe /d /s /c "choice /d y /n /t 3 >nul & echo SHOULD_NOT_SURVIVE>late-cancel-marker.txt" >nul 2>&1',
+        ':wait',
+        'goto wait',
+        '',
+      ].join('\r\n'), 'utf8');
+      const controller = new AbortController();
+      const pending = execute(module, 'coder.command.run', {
+        projectId: project.id,
+        executable: '.\\cancel-child.cmd',
+        args: [],
+        timeoutMs: 30_000,
+        allowNetwork: false,
+      }, { signal: controller.signal });
+
+      await waitForPath(started, 10_000);
+      controller.abort('test-cancellation');
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      await new Promise((resolve) => setTimeout(resolve, 3_500));
+      expect(existsSync(orphan)).toBe(false);
+    } finally {
+      await rm(monarchRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it('keeps generic network requests public and credential-free and blocks sensitive Hub uploads', async () => {
     const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-integrations-'));
     const module = new CoderModule({ monarchRoot });
@@ -544,6 +630,7 @@ describe('Coder Mode', () => {
       permissionProfile: { sandboxMode: 'workspace-write', approvalPolicy: 'on-request', autonomyMode: 'workspace-autonomous' },
     });
     kernel.registerModule(module);
+    kernel.registerModule(createDeterministicSecurityModule());
     await kernel.start();
     try {
       const project = await module.projects.create('Kernel Lane');
@@ -577,6 +664,15 @@ describe('Coder Mode', () => {
   });
 });
 
-async function execute(module: CoderModule, capabilityId: string, input: unknown) {
-  return module.executeCapability({ capabilityId, input } as any, context);
+async function execute(module: CoderModule, capabilityId: string, input: unknown, control: { signal?: AbortSignal } = {}) {
+  return module.executeCapability({ capabilityId, input } as any, context, control);
+}
+
+async function waitForPath(target: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(target)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for ${target}.`);
 }

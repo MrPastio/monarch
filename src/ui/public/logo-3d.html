@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Monarch 3D Logo Studio</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="stylesheet" href="/logo-3d.css">
+</head>
+<body>
+  <div class="studio-container">
+    <!-- Top Glass Header -->
+    <header class="top-bar">
+      <a href="/" class="brand-badge" title="Вернуться в Monarch">
+        <img src="/assets/brand/monarch-icon.png" alt="Monarch Logo" class="brand-icon">
+        <div class="brand-info">
+          <span class="brand-title">Monarch 3D Studio</span>
+          <span class="brand-subtitle">Interactive Logo & Mesh Hub</span>
+        </div>
+      </a>
+      <div class="top-actions">
+        <button id="btn-autorotate" class="btn btn-active" type="button" title="Авто-поворот">
+          <span>🔄 Авто-вращение</span>
+        </button>
+        <button id="btn-reset" class="btn" type="button" title="Сбросить камеру">
+          <span>🎯 Сброс</span>
+        </button>
+        <a href="/" class="btn btn-primary" title="В главный интерфейс">
+          <span>← В приложение</span>
+        </a>
+      </div>
+    </header>
+
+    <!-- Main Viewport -->
+    <main class="viewport-area">
+      <div id="canvas-container" class="canvas-wrapper"></div>
+
+      <div class="hint-badge">
+        <span><kbd>ЛКМ</kbd> Вращение</span>
+        <span><kbd>Колесо</kbd> Масштаб</span>
+        <span><kbd>Слайдер</kbd> Разбор слоёв</span>
+      </div>
+    </main>
+
+    <!-- Right Glass Sidebar -->
+    <aside class="sidebar-panel">
+      <!-- Explode View Section -->
+      <section class="panel-section">
+        <div class="section-label">Разбор конструкции (Explode)</div>
+        <div class="slider-group">
+          <div class="slider-header">
+            <span>Смещение слоёв</span>
+            <span id="explode-value" class="slider-value">0%</span>
+          </div>
+          <input id="explode-slider" class="range-slider" type="range" min="0" max="2" step="0.01" value="0" aria-label="Смещение слоев 3D модели">
+        </div>
+      </section>
+
+      <!-- Material Presets -->
+      <section class="panel-section">
+        <div class="section-label">Материалы и стили</div>
+        <div class="btn-grid">
+          <button class="btn btn-active" data-preset="signature" type="button">Signature Gold</button>
+          <button class="btn" data-preset="obsidian" type="button">Obsidian 24K</button>
+          <button class="btn" data-preset="cyberpunk" type="button">Cyber Amber</button>
+          <button class="btn" data-preset="puregold" type="button">Imperial Gold</button>
+        </div>
+      </section>
+
+      <!-- Render Modes -->
+      <section class="panel-section">
+        <div class="section-label">Режим рендера</div>
+        <div class="btn-grid">
+          <button id="btn-solid" class="btn btn-active" type="button">PBR Solid</button>
+          <button id="btn-wireframe" class="btn" type="button">Wireframe</button>
+        </div>
+      </section>
+
+      <!-- Geometry Structure -->
+      <section class="panel-section">
+        <div class="section-label">Слои модели</div>
+        <div style="display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--text-secondary);">
+          <div style="display: flex; justify-content: space-between; padding: 6px 10px; background: rgba(255,255,255,0.03); border-radius: 6px;">
+            <span>👑 Корона (Crown & Gem)</span>
+            <span style="color: var(--accent-gold); font-family: var(--font-mono);">Gold PBR</span>
+          </div>
+          <div style="display: flex; justify-content: space-between; padding: 6px 10px; background: rgba(255,255,255,0.03); border-radius: 6px;">
+            <span>🛡️ Рамка щита (Shield Frame)</span>
+            <span style="color: var(--text-primary); font-family: var(--font-mono);">Ivory White</span>
+          </div>
+          <div style="display: flex; justify-content: space-between; padding: 6px 10px; background: rgba(255,255,255,0.03); border-radius: 6px;">
+            <span>⬛ Основание (Shield Base)</span>
+            <span style="color: var(--text-muted); font-family: var(--font-mono);">Graphite Metal</span>
+          </div>
+          <div style="display: flex; justify-content: space-between; padding: 6px 10px; background: rgba(255,255,255,0.03); border-radius: 6px;">
+            <span>⚡ Шины и чипы (Circuits)</span>
+            <span style="color: var(--accent-amber); font-family: var(--font-mono);">Emissive Glow</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Downloads -->
+      <section class="panel-section" style="margin-top: auto;">
+        <div class="section-label">Экспорт 3D-файлов</div>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <a href="/assets/brand/3d/monarch-logo.obj" download="monarch-logo.obj" class="download-card" title="Скачать Wavefront OBJ">
+            <div class="download-info">
+              <span class="download-format">.OBJ + .MTL</span>
+              <span class="download-desc">Для Blender, Maya, Cinema 4D</span>
+            </div>
+            <span class="download-icon">⬇</span>
+          </a>
+          <a href="/assets/brand/3d/monarch-logo.stl" download="monarch-logo.stl" class="download-card" title="Скачать STL для 3D-печати">
+            <div class="download-info">
+              <span class="download-format">.STL (3D Print)</span>
+              <span class="download-desc">Для слайсеров и 3D-принтеров</span>
+            </div>
+            <span class="download-icon">⬇</span>
+          </a>
+          <a href="/assets/brand/3d/monarch-logo.gltf" download="monarch-logo.gltf" class="download-card" title="Скачать glTF 2.0">
+            <div class="download-info">
+              <span class="download-format">.GLTF 2.0</span>
+              <span class="download-desc">PBR веб-стандарт с текстурами</span>
+            </div>
+            <span class="download-icon">⬇</span>
+          </a>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <script type="module">
+    import { init3DStudio } from '/startup/monarch-3d-studio.js';
+
+    const container = document.getElementById('canvas-container');
+    const studio = init3DStudio(container);
+
+    // Controls binding
+    const explodeSlider = document.getElementById('explode-slider');
+    const explodeValue = document.getElementById('explode-value');
+    explodeSlider.addEventListener('input', (e) => {
+      const val = parseFloat(e.target.value);
+      studio.setExplode(val);
+      explodeValue.textContent = `${Math.round((val / 2) * 100)}%`;
+    });
+
+    const btnAutorotate = document.getElementById('btn-autorotate');
+    btnAutorotate.addEventListener('click', () => {
+      const current = studio.getAutoRotate();
+      studio.setAutoRotate(!current);
+      btnAutorotate.classList.toggle('btn-active', !current);
+    });
+
+    const btnReset = document.getElementById('btn-reset');
+    btnReset.addEventListener('click', () => {
+      studio.resetCamera();
+      explodeSlider.value = 0;
+      studio.setExplode(0);
+      explodeValue.textContent = '0%';
+    });
+
+    // Preset buttons
+    const presetButtons = document.querySelectorAll('[data-preset]');
+    presetButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        presetButtons.forEach((b) => b.classList.remove('btn-active'));
+        btn.classList.add('btn-active');
+        studio.setPreset(btn.dataset.preset);
+      });
+    });
+
+    // Wireframe buttons
+    const btnSolid = document.getElementById('btn-solid');
+    const btnWireframe = document.getElementById('btn-wireframe');
+    btnSolid.addEventListener('click', () => {
+      btnSolid.classList.add('btn-active');
+      btnWireframe.classList.remove('btn-active');
+      studio.setWireframe(false);
+    });
+    btnWireframe.addEventListener('click', () => {
+      btnWireframe.classList.add('btn-active');
+      btnSolid.classList.remove('btn-active');
+      studio.setWireframe(true);
+    });
+  </script>
+</body>
+</html>

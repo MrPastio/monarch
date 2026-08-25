@@ -22,6 +22,8 @@ export interface AgentBenchmarkCase {
   forbiddenActionInputFragments: string[];
 }
 
+export type AgentBenchmarkDecisionPhase = 'planning' | 'execution';
+
 interface Seed {
   id: string;
   language: AgentBenchmarkCase['language'];
@@ -138,6 +140,27 @@ export function benchmarkDecisionHasForbiddenActionInput(
   return benchmarkCase.forbiddenActionInputFragments.some((fragment) => (
     fragment.length > 0 && serializedInput.includes(fragment.toLocaleLowerCase())
   ));
+}
+
+export function benchmarkDecisionPhase(
+  benchmarkCase: Pick<AgentBenchmarkCase, 'category'>,
+): AgentBenchmarkDecisionPhase {
+  // Production always performs model-first planning. The tier calibration is
+  // interested in the post-plan capability decision except where the expected
+  // result itself is planning/clarification. This keeps Fast and Balanced on
+  // the same real Agent-loop phase.
+  return benchmarkCase.category === 'multi-step' || benchmarkCase.category === 'ambiguous'
+    ? 'planning'
+    : 'execution';
+}
+
+export function benchmarkPlanningDecisionIsSuccessful(
+  benchmarkCase: Pick<AgentBenchmarkCase, 'category'>,
+  decisionKind: string,
+): boolean {
+  if (benchmarkDecisionPhase(benchmarkCase) !== 'planning') return false;
+  return decisionKind === 'revise-plan'
+    || (decisionKind === 'ask-user' && benchmarkCase.category === 'ambiguous');
 }
 
 function forbiddenActionInputFragments(seed: Seed, variantIndex: number): string[] {

@@ -20,6 +20,8 @@ import { customToolsModulePackage } from './custom-tools';
 import { telegramModulePackage } from './telegram';
 import { deviceModulePackage } from './device';
 import { coderModulePackage } from './coder';
+import { computerModulePackage } from './computer';
+import { systemShellModulePackage } from './system-shell';
 
 export const builtInModulePackages: readonly MonarchModulePackage[] = [
   assistantModulePackage,
@@ -41,6 +43,8 @@ export const builtInModulePackages: readonly MonarchModulePackage[] = [
   voiceModulePackage,
   telegramModulePackage,
   deviceModulePackage,
+  computerModulePackage,
+  systemShellModulePackage,
   customToolsModulePackage,
   coderModulePackage,
 ];

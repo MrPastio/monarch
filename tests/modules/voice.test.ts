@@ -97,7 +97,7 @@ describe('Voice Module', () => {
       shutdown,
       snapshot: () => ({ state: 'idle' as const, engine: 'vosk' as const }),
     };
-    const voice = new VoiceModule(undefined, sttRuntime);
+    const voice = new VoiceModule(sttRuntime);
     const context = { emit: vi.fn(async () => undefined) } as any;
 
     await voice.activate(context);
@@ -310,75 +310,11 @@ process.exit(2);
     expect(status.output).toMatchObject({ running: { stt: false } });
   });
 
-  it('classifies a voice turn without loading a model', async () => {
-    const voice = new VoiceModule();
-    const emitted: Array<{ event: string; payload: unknown }> = [];
-    const context = {
-      emit: async (event: string, _moduleId: string, payload: unknown) => {
-        emitted.push({ event, payload });
-      },
-    } as any;
+  it('exposes only transport capabilities; reasoning belongs to the common Agent Runtime', () => {
+    const capabilityIds = new VoiceModule().manifest.capabilities.map((capability) => capability.id);
 
-    const result = await voice.executeCapability({
-      id: 'exec_voice_classify',
-      intentId: 'intent_voice_classify',
-      moduleId: 'voice',
-      capabilityId: 'voice.mode.classify',
-      input: { text: 'Оскар, проанализируй архитектуру и сравни варианты' },
-      createdAt: new Date(0).toISOString(),
-      requestedBy: 'ui:voice-mode',
-    }, context);
-
-    expect(result.ok).toBe(true);
-    expect(result.output).toMatchObject({
-      lane: 'fast-llm',
-      modelRoute: 'gemma4-fast',
-    });
-    expect(emitted).toContainEqual(expect.objectContaining({ event: 'voice.mode.classified' }));
-  });
-
-  it('owns a session-scoped multi-turn context without using standard Oscar history', async () => {
-    const voice = new VoiceModule();
-    const context = { emit: vi.fn(async () => undefined) } as any;
-    const request = (capabilityId: string, input: Record<string, unknown>) => ({
-      id: `exec_${capabilityId}`,
-      intentId: 'intent_voice_session',
-      moduleId: 'voice',
-      capabilityId,
-      input,
-      createdAt: new Date(0).toISOString(),
-      requestedBy: 'ui:voice-mode',
-    });
-
-    const started = await voice.executeCapability(request('voice.mode.session.start', {}), context);
-    const sessionId = String((started.output as any).sessionId);
-    const first = await voice.executeCapability(request('voice.mode.classify', {
-      sessionId,
-      text: 'Кто сейчас премьер России?',
-    }), context);
-    const firstCandidate = first.output as any;
-    await voice.executeCapability(request('voice.mode.session.complete', {
-      sessionId,
-      turnId: firstCandidate.context.turnId,
-      response: 'Премьер-министр России — Михаил Мишустин.',
-      actionId: firstCandidate.actionId,
-    }), context);
-
-    const followUp = await voice.executeCapability(request('voice.mode.classify', {
-      sessionId,
-      text: 'А сколько ему лет?',
-    }), context);
-
-    expect(followUp.output).toMatchObject({
-      lane: 'fast-llm',
-      context: {
-        contextDependent: true,
-        history: [
-          { role: 'user', content: 'Кто сейчас премьер России?' },
-          { role: 'assistant', content: 'Премьер-министр России — Михаил Мишустин.' },
-        ],
-      },
-    });
+    expect(capabilityIds).toContain('voice.transcribe.prepare');
+    expect(capabilityIds.some((id) => id.startsWith('voice.mode.'))).toBe(false);
   });
 });
 

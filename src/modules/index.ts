@@ -16,3 +16,5 @@ export * from './workspace';
 export * from './custom-tools';
 export * from './telegram';
 export * from './device';
+export * from './computer';
+export * from './system-shell';

@@ -4,8 +4,10 @@ import {
   Menu,
   MessageChannelMain,
   Tray,
+  WebContentsView,
   clipboard,
   dialog,
+  globalShortcut,
   ipcMain,
   nativeImage,
   powerMonitor,
@@ -15,7 +17,7 @@ import {
 } from 'electron';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
@@ -28,6 +30,13 @@ import {
   shouldAllowDesktopPermission,
 } from './security-policy.mjs';
 import { shouldHideToTrayOnClose, trayWindowLabel } from './tray-policy.mjs';
+import {
+  isAllowedImageProviderUrl,
+  resolveEmbeddedImageProviderBounds,
+  resolveImageProviderEntryUrl,
+  resolveImageProviderZoom,
+} from './image-provider-policy.mjs';
+import { createImageProviderDownloadHandler } from './image-provider-download.mjs';
 import { loadOrCreateSafeDeviceKey } from '../safe/device-binding.mjs';
 import { createSafeCapabilityToken } from '../safe/capability-token.mjs';
 import { normalizeSafeSecurityPolicy } from '../safe/security-policy.mjs';
@@ -37,6 +46,13 @@ import { ownsSafeSessionResource, shouldLockSafeOnBlur } from './safe-session-po
 import { resolveSafeStorageRoot } from './safe-storage-path.mjs';
 import { resolveRuntimeLaunch } from './runtime-entry.mjs';
 import { waitForRuntimeReady } from './runtime-startup.mjs';
+import { isOwnerModeSuspended, prepareOwnerAuthoritySession, setOwnerModeSuspended } from './owner-authority.mjs';
+import {
+  createOwnerDeviceRequest,
+  exportOwnerDeviceRequest,
+  importOwnerEntitlement,
+  readOwnerEnrollmentStatus,
+} from './owner-enrollment.mjs';
 import {
   createSpeechDiagnosticRecord,
   createSpeechWarmupCoordinator,
@@ -57,9 +73,16 @@ import { cleanupRetainedUpdateComponents } from './retention-cleanup.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(__dirname, '..', '..');
+const desktopIconPath = path.join(
+  workspaceRoot,
+  'assets',
+  process.platform === 'win32' ? 'icon.ico' : 'icon.png',
+);
 const workspacePackage = readJsonFileIfPresent(path.join(workspaceRoot, 'package.json'));
 const safeEntryQaMode = process.argv.includes('--safe-entry-qa');
 const updateDemoMode = process.argv.includes('--update-demo') && !app.isPackaged;
+const desktopAcceptanceMode = process.argv.includes('--desktop-acceptance') && !app.isPackaged;
+const smokeMode = process.argv.includes('--smoke');
 const configuredInstallRoot = process.env.MONARCH_INSTALL_ROOT && path.isAbsolute(process.env.MONARCH_INSTALL_ROOT)
   ? path.resolve(process.env.MONARCH_INSTALL_ROOT)
   : null;
@@ -76,6 +99,9 @@ const installedLauncher = configuredInstallRoot
 const configuredPayloadRoot = process.env.MONARCH_PAYLOAD_ROOT && path.isAbsolute(process.env.MONARCH_PAYLOAD_ROOT)
   ? path.resolve(process.env.MONARCH_PAYLOAD_ROOT)
   : null;
+const configuredModelsRoot = process.env.MONARCH_MODELS_ROOT && path.isAbsolute(process.env.MONARCH_MODELS_ROOT)
+  ? path.resolve(process.env.MONARCH_MODELS_ROOT)
+  : null;
 const configuredDataRoot = process.env.MONARCH_DATA_ROOT && path.isAbsolute(process.env.MONARCH_DATA_ROOT)
   ? path.resolve(process.env.MONARCH_DATA_ROOT)
   : null;
@@ -90,6 +116,8 @@ const configuredSecretsRoot = process.env.MONARCH_SECRETS_ROOT && path.isAbsolut
 const desktopRuntimeRoot = configuredDataRoot
   ? path.join(configuredDataRoot, 'runtime', 'desktop')
   : path.join(workspaceRoot, 'runtime');
+const imageProviderDownloadParent = path.join(desktopRuntimeRoot, 'image-provider-downloads');
+const imageProviderDownloadRoot = path.join(imageProviderDownloadParent, randomBytes(12).toString('hex'));
 const desktopLogsRoot = configuredLogsRoot
   ? path.join(configuredLogsRoot, 'desktop')
   : desktopRuntimeRoot;
@@ -117,8 +145,23 @@ const safeEntryQaProfile = safeEntryQaMode
 const updateDemoProfile = updateDemoMode
   ? mkdtempSync(path.join(os.tmpdir(), 'monarch-update-demo-'))
   : null;
-const isolatedUserDataRoot = safeEntryQaProfile || updateDemoProfile;
+const desktopIsolationParent = configuredDataRoot
+  ? path.join(configuredDataRoot, 'runtime', 'desktop-isolation')
+  : path.join(workspaceRoot, 'runtime');
+const sourceSmokeMode = smokeMode && !app.isPackaged;
+if (desktopAcceptanceMode || sourceSmokeMode) mkdirSync(desktopIsolationParent, { recursive: true });
+const desktopAcceptanceProfile = desktopAcceptanceMode
+  ? mkdtempSync(path.join(desktopIsolationParent, 'desktop-acceptance-'))
+  : null;
+const desktopSmokeProfile = sourceSmokeMode
+  ? mkdtempSync(path.join(desktopIsolationParent, 'desktop-smoke-'))
+  : null;
+const desktopRuntimeIsolationProfile = desktopAcceptanceProfile || desktopSmokeProfile;
+const isolatedUserDataRoot = safeEntryQaProfile || updateDemoProfile || desktopAcceptanceProfile;
 if (isolatedUserDataRoot) app.setPath('userData', isolatedUserDataRoot);
+const ownerAuthorityRoot = desktopRuntimeIsolationProfile
+  ? path.join(desktopRuntimeIsolationProfile, 'owner-authority')
+  : path.join(app.getPath('appData'), 'Monarch', 'authority');
 const safeRoot = !updateDemoMode && installedLayout?.configRoot && path.isAbsolute(installedLayout.configRoot)
   ? path.join(path.resolve(installedLayout.configRoot), 'Safe', 'safe-v1')
   : resolveSafeStorageRoot({
@@ -132,11 +175,14 @@ const safeIndexPath = path.join(safeUiRoot, 'index.html');
 const safeAuthorizationPath = path.join(safeUiRoot, 'authorization.html');
 const safeAuthorizationPreloadPath = path.join(safeUiRoot, 'authorization-preload.cjs');
 const safeIconPath = path.join(workspaceRoot, 'assets', 'safe', 'monarch-safe.ico');
-const smokeMode = process.argv.includes('--smoke');
 const safeLaunchMode = process.argv.includes('--safe') && !safeEntryQaMode;
-const appName = updateDemoMode ? 'Monarch · безопасная демонстрация обновления' : 'Monarch';
+const appName = updateDemoMode
+  ? 'Monarch · безопасная демонстрация обновления'
+  : desktopAcceptanceMode ? 'Monarch · Acceptance' : 'Monarch';
 const desktopAttestationToken = randomBytes(32).toString('base64url');
 let mainWindow = null;
+let imageProviderWindow = null;
+let embeddedImageProviderView = null;
 let installerCoordinator = null;
 let postUpdateTrial = null;
 const updateDemo = updateDemoMode ? createUpdateDemoRuntime() : null;
@@ -196,7 +242,9 @@ let trayHintShown = false;
 let shuttingDown = false;
 let shutdownComplete = false;
 let shutdownPromise = null;
+let computerUseEmergencyStopRunning = false;
 const configuredSafeSessions = new WeakSet();
+const configuredImageProviderSessions = new WeakSet();
 const safeEntryQaEvents = [];
 let safeSecurityPolicy = normalizeSafeSecurityPolicy(null);
 
@@ -214,10 +262,10 @@ if (!updateDemoMode && configuredInstallRoot && configuredPayloadRoot) {
   });
 }
 
-if (!safeEntryQaMode && !updateDemoMode && !app.requestSingleInstanceLock()) {
+if (!safeEntryQaMode && !updateDemoMode && !smokeMode && !desktopAcceptanceMode && !app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  if (!safeEntryQaMode && !updateDemoMode) {
+  if (!safeEntryQaMode && !updateDemoMode && !smokeMode && !desktopAcceptanceMode) {
     app.on('second-instance', (_event, commandLine) => {
       if (commandLine.includes('--safe')) void showSafeWindow();
       else void showMainWindow();
@@ -230,12 +278,13 @@ if (!safeEntryQaMode && !updateDemoMode && !app.requestSingleInstanceLock()) {
     .then(startDesktopApp)
     .catch(async (error) => {
       await showFatalError(error);
+      await cleanupDesktopRuntimeIsolation();
       app.exit(1);
     });
 }
 
 app.on('window-all-closed', () => {
-  if (updateDemoMode) {
+  if (updateDemoMode || desktopAcceptanceMode) {
     app.quit();
     return;
   }
@@ -299,6 +348,16 @@ ipcMain.handle('monarch:copy-text', (_event, value) => {
   clipboard.writeText(String(value ?? ''));
   return true;
 });
+ipcMain.handle('monarch:open-models-folder', async (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+    return { ok: false, error: 'untrusted-renderer' };
+  }
+  if (!configuredModelsRoot) return { ok: false, error: 'models-root-unavailable' };
+  const modelsRoot = configuredModelsRoot;
+  mkdirSync(modelsRoot, { recursive: true });
+  const error = await shell.openPath(modelsRoot);
+  return error ? { ok: false, error: 'models-folder-open-failed' } : { ok: true };
+});
 ipcMain.handle('monarch:speech-speak', async (event, value = {}) => {
   if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
     return { ok: false, error: 'untrusted-renderer' };
@@ -344,6 +403,81 @@ ipcMain.handle('monarch:speech-diagnostics', (event) => {
     return { status: 'failed', ok: false, error: 'untrusted-renderer', summary: 'Диагностика TTS недоступна.' };
   }
   return speechWarmup.snapshot();
+});
+ipcMain.handle('monarch:speech-capabilities', (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+    return { schemaVersion: 1, platform: process.platform, primaryEngine: 'unavailable', neuralInstalled: false };
+  }
+  return speechOutput.capabilities();
+});
+ipcMain.handle('monarch:owner-enrollment-status', async (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+    return { ok: false, error: 'untrusted-renderer' };
+  }
+  const status = await readOwnerEnrollmentStatus({ authorityRoot: ownerAuthorityRoot, safeStorage });
+  return { ok: true, status: { ...status, ownerSuspended: await isOwnerModeSuspended(ownerAuthorityRoot) } };
+});
+ipcMain.handle('monarch:owner-mode-set-suspended', async (event, suspended) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return { ok: false, error: 'untrusted-renderer' };
+  const result = await setOwnerModeSuspended({ authorityRoot: ownerAuthorityRoot, suspended: suspended === true });
+  if (!result.ok) return result;
+  setImmediate(() => {
+    quitRequested = true;
+    app.relaunch();
+    app.quit();
+  });
+  return result;
+});
+ipcMain.handle('monarch:owner-device-request-create', async (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+    return { ok: false, error: 'untrusted-renderer' };
+  }
+  return createOwnerDeviceRequest({ authorityRoot: ownerAuthorityRoot, safeStorage });
+});
+ipcMain.handle('monarch:owner-device-request-export', async (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+    return { ok: false, error: 'untrusted-renderer' };
+  }
+  const prepared = await createOwnerDeviceRequest({ authorityRoot: ownerAuthorityRoot, safeStorage });
+  if (!prepared.ok) return prepared;
+  const selection = await dialog.showSaveDialog(mainWindow, {
+    title: 'Сохранить публичный запрос Owner',
+    defaultPath: path.join(app.getPath('downloads'), 'device-request.json'),
+    buttonLabel: 'Сохранить запрос',
+    filters: [{ name: 'Monarch Owner request', extensions: ['json'] }],
+    showOverwriteConfirmation: true,
+  });
+  if (selection.canceled || !selection.filePath) return { ok: false, canceled: true };
+  return exportOwnerDeviceRequest({ authorityRoot: ownerAuthorityRoot, destinationPath: selection.filePath });
+});
+ipcMain.handle('monarch:owner-entitlement-import', async (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+    return { ok: false, error: 'untrusted-renderer' };
+  }
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: 'Импортировать Owner entitlement',
+    defaultPath: app.getPath('downloads'),
+    buttonLabel: 'Проверить и импортировать',
+    properties: ['openFile'],
+    filters: [{ name: 'Monarch Owner entitlement', extensions: ['json'] }],
+  });
+  if (selection.canceled || selection.filePaths.length !== 1) return { ok: false, canceled: true };
+  return importOwnerEntitlement({
+    authorityRoot: ownerAuthorityRoot,
+    sourcePath: selection.filePaths[0],
+    safeStorage,
+  });
+});
+ipcMain.handle('monarch:owner-enrollment-restart', (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+    return { ok: false, error: 'untrusted-renderer' };
+  }
+  setImmediate(() => {
+    quitRequested = true;
+    app.relaunch();
+    app.quit();
+  });
+  return { ok: true };
 });
 
 function logSpeechDiagnostic(kind, input) {
@@ -394,6 +528,59 @@ ipcMain.handle('monarch:pick-coder-folder', async (event) => {
   });
   if (selection.canceled || selection.filePaths.length !== 1) return null;
   return selection.filePaths[0];
+});
+ipcMain.handle('monarch:open-image-provider', async (event, value = {}) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+    return { ok: false, error: 'untrusted-renderer' };
+  }
+  const prompt = String(value?.prompt || '').replace(/[\u0000-\u001F\u007F]/gu, '').trim().slice(0, 8_000);
+  if (prompt) clipboard.writeText(prompt);
+  const url = resolveImageProviderEntryUrl(value?.url);
+  await showImageProviderWindow(url);
+  return { ok: true, url, promptCopied: Boolean(prompt) };
+});
+ipcMain.handle('monarch:show-embedded-image-provider', async (event, value = {}) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+    return { ok: false, error: 'untrusted-renderer' };
+  }
+  const bounds = resolveEmbeddedImageProviderBounds(value?.bounds, mainWindow.getContentBounds());
+  if (!bounds) return { ok: false, error: 'provider-view-too-small' };
+  const prompt = normalizeImageProviderPrompt(value?.prompt);
+  if (prompt) clipboard.writeText(prompt);
+  const url = resolveImageProviderEntryUrl(value?.url);
+  await showEmbeddedImageProvider(url, bounds, resolveImageProviderZoom(value?.zoom));
+  return { ok: true, url, promptCopied: Boolean(prompt), bounds };
+});
+ipcMain.handle('monarch:update-embedded-image-provider-bounds', (event, value = {}) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id || !embeddedImageProviderView) {
+    return { ok: false };
+  }
+  const bounds = resolveEmbeddedImageProviderBounds(value, mainWindow.getContentBounds());
+  if (!bounds) return { ok: false, error: 'provider-view-too-small' };
+  embeddedImageProviderView.setBounds(bounds);
+  return { ok: true, bounds };
+});
+ipcMain.handle('monarch:hide-embedded-image-provider', (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return { ok: false };
+  embeddedImageProviderView?.setVisible(false);
+  return { ok: true };
+});
+ipcMain.handle('monarch:navigate-embedded-image-provider', async (event, action) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id || !embeddedImageProviderView) {
+    return { ok: false };
+  }
+  const contents = embeddedImageProviderView.webContents;
+  if (action === 'back' && contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
+  else if (action === 'reload') contents.reload();
+  else return { ok: false, error: 'unsupported-provider-navigation' };
+  return { ok: true };
+});
+ipcMain.handle('monarch:close-image-provider', async (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return { ok: false };
+  if (imageProviderWindow && !imageProviderWindow.isDestroyed()) imageProviderWindow.close();
+  imageProviderWindow = null;
+  destroyEmbeddedImageProvider();
+  return { ok: true };
 });
 ipcMain.handle('monarch:open-safe', async (event) => {
   if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return { ok: false };
@@ -524,7 +711,7 @@ ipcMain.on('monarch-safe:sealed', (event) => {
 });
 
 async function startDesktopApp() {
-  if (!updateDemoMode) {
+  if (!updateDemoMode && !desktopAcceptanceMode) {
     postUpdateTrial = await preparePostUpdateTrial().catch((error) => {
       if (process.argv.some((value) => value.startsWith('--post-update='))) throw error;
       return null;
@@ -554,15 +741,18 @@ async function startDesktopApp() {
     mkdir(desktopRuntimeRoot, { recursive: true }),
     mkdir(desktopLogsRoot, { recursive: true }),
   ]);
-  // Spawn the Qwen worker synchronously before the runtime can prewarm other
-  // local models. Renderer callers await this exact shared promise via IPC.
-  if (!smokeMode && !safeEntryQaMode && !safeLaunchMode && !updateDemoMode) void speechWarmup.start();
+  // Neural TTS is intentionally lazy. Qwen Pro is the primary text/agent
+  // runtime and must not compete with an unused multi-gigabyte voice worker.
+  // Voice Mode starts the shared warmup through trusted IPC when it opens.
   runtimeUrl = await startRuntime();
 
   if (smokeMode) {
-    const [health, capabilityPayload] = await Promise.all([
-      fetchJson(`${runtimeUrl}/api/health`),
+    const [health, capabilityPayload, permissionPayload] = await Promise.all([
+      fetchJson(`${runtimeUrl}/api/health`, {}, 30_000),
       fetchJson(`${runtimeUrl}/api/capabilities`),
+      fetchJson(`${runtimeUrl}/api/permissions`, {
+        'X-Monarch-Desktop-Attestation': desktopAttestationToken,
+      }),
     ]);
     const loadRecords = Array.isArray(health?.loadRecords) ? health.loadRecords : [];
     const capabilities = Array.isArray(capabilityPayload?.capabilities)
@@ -573,22 +763,29 @@ async function startDesktopApp() {
       runtimeUrl,
       modules: loadRecords.filter((record) => record?.status === 'loaded').length,
       capabilities,
+      authorityTier: permissionPayload?.authority?.tier || 'public',
+      authoritySource: permissionPayload?.authority?.source || 'default',
+      authorityDiagnostic: permissionPayload?.authority?.diagnostic || null,
+      autonomyMode: permissionPayload?.profile?.autonomyMode || null,
+      approvalPolicy: permissionPayload?.profile?.approvalPolicy || null,
     }, null, 2));
     stopRuntime();
+    await cleanupDesktopRuntimeIsolation();
     app.quit();
     return;
   }
 
   Menu.setApplicationMenu(createApplicationMenu());
+  registerComputerUseEmergencyShortcut();
   powerMonitor.on('lock-screen', () => closeSafeForSystemBoundary());
   powerMonitor.on('suspend', () => closeSafeForSystemBoundary());
-  if (!safeEntryQaMode && !safeLaunchMode && !updateDemoMode) createTray();
+  if (!safeEntryQaMode && !safeLaunchMode && !updateDemoMode && !desktopAcceptanceMode) createTray();
   if (safeLaunchMode) {
     await showSafeWindow();
   } else {
     await createMainWindow();
     if (postUpdateTrial) {
-      const health = await fetchJson(`${runtimeUrl}/api/health`);
+      const health = await fetchJson(`${runtimeUrl}/api/health`, {}, 30_000);
       await writeHealthAcknowledgement({
         trial: postUpdateTrial,
         backendHealth: health,
@@ -604,12 +801,13 @@ async function startDesktopApp() {
 async function createMainWindow() {
   mainWindow = new BrowserWindow({
     title: appName,
-    icon: path.join(workspaceRoot, 'assets', 'icon.png'),
+    icon: desktopIconPath,
     width: 1360,
     height: 900,
     minWidth: 980,
     minHeight: 680,
-    backgroundColor: '#f3f5f7',
+    backgroundColor: '#08090a',
+    autoHideMenuBar: true,
     show: false,
     ...(safeEntryQaMode ? { x: -32000, y: -32000, opacity: 0, focusable: false, skipTaskbar: true } : {}),
     webPreferences: {
@@ -619,6 +817,7 @@ async function createMainWindow() {
       sandbox: false,
     },
   });
+  mainWindow.setMenu(null);
 
   const readyToShow = new Promise((resolve) => mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
@@ -636,7 +835,11 @@ async function createMainWindow() {
   }
 
   mainWindow.on('close', (event) => {
-    if (!shouldHideToTrayOnClose({ smokeMode: smokeMode || updateDemoMode, shuttingDown, quitRequested })) {
+    if (!shouldHideToTrayOnClose({
+      smokeMode: smokeMode || updateDemoMode || desktopAcceptanceMode,
+      shuttingDown,
+      quitRequested,
+    })) {
       return;
     }
     event.preventDefault();
@@ -649,6 +852,9 @@ async function createMainWindow() {
   mainWindow.on('hide', rebuildTrayMenu);
 
   mainWindow.on('closed', () => {
+    if (imageProviderWindow && !imageProviderWindow.isDestroyed()) imageProviderWindow.close();
+    imageProviderWindow = null;
+    destroyEmbeddedImageProvider();
     mainWindow = null;
     rebuildTrayMenu();
   });
@@ -656,7 +862,7 @@ async function createMainWindow() {
   configureMainWindowSecurity(mainWindow, runtimeUrl);
 
   await mainWindow.loadURL(runtimeUrl);
-  if (updateDemoMode) mainWindow.setTitle(appName);
+  if (updateDemoMode || desktopAcceptanceMode) mainWindow.setTitle(appName);
   await readyToShow;
 }
 
@@ -706,7 +912,7 @@ async function showSafeWindow() {
 
   launchedSafeWindow = new BrowserWindow({
     title: 'Monarch Safe',
-    icon: existsSync(safeIconPath) ? safeIconPath : path.join(workspaceRoot, 'assets', 'icon.png'),
+    icon: existsSync(safeIconPath) ? safeIconPath : desktopIconPath,
     width: 1520,
     height: 960,
     minWidth: 1040,
@@ -1379,8 +1585,7 @@ function stopSafeRuntime(targetProcess = safeProcess, targetCapabilityKey = safe
 
 function createTray() {
   if (smokeMode || tray) return;
-  const iconPath = path.join(workspaceRoot, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png');
-  const source = nativeImage.createFromPath(iconPath);
+  const source = nativeImage.createFromPath(desktopIconPath);
   const icon = process.platform === 'win32' ? source.resize({ width: 16, height: 16 }) : source;
   tray = new Tray(icon);
   tray.setToolTip('Monarch · защита работает в фоне');
@@ -1483,6 +1688,157 @@ async function openExternalSafely(value) {
   return true;
 }
 
+async function showImageProviderWindow(url) {
+  if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Main Monarch window is unavailable.');
+  if (!imageProviderWindow || imageProviderWindow.isDestroyed()) {
+    imageProviderWindow = new BrowserWindow({
+      title: 'Monarch Images · Perchance',
+      parent: mainWindow,
+      width: 1180,
+      height: 820,
+      minWidth: 760,
+      minHeight: 620,
+      backgroundColor: '#101112',
+      show: false,
+      autoHideMenuBar: true,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        partition: 'monarch-perchance-provider',
+      },
+    });
+    imageProviderWindow.setMenu(null);
+    imageProviderWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    imageProviderWindow.webContents.session.setPermissionCheckHandler(() => false);
+    imageProviderWindow.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
+      if (isAllowedImageProviderUrl(targetUrl)) {
+        void imageProviderWindow?.loadURL(targetUrl);
+      } else {
+        void openExternalSafely(targetUrl);
+      }
+      return { action: 'deny' };
+    });
+    imageProviderWindow.webContents.on('will-navigate', (event, targetUrl) => {
+      if (isAllowedImageProviderUrl(targetUrl)) return;
+      event.preventDefault();
+      void openExternalSafely(targetUrl);
+    });
+    imageProviderWindow.webContents.on('did-finish-load', () => applyImageProviderSurfaceCss(imageProviderWindow?.webContents));
+    configureImageProviderDownloads(imageProviderWindow.webContents.session);
+    imageProviderWindow.on('closed', () => { imageProviderWindow = null; });
+    imageProviderWindow.once('ready-to-show', () => imageProviderWindow?.show());
+  }
+  if (imageProviderWindow.webContents.getURL() !== url) await imageProviderWindow.loadURL(url);
+  imageProviderWindow.show();
+  imageProviderWindow.focus();
+}
+
+async function showEmbeddedImageProvider(url, bounds, zoom) {
+  if (!mainWindow || mainWindow.isDestroyed()) throw new Error('Main Monarch window is unavailable.');
+  if (!embeddedImageProviderView || embeddedImageProviderView.webContents.isDestroyed()) {
+    embeddedImageProviderView = new WebContentsView({
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        devTools: false,
+        spellcheck: true,
+        partition: 'monarch-perchance-provider',
+      },
+    });
+    embeddedImageProviderView.setBackgroundColor('#101112');
+    embeddedImageProviderView.setBorderRadius(14);
+    mainWindow.contentView.addChildView(embeddedImageProviderView);
+    configureEmbeddedImageProvider(embeddedImageProviderView);
+  }
+  embeddedImageProviderView.setBounds(bounds);
+  embeddedImageProviderView.webContents.zoomFactor = zoom;
+  if (embeddedImageProviderView.webContents.getURL() !== url) {
+    embeddedImageProviderView.setVisible(false);
+    await embeddedImageProviderView.webContents.loadURL(url);
+  }
+  embeddedImageProviderView.setVisible(true);
+  embeddedImageProviderView.webContents.focus();
+}
+
+function configureEmbeddedImageProvider(view) {
+  const contents = view.webContents;
+  const providerSession = contents.session;
+  providerSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+  providerSession.setPermissionCheckHandler(() => false);
+  configureImageProviderDownloads(providerSession);
+  contents.setWindowOpenHandler(({ url: targetUrl }) => {
+    if (isAllowedImageProviderUrl(targetUrl)) void contents.loadURL(targetUrl);
+    return { action: 'deny' };
+  });
+  contents.on('will-navigate', (event, targetUrl) => {
+    if (isAllowedImageProviderUrl(targetUrl)) return;
+    event.preventDefault();
+  });
+  contents.on('did-start-loading', () => sendEmbeddedImageProviderState('loading'));
+  contents.on('did-finish-load', () => {
+    applyImageProviderSurfaceCss(contents);
+    sendEmbeddedImageProviderState('ready', { url: contents.getURL() });
+  });
+  contents.on('did-fail-load', (_event, code, description, validatedUrl, isMainFrame) => {
+    if (isMainFrame === false || code === -3) return;
+    sendEmbeddedImageProviderState('error', { code, description, url: validatedUrl });
+  });
+  contents.on('render-process-gone', (_event, details) => {
+    sendEmbeddedImageProviderState('error', { description: details?.reason || 'provider-renderer-stopped' });
+  });
+}
+
+function applyImageProviderSurfaceCss(contents) {
+  if (!contents || contents.isDestroyed()) return;
+  void contents.insertCSS(`
+    :root { color-scheme: dark; }
+    html, body { background-color: #101112 !important; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-track { background: #101112; }
+    ::-webkit-scrollbar-thumb { background: #4a4032; border: 2px solid #101112; border-radius: 999px; }
+    ::selection { background: #ff9c3538; }
+    :focus-visible { outline-color: #ff9c35 !important; }
+  `).catch(() => undefined);
+}
+
+function configureImageProviderDownloads(providerSession) {
+  if (configuredImageProviderSessions.has(providerSession)) return;
+  configuredImageProviderSessions.add(providerSession);
+  mkdirSync(imageProviderDownloadRoot, { recursive: true });
+  providerSession.on('will-download', createImageProviderDownloadHandler({
+    root: imageProviderDownloadRoot,
+    isTrustedSource: (contents) => contents?.id === embeddedImageProviderView?.webContents.id
+      || contents?.id === imageProviderWindow?.webContents.id,
+    emit: sendImageProviderDownloadState,
+  }));
+}
+
+function sendImageProviderDownloadState(value) {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  mainWindow.webContents.send('monarch:image-provider-download', value);
+}
+
+function sendEmbeddedImageProviderState(status, detail = {}) {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  mainWindow.webContents.send('monarch:image-provider-state', { status, ...detail });
+}
+
+function destroyEmbeddedImageProvider() {
+  const view = embeddedImageProviderView;
+  embeddedImageProviderView = null;
+  if (!view) return;
+  const providerSession = view.webContents.session;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view);
+  if (!view.webContents.isDestroyed()) view.webContents.close();
+  void providerSession.clearStorageData().catch(() => undefined);
+}
+
+function normalizeImageProviderPrompt(value) {
+  return String(value || '').replace(/[\u0000-\u001F\u007F]/gu, '').trim().slice(0, 8_000);
+}
+
 async function startRuntime() {
   const nodePath = resolveNodeExecutable();
   const runtimeLaunch = resolveRuntimeLaunch({
@@ -1491,6 +1847,14 @@ async function startRuntime() {
   });
 
   const port = await findFreePort(4317, 40);
+  const ownerAuthority = !safeEntryQaMode && !safeLaunchMode && !updateDemoMode
+    ? await prepareOwnerAuthoritySession({
+      authorityRoot: ownerAuthorityRoot,
+      safeStorage,
+      desktopAttestationToken,
+      runtimePort: port,
+    }).catch(() => ({ environmentValue: '', summary: { tier: 'public', diagnostic: 'owner-bootstrap-failed' } }))
+    : { environmentValue: '', summary: { tier: 'public', diagnostic: 'owner-disabled-in-isolated-mode' } };
   const env = {
     ...process.env,
     MONARCH_UI_PORT: String(port),
@@ -1499,6 +1863,18 @@ async function startRuntime() {
     MONARCH_AGENT_RUNTIME_V2: '1',
     MONARCH_DESKTOP_ATTESTATION_TOKEN: desktopAttestationToken,
   };
+  if (desktopRuntimeIsolationProfile) {
+    const isolatedDataRoot = path.join(desktopRuntimeIsolationProfile, 'data');
+    const isolatedStateRoot = path.join(desktopRuntimeIsolationProfile, 'state');
+    await Promise.all([
+      mkdir(isolatedDataRoot, { recursive: true }),
+      mkdir(isolatedStateRoot, { recursive: true }),
+    ]);
+    env.MONARCH_DATA_ROOT = isolatedDataRoot;
+    env.MONARCH_STATE_ROOT = isolatedStateRoot;
+  }
+  if (ownerAuthority.environmentValue) env.MONARCH_OWNER_AUTHORITY_ENVELOPE = ownerAuthority.environmentValue;
+  else delete env.MONARCH_OWNER_AUTHORITY_ENVELOPE;
   // Voice Mode owns STT preparation after the shared Qwen warmup settles.
   // Do not let an inherited shell flag race Vosk/sherpa allocation with TTS.
   delete env.MONARCH_STT_PREWARM_ON_ACTIVATE;
@@ -1510,12 +1886,18 @@ async function startRuntime() {
 
   runtimeReady = false;
   let spawnError = null;
-  const launchedProcess = spawn(nodePath, [...runtimeLaunch.args, 'serve', '--port', String(port)], {
-    cwd: workspaceRoot,
-    env,
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  let launchedProcess;
+  try {
+    launchedProcess = spawn(nodePath, [...runtimeLaunch.args, 'serve', '--port', String(port)], {
+      cwd: workspaceRoot,
+      env,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'spawn-error';
+    throw new Error(`Runtime spawn failed (${code}) using ${nodePath} and ${runtimeLaunch.kind} entry ${runtimeLaunch.entryPath}.`);
+  }
   serverProcess = launchedProcess;
   launchedProcess.stdout.pipe(out);
   launchedProcess.stderr.pipe(err);
@@ -1590,6 +1972,7 @@ function readSecurityStartupState(health) {
 
 async function shutdownDesktop() {
   shuttingDown = true;
+  globalShortcut.unregister('Control+Alt+Escape');
   speechOutput.dispose();
   await speechLogQueue.catch(() => undefined);
   if (safeWindow && !safeWindow.isDestroyed()) safeWindow.destroy();
@@ -1598,8 +1981,77 @@ async function shutdownDesktop() {
   // It must never shut down a runtime owned by the real Desktop instance.
   // A standalone Safe window is a client of the already-running Monarch services.
   // Closing that shortcut must never tear down Oscar for the main Monarch app.
-  if (!safeEntryQaMode && !safeLaunchMode && !updateDemoMode) await stopOscarBackend().catch(() => undefined);
+  if (!safeEntryQaMode && !safeLaunchMode && !updateDemoMode && !desktopAcceptanceMode) {
+    await stopOscarBackend().catch(() => undefined);
+  }
   stopRuntime();
+  await cleanupImageProviderDownloads();
+  await cleanupDesktopRuntimeIsolation();
+}
+
+function registerComputerUseEmergencyShortcut() {
+  const accelerator = 'Control+Alt+Escape';
+  globalShortcut.unregister(accelerator);
+  const registered = globalShortcut.register(accelerator, () => {
+    void emergencyStopComputerUse('desktop-global-shortcut');
+  });
+  if (!registered) {
+    console.warn(`Computer Use emergency shortcut could not be registered: ${accelerator}`);
+  }
+}
+
+async function emergencyStopComputerUse(requestedBy = 'desktop-emergency-stop') {
+  if (!runtimeUrl || computerUseEmergencyStopRunning) return false;
+  computerUseEmergencyStopRunning = true;
+  try {
+    const response = await fetch(new URL('/api/computer-use/emergency-stop', runtimeUrl), {
+      method: 'POST',
+      headers: {
+        'X-Monarch-Desktop-Attestation': desktopAttestationToken,
+      },
+    });
+    const payload = await response.json().catch(() => ({}));
+    const stopped = response.ok && payload?.result?.ok === true;
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('monarch:computer-use-emergency-stop', {
+        ok: stopped,
+        requestedBy,
+        shortcut: 'Ctrl+Alt+Escape',
+        result: payload?.result || null,
+      });
+    }
+    return stopped;
+  } catch (error) {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('monarch:computer-use-emergency-stop', {
+        ok: false,
+        requestedBy,
+        shortcut: 'Ctrl+Alt+Escape',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return false;
+  } finally {
+    computerUseEmergencyStopRunning = false;
+  }
+}
+
+async function cleanupImageProviderDownloads() {
+  const resolvedRoot = path.resolve(imageProviderDownloadRoot);
+  const resolvedParent = path.resolve(imageProviderDownloadParent);
+  if (path.dirname(resolvedRoot).toLowerCase() !== resolvedParent.toLowerCase()) return;
+  await rm(resolvedRoot, { recursive: true, force: true }).catch(() => undefined);
+}
+
+async function cleanupDesktopRuntimeIsolation() {
+  if (!desktopRuntimeIsolationProfile) return;
+  const isolationRoot = path.resolve(desktopRuntimeIsolationProfile);
+  const expectedParent = path.resolve(workspaceRoot, 'runtime');
+  const allowedPrefix = desktopAcceptanceProfile ? 'desktop-acceptance-' : 'desktop-smoke-';
+  if (path.dirname(isolationRoot).toLowerCase() === expectedParent.toLowerCase()
+    && path.basename(isolationRoot).startsWith(allowedPrefix)) {
+    await rm(isolationRoot, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 async function stopOscarBackend() {
@@ -1674,9 +2126,9 @@ async function readRuntimeLogTail(filePath, maxCharacters = 6_000) {
   }
 }
 
-function fetchJson(url) {
+function fetchJson(url, headers = {}, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
-    const request = http.get(url, (response) => {
+    const request = http.get(url, { headers }, (response) => {
       let body = '';
       response.setEncoding('utf8');
       response.on('data', (chunk) => {
@@ -1695,7 +2147,7 @@ function fetchJson(url) {
       });
     });
     request.on('error', reject);
-    request.setTimeout(5000, () => {
+    request.setTimeout(timeoutMs, () => {
       request.destroy(new Error(`Timeout fetching ${url}`));
     });
   });

@@ -18,7 +18,7 @@ afterEach(() => {
 describe('VoiceModule direct PCM sessions', () => {
   it('binds crypto sessions to one client and enforces exact sequence without persisting PCM', async () => {
     const runtime = createStreamingRuntime();
-    const voice = new VoiceModule(createVoiceModels() as any, runtime as any);
+    const voice = new VoiceModule(runtime as any);
     const context = createContext();
 
     const first = await execute(voice, context, 'voice.transcribe.stream.start', {
@@ -67,7 +67,7 @@ describe('VoiceModule direct PCM sessions', () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);
     const runtime = createStreamingRuntime();
-    const voice = new VoiceModule(createVoiceModels() as any, runtime as any);
+    const voice = new VoiceModule(runtime as any);
     const context = createContext();
     const start = await execute(voice, context, 'voice.transcribe.stream.start', {
       language: 'ru-RU', sampleRate: 16_000,
@@ -103,7 +103,7 @@ describe('VoiceModule direct PCM sessions', () => {
   it('expires the server session and cancels its resident worker stream', async () => {
     vi.useFakeTimers();
     const runtime = createStreamingRuntime();
-    const voice = new VoiceModule(createVoiceModels() as any, runtime as any);
+    const voice = new VoiceModule(runtime as any);
     const context = createContext();
     const start = await execute(voice, context, 'voice.transcribe.stream.start', {
       language: 'ru-RU', sampleRate: 16_000,
@@ -125,7 +125,7 @@ describe('VoiceModule direct PCM sessions', () => {
   it('treats the server TTL as inactivity and accepts PCM beyond 30 seconds', async () => {
     vi.useFakeTimers();
     const runtime = createStreamingRuntime();
-    const voice = new VoiceModule(createVoiceModels() as any, runtime as any);
+    const voice = new VoiceModule(runtime as any);
     const context = createContext();
     const start = await execute(voice, context, 'voice.transcribe.stream.start', {
       language: 'ru-RU', sampleRate: 16_000,
@@ -152,7 +152,7 @@ describe('VoiceModule direct PCM sessions', () => {
   it('best-effort cancels and forgets a session when remote finalization fails', async () => {
     const runtime = createStreamingRuntime();
     runtime.finishStream.mockRejectedValueOnce(new Error('worker crashed'));
-    const voice = new VoiceModule(createVoiceModels() as any, runtime as any);
+    const voice = new VoiceModule(runtime as any);
     const context = createContext();
     const start = await execute(voice, context, 'voice.transcribe.stream.start', {
       language: 'ru-RU', sampleRate: 16_000,
@@ -175,7 +175,7 @@ describe('VoiceModule direct PCM sessions', () => {
   it('keeps an explicit custom transcribe command on the MediaRecorder-only contract', async () => {
     process.env.MONARCH_STT_TRANSCRIBE_COMMAND = 'node runtime/custom-stt.cjs {audio} {language}';
     const runtime = createStreamingRuntime();
-    const voice = new VoiceModule(createVoiceModels() as any, runtime as any);
+    const voice = new VoiceModule(runtime as any);
     const result = await execute(voice, createContext(), 'voice.transcribe.stream.start', {
       language: 'ru-RU', sampleRate: 16_000,
     }, 'ui:voice:custom');
@@ -203,15 +203,6 @@ function createStreamingRuntime() {
     cancelStream: vi.fn(async () => ({ cancelled: true })),
     shutdown: vi.fn(async () => undefined),
     snapshot: () => ({ state: 'ready', engine: 'hybrid' }),
-  };
-}
-
-function createVoiceModels() {
-  return {
-    prepare: vi.fn(),
-    respond: vi.fn(),
-    shutdown: vi.fn(async () => undefined),
-    snapshot: () => ({ state: 'idle' }),
   };
 }
 

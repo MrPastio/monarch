@@ -245,6 +245,50 @@ describe('Security pane rendering', () => {
     );
   });
 
+  it('does not dispatch protection stop until a valid six-digit PIN is provided', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', {
+      querySelector: (selector: string) => elements[selector] || null,
+      querySelectorAll: () => [],
+    });
+    const promptPin = vi.fn()
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce('12ab')
+      .mockReturnValueOnce('483920');
+    vi.stubGlobal('prompt', promptPin);
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = {
+      busy: false,
+      statusBusy: false,
+      status: securityStatus(true),
+      lastResult: null,
+      audit: null,
+      error: '',
+    };
+    apiMocks.executeConfirmedCapability.mockResolvedValue(securityStatus(false));
+    apiMocks.executeCapability.mockResolvedValue(securityStatus(false));
+    const { initSecurityPane, renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    initSecurityPane(renderSecurity);
+    renderSecurity();
+
+    elements['#security-stop'].click();
+    expect(apiMocks.executeConfirmedCapability).not.toHaveBeenCalled();
+    expect(state.security.error).toContain('не введён');
+
+    elements['#security-stop'].click();
+    expect(apiMocks.executeConfirmedCapability).not.toHaveBeenCalled();
+    expect(state.security.error).toContain('6 цифр');
+
+    elements['#security-stop'].click();
+    await vi.waitFor(() => expect(apiMocks.executeConfirmedCapability).toHaveBeenCalledOnce());
+    expect(apiMocks.executeConfirmedCapability).toHaveBeenCalledWith(
+      'security',
+      'security.protection.stop',
+      { waitSeconds: 10, pin: '483920' },
+      'ui:security',
+    );
+  });
+
   it('explains the real degraded protection state instead of implying full coverage', async () => {
     const elements = createSecurityDom();
     vi.stubGlobal('document', {
@@ -271,7 +315,7 @@ describe('Security pane rendering', () => {
     renderSecurity();
 
     expect(elements['#security-protection-title'].textContent).toBe('Защита работает частично');
-    expect(elements['#security-protection-copy'].textContent).toContain('датчиков требуют внимания');
+    expect(elements['#security-protection-copy'].textContent).toContain('Часть защиты требует внимания');
     expect(elements['#security-start'].hidden).toBe(true);
     expect(elements['#security-stop'].hidden).toBe(false);
   });
@@ -331,9 +375,9 @@ describe('Security pane rendering', () => {
     expect(elements['#security-incident-list'].innerHTML).toContain('sample.exe');
     expect(elements['#security-incident-detail'].innerHTML).toContain('612 / 800');
     expect(elements['#security-incident-detail'].innerHTML).toContain('process_spawn');
-    expect(elements['#security-incident-detail'].innerHTML).toContain('Цепочка атаки');
+    expect(elements['#security-incident-detail'].innerHTML).toContain('Как связаны события');
     expect(elements['#security-incident-detail'].innerHTML).toContain('тот же процесс');
-    expect(elements['#security-incident-detail'].innerHTML).toContain('не меняет риск');
+    expect(elements['#security-incident-detail'].innerHTML).toContain('только для пояснения');
     expect(elements['#security-incident-detail'].innerHTML).toContain('Предложить изоляцию');
     expect(elements['#security-incident-detail'].innerHTML).toContain('Событие безопасно');
   });
@@ -624,7 +668,7 @@ describe('Security pane rendering', () => {
     expect(elements['#security-replay-metrics'].innerHTML).toContain('18.50%');
     expect(elements['#security-replay-metrics'].innerHTML).toContain('20.0 MB');
     expect(elements['#security-replay-metrics'].innerHTML).toContain('3.75 ms');
-    expect(elements['#security-replay-metrics'].innerHTML).toContain('5 атак / 3 benign');
+    expect(elements['#security-replay-metrics'].innerHTML).toContain('5 опасных / 3 безопасных сценариев');
     expect(elements['#security-replay-metrics'].innerHTML).toContain('RAT · автозапуск · эксфильтрация');
     expect(elements['#security-replay-metrics'].innerHTML).toContain('администрирование · разработка · настройка сети');
   });
@@ -644,7 +688,7 @@ describe('Security pane rendering', () => {
         output: { payload: {
           running: true,
           profile: { level: 'balanced' },
-          model_policy: { enabled: true, confirmation_mode: 'adaptive' },
+          model_policy: { enabled: true, action_guard_reaction: 'guard', confirmation_mode: 'adaptive' },
         } },
       },
       lastResult: null,
@@ -654,7 +698,7 @@ describe('Security pane rendering', () => {
     };
     apiMocks.executeConfirmedCapability.mockResolvedValue({
       ok: true,
-      output: { payload: { enabled: false, confirmation_mode: 'always' } },
+      output: { payload: { enabled: false, action_guard_reaction: 'confirm-all', confirmation_mode: 'always' } },
     });
     apiMocks.executeCapability.mockResolvedValue(state.security.status);
     const { initSecurityPane, renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
@@ -662,16 +706,69 @@ describe('Security pane rendering', () => {
     renderSecurity();
 
     elements['#security-model-commands-enabled'].checked = false;
-    elements['#security-model-confirmation'].value = 'always';
+    elements['#security-model-confirmation'].value = 'strict';
     elements['#security-model-policy-save'].click();
 
     await vi.waitFor(() => expect(apiMocks.executeConfirmedCapability).toHaveBeenCalledOnce());
     expect(apiMocks.executeConfirmedCapability).toHaveBeenCalledWith(
       'security',
       'security.model_policy.set',
-      { enabled: false, confirmationMode: 'always' },
+      { enabled: false, agentSecurityMode: 'strict', actionGuardReaction: 'confirm-all' },
       'ui:security',
     );
+  });
+
+  it('renders danger probability, strongest factors, reaction, and exact receipt', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', {
+      querySelector: (selector: string) => elements[selector] || null,
+      querySelectorAll: () => [],
+    });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = {
+      busy: false,
+      statusBusy: false,
+      status: {
+        ok: true,
+        output: { payload: {
+          running: true,
+          profile: { level: 'balanced' },
+          model_policy: { enabled: true, agent_security_mode: 'guard' },
+          dangerLog: [
+            {
+              type: 'security.danger.assessed',
+              requestId: 'exec-danger-1',
+              capabilityId: 'workspace.files.delete',
+              response: 'confirm',
+              assessment: {
+                dangerProbability: 74,
+                factors: {
+                  reversibility: { score: 100 },
+                  effect: { score: 85 },
+                  scope: { score: 35 },
+                  novelty: { score: 30 },
+                },
+              },
+            },
+            {
+              type: 'security.danger.receipt',
+              requestId: 'exec-danger-1',
+              receipt: { ledgerId: 'ledger-danger-1', ok: true },
+            },
+          ],
+        } },
+      },
+      error: '',
+    };
+    const { renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+
+    renderSecurity();
+
+    expect(elements['#security-danger-log'].innerHTML).toContain('workspace.files.delete');
+    expect(elements['#security-danger-log'].innerHTML).toContain('74%');
+    expect(elements['#security-danger-log'].innerHTML).toContain('reversibility 100%');
+    expect(elements['#security-danger-log'].innerHTML).toContain('confirm');
+    expect(elements['#security-danger-log'].innerHTML).toContain('ledger-danger-1');
   });
 
   it('does not launch incident and PIN checks when the Security profile is off', async () => {
@@ -791,6 +888,7 @@ function createSecurityDom(): Record<string, FakeElement> {
     '#security-model-confirmation',
     '#security-model-policy-save',
     '#security-model-policy-feedback',
+    '#security-danger-log',
   ];
   return Object.fromEntries(selectors.map((selector) => [selector, new FakeElement()]));
 }

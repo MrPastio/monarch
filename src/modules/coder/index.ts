@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
+  MonarchExecutionControl,
   MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
@@ -13,6 +14,7 @@ import type {
   MonarchRouteDecision,
 } from '../../core';
 import { isPathWithinRoot, permissionModeForRisk, resolveMonarchRuntimePaths } from '../../core';
+import { writeFileAtomically } from '../../core/durable-json-file';
 import { safeFetch } from '../custom-tools';
 import { coderManifest } from './manifest';
 import { CoderProjectStore } from './project-store';
@@ -51,6 +53,7 @@ export class CoderModule implements MonarchModule {
   readonly monarchRoot: string;
   readonly sandbox: CoderSandboxRunner;
   private readonly huggingFaceExecutablePath: string;
+  private readonly fileMutationQueues = new Map<string, Promise<void>>();
 
   constructor(options: CoderModuleOptions = {}) {
     this.monarchRoot = path.resolve(options.monarchRoot || process.cwd());
@@ -144,8 +147,10 @@ export class CoderModule implements MonarchModule {
   async executeCapability(
     request: MonarchExecutionRequest,
     context: MonarchKernelContext,
+    control: MonarchExecutionControl = {},
   ): Promise<MonarchExecutionResult> {
     try {
+      control.signal?.throwIfAborted();
       switch (request.capabilityId) {
       case 'coder.projects.list':
         return ok('Coder projects loaded.', this.projects.list());
@@ -156,57 +161,58 @@ export class CoderModule implements MonarchModule {
       case 'coder.projects.activate':
         return this.activateProject(request.input, context);
       case 'coder.files.list':
-        return await this.listFiles(request.input);
+        return await this.listFiles(request.input, control.signal);
       case 'coder.files.read':
-        return await this.readTextFile(request.input);
+        return await this.readTextFile(request.input, control.signal);
       case 'coder.files.write':
-        return await this.writeTextFile(request.input, context);
+        return await this.writeTextFile(request.input, context, control.signal);
       case 'coder.files.patch':
-        return await this.patchTextFile(request.input, context);
+        return await this.patchTextFile(request.input, context, control.signal);
       case 'coder.files.delete':
-        return await this.deleteFile(request.input, context);
+        return await this.deleteFile(request.input, context, control.signal);
       case 'coder.command.run':
-        return await this.runCommandCapability(request.input, context);
+        return await this.runCommandCapability(request.input, context, control.signal);
       case 'coder.network.fetch':
-        return await this.fetchPublicResource(request.input);
+        return await this.fetchPublicResource(request.input, control.signal);
       case 'coder.network.request':
-        return await this.requestPublicResource(request.input);
+        return await this.requestPublicResource(request.input, control.signal);
       case 'coder.git.status':
-        return await this.gitStatus(request.input);
+        return await this.gitStatus(request.input, control.signal);
       case 'coder.git.diff':
-        return await this.gitDiff(request.input);
+        return await this.gitDiff(request.input, control.signal);
       case 'coder.git.init':
-        return await this.gitInit(request.input);
+        return await this.gitInit(request.input, control.signal);
       case 'coder.git.stage':
-        return await this.gitStage(request.input);
+        return await this.gitStage(request.input, control.signal);
       case 'coder.git.commit':
-        return await this.gitCommit(request.input);
+        return await this.gitCommit(request.input, control.signal);
       case 'coder.git.branch.create':
-        return await this.gitBranchCreate(request.input);
+        return await this.gitBranchCreate(request.input, control.signal);
       case 'coder.git.push':
-        return await this.gitPush(request.input);
+        return await this.gitPush(request.input, control.signal);
       case 'coder.github.status':
-        return await this.githubStatus();
+        return await this.githubStatus(control.signal);
       case 'coder.github.pr.view':
-        return await this.githubPullRequestView(request.input);
+        return await this.githubPullRequestView(request.input, control.signal);
       case 'coder.github.pr.create':
-        return await this.githubPullRequestCreate(request.input);
+        return await this.githubPullRequestCreate(request.input, control.signal);
       case 'coder.huggingface.status':
-        return await this.huggingFaceStatus();
+        return await this.huggingFaceStatus(control.signal);
       case 'coder.huggingface.repo.info':
-        return await this.huggingFaceRepoInfo(request.input);
+        return await this.huggingFaceRepoInfo(request.input, control.signal);
       case 'coder.huggingface.download':
-        return await this.huggingFaceDownload(request.input);
+        return await this.huggingFaceDownload(request.input, control.signal);
       case 'coder.huggingface.upload':
-        return await this.huggingFaceUpload(request.input);
+        return await this.huggingFaceUpload(request.input, control.signal);
       case 'coder.skills.create':
-        return await this.createSkill(request.input, context);
+        return await this.createSkill(request.input, context, control.signal);
       case 'coder.integrations.status':
-        return await this.integrationsStatus();
+        return await this.integrationsStatus(control.signal);
       default:
         return fail(`Unsupported Coder capability: ${request.capabilityId}`, 'unsupported-capability');
       }
     } catch (error) {
+      if (control.signal?.aborted) throw error;
       return fail(error instanceof Error ? error.message : String(error), 'coder-operation-failed');
     }
   }
@@ -229,7 +235,8 @@ export class CoderModule implements MonarchModule {
     return ok(`Project '${project.name}' activated.`, project);
   }
 
-  private async listFiles(input: unknown): Promise<MonarchExecutionResult> {
+  private async listFiles(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const rawPath = readOptionalString(input, 'path') || '.';
     const evaluation = await this.projects.policy.evaluatePath(rawPath, 'list', project.root);
@@ -241,6 +248,7 @@ export class CoderModule implements MonarchModule {
     const entries: Array<{ path: string; type: 'file' | 'directory'; sizeBytes?: number }> = [];
     const queue: Array<{ absolute: string; relative: string; depth: number }> = [{ absolute: evaluation.resolvedPath, relative: '', depth: 0 }];
     while (queue.length && entries.length < limit) {
+      signal?.throwIfAborted();
       const current = queue.shift()!;
       const children = await readdir(current.absolute, { withFileTypes: true });
       children.sort((left, right) => Number(right.isDirectory()) - Number(left.isDirectory()) || left.name.localeCompare(right.name));
@@ -261,7 +269,8 @@ export class CoderModule implements MonarchModule {
     return ok(`Listed ${entries.length} project entries.`, { project, root: evaluation.resolvedPath, entries, truncated: entries.length >= limit });
   }
 
-  private async readTextFile(input: unknown): Promise<MonarchExecutionResult> {
+  private async readTextFile(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const evaluation = await this.projects.policy.evaluatePath(readString(input, 'path'), 'read', project.root);
     if (!evaluation.allowed) return blocked(evaluation.message, evaluation);
@@ -273,66 +282,78 @@ export class CoderModule implements MonarchModule {
     return ok(`Read ${content.length} characters.`, { path: evaluation.resolvedPath, content, sizeBytes: fileStat.size });
   }
 
-  private async writeTextFile(input: unknown, context: MonarchKernelContext): Promise<MonarchExecutionResult> {
+  private async writeTextFile(input: unknown, context: MonarchKernelContext, signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const content = readString(input, 'content', true);
     if (Buffer.byteLength(content, 'utf8') > MAX_WRITE_BYTES) throw new Error(`Write exceeds the ${MAX_WRITE_BYTES}-byte limit.`);
     const evaluation = await this.projects.policy.evaluatePath(readString(input, 'path'), 'write', project.root);
     if (!evaluation.allowed) return blocked(evaluation.message, evaluation);
     const overwrite = readBoolean(input, 'overwrite', false);
-    if (!overwrite && existsSync(evaluation.resolvedPath)) throw new Error('Target already exists; set overwrite=true to replace it.');
-    await atomicWrite(evaluation.resolvedPath, content);
-    const persisted = await readFile(evaluation.resolvedPath);
-    const expected = Buffer.from(content, 'utf8');
-    if (!persisted.equals(expected)) throw new Error('Coder write verification failed after the atomic rename.');
-    await context.emit('coder.file.written', this.manifest.id, { projectId: project.id, path: evaluation.resolvedPath });
-    return ok(`Wrote and verified ${persisted.length} bytes.`, {
-      path: evaluation.resolvedPath,
-      sizeBytes: persisted.length,
-      sha256: createHash('sha256').update(persisted).digest('hex'),
-      verified: true,
+    return this.withFileMutation(evaluation.resolvedPath, async () => {
+      signal?.throwIfAborted();
+      if (!overwrite && existsSync(evaluation.resolvedPath)) throw new Error('Target already exists; set overwrite=true to replace it.');
+      await atomicWrite(evaluation.resolvedPath, content);
+      const persisted = await readFile(evaluation.resolvedPath);
+      const expected = Buffer.from(content, 'utf8');
+      if (!persisted.equals(expected)) throw new Error('Coder write verification failed after the atomic rename.');
+      await context.emit('coder.file.written', this.manifest.id, { projectId: project.id, path: evaluation.resolvedPath });
+      return ok(`Wrote and verified ${persisted.length} bytes.`, {
+        path: evaluation.resolvedPath,
+        sizeBytes: persisted.length,
+        sha256: createHash('sha256').update(persisted).digest('hex'),
+        verified: true,
+      });
     });
   }
 
-  private async patchTextFile(input: unknown, context: MonarchKernelContext): Promise<MonarchExecutionResult> {
+  private async patchTextFile(input: unknown, context: MonarchKernelContext, signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const evaluation = await this.projects.policy.evaluatePath(readString(input, 'path'), 'write', project.root);
     if (!evaluation.allowed) return blocked(evaluation.message, evaluation);
     const replacements = readReplacements(input);
-    let content = await readFile(evaluation.resolvedPath, 'utf8');
-    for (const replacement of replacements) {
-      const occurrences = content.split(replacement.oldText).length - 1;
-      if (occurrences !== 1) throw new Error(`Patch expected exactly one occurrence, found ${occurrences}.`);
-      content = content.replace(replacement.oldText, replacement.newText);
-    }
-    if (Buffer.byteLength(content, 'utf8') > MAX_WRITE_BYTES) throw new Error('Patched file exceeds the write limit.');
-    await atomicWrite(evaluation.resolvedPath, content);
-    const persisted = await readFile(evaluation.resolvedPath);
-    const expected = Buffer.from(content, 'utf8');
-    if (!persisted.equals(expected)) throw new Error('Coder patch verification failed after the atomic rename.');
-    await context.emit('coder.file.patched', this.manifest.id, { projectId: project.id, path: evaluation.resolvedPath, replacements: replacements.length });
-    return ok(`Applied ${replacements.length} exact replacement(s) and verified the result.`, {
-      path: evaluation.resolvedPath,
-      replacements: replacements.length,
-      sizeBytes: persisted.length,
-      sha256: createHash('sha256').update(persisted).digest('hex'),
-      verified: true,
+    return this.withFileMutation(evaluation.resolvedPath, async () => {
+      signal?.throwIfAborted();
+      let content = await readFile(evaluation.resolvedPath, 'utf8');
+      for (const replacement of replacements) {
+        const occurrences = content.split(replacement.oldText).length - 1;
+        if (occurrences !== 1) throw new Error(`Patch expected exactly one occurrence, found ${occurrences}.`);
+        content = content.replace(replacement.oldText, replacement.newText);
+      }
+      if (Buffer.byteLength(content, 'utf8') > MAX_WRITE_BYTES) throw new Error('Patched file exceeds the write limit.');
+      await atomicWrite(evaluation.resolvedPath, content);
+      const persisted = await readFile(evaluation.resolvedPath);
+      const expected = Buffer.from(content, 'utf8');
+      if (!persisted.equals(expected)) throw new Error('Coder patch verification failed after the atomic rename.');
+      await context.emit('coder.file.patched', this.manifest.id, { projectId: project.id, path: evaluation.resolvedPath, replacements: replacements.length });
+      return ok(`Applied ${replacements.length} exact replacement(s) and verified the result.`, {
+        path: evaluation.resolvedPath,
+        replacements: replacements.length,
+        sizeBytes: persisted.length,
+        sha256: createHash('sha256').update(persisted).digest('hex'),
+        verified: true,
+      });
     });
   }
 
-  private async deleteFile(input: unknown, context: MonarchKernelContext): Promise<MonarchExecutionResult> {
+  private async deleteFile(input: unknown, context: MonarchKernelContext, signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const evaluation = await this.projects.policy.evaluatePath(readString(input, 'path'), 'delete', project.root);
     if (!evaluation.allowed) return blocked(evaluation.message, evaluation);
-    const fileStat = await stat(evaluation.resolvedPath);
-    if (!fileStat.isFile()) throw new Error('Coder Mode only deletes individual files, never directories.');
-    await rm(evaluation.resolvedPath, { force: false, recursive: false });
-    if (existsSync(evaluation.resolvedPath)) throw new Error('Coder delete verification failed; the file still exists.');
-    await context.emit('coder.file.deleted', this.manifest.id, { projectId: project.id, path: evaluation.resolvedPath });
-    return ok('File deleted and verified absent.', { path: evaluation.resolvedPath, verified: true });
+    return this.withFileMutation(evaluation.resolvedPath, async () => {
+      signal?.throwIfAborted();
+      const fileStat = await stat(evaluation.resolvedPath);
+      if (!fileStat.isFile()) throw new Error('Coder Mode only deletes individual files, never directories.');
+      await rm(evaluation.resolvedPath, { force: false, recursive: false });
+      if (existsSync(evaluation.resolvedPath)) throw new Error('Coder delete verification failed; the file still exists.');
+      await context.emit('coder.file.deleted', this.manifest.id, { projectId: project.id, path: evaluation.resolvedPath });
+      return ok('File deleted and verified absent.', { path: evaluation.resolvedPath, verified: true });
+    });
   }
 
-  private async runCommandCapability(input: unknown, context: MonarchKernelContext): Promise<MonarchExecutionResult> {
+  private async runCommandCapability(input: unknown, context: MonarchKernelContext, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const executable = readString(input, 'executable');
     const args = readStringArray(input, 'args');
@@ -343,7 +364,7 @@ export class CoderModule implements MonarchModule {
       timeoutMs: readNumber(input, 'timeoutMs', 120_000),
       allowNetwork: readBoolean(input, 'allowNetwork', true),
       ...(cwd ? { cwd } : {}),
-    });
+    }, signal);
     await context.emit('coder.command.completed', this.manifest.id, {
       projectId: project.id,
       executable,
@@ -359,11 +380,12 @@ export class CoderModule implements MonarchModule {
     };
   }
 
-  private async fetchPublicResource(input: unknown): Promise<MonarchExecutionResult> {
+  private async fetchPublicResource(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const method = (readOptionalString(input, 'method') || 'GET').toUpperCase();
     if (method !== 'GET' && method !== 'HEAD') throw new Error('Coder network fetch only allows GET or HEAD requests.');
     const requestedUrl = readPublicNetworkUrl(input);
-    const response = await safeFetch(requestedUrl, { method });
+    const response = await safeFetch(requestedUrl, { method, ...(signal ? { signal } : {}) });
     const contentType = response.headers.get('content-type') || '';
     const body = method === 'HEAD' ? '' : await response.text();
     return ok(`Fetched ${response.status} ${response.statusText}.`, {
@@ -376,7 +398,8 @@ export class CoderModule implements MonarchModule {
     });
   }
 
-  private async requestPublicResource(input: unknown): Promise<MonarchExecutionResult> {
+  private async requestPublicResource(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const method = (readOptionalString(input, 'method') || 'GET').toUpperCase();
     if (!new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']).has(method)) {
       throw new Error('Coder network request method must be GET, HEAD, POST, PUT, PATCH, or DELETE.');
@@ -392,6 +415,7 @@ export class CoderModule implements MonarchModule {
       method,
       headers,
       ...(body === undefined ? {} : { body }),
+      ...(signal ? { signal } : {}),
     });
     const responseBody = method === 'HEAD' ? '' : await response.text();
     return {
@@ -410,9 +434,9 @@ export class CoderModule implements MonarchModule {
     };
   }
 
-  private async gitStatus(input: unknown): Promise<MonarchExecutionResult> {
+  private async gitStatus(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const project = this.projects.require(readOptionalString(input, 'projectId'));
-    const result = await this.runGitSandbox(project, ['status', '--short', '--branch'], 30_000);
+    const result = await this.runGitSandbox(project, ['status', '--short', '--branch'], 30_000, false, signal);
     return {
       ok: result.exitCode === 0,
       summary: result.exitCode === 0 ? 'Git status loaded.' : 'Git status failed.',
@@ -421,13 +445,13 @@ export class CoderModule implements MonarchModule {
     };
   }
 
-  private async gitDiff(input: unknown): Promise<MonarchExecutionResult> {
+  private async gitDiff(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const args = ['diff', '--no-ext-diff', '--no-color'];
     if (readBoolean(input, 'staged', false)) args.push('--cached');
     const requestedPath = readOptionalString(input, 'path');
     if (requestedPath) args.push('--', await this.validatedProjectRelativePath(project, requestedPath));
-    const result = await this.runGitSandbox(project, args, 30_000);
+    const result = await this.runGitSandbox(project, args, 30_000, false, signal);
     return {
       ok: result.exitCode === 0,
       summary: result.exitCode === 0 ? 'Git diff loaded.' : 'Git diff failed.',
@@ -436,14 +460,14 @@ export class CoderModule implements MonarchModule {
     };
   }
 
-  private async gitInit(input: unknown): Promise<MonarchExecutionResult> {
+  private async gitInit(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const initialBranch = readOptionalString(input, 'initialBranch') || 'main';
-    await this.assertGitBranch(project, initialBranch);
-    const initialized = await this.runGitSandbox(project, ['init', '-b', initialBranch, '.'], 60_000);
+    await this.assertGitBranch(project, initialBranch, signal);
+    const initialized = await this.runGitSandbox(project, ['init', '-b', initialBranch, '.'], 60_000, false, signal);
     if (initialized.exitCode !== 0) return fail('Git repository initialization failed.', 'git-init-failed');
     await ensureMonarchGitExclude(project.root);
-    const verification = await this.runGitSandbox(project, ['rev-parse', '--is-inside-work-tree'], 30_000);
+    const verification = await this.runGitSandbox(project, ['rev-parse', '--is-inside-work-tree'], 30_000, false, signal);
     const verified = verification.exitCode === 0 && verification.stdout.trim() === 'true';
     return {
       ok: verified,
@@ -453,15 +477,15 @@ export class CoderModule implements MonarchModule {
     };
   }
 
-  private async gitStage(input: unknown): Promise<MonarchExecutionResult> {
+  private async gitStage(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const requestedPaths = readStringArray(input, 'paths');
     if (requestedPaths.length < 1 || requestedPaths.length > 64) throw new Error('Git stage requires 1 to 64 project paths.');
     const paths: string[] = [];
     for (const requested of requestedPaths) paths.push(await this.validatedProjectRelativePath(project, requested));
-    const staged = await this.runGitSandbox(project, ['add', '--', ...paths], 120_000);
+    const staged = await this.runGitSandbox(project, ['add', '--', ...paths], 120_000, false, signal);
     if (staged.exitCode !== 0) return fail('Git staging failed.', 'git-stage-failed');
-    const observed = await this.runGitSandbox(project, ['diff', '--cached', '--name-only', '--no-renames'], 30_000);
+    const observed = await this.runGitSandbox(project, ['diff', '--cached', '--name-only', '--no-renames'], 30_000, false, signal);
     const files = observed.stdout.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean).slice(0, 500);
     return ok(`Staged ${files.length} observed path(s).`, {
       requestedPaths: paths,
@@ -471,24 +495,24 @@ export class CoderModule implements MonarchModule {
     });
   }
 
-  private async gitCommit(input: unknown): Promise<MonarchExecutionResult> {
+  private async gitCommit(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const message = boundedSingleLine(readString(input, 'message'), 'commit message', 500);
     const authorName = boundedSingleLine(readOptionalString(input, 'authorName') || 'Monarch Coder', 'author name', 120);
     const authorEmail = boundedSingleLine(readOptionalString(input, 'authorEmail') || 'coder@monarch.local', 'author email', 200);
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(authorEmail)) throw new Error('Git author email is invalid.');
-    const staged = await this.runGitSandbox(project, ['diff', '--cached', '--name-only'], 30_000);
+    const staged = await this.runGitSandbox(project, ['diff', '--cached', '--name-only'], 30_000, false, signal);
     if (staged.exitCode !== 0 || !staged.stdout.trim()) return fail('No staged changes are available to commit.', 'git-nothing-staged');
-    const before = await this.gitHead(project);
+    const before = await this.gitHead(project, signal);
     const committed = await this.runGitSandbox(project, [
       '-c', `user.name=${authorName}`,
       '-c', `user.email=${authorEmail}`,
       '-c', 'commit.gpgSign=false',
       'commit', '--no-verify', '--no-gpg-sign', '-m', message,
-    ], 120_000);
+    ], 120_000, false, signal);
     if (committed.exitCode !== 0) return fail('Git commit failed.', 'git-commit-failed');
-    const after = await this.gitHead(project);
-    const details = await this.runGitSandbox(project, ['show', '-s', '--format=%H%x00%s%x00%an%x00%ae', 'HEAD'], 30_000);
+    const after = await this.gitHead(project, signal);
+    const details = await this.runGitSandbox(project, ['show', '-s', '--format=%H%x00%s%x00%an%x00%ae', 'HEAD'], 30_000, false, signal);
     const fields = details.stdout.trim().split('\0');
     const verified = Boolean(after && after !== before && fields[0] === after);
     return {
@@ -508,17 +532,17 @@ export class CoderModule implements MonarchModule {
     };
   }
 
-  private async gitBranchCreate(input: unknown): Promise<MonarchExecutionResult> {
+  private async gitBranchCreate(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const name = readString(input, 'name');
-    await this.assertGitBranch(project, name);
+    await this.assertGitBranch(project, name, signal);
     const startPoint = readOptionalString(input, 'startPoint');
     if (startPoint && (!/^[A-Za-z0-9._/@{}+-]{1,200}$/.test(startPoint) || startPoint.startsWith('-'))) {
       throw new Error('Git branch start point is invalid.');
     }
-    const created = await this.runGitSandbox(project, ['switch', '-c', name, ...(startPoint ? [startPoint] : [])], 60_000);
+    const created = await this.runGitSandbox(project, ['switch', '-c', name, ...(startPoint ? [startPoint] : [])], 60_000, false, signal);
     if (created.exitCode !== 0) return fail('Git branch creation failed.', 'git-branch-create-failed');
-    const observed = await this.currentGitBranch(project);
+    const observed = await this.currentGitBranch(project, signal);
     const verified = observed === name;
     return {
       ok: verified,
@@ -528,18 +552,18 @@ export class CoderModule implements MonarchModule {
     };
   }
 
-  private async gitPush(input: unknown): Promise<MonarchExecutionResult> {
+  private async gitPush(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const remote = readOptionalString(input, 'remote') || 'origin';
     if (!/^[A-Za-z0-9._-]{1,80}$/.test(remote)) throw new Error('Git remote name is invalid.');
-    const branch = readOptionalString(input, 'branch') || await this.currentGitBranch(project);
-    await this.assertGitBranch(project, branch);
-    const remoteLookup = await this.runGitSandbox(project, ['remote', 'get-url', '--push', remote], 30_000);
+    const branch = readOptionalString(input, 'branch') || await this.currentGitBranch(project, signal);
+    await this.assertGitBranch(project, branch, signal);
+    const remoteLookup = await this.runGitSandbox(project, ['remote', 'get-url', '--push', remote], 30_000, false, signal);
     if (remoteLookup.exitCode !== 0) return fail(`Git remote '${remote}' is unavailable.`, 'git-remote-missing');
     const remoteUrl = remoteLookup.stdout.trim();
     assertSupportedPublicGitRemote(remoteUrl);
-    await this.assertSafeHostGitConfiguration(project);
-    const localHead = await this.gitHead(project);
+    await this.assertSafeHostGitConfiguration(project, signal);
+    const localHead = await this.gitHead(project, signal);
     if (!localHead) return fail('Git branch has no commit to push.', 'git-head-missing');
     const args = [
       '-c', 'core.fsmonitor=false',
@@ -556,7 +580,7 @@ export class CoderModule implements MonarchModule {
       `${branch}:refs/heads/${branch}`,
     ];
     const hostGitEnvironment = hardenedHostGitEnvironment(this.sandbox.runtimeRoot);
-    const pushed = await runProcess('git', args, project.root, 10 * 60_000, hostGitEnvironment);
+    const pushed = await runProcess('git', args, project.root, 10 * 60_000, hostGitEnvironment, signal);
     if (pushed.exitCode !== 0) {
       return { ok: false, summary: 'Git push failed.', output: sanitizeProcessResult(pushed), error: 'git-push-failed' };
     }
@@ -569,14 +593,14 @@ export class CoderModule implements MonarchModule {
       '-c', 'protocol.https.allow=always',
       '-c', 'protocol.ssh.allow=always',
       'ls-remote', '--heads', remoteUrl, `refs/heads/${branch}`,
-    ], project.root, 120_000, hostGitEnvironment);
+    ], project.root, 120_000, hostGitEnvironment, signal);
     const remoteHead = /^([a-f0-9]{40,64})\s/m.exec(observed.stdout)?.[1] || null;
     const verified = observed.exitCode === 0 && remoteHead === localHead;
     const setUpstream = readBoolean(input, 'setUpstream', true);
     let upstreamConfigured = !setUpstream;
     if (verified && setUpstream) {
-      const remoteConfig = await this.runGitSandbox(project, ['config', '--local', '--replace-all', `branch.${branch}.remote`, remote], 30_000);
-      const mergeConfig = await this.runGitSandbox(project, ['config', '--local', '--replace-all', `branch.${branch}.merge`, `refs/heads/${branch}`], 30_000);
+      const remoteConfig = await this.runGitSandbox(project, ['config', '--local', '--replace-all', `branch.${branch}.remote`, remote], 30_000, false, signal);
+      const mergeConfig = await this.runGitSandbox(project, ['config', '--local', '--replace-all', `branch.${branch}.merge`, `refs/heads/${branch}`], 30_000, false, signal);
       upstreamConfigured = remoteConfig.exitCode === 0 && mergeConfig.exitCode === 0;
     }
     const complete = verified && upstreamConfigured;
@@ -601,57 +625,57 @@ export class CoderModule implements MonarchModule {
     };
   }
 
-  private async githubStatus(): Promise<MonarchExecutionResult> {
-    const status = await probe('gh', ['auth', 'status'], this.sandbox.runtimeRoot);
+  private async githubStatus(signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    const status = await probe('gh', ['auth', 'status'], this.sandbox.runtimeRoot, signal);
     return ok('GitHub integration status loaded.', status);
   }
 
-  private async githubPullRequestView(input: unknown): Promise<MonarchExecutionResult> {
+  private async githubPullRequestView(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const number = readNumber(input, 'number', 0);
     if (number < 1 || number > Number.MAX_SAFE_INTEGER) throw new Error('GitHub pull request number is required.');
-    const repository = await this.githubRepository(project);
+    const repository = await this.githubRepository(project, signal);
     const args = ['pr', 'view', String(Math.trunc(number)), '--repo', repository, '--json', 'number,url,state,isDraft,headRefName,baseRefName,title,mergeStateStatus'];
-    const viewed = await runProcess('gh', args, this.sandbox.runtimeRoot, 60_000, integrationProcessEnvironment(this.sandbox.runtimeRoot));
+    const viewed = await runProcess('gh', args, this.sandbox.runtimeRoot, 60_000, integrationProcessEnvironment(this.sandbox.runtimeRoot), signal);
     if (viewed.exitCode !== 0) return { ok: false, summary: 'GitHub pull request lookup failed.', output: sanitizeProcessResult(viewed), error: 'github-pr-view-failed' };
     const data = parseJsonObject(viewed.stdout, 'GitHub pull request response');
     return ok(`GitHub pull request #${String(data.number || '?')} loaded.`, { ...data, verified: true });
   }
 
-  private async githubPullRequestCreate(input: unknown): Promise<MonarchExecutionResult> {
+  private async githubPullRequestCreate(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const title = boundedText(readString(input, 'title'), 'pull request title', 240);
     const body = boundedText(readString(input, 'body', true), 'pull request body', 32_000, true);
     const base = readString(input, 'base');
-    const head = readOptionalString(input, 'head') || await this.currentGitBranch(project);
-    await this.assertGitBranch(project, base);
-    await this.assertGitBranch(project, head);
-    const repository = await this.githubRepository(project);
+    const head = readOptionalString(input, 'head') || await this.currentGitBranch(project, signal);
+    await this.assertGitBranch(project, base, signal);
+    await this.assertGitBranch(project, head, signal);
+    const repository = await this.githubRepository(project, signal);
     const args = ['pr', 'create', '--repo', repository, '--title', title, '--body', body, '--base', base, '--head', head];
     if (readBoolean(input, 'draft', true)) args.push('--draft');
-    const created = await runProcess('gh', args, this.sandbox.runtimeRoot, 120_000, integrationProcessEnvironment(this.sandbox.runtimeRoot));
+    const created = await runProcess('gh', args, this.sandbox.runtimeRoot, 120_000, integrationProcessEnvironment(this.sandbox.runtimeRoot), signal);
     if (created.exitCode !== 0) return { ok: false, summary: 'GitHub pull request creation failed.', output: sanitizeProcessResult(created), error: 'github-pr-create-failed' };
     const url = /https:\/\/github\.com\/[^\s]+\/pull\/\d+/i.exec(created.stdout)?.[0];
     if (!url) return fail('GitHub CLI returned no pull request URL.', 'github-pr-url-missing');
-    const verifiedResult = await runProcess('gh', ['pr', 'view', url, '--repo', repository, '--json', 'number,url,state,isDraft,headRefName,baseRefName,title,mergeStateStatus'], this.sandbox.runtimeRoot, 60_000, integrationProcessEnvironment(this.sandbox.runtimeRoot));
+    const verifiedResult = await runProcess('gh', ['pr', 'view', url, '--repo', repository, '--json', 'number,url,state,isDraft,headRefName,baseRefName,title,mergeStateStatus'], this.sandbox.runtimeRoot, 60_000, integrationProcessEnvironment(this.sandbox.runtimeRoot), signal);
     if (verifiedResult.exitCode !== 0) return fail('GitHub pull request was created but readback verification failed.', 'github-pr-verification-failed');
     const verified = parseJsonObject(verifiedResult.stdout, 'GitHub pull request verification');
     return ok(`Created and verified GitHub pull request #${String(verified.number || '?')}.`, { ...verified, verified: true });
   }
 
-  private async huggingFaceStatus(): Promise<MonarchExecutionResult> {
-    const status = await probe(this.huggingFaceExecutable(), ['auth', 'whoami'], this.sandbox.runtimeRoot);
+  private async huggingFaceStatus(signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    const status = await probe(this.huggingFaceExecutable(), ['auth', 'whoami'], this.sandbox.runtimeRoot, signal);
     return ok('Hugging Face integration status loaded.', status);
   }
 
-  private async huggingFaceRepoInfo(input: unknown): Promise<MonarchExecutionResult> {
+  private async huggingFaceRepoInfo(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const repoId = readHuggingFaceRepoId(input);
     const repoType = readHuggingFaceRepoType(input);
     const revision = readOptionalString(input, 'revision');
     const collection = repoType === 'model' ? 'models' : `${repoType}s`;
     const url = new URL(`https://huggingface.co/api/${collection}/${repoId}`);
     if (revision) url.searchParams.set('revision', boundedSingleLine(revision, 'revision', 200));
-    const response = await safeFetch(url);
+    const response = await safeFetch(url, signal ? { signal } : {});
     if (!response.ok) return fail(`Hugging Face repository lookup returned ${response.status}.`, 'huggingface-repo-info-failed');
     const data = parseJsonObject(await response.text(), 'Hugging Face repository response');
     return ok(`Hugging Face ${repoType} '${repoId}' loaded.`, {
@@ -668,7 +692,7 @@ export class CoderModule implements MonarchModule {
     });
   }
 
-  private async huggingFaceDownload(input: unknown): Promise<MonarchExecutionResult> {
+  private async huggingFaceDownload(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const repoId = readHuggingFaceRepoId(input);
     const repoType = readHuggingFaceRepoType(input);
@@ -683,7 +707,7 @@ export class CoderModule implements MonarchModule {
     const commonArgs = [repoId, ...filenames, '--type', repoType, ...(revision ? ['--revision', boundedSingleLine(revision, 'revision', 200)] : [])];
     const executable = this.huggingFaceExecutable();
     const env = integrationProcessEnvironment(this.sandbox.runtimeRoot);
-    const dryRun = await runProcess(executable, ['download', ...commonArgs, '--dry-run', '--format', 'json'], this.sandbox.runtimeRoot, 120_000, env);
+    const dryRun = await runProcess(executable, ['download', ...commonArgs, '--dry-run', '--format', 'json'], this.sandbox.runtimeRoot, 120_000, env, signal);
     if (dryRun.exitCode !== 0) return { ok: false, summary: 'Hugging Face download plan failed.', output: sanitizeProcessResult(dryRun), error: 'huggingface-download-plan-failed' };
     const planned = parseJsonArray(dryRun.stdout, 'Hugging Face download plan');
     const plannedBytes = planned.reduce<number>((total, entry) => total + parseHumanByteSize(isRecord(entry) ? entry.size : 0), 0);
@@ -692,16 +716,17 @@ export class CoderModule implements MonarchModule {
       throw new Error('Large Hugging Face downloads to C: are blocked. Select a project or destination on E: or D:.');
     }
     await mkdir(destination.resolvedPath, { recursive: true });
-    const downloaded = await runProcess(executable, ['download', ...commonArgs, '--local-dir', destination.resolvedPath, '--max-workers', '4', '--format', 'json'], this.sandbox.runtimeRoot, 10 * 60_000, env);
+    const downloaded = await runProcess(executable, ['download', ...commonArgs, '--local-dir', destination.resolvedPath, '--max-workers', '4', '--format', 'json'], this.sandbox.runtimeRoot, 10 * 60_000, env, signal);
     if (downloaded.exitCode !== 0) return { ok: false, summary: 'Hugging Face download failed.', output: sanitizeProcessResult(downloaded), error: 'huggingface-download-failed' };
     const files = [] as Array<{ path: string; sizeBytes: number; sha256: string }>;
     for (const filename of filenames) {
+      signal?.throwIfAborted();
       const target = path.resolve(destination.resolvedPath, filename);
       const canonical = await realpath(target);
       if (!isPathWithinRoot(canonical, destination.resolvedPath, { allowRoot: false })) throw new Error('Downloaded Hugging Face file escaped the destination through a link.');
       const details = await stat(canonical);
       if (!details.isFile()) throw new Error(`Downloaded Hugging Face file is missing: ${filename}`);
-      files.push({ path: canonical, sizeBytes: details.size, sha256: await sha256File(canonical) });
+      files.push({ path: canonical, sizeBytes: details.size, sha256: await sha256File(canonical, signal) });
     }
     return ok(`Downloaded and verified ${files.length} Hugging Face file(s).`, {
       repoId,
@@ -714,7 +739,7 @@ export class CoderModule implements MonarchModule {
     });
   }
 
-  private async huggingFaceUpload(input: unknown): Promise<MonarchExecutionResult> {
+  private async huggingFaceUpload(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const repoId = readHuggingFaceRepoId(input);
     const repoType = readHuggingFaceRepoType(input);
@@ -722,7 +747,7 @@ export class CoderModule implements MonarchModule {
     if (!local.allowed || !isPathWithinRoot(local.resolvedPath, project.root, { allowRoot: true })) {
       return blocked(local.message || 'Hugging Face uploads must originate inside the selected project.', local);
     }
-    const audit = await auditUploadTree(local.resolvedPath, MAX_HF_TRANSFER_BYTES);
+    const audit = await auditUploadTree(local.resolvedPath, MAX_HF_TRANSFER_BYTES, signal);
     const remotePath = validateHuggingFaceFilename(readOptionalString(input, 'pathInRepo') || path.basename(local.resolvedPath));
     const revision = readOptionalString(input, 'revision');
     const commitMessage = boundedSingleLine(readOptionalString(input, 'commitMessage') || `Upload ${remotePath} from Monarch Coder`, 'commit message', 500);
@@ -745,13 +770,13 @@ export class CoderModule implements MonarchModule {
     ];
     const executable = this.huggingFaceExecutable();
     const env = integrationProcessEnvironment(this.sandbox.runtimeRoot);
-    const uploaded = await runProcess(executable, args, this.sandbox.runtimeRoot, 10 * 60_000, env);
+    const uploaded = await runProcess(executable, args, this.sandbox.runtimeRoot, 10 * 60_000, env, signal);
     if (uploaded.exitCode !== 0) return { ok: false, summary: 'Hugging Face upload failed.', output: sanitizeProcessResult(uploaded), error: 'huggingface-upload-failed' };
     const verification = await runProcess(executable, [
       'download', repoId, remotePath, '--type', repoType,
       ...(revision ? ['--revision', revision] : []),
       '--dry-run', '--format', 'json',
-    ], this.sandbox.runtimeRoot, 120_000, env);
+    ], this.sandbox.runtimeRoot, 120_000, env, signal);
     const verifiedFiles = verification.exitCode === 0 ? parseJsonArray(verification.stdout, 'Hugging Face upload verification') : [];
     const verified = verifiedFiles.length > 0;
     return {
@@ -771,7 +796,14 @@ export class CoderModule implements MonarchModule {
     };
   }
 
-  private async runGitSandbox(project: CoderProject, args: string[], timeoutMs: number, allowNetwork = false): Promise<ProcessResult & { isolation?: unknown }> {
+  private async runGitSandbox(
+    project: CoderProject,
+    args: string[],
+    timeoutMs: number,
+    allowNetwork = false,
+    signal?: AbortSignal,
+  ): Promise<ProcessResult & { isolation?: unknown }> {
+    signal?.throwIfAborted();
     const hooksPath = path.join(this.sandbox.runtimeRoot, 'empty-git-hooks').replace(/\\/g, '/');
     await mkdir(hooksPath, { recursive: true });
     return this.runProjectCommand(project, {
@@ -779,11 +811,11 @@ export class CoderModule implements MonarchModule {
       args: ['-c', `core.hooksPath=${hooksPath}`, '-c', 'diff.external=', ...args],
       timeoutMs,
       allowNetwork,
-    });
+    }, signal);
   }
 
-  private async assertSafeHostGitConfiguration(project: CoderProject): Promise<void> {
-    const result = await this.runGitSandbox(project, ['config', '--local', '--no-includes', '--null', '--name-only', '--list'], 30_000);
+  private async assertSafeHostGitConfiguration(project: CoderProject, signal?: AbortSignal): Promise<void> {
+    const result = await this.runGitSandbox(project, ['config', '--local', '--no-includes', '--null', '--name-only', '--list'], 30_000, false, signal);
     if (result.exitCode !== 0) throw new Error('Local Git configuration could not be audited before host credential use.');
     const dangerous = result.stdout
       .split('\0')
@@ -794,9 +826,10 @@ export class CoderModule implements MonarchModule {
     }
   }
 
-  private async githubRepository(project: CoderProject): Promise<string> {
+  private async githubRepository(project: CoderProject, signal?: AbortSignal): Promise<string> {
     for (const remote of ['origin', 'upstream']) {
-      const lookup = await this.runGitSandbox(project, ['remote', 'get-url', remote], 30_000);
+      signal?.throwIfAborted();
+      const lookup = await this.runGitSandbox(project, ['remote', 'get-url', remote], 30_000, false, signal);
       if (lookup.exitCode !== 0) continue;
       const repository = parseGitHubRepository(lookup.stdout.trim());
       if (repository) return repository;
@@ -813,22 +846,22 @@ export class CoderModule implements MonarchModule {
     return relative || '.';
   }
 
-  private async assertGitBranch(project: CoderProject, branch: string): Promise<void> {
+  private async assertGitBranch(project: CoderProject, branch: string, signal?: AbortSignal): Promise<void> {
     if (!branch || branch.length > 200 || branch.startsWith('-')) throw new Error('Git branch name is invalid.');
-    const checked = await this.runGitSandbox(project, ['check-ref-format', '--branch', branch], 30_000);
+    const checked = await this.runGitSandbox(project, ['check-ref-format', '--branch', branch], 30_000, false, signal);
     if (checked.exitCode !== 0) {
       throw new Error(`Git branch name is invalid: ${branch} (${(checked.stderr || checked.stdout || `exit ${checked.exitCode}`).trim()})`);
     }
   }
 
-  private async gitHead(project: CoderProject): Promise<string | null> {
-    const result = await this.runGitSandbox(project, ['rev-parse', '--verify', 'HEAD'], 30_000);
+  private async gitHead(project: CoderProject, signal?: AbortSignal): Promise<string | null> {
+    const result = await this.runGitSandbox(project, ['rev-parse', '--verify', 'HEAD'], 30_000, false, signal);
     const value = result.stdout.trim();
     return result.exitCode === 0 && /^[a-f0-9]{40,64}$/i.test(value) ? value : null;
   }
 
-  private async currentGitBranch(project: CoderProject): Promise<string> {
-    const result = await this.runGitSandbox(project, ['symbolic-ref', '--quiet', '--short', 'HEAD'], 30_000);
+  private async currentGitBranch(project: CoderProject, signal?: AbortSignal): Promise<string> {
+    const result = await this.runGitSandbox(project, ['symbolic-ref', '--quiet', '--short', 'HEAD'], 30_000, false, signal);
     const branch = result.stdout.trim();
     if (result.exitCode !== 0 || !branch) throw new Error('Current Git branch is unavailable.');
     return branch;
@@ -840,7 +873,8 @@ export class CoderModule implements MonarchModule {
     return executable;
   }
 
-  private async createSkill(input: unknown, context: MonarchKernelContext): Promise<MonarchExecutionResult> {
+  private async createSkill(input: unknown, context: MonarchKernelContext, signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const project = this.projects.require(readOptionalString(input, 'projectId'));
     const name = readString(input, 'name').trim();
     const slug = name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
@@ -853,6 +887,7 @@ export class CoderModule implements MonarchModule {
     if (!policy.allowed) return blocked(policy.message, policy);
     await mkdir(draft, { recursive: true });
     try {
+      signal?.throwIfAborted();
       const description = readString(input, 'description');
       const instructions = readString(input, 'instructions');
       if (instructions.length < 40 || instructions.length > 80_000) throw new Error('Skill instructions must be between 40 and 80,000 characters.');
@@ -874,11 +909,12 @@ export class CoderModule implements MonarchModule {
           cwd: typeof validation.cwd === 'string' ? validation.cwd : project.root,
           timeoutMs: typeof validation.timeoutMs === 'number' ? validation.timeoutMs : 60_000,
           allowNetwork: validation.allowNetwork === true,
-        });
+        }, signal);
         if (validationResult.exitCode !== 0 || validationResult.timedOut) {
           throw new Error(`Skill validation failed: ${validationResult.stderr || validationResult.stdout || 'non-zero exit'}`);
         }
       }
+      signal?.throwIfAborted();
       await rename(draft, target);
       await context.emit('coder.skill.validated', this.manifest.id, { projectId: project.id, skill: slug, path: target });
       return ok(`Skill '${slug}' validated and activated.`, { skill: slug, path: target, validation: validationResult });
@@ -888,12 +924,13 @@ export class CoderModule implements MonarchModule {
     }
   }
 
-  private async integrationsStatus(): Promise<MonarchExecutionResult> {
+  private async integrationsStatus(signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
     const [checks, sandbox] = await Promise.all([
       Promise.all([
-      probe('git', ['--version'], this.sandbox.runtimeRoot),
-      probe('gh', ['auth', 'status'], this.sandbox.runtimeRoot),
-      probe(this.huggingFaceExecutablePath, ['auth', 'whoami'], this.sandbox.runtimeRoot),
+      probe('git', ['--version'], this.sandbox.runtimeRoot, signal),
+      probe('gh', ['auth', 'status'], this.sandbox.runtimeRoot, signal),
+      probe(this.huggingFaceExecutablePath, ['auth', 'whoami'], this.sandbox.runtimeRoot, signal),
       ]),
       this.sandbox.status(),
     ]);
@@ -907,10 +944,25 @@ export class CoderModule implements MonarchModule {
     });
   }
 
+  private async withFileMutation<R>(target: string, operation: () => Promise<R>): Promise<R> {
+    const key = process.platform === 'win32' ? path.resolve(target).toLowerCase() : path.resolve(target);
+    const previous = this.fileMutationQueues.get(key) || Promise.resolve();
+    const running = previous.then(operation, operation);
+    const settled = running.then(() => undefined, () => undefined);
+    this.fileMutationQueues.set(key, settled);
+    try {
+      return await running;
+    } finally {
+      if (this.fileMutationQueues.get(key) === settled) this.fileMutationQueues.delete(key);
+    }
+  }
+
   private async runProjectCommand(
     project: CoderProject,
     command: { executable: string; args: string[]; cwd?: string; timeoutMs: number; allowNetwork?: boolean },
+    signal?: AbortSignal,
   ): Promise<ProcessResult> {
+    signal?.throwIfAborted();
     const cwdEvaluation = await this.projects.policy.evaluatePath(command.cwd || project.root, 'read', project.root);
     if (!cwdEvaluation.allowed) throw new Error(cwdEvaluation.message);
     const cwdStat = await stat(cwdEvaluation.resolvedPath);
@@ -926,19 +978,13 @@ export class CoderModule implements MonarchModule {
       cwd: cwdEvaluation.resolvedPath,
       timeoutMs: clamp(command.timeoutMs, 1_000, 10 * 60_000),
       allowNetwork: command.allowNetwork !== false,
+      ...(signal ? { signal } : {}),
     });
   }
 }
 
 async function atomicWrite(target: string, content: string): Promise<void> {
-  await mkdir(path.dirname(target), { recursive: true });
-  const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${randomUUID()}.tmp`);
-  try {
-    await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' });
-    await rename(temporary, target);
-  } finally {
-    await rm(temporary, { force: true }).catch(() => undefined);
-  }
+  await writeFileAtomically(target, content);
 }
 
 function runProcess(
@@ -947,13 +993,18 @@ function runProcess(
   cwd: string,
   timeoutMs: number,
   env: NodeJS.ProcessEnv = process.env,
+  signal?: AbortSignal,
 ): Promise<ProcessResult> {
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { cwd, env, shell: false, windowsHide: true });
     let stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     let stderr: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     let timedOut = false;
     let truncated = false;
+    let cancelled = false;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const append = (current: Buffer<ArrayBufferLike>, chunk: Buffer<ArrayBufferLike>): Buffer<ArrayBufferLike> => {
       const remaining = MAX_PROCESS_OUTPUT_BYTES - current.length;
       if (remaining <= 0) { truncated = true; return current; }
@@ -962,29 +1013,44 @@ function runProcess(
     };
     child.stdout.on('data', (chunk: Buffer) => { stdout = append(stdout, chunk); });
     child.stderr.on('data', (chunk: Buffer) => { stderr = append(stderr, chunk); });
-    child.once('error', reject);
-    const timer = setTimeout(() => {
+    const onAbort = () => {
+      cancelled = true;
+      child.kill('SIGTERM');
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const finish = (operation: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      operation();
+    };
+    child.once('error', (error) => finish(() => reject(cancelled && signal ? abortReason(signal) : error)));
+    timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
     }, timeoutMs);
-    child.once('close', (exitCode, signal) => {
-      clearTimeout(timer);
-      resolve({
+    child.once('close', (exitCode, processSignal) => {
+      finish(() => cancelled
+        ? reject(abortReason(signal!))
+        : resolve({
         exitCode,
-        signal,
+        signal: processSignal,
         stdout: stdout.toString('utf8'),
         stderr: stderr.toString('utf8'),
         timedOut,
         truncated,
-      });
+        }));
     });
+    if (signal?.aborted) onAbort();
   });
 }
 
-async function probe(executable: string, args: string[], runtimeRoot: string): Promise<Record<string, unknown>> {
+async function probe(executable: string, args: string[], runtimeRoot: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  signal?.throwIfAborted();
   if (path.isAbsolute(executable) && !existsSync(executable)) return { installed: false, authenticated: false };
   try {
-    const result = await runProcess(executable, args, process.cwd(), 15_000, sanitizedProcessEnvironment(runtimeRoot));
+    const result = await runProcess(executable, args, process.cwd(), 15_000, sanitizedProcessEnvironment(runtimeRoot), signal);
     return {
       installed: true,
       authenticated: result.exitCode === 0,
@@ -992,6 +1058,7 @@ async function probe(executable: string, args: string[], runtimeRoot: string): P
       summary: sanitizeProbeOutput(result.stdout || result.stderr),
     };
   } catch (error) {
+    if (signal?.aborted) throw error;
     const code = (error as NodeJS.ErrnoException)?.code;
     return { installed: code !== 'ENOENT', authenticated: false, summary: code === 'ENOENT' ? 'Not installed.' : 'Status unavailable.' };
   }
@@ -1174,7 +1241,8 @@ function parseHumanByteSize(value: unknown): number {
   return Math.ceil(amount * (1024 ** power));
 }
 
-async function auditUploadTree(target: string, maxBytes: number): Promise<{ files: number; totalBytes: number; directory: boolean }> {
+async function auditUploadTree(target: string, maxBytes: number, signal?: AbortSignal): Promise<{ files: number; totalBytes: number; directory: boolean }> {
+  signal?.throwIfAborted();
   const details = await stat(target);
   const sensitive = /^(?:\.env(?:\..*)?|id_(?:rsa|ed25519|ecdsa)(?:\.pub)?|\.(?:npmrc|pypirc|netrc)|_netrc|(?:credentials?|secrets?)(?:\.(?:json|ya?ml|toml|ini|txt))?|.*[._-](?:secret|secrets|credential|credentials|token|access[_-]?token|api[_-]?key)(?:\.(?:json|ya?ml|toml|ini|txt))?|.*\.(?:pem|p12|pfx|key))$/i;
   const excludedDirectories = new Set(['.git', '.monarch', '.venv', 'node_modules']);
@@ -1188,6 +1256,7 @@ async function auditUploadTree(target: string, maxBytes: number): Promise<{ file
   let totalBytes = 0;
   const queue = [target];
   while (queue.length > 0) {
+    signal?.throwIfAborted();
     const current = queue.shift()!;
     for (const entry of await readdir(current, { withFileTypes: true })) {
       if (entry.isSymbolicLink()) throw new Error('Hugging Face uploads cannot include symbolic links.');
@@ -1215,15 +1284,33 @@ async function ensureMonarchGitExclude(projectRoot: string): Promise<void> {
   await atomicWrite(excludePath, `${existing}${existing && !existing.endsWith('\n') ? '\n' : ''}.monarch/\n`);
 }
 
-function sha256File(target: string): Promise<string> {
+function sha256File(target: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const hash = createHash('sha256');
     const stream = createReadStream(target);
+    const onAbort = () => stream.destroy(abortReason(signal!));
+    signal?.addEventListener('abort', onAbort, { once: true });
     stream.on('data', (chunk) => hash.update(chunk));
-    stream.once('error', reject);
-    stream.once('end', () => resolve(hash.digest('hex')));
+    stream.once('error', (error) => {
+      signal?.removeEventListener('abort', onAbort);
+      reject(error);
+    });
+    stream.once('end', () => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve(hash.digest('hex'));
+    });
+    if (signal?.aborted) onAbort();
   });
 }
+
+function abortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error(typeof signal.reason === 'string' && signal.reason.trim() ? signal.reason : 'Coder capability aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
 
 function readRecord(input: unknown): Record<string, unknown> | null {
   return isRecord(input) ? input : null;

@@ -52,6 +52,8 @@ describe('Monarch Studio UI helpers', () => {
     expect(html).toContain('<link rel="stylesheet" href="/studio.css">');
     expect(html).not.toContain('<link rel="stylesheet" href="/styles.css">');
     expect(html).toContain('data-scroll-target="modules-section"');
+    expect(html.indexOf('data-modules-tab="library"')).toBeLessThan(html.indexOf('data-modules-tab="studio"'));
+    expect(script).toContain("openModulesPanel('library', false)");
     expect(html.match(/data-studio-advanced-group hidden/g)).toHaveLength(2);
     expect(app).toContain("import { initStudioPane, setStudioActive } from './modules/studio-pane.js';");
     expect(app).toContain("elements.shell?.classList.toggle('modules-active', targetId === 'modules-section')");

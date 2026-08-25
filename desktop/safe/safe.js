@@ -80,14 +80,6 @@ function bindEvents() {
   $('#safe-settings-form').addEventListener('submit', saveSecuritySettings);
   $('#safe-settings-close').addEventListener('click', closeSecuritySettings);
   $('#safe-settings-cancel').addEventListener('click', closeSecuritySettings);
-  $('#confirm-action').addEventListener('click', (event) => {
-    event.preventDefault();
-    $('#confirm-dialog').close('default');
-  });
-  $('#confirm-form button[value="cancel"]').addEventListener('click', (event) => {
-    event.preventDefault();
-    $('#confirm-dialog').close('cancel');
-  });
   for (const selector of ['#safe-auto-lock', '#safe-minimize-action', '#safe-clipboard-mode', '#safe-lock-on-blur', '#safe-clear-clipboard']) {
     $(selector).addEventListener('change', renderSecurityAssessment);
   }
@@ -453,16 +445,21 @@ function renderFiles() {
 }
 
 async function openFile(id) {
+  const editor = $('#editor-active');
+  editor.dataset.openTransition = 'requested';
   if (state.currentDirty) {
+    editor.dataset.openTransition = 'confirming-discard';
     const confirmed = await confirmInsideSafe({
       title: 'Несохранённые изменения',
       copy: `Открыть другой файл и безвозвратно отбросить изменения в «${state.currentFile?.name || 'текущем файле'}»?`,
       actionLabel: 'Отбросить и открыть',
     });
-    if (!confirmed) return;
+    if (!confirmed) { editor.dataset.openTransition = 'discard-cancelled'; return; }
   }
   try {
+    editor.dataset.openTransition = 'reading-encrypted-file';
     const result = await request('readFile', { id });
+    editor.dataset.openTransition = 'rendering-file';
     revokeObjectUrl(); state.currentBytes?.fill(0); state.currentFile = result.file; state.currentBytes = result.bytes instanceof Uint8Array ? result.bytes : new Uint8Array(result.bytes); renderFiles();
     $('#editor-empty').hidden = true; $('#editor-active').hidden = false; $('#editor-active').classList.remove('motion-reveal'); void $('#editor-active').offsetWidth; $('#editor-active').classList.add('motion-reveal'); $('#editor-file-name').textContent = result.file.name;
     const textLike = isText(result.file); const kind = fileKind(result.file);
@@ -482,7 +479,8 @@ async function openFile(id) {
     setCurrentFileDirty(false);
     $('#extract-archive').hidden = result.file.mime !== 'application/x-monarch-safe-archive'; setEditorTab('edit');
     focusFileControl('[data-file-id]', id);
-  } catch (error) { toast(error.message, true); }
+    editor.dataset.openTransition = 'complete';
+  } catch (error) { editor.dataset.openTransition = `error:${error?.code || error?.message || 'unknown'}`; toast(error.message, true); }
 }
 
 function setEditorTab(tab) {
@@ -908,13 +906,35 @@ function clearCredentialInputs() {
 }
 function confirmInsideSafe({ title = 'Подтверждение', copy, actionLabel = 'Продолжить' }) {
   const dialog = $('#confirm-dialog');
+  const confirmAction = $('#confirm-action');
+  const cancelAction = $('#confirm-form button[value="cancel"]');
   dialog.returnValue = '';
   $('#confirm-title').textContent = title;
   $('#confirm-copy').textContent = copy;
-  $('#confirm-action').textContent = actionLabel;
+  confirmAction.textContent = actionLabel;
   return new Promise((resolve) => {
-    const done = () => { dialog.removeEventListener('close', done); resolve(dialog.returnValue === 'default'); };
-    dialog.addEventListener('close', done);
+    let settled = false;
+    const cleanup = () => {
+      confirmAction.removeEventListener('click', onConfirm);
+      cancelAction.removeEventListener('click', onCancel);
+      dialog.removeEventListener('cancel', onDialogCancel);
+      dialog.removeEventListener('close', onDialogClose);
+    };
+    const settle = (accepted, closeDialog = true) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (closeDialog && dialog.open) dialog.close(accepted ? 'default' : 'cancel');
+      resolve(accepted);
+    };
+    const onConfirm = (event) => { event.preventDefault(); settle(true); };
+    const onCancel = (event) => { event.preventDefault(); settle(false); };
+    const onDialogCancel = (event) => { event.preventDefault(); settle(false); };
+    const onDialogClose = () => settle(dialog.returnValue === 'default', false);
+    confirmAction.addEventListener('click', onConfirm);
+    cancelAction.addEventListener('click', onCancel);
+    dialog.addEventListener('cancel', onDialogCancel);
+    dialog.addEventListener('close', onDialogClose);
     dialog.showModal();
   });
 }

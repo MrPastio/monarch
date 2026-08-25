@@ -4,6 +4,7 @@ import { startMonarchHttpServer } from './app/http-server';
 import type { MonarchIntentSource } from './core';
 import { readModelCatalog } from './modules/models/model-catalog';
 import { createModelRuntimeReport } from './modules/models/runtime-adapters';
+import { resolveOwnerAuthorityFromEnvironment } from './authority/owner-authority';
 
 const workspaceRoot = process.cwd();
 
@@ -49,7 +50,11 @@ async function main(): Promise<void> {
 }
 
 async function runServe(): Promise<void> {
-  const app = new MonarchApplication({ workspaceRoot, enableAgentRuntimeV2: true });
+  const app = new MonarchApplication({
+    workspaceRoot,
+    enableAgentRuntimeV2: true,
+    authorityContext: resolveOwnerAuthorityFromEnvironment(),
+  });
   const requestedPort = readNumberFlag('--port') || Number(process.env.MONARCH_UI_PORT || process.env.PORT || 4317);
   const host = readStringFlag('--host') || process.env.MONARCH_HOST || '127.0.0.1';
   const publicDirectory = path.join(workspaceRoot, 'src', 'ui', 'public');
@@ -125,12 +130,14 @@ async function runIntent(): Promise<void> {
   if (!text) {
     throw new Error('Intent text is required. Example: npm run intent -- "Покажи плагины"');
   }
+  if (hasFlag('--confirm') || hasFlag('--confirmed')) {
+    throw new Error('Текстовый --confirm отключён: разрешение выдаётся только точной Agent action-card.');
+  }
 
   await withApplication(async (app) => {
     const result = await app.submitIntent({
       text,
       source: readSourceFlag(),
-      confirmed: hasFlag('--confirm') || hasFlag('--confirmed'),
     });
     console.log(JSON.stringify(result, null, 2));
   });
@@ -215,7 +222,7 @@ function printHelp(): void {
   console.log(`Monarch commands:
   serve                     Start the local Monarch HTTP/UI program.
   status                    Print runtime health and registry summary.
-  intent <text> [--confirm] Route and execute one intent.
+  intent <text>             Create a Turn; action approval is available only through an exact action-card.
   system                    Print the agent system profile.
   check-models              List model files, check size, detect missing models, and print instructions.
 

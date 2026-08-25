@@ -20,6 +20,8 @@ heavy_process_poll_seconds = 12.0
 [files]
 max_full_hash_bytes = 268435456
 entropy_sample_bytes = 1048576
+parser_timeout_seconds = 5.0
+parser_memory_limit_bytes = 268435456
 
 [file_watch]
 enabled = true
@@ -97,3 +99,4 @@ self_protection_poll_seconds = 60.0
 emergency_auto_lock_enabled = true
 emergency_recovery_seconds = 600
 max_events_per_tick = 25
+max_sensor_processing_seconds_per_tick = 10.0

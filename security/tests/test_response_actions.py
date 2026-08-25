@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
+import base64
 import json
 import os
+import re
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -19,9 +22,14 @@ from monarch_security.actions import (
     ResponseActionStore,
     ResponseApprovalBroker,
     ResponseGrantError,
+    ResponseRuntimeLayout,
     read_service_heartbeat,
     write_service_heartbeat,
+    _attest_response_runtime,
+    _response_runtime_preflight_script,
+    _resolve_response_runtime_layout,
     _run_powershell,
+    _windows_powershell_path,
     install_response_executor_task,
     request_response_execution,
     serve_response_pipe,
@@ -244,17 +252,169 @@ class ResponseActionTests(unittest.TestCase):
             root = Path(directory)
             python = root / "python.exe"
             launcher = root / "run_monarch_security.py"
-            config = root / "monarch_security.toml"
+            config = root / "owner's monarch_security.toml"
             for path in (python, launcher, config):
                 path.write_text("test", encoding="utf-8")
             commands: list[str] = []
-            install_response_executor_task(python, launcher, config, runner=commands.append)
+            layout = ResponseRuntimeLayout((root,), (root,))
+            with mock.patch(
+                "monarch_security.actions._resolve_response_runtime_layout",
+                return_value=layout,
+            ), mock.patch(
+                "monarch_security.actions._attest_response_runtime",
+                return_value="a" * 64,
+            ):
+                install_response_executor_task(
+                    python,
+                    launcher,
+                    config,
+                    runner=commands.append,
+                )
             uninstall_response_executor_task(runner=commands.append)
             self.assertIn("Register-ScheduledTask", commands[0])
             self.assertIn("-RestartCount 999", commands[0])
             self.assertIn("-RunLevel Highest", commands[0])
-            self.assertIn("response-service-run --confirm-service-action", commands[0])
+            encoded = re.search(r"EncodedCommand ([A-Za-z0-9+/=]+)", commands[0])
+            self.assertIsNotNone(encoded)
+            script = base64.b64decode(encoded.group(1)).decode("utf-16le")
+            self.assertIn("Response runtime digest mismatch", script)
+            self.assertIn("'-I' '-P' '-B'", script)
+            self.assertIn("response-service-run", script)
+            self.assertIn("Get-ChildItem Env:", script)
+            self.assertIn("Set-Location", script)
+            self.assertNotIn(str(launcher), script)
+            self.assertNotIn(str(config), commands[0])
+            self.assertLess(len(commands[0]), 24_000)
             self.assertIn("Unregister-ScheduledTask", commands[1])
+
+    def test_executor_task_attestation_failure_never_registers_task(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = root / "python.exe"
+            launcher = root / "run_monarch_security.py"
+            config = root / "monarch_security.toml"
+            for path in (python, launcher, config):
+                path.write_text("test", encoding="utf-8")
+            runner = mock.Mock()
+            layout = ResponseRuntimeLayout((root,), (root,))
+            with mock.patch(
+                "monarch_security.actions._resolve_response_runtime_layout",
+                return_value=layout,
+            ), mock.patch(
+                "monarch_security.actions._attest_response_runtime",
+                side_effect=ResponseActionError("synthetic-attestation-failure"),
+            ):
+                with self.assertRaisesRegex(ResponseActionError, "synthetic-attestation-failure"):
+                    install_response_executor_task(
+                        python,
+                        launcher,
+                        config,
+                        runner=runner,
+                    )
+
+            runner.assert_not_called()
+
+    def test_executor_task_rejects_invalid_attestation_digest(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = root / "python.exe"
+            launcher = root / "run_monarch_security.py"
+            config = root / "monarch_security.toml"
+            for path in (python, launcher, config):
+                path.write_text("test", encoding="utf-8")
+            runner = mock.Mock()
+            layout = ResponseRuntimeLayout((root,), (root,))
+            with mock.patch(
+                "monarch_security.actions._resolve_response_runtime_layout",
+                return_value=layout,
+            ), mock.patch(
+                "monarch_security.actions._attest_response_runtime",
+                return_value="not-a-sha256",
+            ):
+                with self.assertRaisesRegex(ResponseActionError, "invalid digest"):
+                    install_response_executor_task(
+                        python,
+                        launcher,
+                        config,
+                        runner=runner,
+                    )
+
+            runner.assert_not_called()
+
+    def test_runtime_layout_rejects_a_different_python_executable(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = root / "python.exe"
+            config = root / "monarch_security.toml"
+            python.write_text("test", encoding="utf-8")
+            config.write_text("[runtime]\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ResponseActionError, "active Python runtime"):
+                _resolve_response_runtime_layout(python, config)
+
+    def test_runtime_attestation_rejects_user_owned_directory(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "runtime.py").write_text("print('synthetic')\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ResponseActionError, "owner is not trusted"):
+                _attest_response_runtime((root,))
+
+    def test_runtime_attestation_accepts_windows_binary_and_binds_digest(self) -> None:
+        powershell = (
+            Path(os.environ["SystemRoot"])
+            / "System32"
+            / "WindowsPowerShell"
+            / "v1.0"
+            / "powershell.exe"
+        ).resolve(strict=True)
+        digest = _attest_response_runtime((powershell,))
+        self.assertRegex(digest, r"^[a-f0-9]{64}$")
+
+        script = _response_runtime_preflight_script(
+            (powershell,),
+            expected_digest="0" * 64,
+        )
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        completed = subprocess.run(
+            [
+                str(powershell),
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                encoded,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Response runtime digest mismatch", completed.stdout)
+
+    def test_runtime_attestation_rejects_reparse_root_when_supported(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            link = root / "runtime-link"
+            target.mkdir()
+            try:
+                os.symlink(target, link, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"Windows symlink fixture unavailable: {exc}")
+
+            with self.assertRaisesRegex(ResponseActionError, "reparse point"):
+                _attest_response_runtime((link,))
+
+    def test_windows_powershell_path_ignores_process_environment_override(self) -> None:
+        with TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"SystemRoot": directory, "WINDIR": directory}):
+                resolved = _windows_powershell_path()
+
+        self.assertTrue(resolved.is_file())
+        self.assertNotIn(directory.lower(), str(resolved).lower())
 
 
 def _proposal(root: Path):

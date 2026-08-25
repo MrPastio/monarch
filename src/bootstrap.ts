@@ -6,6 +6,7 @@ import {
   type MonarchModuleLoadRecord,
   type MonarchModulePackage,
   type MonarchPermissionProfile,
+  type MonarchAuthorityContext,
   resolveMonarchRuntimePaths,
 } from './core';
 import path from 'node:path';
@@ -19,6 +20,7 @@ export interface MonarchBootstrapOptions {
   disabledModules?: readonly string[];
   enableLocalSystemRouter?: boolean;
   permissionProfile?: MonarchPermissionProfile;
+  authorityContext?: MonarchAuthorityContext;
 }
 
 export interface MonarchRuntime {
@@ -40,12 +42,14 @@ export function createMonarchRuntime(options: MonarchBootstrapOptions = {}): Mon
       workspaceRoot: runtimePaths.userWorkspaceRoot,
       agencyStateDirectory: path.join(runtimePaths.stateRoot, 'agency'),
       ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
+      ...(options.authorityContext ? { authorityContext: options.authorityContext } : {}),
     })
     : new MonarchKernel({
       workspaceRoot: runtimePaths.userWorkspaceRoot,
       agencyStateDirectory: path.join(runtimePaths.stateRoot, 'agency'),
       llmRouter: createLocalSystemRouter({ workspaceRoot }),
       ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
+      ...(options.authorityContext ? { authorityContext: options.authorityContext } : {}),
     });
   const loader = new MonarchModuleLoader({
     workspaceRoot,

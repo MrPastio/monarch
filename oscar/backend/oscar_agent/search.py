@@ -170,7 +170,7 @@ class DuckDuckGoProvider:
             if results:
                 return results
         except Exception as exc:
-            logger.warning("DDGS search failed; falling back to DuckDuckGo HTML: %s", exc)
+            logger.warning("DDGS search failed; falling back to DuckDuckGo HTML: %s", type(exc).__name__)
 
         return await asyncio.to_thread(self._duckduckgo_html, query, max_results)
 
@@ -224,7 +224,7 @@ class DuckDuckGoProvider:
                 response = client.get(url, headers=self.headers)
                 response.raise_for_status()
         except httpx.HTTPError as exc:
-            logger.warning("DuckDuckGo HTML search failed: %s", exc)
+            logger.warning("DuckDuckGo HTML search failed: %s", type(exc).__name__)
             return []
 
         soup = BeautifulSoup(response.text, "html.parser")
@@ -275,6 +275,7 @@ class WebSearchService:
         query: str,
         max_results: int | None = None,
         fetch_pages: bool = True,
+        persist: bool = True,
     ) -> list[SearchResult]:
         query = normalize_search_query(query)
         if not query:
@@ -283,6 +284,26 @@ class WebSearchService:
         limit = clamp_result_limit(max_results or self.settings.search_top_k)
         safe_raw_results = await self._collect_safe_results(query, limit)
         results = [SearchResult(title=item.title, url=item.url, snippet=item.snippet) for item in safe_raw_results]
+
+        if not persist:
+            for result in results:
+                result.ingestion_status = "skipped"
+                result.status_detail = "zero-retention"
+            if not fetch_pages:
+                return results
+            timeout = httpx.Timeout(self.settings.fetch_timeout_seconds)
+            limits = httpx.Limits(max_connections=FETCH_CONCURRENCY, max_keepalive_connections=FETCH_CONCURRENCY)
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                limits=limits,
+                follow_redirects=False,
+                headers=self.client_headers,
+                trust_env=False,
+            ) as client:
+                return await asyncio.gather(*(
+                    self._fetch_voice_excerpt(client, result)
+                    for result in results
+                ))
 
         if not fetch_pages:
             for result in results:
@@ -371,9 +392,9 @@ class WebSearchService:
                 result.snippet = excerpt
                 result.status_detail = "voice-page-context"
         except (UnsafeFetchError, FetchSizeLimitError, httpx.HTTPError, ValueError):
-            logger.info("Voice context page fetch failed for %s", result.url, exc_info=True)
+            logger.info("Transient page fetch failed without retaining request content")
         except Exception:
-            logger.exception("Voice context page extraction failed for %s", result.url)
+            logger.warning("Transient page extraction failed without retaining request content")
         return result
 
     async def _collect_safe_results(self, query: str, limit: int) -> list[RawSearchResult]:
@@ -393,7 +414,7 @@ class WebSearchService:
             try:
                 provider_results.extend(await self.search_provider.search(planned_query, provider_limit))
             except Exception:
-                logger.exception("Search provider failed for query %r; continuing", planned_query)
+                logger.warning("Search provider failed; continuing without that branch")
         ranked_results = rank_search_results(unique_results(provider_results), query)
         candidate_limit = min(MAX_PROVIDER_RESULTS, max(limit, limit * 3))
         raw_results = unique_results([*direct_results, *ranked_results])[:candidate_limit]
@@ -410,7 +431,7 @@ class WebSearchService:
             if check is True:
                 safe_results.append(item)
             else:
-                logger.warning("Dropping unsafe search result URL: %s", item.url)
+                logger.warning("Dropping an unsafe search result URL")
         return safe_results
 
     async def _safe_get(self, client: httpx.AsyncClient, url: str) -> httpx.Response:

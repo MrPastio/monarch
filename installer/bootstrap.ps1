@@ -1,9 +1,9 @@
 param(
   [string]$InstallDirectory = "",
   [string]$InstallRoot = "",
-  [string]$AppVersion = "0.2.4.1",
+  [string]$AppVersion = "0.2.5.0",
   [string]$RuntimeVersion = "2026.07.7",
-  [string]$BackendEnvironment = "backend-0.1.5-offline5",
+  [string]$BackendEnvironment = "backend-0.1.5-offline8",
   [int]$DataSchemaVersion = 1,
   [int]$MinimumReadableDataSchema = 1,
   [int]$MaximumReadableDataSchema = 1,
@@ -13,7 +13,6 @@ param(
   [switch]$CpuOnly,
   [switch]$SkipOscar,
   [switch]$SkipSecurity,
-  [switch]$InstallSmallModel,
   [switch]$InstallVoiceStt,
   [switch]$InstallVoiceTts,
   [switch]$NonInteractive
@@ -403,12 +402,6 @@ if (-not $SkipSecurity) {
   Assert-NativeSuccess "Monarch Security runtime installation"
 }
 
-if ($InstallSmallModel) {
-  Write-Step "Installing the optional small Oscar model"
-  & (Join-Path $root "oscar\scripts\download-small-model.ps1")
-  Assert-NativeSuccess "Small model installation"
-}
-
 if ($InstallVoiceStt) {
   Write-Step "Installing verified Voice STT model"
   & (Join-Path $root "tools\setup-sherpa-t-one-stt.ps1")
@@ -441,7 +434,7 @@ $manifest = [ordered]@{
   security = -not $SkipSecurity
   voiceStt = [bool]$InstallVoiceStt
   voiceTts = [bool]$InstallVoiceTts
-  smallModel = [bool]$InstallSmallModel
+  modelsBundled = $false
 }
 $manifestPath = Join-Path $appRoot "install-manifest.json"
 Write-MonarchAtomicJson -Path $manifestPath -Value $manifest

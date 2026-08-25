@@ -31,6 +31,22 @@ class SecurityEvent:
             "facts": _safe_serialized_facts(self.kind, self.facts),
         }
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SecurityEvent":
+        if not isinstance(payload, dict):
+            raise ValueError("security event payload is not an object")
+        facts = payload.get("facts")
+        if not isinstance(facts, dict):
+            raise ValueError("security event facts are not an object")
+        required = {
+            name: str(payload.get(name) or "")
+            for name in ("event_id", "timestamp", "kind", "source", "subject")
+        }
+        missing = [name for name, value in required.items() if not value.strip()]
+        if missing:
+            raise ValueError(f"security event is missing {', '.join(missing)}")
+        return cls(facts=dict(facts), **required)
+
 
 @dataclass(frozen=True)
 class RuleAssessment:
@@ -48,6 +64,34 @@ class RuleAssessment:
             "reasons": self.reasons,
             "route": self.route,
         }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RuleAssessment":
+        if not isinstance(payload, dict):
+            raise ValueError("rule assessment payload is not an object")
+        event_payload = payload.get("event")
+        reasons = payload.get("reasons")
+        if not isinstance(event_payload, dict) or not isinstance(reasons, list):
+            raise ValueError("rule assessment payload is malformed")
+        try:
+            score = int(payload.get("score"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("rule assessment score is invalid") from exc
+        if not 0 <= score <= 100:
+            raise ValueError("rule assessment score is out of range")
+        severity = str(payload.get("severity") or "").strip().lower()
+        route = str(payload.get("route") or "").strip().lower()
+        if severity not in {"clean", "low", "medium", "high", "critical"}:
+            raise ValueError("rule assessment severity is invalid")
+        if route not in {"local", "deep_scan", "llm"}:
+            raise ValueError("rule assessment route is invalid")
+        return cls(
+            event=SecurityEvent.from_dict(event_payload),
+            score=score,
+            severity=severity,
+            reasons=[str(reason) for reason in reasons],
+            route=route,
+        )
 
 
 @dataclass(frozen=True)

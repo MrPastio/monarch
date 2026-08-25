@@ -3,6 +3,7 @@ import {
   executeConfirmedCapability,
 } from './api.js';
 import { escapeHtml, readErrorMessage } from './utils.js';
+import { swapUiSurface } from './ui-motion.js';
 
 const DEFAULT_CONNECTION = {
   baseUrl: 'http://127.0.0.1:7861/v1',
@@ -27,8 +28,8 @@ const KNOWN_MODELS = {
   'monarch-auto': ['Auto', 'Monarch выберет локальную модель под запрос.'],
   'monarch-fast': ['Fast', 'Быстрые ответы и лёгкие интеграции.'],
   'monarch-balanced': ['Balanced', 'Основной профиль качества и скорости.'],
-  'monarch-deep': ['Deep', 'Сложные задачи с reasoning_effort=high.'],
-  'monarch-extra': ['Extra', 'Самый крупный установленный локальный профиль.'],
+  'monarch-deep': ['Pro', 'Совместимый alias для Qwen3.8 27B Pro.'],
+  'monarch-extra': ['Pro', 'Совместимый alias для Qwen3.8 27B Pro.'],
   'qwen2.5-0.5b-instruct': ['Qwen2.5 0.5B', 'Super Fast: самый лёгкий локальный Qwen для коротких ответов.'],
   'qwen3-1.7b-instruct': ['Qwen3 1.7B', 'Super Fast: быстрый Qwen3 без вывода thinking trace.'],
 };
@@ -46,6 +47,7 @@ const ui = {
   error: '',
   feedback: '',
   feedbackKind: 'success',
+  tab: 'connection',
   preset: readStoredValue(PRESET_KEY, ['fields', 'python', 'node', 'powershell'], 'fields'),
   model: readStoredValue(MODEL_KEY, null, 'monarch-auto'),
   ttsModel: readStoredValue(TTS_MODEL_KEY, null, 'qwen3-tts-0.6b-base'),
@@ -93,6 +95,12 @@ export function renderSharingPane() {
   const snippet = buildSnippet(ui.preset, connection, ui.model);
 
   root.innerHTML = `
+    <nav class="sharing-main-tabs" role="tablist" aria-label="Разделы Monarch Sharing">
+      ${renderSharingTab('connection', 'Подключение')}
+      ${renderSharingTab('examples', 'Примеры')}
+      ${renderSharingTab('models', 'Модели')}
+      ${renderSharingTab('voice', 'Голос')}
+    </nav>
     <section class="sharing-status-card ${connected ? 'is-online' : 'is-offline'}" aria-label="Состояние Monarch Sharing">
       <div class="sharing-status-copy">
         <span class="sharing-status-line"><i aria-hidden="true"></i>${connected ? 'API работает' : 'API не запущен'}</span>
@@ -101,7 +109,6 @@ export function renderSharingPane() {
         <div class="sharing-trust-line">
           <span>127.0.0.1</span>
           <span>Только этот компьютер</span>
-          <span>Без облака</span>
         </div>
       </div>
       <div class="sharing-status-actions">
@@ -116,21 +123,22 @@ export function renderSharingPane() {
       </div>
     </section>
 
-    <div class="sharing-workflow">
-      <section class="sharing-connect-panel" aria-labelledby="sharing-connect-title">
+    <div class="sharing-tab-stage">
+    <div class="sharing-workflow sharing-workflow-${ui.tab}">
+      <section class="sharing-connect-panel" aria-labelledby="sharing-connect-title" ${ui.tab === 'connection' ? '' : 'hidden'}>
         <header class="sharing-section-heading">
           <span>1</span>
           <div>
             <h3 id="sharing-connect-title">Данные подключения</h3>
-            <p>Три поля, которые нужны любому OpenAI-compatible приложению.</p>
+            <p>Скопируй адрес, ключ и название модели.</p>
           </div>
         </header>
 
         <div class="sharing-field-list">
-          ${renderCopyField('Base URL', connection.baseUrl, 'base-url', 'Скопировать URL')}
+          ${renderCopyField('Адрес API', connection.baseUrl, 'base-url', 'Скопировать адрес')}
           <div class="sharing-field-row">
             <div class="sharing-field-copy">
-              <span>API key</span>
+              <span>Ключ API</span>
               <strong>${tokenConfigured ? '••••••••••••••••••••' : 'Ключ ещё не создан'}</strong>
               <small>${escapeHtml(connection.authentication?.tokenPath || DEFAULT_CONNECTION.authentication.tokenPath)}</small>
             </div>
@@ -140,7 +148,7 @@ export function renderSharingPane() {
           </div>
           <label class="sharing-field-row sharing-model-field" for="sharing-model-select">
             <span class="sharing-field-copy">
-              <span>Model</span>
+              <span>Модель</span>
               <small>Для большинства приложений оставь автоматический выбор.</small>
             </span>
             <select id="sharing-model-select" aria-label="Модель Monarch Sharing">
@@ -155,7 +163,7 @@ export function renderSharingPane() {
         </div>
       </section>
 
-      <section class="sharing-code-panel" aria-labelledby="sharing-code-title">
+      <section class="sharing-code-panel" aria-labelledby="sharing-code-title" ${ui.tab === 'examples' ? '' : 'hidden'}>
         <header class="sharing-section-heading">
           <span>2</span>
           <div>
@@ -177,7 +185,7 @@ export function renderSharingPane() {
       </section>
     </div>
 
-    <section class="sharing-models-panel" aria-labelledby="sharing-models-title">
+    <section class="sharing-models-panel" aria-labelledby="sharing-models-title" ${ui.tab === 'models' ? '' : 'hidden'}>
       <header>
         <div>
           <h3 id="sharing-models-title">Модели в API</h3>
@@ -188,27 +196,28 @@ export function renderSharingPane() {
       ${renderModels(models, connected)}
     </section>
 
-    <section class="sharing-tts-panel" aria-labelledby="sharing-tts-title">
+    <section class="sharing-tts-panel" aria-labelledby="sharing-tts-title" ${ui.tab === 'voice' ? '' : 'hidden'}>
       <header>
         <div>
           <span class="sharing-kicker">Audio / WAV</span>
-          <h3 id="sharing-tts-title">TTS Models</h3>
-          <p>${connected ? 'Отдельный OpenAI-compatible endpoint: модели речи не попадают в chat completions.' : 'TTS-модели появятся после запуска локального API.'}</p>
+          <h3 id="sharing-tts-title">Голосовые модели</h3>
+          <p>${connected ? 'Голос работает через отдельный адрес и не смешивается с текстовыми запросами.' : 'Голосовые модели появятся после запуска API.'}</p>
         </div>
         <span>${connected ? ttsModels.length : '—'}</span>
       </header>
       ${renderTtsModels(ttsModels, connected, status?.ttsError)}
       <div class="sharing-tts-actions">
-        <label for="sharing-tts-model-select">TTS model
+        <label for="sharing-tts-model-select">Голосовая модель
           <select id="sharing-tts-model-select" aria-label="TTS модель Monarch Sharing" ${ttsModels.length ? '' : 'disabled'}>
             ${ttsModels.map((modelId) => `<option value="${escapeHtml(modelId)}" ${modelId === ui.ttsModel ? 'selected' : ''}>${escapeHtml(modelId)}</option>`).join('')}
           </select>
         </label>
-        <button class="sharing-inline-button" type="button" data-sharing-copy="tts-snippet" ${ttsModels.length ? '' : 'disabled'}>Скопировать TTS пример</button>
+        <button class="sharing-inline-button" type="button" data-sharing-copy="tts-snippet" ${ttsModels.length ? '' : 'disabled'}>Скопировать пример</button>
       </div>
       <small class="sharing-tts-endpoint">${escapeHtml(connection.endpoints?.audioSpeech || `${connection.baseUrl}/audio/speech`)}</small>
     </section>
 
+    </div>
     <div class="sharing-feedback ${ui.feedbackKind === 'error' ? 'is-error' : ''}" role="status" ${ui.feedback ? '' : 'hidden'}>
       ${escapeHtml(ui.feedback)}
     </div>
@@ -240,6 +249,15 @@ export async function loadSharingStatus() {
 }
 
 async function handleSharingClick(event) {
+  const tabButton = event.target.closest('[data-sharing-tab]');
+  if (tabButton) {
+    const nextTab = tabButton.dataset.sharingTab || 'connection';
+    const order = ['connection', 'examples', 'models', 'voice'];
+    const direction = order.indexOf(nextTab) >= order.indexOf(ui.tab) ? 1 : -1;
+    const stage = document.querySelector('#sharing-page-root .sharing-tab-stage');
+    void swapUiSurface(stage, () => selectSharingTab(nextTab), { direction });
+    return;
+  }
   const actionButton = event.target.closest('[data-sharing-action]');
   if (actionButton) {
     const action = actionButton.getAttribute('data-sharing-action');
@@ -294,6 +312,24 @@ async function handleSharingClick(event) {
   }
 }
 
+function renderSharingTab(id, label) {
+  const selected = ui.tab === id;
+  return `<button type="button" role="tab" data-sharing-tab="${id}" aria-selected="${selected}">${label}</button>`;
+}
+
+function selectSharingTab(value) {
+  ui.tab = ['connection', 'examples', 'models', 'voice'].includes(value) ? value : 'connection';
+  document.querySelectorAll('[data-sharing-tab]').forEach((button) => {
+    button.setAttribute('aria-selected', String(button.dataset.sharingTab === ui.tab));
+  });
+  document.querySelector('.sharing-connect-panel')?.toggleAttribute('hidden', ui.tab !== 'connection');
+  document.querySelector('.sharing-code-panel')?.toggleAttribute('hidden', ui.tab !== 'examples');
+  document.querySelector('.sharing-models-panel')?.toggleAttribute('hidden', ui.tab !== 'models');
+  document.querySelector('.sharing-tts-panel')?.toggleAttribute('hidden', ui.tab !== 'voice');
+  const workflow = document.querySelector('.sharing-workflow');
+  if (workflow) workflow.className = `sharing-workflow sharing-workflow-${ui.tab}`;
+}
+
 function handleSharingChange(event) {
   if (event.target?.id === 'sharing-model-select') {
     ui.model = event.target.value || 'monarch-auto';
@@ -312,7 +348,7 @@ function handleSharingChange(event) {
 async function startSharingBackend() {
   ui.starting = true;
   ui.error = '';
-  setFeedback('Запускаю локальный runtime…');
+  setFeedback('Запускаю API…');
   try {
     await executeConfirmedCapability('oscar', 'oscar.backend.start', {}, 'ui:sharing');
     for (let attempt = 0; attempt < 10; attempt += 1) {
@@ -325,7 +361,7 @@ async function startSharingBackend() {
         return;
       }
     }
-    throw new Error('Backend запущен, но Sharing API пока не ответил. Нажми «Проверить» через несколько секунд.');
+    throw new Error('Сервис запущен, но API ещё не ответил. Нажми «Проверить» через несколько секунд.');
   } catch (error) {
     ui.error = readErrorMessage(error);
     setFeedback(ui.error, 'error');
@@ -347,7 +383,7 @@ async function copySharingToken() {
         ? 'API key ещё не создан. Сначала запусти Sharing API.'
         : 'Monarch Desktop не разрешил копирование ключа.');
     }
-    setFeedback('API key скопирован безопасно: значение не показывалось в интерфейсе.');
+    setFeedback('Ключ API скопирован. Его значение не показывалось на экране.');
   } catch (error) {
     setFeedback(readErrorMessage(error), 'error');
   }
@@ -395,7 +431,7 @@ function renderModelOptionList(models) {
 
 function renderModels(models, connected) {
   if (!connected) {
-    return '<div class="sharing-empty-models">Запусти API — Monarch проверит runtime и покажет доступные model IDs.</div>';
+    return '<div class="sharing-empty-models">Запусти API — Monarch покажет доступные модели.</div>';
   }
   if (!models.length) {
     return '<div class="sharing-empty-models">API отвечает, но локальные текстовые модели не найдены.</div>';
@@ -404,7 +440,7 @@ function renderModels(models, connected) {
   const monarch = models.filter((modelId) => !SUPER_FAST_MODEL_IDS.has(modelId));
   return [
     superFast.length ? renderModelGroup('Super Fast', 'Qwen — быстрые локальные chat-модели.', superFast) : '',
-    monarch.length ? renderModelGroup('Monarch Profiles', 'Основные профили общего Oscar runtime.', monarch) : '',
+    monarch.length ? renderModelGroup('Модели Monarch', 'Основные модели Oscar.', monarch) : '',
   ].join('');
 }
 
@@ -429,10 +465,10 @@ function renderModelGroup(title, detail, models) {
 
 function renderTtsModels(models, connected, ttsError) {
   if (!connected) {
-    return '<div class="sharing-empty-models">Запусти API — Monarch проверит установленные Qwen3-TTS checkpoints.</div>';
+    return '<div class="sharing-empty-models">Запусти API — Monarch покажет установленные голосовые модели.</div>';
   }
   if (!models.length) {
-    return `<div class="sharing-empty-models">${escapeHtml(ttsError || 'Qwen3-TTS models пока недоступны в локальном runtime.')}</div>`;
+    return `<div class="sharing-empty-models">${escapeHtml(ttsError || 'Голосовые модели пока недоступны.')}</div>`;
   }
   return `
     <div class="sharing-tts-rail">
@@ -486,9 +522,9 @@ function uniqueModels(models) {
 }
 
 function friendlyOfflineMessage(error) {
-  if (!error) return 'Локальный endpoint пока недоступен.';
+  if (!error) return 'API пока недоступен.';
   if (/fetch failed|refused|abort|timed? ?out|unavailable/i.test(error)) {
-    return 'Локальный endpoint пока недоступен. Запусти API — облако для этого не требуется.';
+    return 'API пока недоступен. Запусти его кнопкой выше.';
   }
   return error;
 }

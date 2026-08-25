@@ -315,7 +315,7 @@ function Write-MonarchVersionDescriptor {
     descriptorVersion = 1
     appVersion = $AppVersion
     layoutSchemaVersion = 1
-    minimumLauncherVersion = "1.0.3"
+    minimumLauncherVersion = "1.0.4"
     runtimeVersion = $RuntimeVersion
     backendEnvironment = $BackendEnvironment
     dataSchemaVersion = $DataSchemaVersion
@@ -343,6 +343,144 @@ function Set-MonarchCurrentVersion {
     updatedAt = [DateTimeOffset]::UtcNow.ToString("o")
   }
   Write-MonarchAtomicJson -Path (Join-Path $InstallRoot "current.json") -Value $pointer
+}
+
+function Test-MonarchInstalledVersionHealthy {
+  param(
+    [Parameter(Mandatory = $true)][string]$InstallRoot,
+    [Parameter(Mandatory = $true)][object]$Layout,
+    [Parameter(Mandatory = $true)][string]$Version
+  )
+
+  if ($Version -notmatch '^\d+\.\d+\.\d+(?:\.\d+)?$') {
+    return $false
+  }
+  $versionRoot = Join-Path $InstallRoot "versions\$Version"
+  $descriptorPath = Join-Path $versionRoot "version.json"
+  if (-not (Test-Path -LiteralPath $descriptorPath -PathType Leaf) -or
+      (Get-Item -LiteralPath $descriptorPath).Length -le 0) {
+    return $false
+  }
+  try {
+    $descriptor = Get-Content -LiteralPath $descriptorPath -Raw | ConvertFrom-Json
+    if ([int]$descriptor.descriptorVersion -ne 1 -or
+        [string]$descriptor.appVersion -ne $Version -or
+        [string]::IsNullOrWhiteSpace([string]$descriptor.runtimeVersion) -or
+        [string]::IsNullOrWhiteSpace([string]$descriptor.backendEnvironment)) {
+      return $false
+    }
+    foreach ($requiredFile in @(
+      (Join-Path $InstallRoot "Monarch.exe"),
+      (Join-Path $versionRoot "desktop\electron\main.mjs"),
+      (Join-Path $versionRoot "dist\monarch-server.mjs"),
+      (Join-Path $Layout.payloadRoot "runtimes\runtime-$($descriptor.runtimeVersion)\node\node.exe"),
+      (Join-Path $Layout.payloadRoot "runtimes\runtime-$($descriptor.runtimeVersion)\electron\electron.exe"),
+      (Join-Path $Layout.payloadRoot "runtimes\runtime-$($descriptor.runtimeVersion)\python\python.exe")
+    )) {
+      if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf) -or
+          (Get-Item -LiteralPath $requiredFile).Length -le 0) {
+        return $false
+      }
+    }
+    $environmentRoot = Join-Path $Layout.payloadRoot "environments\$($descriptor.backendEnvironment)"
+    return Test-Path -LiteralPath $environmentRoot -PathType Container
+  } catch {
+    return $false
+  }
+}
+
+function Stop-MonarchRunningVersion {
+  param(
+    [Parameter(Mandatory = $true)][string]$InstallRoot,
+    [Parameter(Mandatory = $true)][string]$Version,
+    [int]$GracePeriodMilliseconds = 8000
+  )
+
+  if ($Version -notmatch '^\d+\.\d+\.\d+(?:\.\d+)?$') {
+    throw "Refusing to stop processes for an invalid Monarch version: $Version"
+  }
+  $versionRoot = [IO.Path]::GetFullPath((Join-Path $InstallRoot "versions\$Version"))
+  $versionsRoot = [IO.Path]::GetFullPath((Join-Path $InstallRoot "versions"))
+  if (-not $versionRoot.StartsWith($versionsRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Resolved Monarch version root escaped the install boundary."
+  }
+
+  $needle = ($versionRoot.TrimEnd('\') + '\').ToLowerInvariant()
+  $allowedRoots = @('electron.exe', 'node.exe', 'python.exe', 'pythonw.exe')
+  $records = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+  $rootRecords = @($records | Where-Object {
+    $commandLine = ([string]$_.CommandLine).Replace('/', '\').ToLowerInvariant()
+    $allowedRoots -contains ([string]$_.Name).ToLowerInvariant() -and
+      $commandLine.Contains($needle)
+  })
+  if ($rootRecords.Count -eq 0) {
+    return [pscustomobject]@{ version = $Version; requested = 0; stopped = 0; forced = 0 }
+  }
+
+  $targetIds = New-Object 'Collections.Generic.HashSet[int]'
+  foreach ($record in $rootRecords) { [void]$targetIds.Add([int]$record.ProcessId) }
+  do {
+    $added = 0
+    foreach ($record in $records) {
+      if ($targetIds.Contains([int]$record.ParentProcessId) -and
+          $targetIds.Add([int]$record.ProcessId)) {
+        $added += 1
+      }
+    }
+  } while ($added -gt 0)
+
+  foreach ($record in $rootRecords) {
+    try {
+      $process = Get-Process -Id ([int]$record.ProcessId) -ErrorAction Stop
+      if ($process.MainWindowHandle -ne 0) { [void]$process.CloseMainWindow() }
+    } catch { }
+  }
+  if ($GracePeriodMilliseconds -gt 0) {
+    Start-Sleep -Milliseconds $GracePeriodMilliseconds
+  }
+
+  $alive = @($targetIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+  $forced = $alive.Count
+  foreach ($processId in @($alive | Sort-Object -Descending)) {
+    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+  }
+  $deadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+  do {
+    $remaining = @($targetIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if ($remaining.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 200
+  } while ([DateTimeOffset]::UtcNow -lt $deadline)
+  if ($remaining.Count -gt 0) {
+    throw "Monarch $Version is still running after the upgrade shutdown request."
+  }
+
+  return [pscustomobject]@{
+    version = $Version
+    requested = $targetIds.Count
+    stopped = $targetIds.Count
+    forced = $forced
+  }
+}
+
+function Write-MonarchRepairReceipt {
+  param(
+    [Parameter(Mandatory = $true)][string]$InstallRoot,
+    [string]$PreviousVersion = "",
+    [Parameter(Mandatory = $true)][string]$CandidateVersion,
+    [Parameter(Mandatory = $true)][string]$Reason
+  )
+
+  $repairId = "repair-$([DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))"
+  Write-MonarchAtomicJson `
+    -Path (Join-Path $InstallRoot "repair-history\$repairId.json") `
+    -Value ([ordered]@{
+      schemaVersion = 1
+      repairId = $repairId
+      previousVersion = if ($PreviousVersion) { $PreviousVersion } else { $null }
+      candidateVersion = $CandidateVersion
+      reason = $Reason
+      repairedAt = [DateTimeOffset]::UtcNow.ToString("o")
+    })
 }
 
 function New-MonarchPendingUpdate {
@@ -379,7 +517,7 @@ function New-MonarchPendingUpdate {
     previousVersion = $PreviousVersion
     candidateVersion = $CandidateVersion
     previousLauncherVersion = $previousLauncherVersion
-    candidateLauncherVersion = "1.0.3"
+    candidateLauncherVersion = "1.0.4"
     previousRuntimeVersion = [string]$previousDescriptor.runtimeVersion
     expectedRuntimeVersion = $CandidateRuntimeVersion
     previousBackendEnvironment = [string]$previousDescriptor.backendEnvironment

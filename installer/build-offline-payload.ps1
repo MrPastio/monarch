@@ -1,10 +1,11 @@
 param(
   [Parameter(Mandatory = $true)][string]$SourceRoot,
   [string]$BuildRuntimeRoot = "",
+  [string]$RuntimeDependenciesRoot = "",
   [string]$OutputDirectory = "",
-  [string]$AppVersion = "0.2.4.1",
+  [string]$AppVersion = "0.2.5.0",
   [string]$RuntimeVersion = "2026.07.7",
-  [string]$BackendEnvironment = "backend-0.1.5-offline5",
+  [string]$BackendEnvironment = "backend-0.1.5-offline8",
   [switch]$Force
 )
 
@@ -17,6 +18,14 @@ $buildRoot = if ($BuildRuntimeRoot) {
   [System.IO.Path]::GetFullPath($BuildRuntimeRoot).TrimEnd("\")
 } else {
   $root
+}
+$runtimeDependencies = if ($RuntimeDependenciesRoot) {
+  [System.IO.Path]::GetFullPath($RuntimeDependenciesRoot).TrimEnd("\")
+} else {
+  Join-Path $root "installer\runtime-dependencies\windows-x64"
+}
+if (-not (Test-Path -LiteralPath $runtimeDependencies -PathType Container)) {
+  throw "Verified Windows runtime dependency root is missing: $runtimeDependencies"
 }
 $output = if ($OutputDirectory) {
   [System.IO.Path]::GetFullPath($OutputDirectory).TrimEnd("\")
@@ -250,6 +259,42 @@ function Install-PythonTarget {
   }
 }
 
+function Copy-VerifiedWindowsNativeRuntime {
+  param(
+    [Parameter(Mandatory = $true)][string]$Source,
+    [Parameter(Mandatory = $true)][string]$Destination
+  )
+
+  $manifestPath = Join-Path $Source "manifest.json"
+  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "Windows native runtime manifest is missing: $manifestPath"
+  }
+  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+  if ([int]$manifest.schemaVersion -ne 1 -or
+      [string]$manifest.component -ne "microsoft-vc-openmp-runtime-x64") {
+    throw "Unsupported Windows native runtime dependency manifest."
+  }
+  New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+  foreach ($record in @($manifest.files)) {
+    $name = [string]$record.name
+    if ($name -notmatch '^[A-Za-z0-9_.-]+\.dll$') {
+      throw "Unsafe Windows native runtime dependency name: $name"
+    }
+    $sourceFile = Join-Path $Source $name
+    if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf) -or
+        (Get-Item -LiteralPath $sourceFile).Length -ne [long]$record.size -or
+        (Get-Sha256Hex -Path $sourceFile) -ne [string]$record.sha256) {
+      throw "Windows native runtime dependency failed integrity validation: $name"
+    }
+    Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $Destination $name)
+  }
+  foreach ($required in @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "vcomp140.dll")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Destination $required) -PathType Leaf)) {
+      throw "Required Windows native runtime dependency is missing: $required"
+    }
+  }
+}
+
 function Resolve-PinnedPythonWheel {
   param(
     [Parameter(Mandatory = $true)][string]$Python,
@@ -380,6 +425,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $canvasPackageRoot "build\Release\ca
 if (-not (Test-Path -LiteralPath (Join-Path $root "Monarch.exe") -PathType Leaf)) {
   throw "Build Monarch.exe before assembling the offline payload."
 }
+$computerUseNativeBuildScript = Join-Path $root "scripts\build-computer-use-native.mjs"
+if (-not (Test-Path -LiteralPath $computerUseNativeBuildScript -PathType Leaf)) {
+  throw "Computer Use native build script is missing: $computerUseNativeBuildScript"
+}
 
 if (Test-Path -LiteralPath $output) {
   if (-not $Force -or -not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
@@ -431,6 +480,7 @@ try {
       "docs",
       "showcase",
       "installer\.offline-build-cache",
+      "installer\runtime-dependencies",
       "installer\offline-payload",
       "installer\out",
       "runtime",
@@ -471,6 +521,27 @@ try {
   $expectedNodeVersion = "v$((Get-Content -LiteralPath (Join-Path $root '.node-version') -Raw).Trim())"
   if ($nodeVersion -ne $expectedNodeVersion) {
     throw "Node runtime $nodeVersion does not match pinned $expectedNodeVersion."
+  }
+  Write-Host "[offline] Verifying packaged relative import graph"
+  & $node (Join-Path $root "scripts\verify-relative-import-graph.mjs") `
+    (Join-Path $appOutput "src\ui\public") `
+    (Join-Path $appOutput "desktop\electron")
+  Assert-NativeSuccess "Packaged relative import graph verification"
+  Write-Host "[offline] Compiling payload-bound Computer Use native helper"
+  $computerUseNativeOutput = Join-Path $appOutput "tools\computer-use\bin\monarch-computer-use.exe"
+  & $node $computerUseNativeBuildScript `
+    --project-root $root `
+    --output $computerUseNativeOutput
+  Assert-NativeSuccess "Computer Use native helper build"
+  foreach ($computerUseNativeArtifact in @(
+    $computerUseNativeOutput,
+    "$computerUseNativeOutput.source.sha256",
+    "$computerUseNativeOutput.binary.sha256"
+  )) {
+    if (-not (Test-Path -LiteralPath $computerUseNativeArtifact -PathType Leaf) -or
+        (Get-Item -LiteralPath $computerUseNativeArtifact).Length -le 0) {
+      throw "Computer Use native payload is incomplete: $computerUseNativeArtifact"
+    }
   }
   New-Item -ItemType Directory -Path (Join-Path $runtimeOutput "node") -Force | Out-Null
   Copy-Item -LiteralPath $node -Destination (Join-Path $runtimeOutput "node\node.exe")
@@ -533,14 +604,14 @@ try {
     -Operation "Oscar common runtime installation"
 
   Write-Host "[offline] Resolving llama.cpp CPU profile"
-  $cpuLlamaWheel = Resolve-PinnedPythonWheel `
-    -Python $python `
-    -CacheDirectory (Join-Path $wheelCacheRoot "llama-cpp-python-0.3.30-cpu") `
-    -FileName "llama_cpp_python-0.3.30-py3-none-win_amd64.whl" `
-    -ExpectedSha256 "8f238e24ed335ad05acf48648d0855714dfeb0ed341d1ff15d8b8cc06bd51d6a" `
-    -IndexUrl "https://abetlen.github.io/llama-cpp-python/whl/cpu" `
-    -Requirement "llama-cpp-python==0.3.30" `
-    -Operation "Oscar CPU llama.cpp wheel"
+  $cpuLlamaWheel = Join-Path $runtimeDependencies "llama_cpp_python-0.3.30-py3-none-win_amd64.whl"
+  $cpuLlamaWheelSha256 = "5f71b1b88882f031d94fed2495b1e36e663b73f09106d305319c2ee211903a24"
+  if (-not (Test-Path -LiteralPath $cpuLlamaWheel -PathType Leaf)) {
+    throw "Portable Oscar CPU wheel is missing: $cpuLlamaWheel"
+  }
+  if ((Get-Sha256Hex -Path $cpuLlamaWheel) -ne $cpuLlamaWheelSha256) {
+    throw "Portable Oscar CPU wheel failed SHA-256 verification: $cpuLlamaWheel"
+  }
   Install-PythonTarget `
     -Python $python `
     -Target $cpuSitePackages `
@@ -596,17 +667,23 @@ try {
     )
   Assert-CudaPayloadComplete -CudaRoot $cudaSitePackages
 
+  $windowsNativeRuntime = Join-Path $environmentOutput "native\windows-x64"
+  Copy-VerifiedWindowsNativeRuntime `
+    -Source $runtimeDependencies `
+    -Destination $windowsNativeRuntime
+
   $previousPythonPath = $env:PYTHONPATH
   $previousPath = $env:PATH
   $previousDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
   try {
     $env:PYTHONDONTWRITEBYTECODE = "1"
+    $env:PATH = "$windowsNativeRuntime;$cpuSitePackages\bin;$previousPath"
     $env:PYTHONPATH = "$commonSitePackages;$cpuSitePackages;$(Join-Path $root 'oscar\backend')"
-    & $stagedPython -B -c "import fastapi, uvicorn, pydantic, httpx, llama_cpp, oscar_agent; print('oscar-offline-runtime-ok')"
+    & $stagedPython -B -c "import fastapi, uvicorn, pydantic, httpx, llama_cpp, oscar_agent; assert llama_cpp.__version__ == '0.3.30'; print('oscar-offline-runtime-ok')"
     Assert-NativeSuccess "Offline Oscar CPU runtime validation"
 
     $env:PYTHONPATH = "$commonSitePackages;$cudaSitePackages;$(Join-Path $root 'oscar\backend')"
-    $env:PATH = "$cudaSitePackages\bin;$cudaSitePackages\nvidia\cublas\bin;$cudaSitePackages\nvidia\cuda_runtime\bin;$cudaSitePackages\nvidia\nvjitlink\bin;$previousPath"
+    $env:PATH = "$windowsNativeRuntime;$cudaSitePackages\bin;$cudaSitePackages\nvidia\cublas\bin;$cudaSitePackages\nvidia\cuda_runtime\bin;$cudaSitePackages\nvidia\nvjitlink\bin;$previousPath"
     if (Test-NvidiaRuntimeAvailable) {
       & $stagedPython -B -c "import llama_cpp; print('oscar-offline-cuda-runtime-ok')"
       Assert-NativeSuccess "Offline Oscar CUDA runtime validation"

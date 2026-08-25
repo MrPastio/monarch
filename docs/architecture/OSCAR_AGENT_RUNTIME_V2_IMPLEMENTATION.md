@@ -173,9 +173,9 @@ The disposable live file was removed after byte-for-byte and hash verification. 
 - Actual worker termination is only as strong as each module's `AbortSignal` handling; bounded detach settles Agent ownership while retaining an unresolved dispatched action truthfully.
 - Direct ledger/environment reconciliation for interrupted idempotent actions and durable store retention/compaction remain pending; non-idempotent dispatched actions already stop in user recovery review.
 - Browser/computer providers and a broader connector registry remain future capability families; none were bypassed in this slice.
-- Balanced is the fail-closed release default. Adaptive Fast/Balanced remains an
-  explicit experimental opt-in until a fresh independent holdout proves its
-  quality, safety and latency gates; absent or unknown profile values cannot
-  enable it.
+- Adaptive Fast/Balanced is the Agent-First release default: clear atomic tasks
+  use one bounded Fast decision, while ambiguity, recovery, untrusted output,
+  or sensitive effects escalate explicitly to Balanced. Operators can force the
+  all-Balanced profile with `MONARCH_AGENT_DECISION_PROFILE=balanced`.
 
 The next phase is to migrate Telegram and Voice onto the same task/approval/event contract, then deliberately annotate and expose additional cancellable device/browser capabilities. Legacy phrase dispatch can be removed only after specialized lanes and remote-source parity are proven.

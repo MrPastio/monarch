@@ -1,10 +1,10 @@
-import { state } from './state.js';
+import { state, updateState } from './state.js';
+import { ensureRequiredComponents, fetchState, installModels } from './api.js';
 import {
   escapeHtml,
   initials,
   formatRuntimeStatus,
   formatTime,
-  previewItem
 } from './utils.js';
 
 const elements = {
@@ -12,9 +12,38 @@ const elements = {
   models: document.querySelector('#models'),
   pipeline: document.querySelector('#pipeline'),
   recentEvent: document.querySelector('#recent-event'),
-  workspaceSummary: document.querySelector('#workspace-summary'),
-  workspaceModuleList: document.querySelector('#workspace-module-list'),
 };
+
+let initialized = false;
+const OSCAR_MODEL_ROLES = new Set(['gemma4-fast', 'gemma4-balanced', 'qwen3.8-27b-pro']);
+
+export function initModelManager() {
+  if (initialized) return;
+  initialized = true;
+  document.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-component-ensure]');
+    if (button) {
+      button.disabled = true;
+      void ensureRequiredComponents()
+        .then(() => fetchState())
+        .then(updateState)
+        .catch(() => { button.disabled = false; });
+      return;
+    }
+    const installButton = event.target.closest('[data-model-install]');
+    if (!installButton) return;
+    const roles = String(installButton.dataset.modelInstall || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (roles.length === 0) return;
+    installButton.disabled = true;
+    void installModels(roles, 'settings')
+      .then(() => fetchState())
+      .then(updateState)
+      .catch(() => { installButton.disabled = false; });
+  });
+}
 
 export function renderModelManager() {
   if (!state.data) {
@@ -25,7 +54,6 @@ export function renderModelManager() {
   renderModels();
   renderPipeline();
   renderRecentEvent();
-  renderWorkspace();
 }
 
 function renderModules() {
@@ -54,8 +82,12 @@ function renderModules() {
 }
 
 function renderModels() {
-  const models = state.data.models.models || [];
+  const models = (state.data.models.models || []).filter((model) => OSCAR_MODEL_ROLES.has(model.role));
   const runtimes = state.data.modelRuntime.entries || [];
+  const requiredComponent = state.data.components?.requiredModel || null;
+  const provisionedModels = state.data.components?.schemaVersion === 2
+    ? state.data.components.models || []
+    : [];
 
   // A. Compact list inside right telemetry inspector drawer
   if (elements.models) {
@@ -92,14 +124,15 @@ function renderModels() {
     const experimentalCount = models.filter((model) => {
       const runtime = runtimes.find((entry) => entry.role === model.role);
       const status = runtime?.runnerStatus || model.status;
-      return status === 'experimental' || model.role === 'gemma4-deepthinking' || model.role === 'gemma4-31b';
+      return status === 'experimental' || model.role === 'qwen3.8-27b-pro';
     }).length;
     pageList.innerHTML = `
       <div class="models-page-shell">
         <div class="models-summary-strip" aria-label="Сводка моделей">
           <span><strong>${models.length}</strong> всего</span>
           <span><strong>${readyCount}</strong> готовы</span>
-          <span><strong>${experimentalCount}</strong> deep</span>
+          <span><strong>${experimentalCount}</strong> Pro</span>
+          ${provisionedModels.some((model) => !model.complete) ? '<button type="button" class="claude-secondary-btn" data-model-install="gemma4-fast,gemma4-balanced,qwen3.8-27b-pro">Скачать все</button>' : ''}
         </div>
         <div class="models-card-grid">
           ${models.map((model) => {
@@ -110,6 +143,15 @@ function renderModels() {
             const detail = formatModelDetail(runtime?.detail || asset || 'локально');
             const roleLabel = modelRoleLabel(model.role);
             const roleDescription = modelRoleDescription(model.role);
+            const provisioned = provisionedModels.find((entry) => entry.role === model.role) || null;
+            const managed = provisioned?.components?.[0]
+              || (model.role === requiredComponent?.role ? requiredComponent : null);
+            const managedStatus = provisioned
+              ? renderProvisionedModel(provisioned)
+              : managed && managed.phase !== 'ready'
+                ? renderManagedComponent(managed)
+                : '';
+            const canInstall = provisioned && (!provisioned.installed || !provisioned.complete);
             return `
               <article class="model-record-card" data-status="${escapeHtml(status)}">
                 <header>
@@ -120,6 +162,8 @@ function renderModels() {
                   </div>
                   <span class="status-text ${escapeHtml(status)}">${escapeHtml(displayStatus)}</span>
                 </header>
+                ${managedStatus}
+                ${canInstall ? `<button type="button" class="claude-primary-btn model-install-action" data-model-install="${escapeHtml(model.role)}">${provisioned.phase === 'failed' ? 'Повторить' : provisioned.installed ? 'Докачать' : 'Скачать'}</button>` : ''}
                 <details class="model-record-details">
                   <summary>Технические детали</summary>
                   <div class="model-record-meta">
@@ -147,6 +191,40 @@ function renderModels() {
   }
 }
 
+function renderProvisionedModel(model) {
+  if (model.complete && model.installed) return '';
+  const percent = Math.max(0, Math.min(100, Math.round(Number(model.progress || 0) * 100)));
+  const active = ['checking', 'downloading', 'verifying'].includes(model.phase);
+  if (!active && model.phase !== 'failed') {
+    return model.warning ? `<p class="model-install-note">${escapeHtml(model.warning)}</p>` : '';
+  }
+  return `
+    <div class="model-component-state" data-phase="${escapeHtml(model.phase)}">
+      <div><strong>${model.phase === 'failed' ? 'Загрузка остановилась' : 'Загружаем'}</strong><span>${percent}%</span></div>
+      <progress max="100" value="${percent}">${percent}%</progress>
+      <p>${escapeHtml(model.phase === 'failed' ? 'Попробуй ещё раз.' : `${formatManagedBytes(model.downloadedBytes)} из ${formatManagedBytes(model.expectedBytes)}`)}</p>
+    </div>
+  `;
+}
+
+function renderManagedComponent(component) {
+  const percent = Math.max(0, Math.min(100, Math.round(Number(component.progress || 0) * 100)));
+  const failed = component.phase === 'failed';
+  return `
+    <div class="model-component-state" data-phase="${escapeHtml(component.phase)}">
+      <div><strong>${failed ? 'Нужен повтор установки' : 'Monarch устанавливает модель'}</strong><span>${percent}%</span></div>
+      <progress max="100" value="${percent}">${percent}%</progress>
+      <p>${escapeHtml(component.error || `${formatManagedBytes(component.downloadedBytes)} из ${formatManagedBytes(component.expectedBytes)}`)}</p>
+      ${failed ? '<button type="button" class="claude-primary-btn" data-component-ensure>Повторить</button>' : ''}
+    </div>
+  `;
+}
+
+function formatManagedBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  return `${(bytes / (1024 ** 3)).toFixed(2)} ГБ`;
+}
+
 function formatModelDetail(detail) {
   switch (detail) {
   case 'Model is present and ready.':
@@ -162,8 +240,7 @@ function modelRoleLabel(role) {
   const labels = {
     'gemma4-fast': 'Fast · каждый день',
     'gemma4-balanced': 'Medium · баланс',
-    'gemma4-deepthinking': 'Pro · Deep Thinking',
-    'gemma4-31b': 'Extra · максимум',
+    'qwen3.8-27b-pro': 'Pro · Qwen3.8 27B',
     micro: 'Micro · мгновенно',
     lite: 'Lite · голос',
   };
@@ -174,8 +251,7 @@ function modelRoleDescription(role) {
   const descriptions = {
     'gemma4-fast': 'Короткие ответы, повседневные задачи и быстрые уточнения.',
     'gemma4-balanced': 'Основной профиль для разработки, анализа и длинных диалогов.',
-    'gemma4-deepthinking': 'Сложные задачи, где важнее глубина рассуждения, чем скорость.',
-    'gemma4-31b': 'Редкий тяжёлый маршрут с максимальным расходом ресурсов.',
+    'qwen3.8-27b-pro': 'Полный адаптивный Agent для сложной разработки, анализа и мультимодальных задач. Vision пока beta.',
     micro: 'Минимальная задержка для простых локальных реплик.',
     lite: 'Лёгкий профиль для голосового режима и коротких ответов.',
   };
@@ -229,41 +305,4 @@ function renderRecentEvent() {
       <p>${escapeHtml(event.source)}</p>
     </div>
   `;
-}
-
-function renderWorkspace() {
-  if (!elements.workspaceSummary && !elements.workspaceModuleList) return;
-  const app = state.data.app || {};
-  const modules = state.data.runtime.snapshot.modules || [];
-  const events = state.data.runtime.snapshot.events || [];
-  const capabilities = state.data.runtime.snapshot.capabilities || [];
-  const models = state.data.models.models || [];
-
-  if (elements.workspaceSummary) {
-    elements.workspaceSummary.innerHTML = [
-      previewItem('Путь', app.workspaceRoot || 'неизвестно'),
-      previewItem('Модулей', modules.length),
-      previewItem('Возможностей', capabilities.length),
-      previewItem('Моделей', models.length),
-      previewItem('Событий', events.length),
-    ].join('');
-  }
-
-  if (elements.workspaceModuleList) {
-    const rows = modules.map((record) => {
-      const manifest = record.manifest || {};
-      const capabilityCount = Array.isArray(manifest.capabilities) ? manifest.capabilities.length : 0;
-      return `
-        <article class="workspace-module-card" data-status="${escapeHtml(record.status || 'unknown')}">
-          <header>
-            <strong>${escapeHtml(manifest.name || manifest.id || 'Monarch module')}</strong>
-            <span class="status-text ${escapeHtml(record.status || 'unknown')}">${escapeHtml(formatRuntimeStatus(record.status || 'unknown'))}</span>
-          </header>
-          <p>${escapeHtml(manifest.id || 'module')} · ${escapeHtml(manifest.kind || 'service')}</p>
-          <small>${capabilityCount} ${capabilityCount === 1 ? 'возможность' : 'возможностей'}</small>
-        </article>
-      `;
-    }).join('');
-    elements.workspaceModuleList.innerHTML = rows || '<div class="tree-item">Модули ещё не загружены</div>';
-  }
 }

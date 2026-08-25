@@ -356,6 +356,7 @@ describe('Monarch UpdateService download boundary', () => {
       publicKeys: PUBLIC_KEYS,
       updateRoot: root,
       now: () => NOW,
+      diskReserveBytes: 0,
       fetchImpl: async (urlValue: URL | string, init?: RequestInit) => {
         const url = String(urlValue);
         if (!url.includes('/releases/download/')) {
@@ -421,6 +422,7 @@ describe('Monarch UpdateService download boundary', () => {
       publicKeys: PUBLIC_KEYS,
       updateRoot: root,
       now: () => NOW,
+      diskReserveBytes: 0,
       fetchImpl: async (urlValue: URL | string) => {
         const url = String(urlValue);
         if (!url.includes('/releases/download/')) {
@@ -451,6 +453,7 @@ describe('Monarch UpdateService download boundary', () => {
       publicKeys: PUBLIC_KEYS,
       updateRoot: root,
       now: () => NOW,
+      diskReserveBytes: 0,
       fetchImpl: async (urlValue: URL | string) => {
         const url = String(urlValue);
         if (!url.includes('/releases/download/')) {
@@ -490,6 +493,7 @@ describe('Monarch UpdateService download boundary', () => {
       publicKeys: PUBLIC_KEYS,
       updateRoot: root,
       now: () => NOW,
+      diskReserveBytes: 0,
       fetchImpl: async (urlValue: URL | string) => {
         const url = String(urlValue);
         if (!url.includes('/releases/download/')) {

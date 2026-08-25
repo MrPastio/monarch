@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -7,7 +6,6 @@ import {
   type MonarchRuntime,
 } from '../bootstrap';
 import {
-  type MonarchConfirmationChallenge,
   createMonarchId,
   nowIso,
   type MonarchExecutionRequest,
@@ -16,21 +14,18 @@ import {
   type MonarchIntentResult,
   type MonarchIntentSource,
   type MonarchAgentCapabilitySource,
-  type MonarchPlan,
   type MonarchPermissionProfile,
   type MonarchActionProposalInput,
   type MonarchActionProposalV1,
   type MonarchCapabilityLeaseV1,
-  type MonarchRisk,
-  type MonarchRecentIntentJobNormalizedStatus,
   type MonarchRecentIntentJobQuery,
   type MonarchRecentIntentJobSnapshot,
-  type MonarchRouteDecision,
-  type MonarchOperationalContext,
   type MonarchRuntimePaths,
-  reduceOperationalContext,
+  type MonarchAuthorityContext,
+  type MonarchOwnerUnrestrictedOverride,
+  MONARCH_PUBLIC_AUTHORITY_CONTEXT,
   resolveMonarchRuntimePaths,
-  safePreview,
+  supportsWorkspaceTaskLease,
   withUserFacingExecutionResult,
   withUserFacingIntentResult,
 } from '../core';
@@ -44,21 +39,61 @@ import {
   createModelRuntimeReport,
   type MonarchModelRuntimeReport,
 } from '../modules/models/runtime-adapters';
+import type { MonarchComponentManagerSnapshot } from '../modules/models/component-manager';
+import {
+  MonarchModelProvisioningManager,
+  type MonarchInstallableModelRole,
+  type MonarchModelProvisioningController,
+  type MonarchModelProvisioningSnapshot,
+} from '../modules/models/model-provisioning-manager';
 import {
   createAgentSystemProfile,
   type MonarchAgentSystemProfile,
 } from './system-profile';
 import { readMonarchProductVersion } from './product-version';
-import type { TelegramIntentDispatcher } from '../modules/telegram';
+import type { TelegramIntentDispatcher, TelegramIntentDispatchRequest } from '../modules/telegram';
 import {
   AgentKernelExecutionAdapter,
+  InMemoryAgentTaskStore,
   LocalAgentDecisionProvider,
   LocalJsonAgentTaskStore,
   MonarchAgentRuntime,
+  type AgentApproval,
+  type AgentActionGatewayApprovalBinding,
   type AgentDecisionProvider,
   type AgentTaskStore,
   type CreateAgentTaskInput,
 } from '../agent';
+import {
+  OscarAttachmentStore,
+  OscarDataEgressConsentStore,
+  isNonAuthoritativeConfirmationText,
+  type OscarTurnCoordinator,
+  type OscarTurnCheckpoint,
+} from '../oscar-turn';
+import { createApplicationOscarTurnCoordinator } from './oscar-turn-runtime';
+import {
+  OscarClient,
+  createDefaultOscarChatRequest,
+} from '../modules/oscar/client';
+import {
+  renderPersonalitySystemContext,
+  resolvePersonalityContext,
+  SettingsCommandBus,
+  LocalOwnerDevSettingsStore,
+  LocalOwnerUnrestrictedOverrideStore,
+  type MonarchMemoryScopeV1,
+  type MonarchOwnerDevSettingsV1,
+  type MonarchPersonalityContextV2,
+  type MonarchSettingsBackend,
+} from '../settings';
+import {
+  ImageGenerationService,
+  ImagePromptTranslator,
+  classifyImagePrompt,
+  type ImagePromptTranslationV1,
+} from '../image-generation';
+import type { ComputerUseCapabilitySnapshotV1 } from '../modules/computer';
 
 export interface MonarchApplicationOptions extends MonarchBootstrapOptions {
   workspaceRoot?: string;
@@ -66,6 +101,13 @@ export interface MonarchApplicationOptions extends MonarchBootstrapOptions {
   agentTaskStore?: AgentTaskStore;
   agentDecisionProvider?: AgentDecisionProvider;
   agentRuntimeAutoRun?: boolean;
+  oscarTurnCoordinator?: OscarTurnCoordinator;
+  oscarAttachmentStore?: OscarAttachmentStore;
+  oscarDataEgressConsentStore?: OscarDataEgressConsentStore;
+  settingsCommandBus?: SettingsCommandBus;
+  imageGenerationService?: ImageGenerationService;
+  imagePromptTranslator?: ImagePromptTranslator;
+  modelComponentManager?: MonarchModelProvisioningController;
 }
 
 export interface MonarchIntentSubmission {
@@ -73,6 +115,7 @@ export interface MonarchIntentSubmission {
   source?: MonarchIntentSource;
   confirmed?: boolean;
   confirmationToken?: string;
+  replyToTurnId?: string;
   context?: Record<string, unknown>;
 }
 
@@ -132,6 +175,10 @@ export interface MonarchActionProposalSubmission {
   leaseId?: string;
   /** Internal-only trusted Agent Runtime lane. HTTP bodies never populate this field. */
   executionMode?: 'agent-runtime';
+  /** Internal-only task-owned execution profile. HTTP bodies never populate this field. */
+  permissionProfileOverride?: MonarchPermissionProfile;
+  /** Durable exact approval binding supplied only by Agent Runtime. */
+  agentApprovalBinding?: AgentActionGatewayApprovalBinding;
   /** Internal-only cancellation signal. HTTP bodies never populate this field. */
   signal?: AbortSignal;
 }
@@ -139,7 +186,6 @@ export interface MonarchActionProposalSubmission {
 export interface MonarchActionProposalResult {
   proposal: MonarchActionProposalV1;
   result: MonarchExecutionResult;
-  confirmation?: MonarchConfirmationChallenge;
   lease?: MonarchCapabilityLeaseV1;
 }
 
@@ -159,12 +205,15 @@ export interface MonarchApplicationState {
   };
   models: MonarchModelCatalog;
   modelRuntime: MonarchModelRuntimeReport;
+  components: MonarchComponentManagerSnapshot | MonarchModelProvisioningSnapshot;
   selectedModel: ReturnType<typeof selectModelForInput>;
   routerPipeline: ReturnType<typeof createRouterPipeline>;
 
   lastIntent: MonarchIntentResult | null;
   system: MonarchAgentSystemProfile;
   permissions: MonarchPermissionProfile;
+  authority: MonarchAuthorityContext;
+  ownerDev?: MonarchOwnerDevSettingsV1;
   agency: {
     activeLeases: MonarchCapabilityLeaseV1[];
     recentActions: ReturnType<MonarchRuntime['kernel']['listActionLedger']>;
@@ -202,18 +251,25 @@ export class MonarchApplication {
   readonly runtimePaths: MonarchRuntimePaths;
   readonly runtime: MonarchRuntime;
   readonly agentRuntime: MonarchAgentRuntime | null;
+  /** Session-only runtime; its task store is never written to disk. */
+  readonly incognitoAgentRuntime: MonarchAgentRuntime | null;
+  readonly oscarTurnCoordinator: OscarTurnCoordinator;
+  readonly oscarAttachmentStore: OscarAttachmentStore;
+  readonly oscarDataEgressConsentStore: OscarDataEgressConsentStore;
+  readonly settingsCommandBus: SettingsCommandBus;
+  readonly ownerDevSettingsStore: LocalOwnerDevSettingsStore;
+  readonly ownerUnrestrictedOverrideStore: LocalOwnerUnrestrictedOverrideStore;
+  readonly imageGeneration: ImageGenerationService;
+  readonly imagePromptTranslator: ImagePromptTranslator;
+  readonly modelComponentManager: MonarchModelProvisioningController;
+  private readonly contextClient: OscarClient;
+  readonly authorityContext: MonarchAuthorityContext;
   private started = false;
   private startedAt: string | null = null;
   private modelCatalog: MonarchModelCatalog | null = null;
   private cachedRuntimeState: CachedRuntimeState | null = null;
 
   private lastIntent: MonarchIntentResult | null = null;
-  private readonly pendingConfirmations = new Map<string, PendingConfirmation>();
-  private readonly pendingAgentSurfaceConfirmations = new Map<string, PendingAgentSurfaceConfirmation>();
-  private readonly intentJobs = new Map<string, PendingIntentJob>();
-  private readonly operationalContexts = new Map<string, MonarchOperationalContext>();
-  private intentJobQueue: Promise<void> = Promise.resolve();
-
   private static readonly STATE_CACHE_TTL_MS = 1500;
 
   constructor(options: MonarchApplicationOptions = {}) {
@@ -223,24 +279,40 @@ export class MonarchApplication {
       agentTaskStore,
       agentDecisionProvider,
       agentRuntimeAutoRun,
+      oscarTurnCoordinator,
+      oscarAttachmentStore,
+      oscarDataEgressConsentStore,
+      settingsCommandBus,
+      imageGenerationService,
+      imagePromptTranslator,
+      modelComponentManager,
       ...bootstrapOptions
     } = options;
     this.sourceRoot = workspaceRoot;
     this.productVersion = readMonarchProductVersion(this.sourceRoot);
     this.runtimePaths = resolveMonarchRuntimePaths(workspaceRoot);
     this.workspaceRoot = this.runtimePaths.userWorkspaceRoot;
-    const permissionProfile = bootstrapOptions.permissionProfile
-      || readStoredPermissionProfile(this.runtimePaths.stateRoot);
+    this.modelComponentManager = modelComponentManager
+      || new MonarchModelProvisioningManager(this.runtimePaths);
+    this.authorityContext = Object.freeze({ ...(bootstrapOptions.authorityContext || MONARCH_PUBLIC_AUTHORITY_CONTEXT) });
+    const storedPermissionProfile = readStoredPermissionProfile(this.runtimePaths.stateRoot);
+    const migratedStoredProfile = migrateStoredOwnerPermissionProfile(storedPermissionProfile, this.authorityContext);
+    const permissionProfile = bootstrapOptions.permissionProfile || migratedStoredProfile;
+    if (!bootstrapOptions.permissionProfile && migratedStoredProfile && migratedStoredProfile !== storedPermissionProfile) {
+      persistPermissionProfile(this.runtimePaths.stateRoot, migratedStoredProfile);
+    }
     this.runtime = createMonarchRuntime({
       ...bootstrapOptions,
       workspaceRoot,
+      authorityContext: this.authorityContext,
       ...(permissionProfile ? { permissionProfile } : {}),
     });
     this.runtime.kernel.setRecentIntentJobsProvider((query) => this.listRecentIntentJobs(query));
     const agentEnabled = enableAgentRuntimeV2 ?? readBooleanEnvironment('MONARCH_AGENT_RUNTIME_V2', false);
     if (agentEnabled) {
       const store = agentTaskStore || new LocalJsonAgentTaskStore(
-        path.join(this.runtimePaths.stateRoot, 'agent', 'tasks.v2.json'),
+        path.join(this.runtimePaths.stateRoot, 'agent', 'tasks.v3.json'),
+        { legacyFilePath: path.join(this.runtimePaths.stateRoot, 'agent', 'tasks.v2.json') },
       );
       const decisionProvider = agentDecisionProvider || new LocalAgentDecisionProvider({
         // Model catalog/runtime configuration belongs to the installed source
@@ -265,16 +337,85 @@ export class MonarchApplication {
         ),
         ...(agentRuntimeAutoRun !== undefined ? { autoRun: agentRuntimeAutoRun } : {}),
       });
+      this.incognitoAgentRuntime = new MonarchAgentRuntime({
+        store: new InMemoryAgentTaskStore(),
+        decisionProvider,
+        executionAdapter,
+        listCapabilities: () => this.runtime.kernel.listCapabilities(),
+        getPermissionProfile: () => this.runtime.kernel.getPermissionProfile(),
+        getModuleStates: () => Object.fromEntries(
+          this.runtime.kernel.getSnapshot().modules.map((record) => [
+            record.manifest.id,
+            record.status === 'registered' ? 'inactive' : record.status,
+          ]),
+        ),
+        runnerId: `incognito_agent_runner_${process.pid}`,
+        ...(agentRuntimeAutoRun !== undefined ? { autoRun: agentRuntimeAutoRun } : {}),
+      });
     } else {
       this.agentRuntime = null;
+      this.incognitoAgentRuntime = null;
     }
-    const telegramDispatcher: TelegramIntentDispatcher = async (request) => this.submitAgentSurfaceIntent({
-      text: request.text,
-      source: 'telegram',
-      context: request.context,
-      ...(request.confirmed !== undefined ? { confirmed: request.confirmed } : {}),
-      ...(request.confirmationToken ? { confirmationToken: request.confirmationToken } : {}),
+    this.oscarAttachmentStore = oscarAttachmentStore || new OscarAttachmentStore(this.runtimePaths.stateRoot);
+    this.oscarDataEgressConsentStore = oscarDataEgressConsentStore
+      || new OscarDataEgressConsentStore(this.runtimePaths.stateRoot);
+    this.contextClient = new OscarClient({
+      workspaceRoot: this.sourceRoot,
+      projectRoot: path.join(this.sourceRoot, 'oscar'),
+      logsRoot: this.runtimePaths.logsRoot,
+      secretsRoot: this.runtimePaths.secretsRoot,
     });
+    this.ownerDevSettingsStore = new LocalOwnerDevSettingsStore(this.runtimePaths.stateRoot);
+    this.ownerUnrestrictedOverrideStore = new LocalOwnerUnrestrictedOverrideStore(this.runtimePaths.stateRoot);
+    for (const module of this.runtime.modules) {
+      const bridge = module as typeof module & {
+        setOwnerDevSettingsProvider?: (provider: () => MonarchOwnerDevSettingsV1) => void;
+      };
+      bridge.setOwnerDevSettingsProvider?.(() => this.getOwnerDevSettings());
+    }
+    const settingsBackend: MonarchSettingsBackend = {
+      read: (request) => request.kind === 'dev'
+        ? this.ownerDevSettingsStore.read(request)
+        : request.kind === 'owner-override'
+          ? this.ownerUnrestrictedOverrideStore.read(request)
+          : this.contextClient.readSettingsContext(request),
+      execute: async (request) => {
+        const receipt = request.command.startsWith('dev.')
+          ? await this.ownerDevSettingsStore.execute(request)
+          : request.command.startsWith('owner-override.')
+            ? await this.ownerUnrestrictedOverrideStore.execute(request)
+            : await this.contextClient.executeSettingsCommand(request);
+        if (request.command.startsWith('owner-override.')) {
+          await this.emitOwnerUnrestrictedOverrideState();
+        }
+        return receipt;
+      },
+    };
+    this.settingsCommandBus = settingsCommandBus || new SettingsCommandBus(
+      settingsBackend,
+      {
+        evaluateLocalSettingsCommand: (input) => this.runtime.kernel.evaluateLocalSettingsCommand(input),
+      },
+      this.authorityContext,
+    );
+    this.imageGeneration = imageGenerationService
+      || new ImageGenerationService(path.join(this.runtimePaths.dataRoot, 'images'));
+    this.imagePromptTranslator = imagePromptTranslator || new ImagePromptTranslator(
+      (request, signal) => this.contextClient.completeRaw(request, signal),
+    );
+    this.oscarTurnCoordinator = oscarTurnCoordinator || createApplicationOscarTurnCoordinator({
+      sourceRoot: this.sourceRoot,
+      runtimePaths: this.runtimePaths,
+      agentRuntime: this.agentRuntime,
+      incognitoAgentRuntime: this.incognitoAgentRuntime,
+      attachments: this.oscarAttachmentStore,
+      dataEgressConsents: this.oscarDataEgressConsentStore,
+      settingsCommandBus: this.settingsCommandBus,
+      getOwnerDevSettings: () => this.getOwnerDevSettings(),
+    });
+    const telegramDispatcher: TelegramIntentDispatcher = async (request) => request.approval
+      ? this.resolveAgentSurfaceApproval(request)
+      : this.submitAgentSurfaceIntent({ text: request.text, source: 'telegram', context: request.context });
     for (const module of this.runtime.modules) {
       const bridge = module as typeof module & { setIntentDispatcher?: (dispatcher: TelegramIntentDispatcher) => void };
       bridge.setIntentDispatcher?.(telegramDispatcher);
@@ -290,12 +431,19 @@ export class MonarchApplication {
       return;
     }
 
+    await this.modelComponentManager.initialize?.();
     this.modelCatalog = await readModelCatalog(this.sourceRoot);
     await this.runtime.kernel.start();
+    await this.emitOwnerUnrestrictedOverrideState();
     try {
       await this.agentRuntime?.start();
+      await this.incognitoAgentRuntime?.start();
+      await this.oscarTurnCoordinator.start();
     } catch (error) {
       try {
+        await this.oscarTurnCoordinator.stop();
+        await this.incognitoAgentRuntime?.discardAllTasks();
+        await this.incognitoAgentRuntime?.stop();
         await this.agentRuntime?.stop();
       } catch {
         // Preserve the startup failure; runtime cleanup is best-effort.
@@ -311,7 +459,6 @@ export class MonarchApplication {
     }
     this.started = true;
     this.startedAt = nowIso();
-
   }
 
   async stop(): Promise<void> {
@@ -319,7 +466,13 @@ export class MonarchApplication {
       return;
     }
 
+    await this.oscarTurnCoordinator.stop();
+    this.oscarAttachmentStore.clearVolatile();
+    this.oscarDataEgressConsentStore.clearVolatile();
+    await this.incognitoAgentRuntime?.discardAllTasks();
+    await this.incognitoAgentRuntime?.stop();
     await this.agentRuntime?.stop();
+    await this.modelComponentManager.stop();
     await this.runtime.kernel.stop();
     this.started = false;
   }
@@ -347,12 +500,17 @@ export class MonarchApplication {
       },
       models: modelCatalog,
       modelRuntime,
+      components: this.modelComponentManager.snapshot(),
       selectedModel: selectModelForInput(input, modelCatalog),
       routerPipeline: createRouterPipeline(input, modelCatalog, modelRuntime),
 
       lastIntent: this.lastIntent,
       system: this.getSystemProfile(),
       permissions: this.runtime.kernel.getPermissionProfile(),
+      authority: this.authorityContext,
+      ...(this.authorityContext.tier === 'owner' && this.authorityContext.source === 'signed-device-entitlement'
+        ? { ownerDev: this.getOwnerDevSettings() }
+        : {}),
       agency: {
         activeLeases: this.runtime.kernel.listCapabilityLeases(true),
         recentActions: this.runtime.kernel.listActionLedger(30),
@@ -367,80 +525,218 @@ export class MonarchApplication {
       throw new Error('Intent text is required.');
     }
 
-    if (submission.confirmed) {
-      return this.submitConfirmedIntent(submission, text);
-    }
-
-    const operationalScope = readOperationalScope(submission.context);
-    const context = {
-      ...(submission.context || {}),
-      confirmed: false,
-      ...(operationalScope ? { operationalContext: this.operationalContexts.get(operationalScope) || {} } : {}),
-    };
-
-    this.lastIntent = withUserFacingIntentResult(await this.runtime.kernel.submitIntent(
-      text,
-      submission.source || 'desktop',
-      context
-    ));
-    this.attachIntentConfirmationIfNeeded(this.lastIntent);
-    if (operationalScope) {
-      this.operationalContexts.set(
-        operationalScope,
-        reduceOperationalContext(this.operationalContexts.get(operationalScope) || {}, this.lastIntent),
+    if (submission.confirmed || submission.confirmationToken) {
+      throw new MonarchApplicationError(
+        410,
+        'legacy-text-confirmation-disabled',
+        'Text confirmation tokens cannot authorize an action. Use the exact structured Agent approval endpoint.',
       );
     }
-    return this.lastIntent;
+    const source = submission.source || 'desktop';
+    if (source === 'smoke') {
+      this.lastIntent = withUserFacingIntentResult(await this.runtime.kernel.submitIntent(
+        text,
+        source,
+        { ...(submission.context || {}), confirmed: false },
+      ));
+      return this.lastIntent;
+    }
+    return this.submitAgentSurfaceIntent({ ...submission, text, source });
+  }
+
+  async readComputerUseCapabilitySnapshot(): Promise<ComputerUseCapabilitySnapshotV1> {
+    const module = this.runtime.kernel.getModule('computer') as (
+      { readCapabilitySnapshot?: () => Promise<ComputerUseCapabilitySnapshotV1> } | undefined
+    );
+    if (module?.readCapabilitySnapshot) return module.readCapabilitySnapshot();
+    return {
+      schemaVersion: 1,
+      available: false,
+      enabled: false,
+      surface: 'computer-use',
+      invocation: '@Computer Use',
+      ownCursor: true,
+      observeAnalyzeAct: true,
+      emergencyShortcut: 'Ctrl+Alt+Escape',
+    };
+  }
+
+  async translateImagePrompt(text: string, signal?: AbortSignal): Promise<ImagePromptTranslationV1> {
+    await this.ensureStarted();
+    const classification = classifyImagePrompt(text);
+    if (classification === 'prohibited') {
+      throw new MonarchApplicationError(
+        403,
+        'prohibited-content',
+        'Этот prompt запрещён политикой защиты несовершеннолетних.',
+      );
+    }
+    if (classification === 'nsfw') {
+      const policy = await this.imageGeneration.readPolicySnapshot();
+      if (!policy.matureModeActive) {
+        throw new MonarchApplicationError(409, 'mature-mode-disabled', 'Режим 18+ сейчас выключен.');
+      }
+    }
+    return this.imagePromptTranslator.translate(text, signal);
+  }
+
+  async indexCoderMemoryEpisode(input: {
+    projectId: string;
+    runId: string;
+    projectName: string;
+    userText: string;
+    assistantText: string;
+    structuredSummary: Record<string, unknown>;
+  }): Promise<unknown> {
+    return this.contextClient.indexMemoryEpisode({
+      schemaVersion: 1,
+      source: 'coder',
+      scope: { type: 'coder-project', projectId: input.projectId },
+      conversationId: `coder:${input.runId}`,
+      turnId: input.runId,
+      projectName: input.projectName,
+      userText: input.userText,
+      assistantText: input.assistantText,
+      structuredSummary: input.structuredSummary,
+    });
+  }
+
+  async retrieveCoderMemoryContext(input: { projectId: string; query: string }): Promise<unknown> {
+    return this.contextClient.retrieveMemoryContext({
+      query: input.query,
+      scope: { type: 'coder-project', projectId: input.projectId },
+    });
+  }
+
+  async readPersonalityContext(scope: MonarchMemoryScopeV1): Promise<{
+    scope: MonarchMemoryScopeV1;
+    settingsRevision: number;
+    context: MonarchPersonalityContextV2 | null;
+  }> {
+    const result = await this.settingsCommandBus.read({
+      schemaVersion: 1,
+      kind: 'personality',
+      scope,
+    }, 'desktop');
+    return {
+      scope,
+      settingsRevision: result.revision,
+      context: resolvePersonalityContext(result.value),
+    };
+  }
+
+  async previewPersonality(scope: MonarchMemoryScopeV1): Promise<{
+    scope: MonarchMemoryScopeV1;
+    settingsRevision: number;
+    personality: MonarchPersonalityContextV2;
+    answer: string;
+  }> {
+    await this.ensureStarted();
+    const snapshot = await this.readPersonalityContext(scope);
+    if (!snapshot.context) {
+      throw new MonarchApplicationError(
+        409,
+        'personality-disabled',
+        'Select a personality profile and enable personalization before previewing it.',
+      );
+    }
+    const language = snapshot.context.language;
+    const prompt = language === 'en'
+      ? 'Briefly introduce yourself and explain how you would help me improve a software product. Use your selected communication style.'
+      : language === 'uk'
+        ? 'Коротко представся і поясни, як ти допоможеш мені покращити програмний продукт. Використовуй обраний стиль спілкування.'
+        : language === 'bg'
+          ? 'Представи се накратко и обясни как ще ми помогнеш да подобря софтуерен продукт. Използвай избрания стил на общуване.'
+          : 'Коротко представься и объясни, как ты поможешь мне улучшить программный продукт. Используй выбранный стиль общения.';
+    const payload = await this.contextClient.chat(createDefaultOscarChatRequest([
+      { role: 'system', content: renderPersonalitySystemContext(snapshot.context) },
+      { role: 'user', content: prompt },
+    ], false, {
+      conversation_id: `personality-preview:${createMonarchId('preview')}`,
+      incognito: true,
+      use_memory: false,
+      research_mode: 'off',
+      reasoning_effort: 'low',
+      max_new_tokens: 320,
+      execution_authority: 'none',
+      persistence_owner: 'backend',
+      inference_lane: 'interactive',
+    }));
+    if (isOscarRecoveryPayload(payload)) {
+      throw new MonarchApplicationError(
+        503,
+        'personality-preview-runtime-unavailable',
+        'Локальная модель сейчас недоступна. Настройки сохранены; повтори проверку после восстановления runtime.',
+      );
+    }
+    const answer = readOscarAnswer(payload);
+    if (!answer) {
+      throw new MonarchApplicationError(
+        502,
+        'personality-preview-empty',
+        'Oscar preview runtime returned no answer.',
+      );
+    }
+    return {
+      scope,
+      settingsRevision: snapshot.settingsRevision,
+      personality: snapshot.context,
+      answer,
+    };
   }
 
   async submitAgentSurfaceIntent(
-    submission: MonarchIntentSubmission & { source: Extract<MonarchIntentSource, 'telegram' | 'voice' | 'api'> },
+    submission: MonarchIntentSubmission & { source: Extract<MonarchIntentSource, 'desktop' | 'telegram' | 'voice' | 'api' | 'system'> },
   ): Promise<MonarchIntentResult> {
     await this.ensureStarted();
     const text = submission.text.trim();
     if (!text) {
       throw new Error('Intent text is required.');
     }
-    if (!this.agentRuntime) {
-      return this.submitIntent(submission);
-    }
-
-    if (submission.confirmed) {
-      return this.resolveAgentSurfaceConfirmation(submission, text);
-    }
-
     const context = submission.context || {};
-    const conversationId = readBoundedContextId(context.clientConversationId);
-    const created = await this.agentRuntime.createTask({
-      request: text,
-      source: {
-        surface: submission.source,
-        remote: submission.source !== 'voice',
-        ...(conversationId ? { conversationId } : {}),
-      },
-      ...(conversationId ? { conversationId } : {}),
-      expectedOutputs: [{
-        id: 'surface_verified_outcome',
-        description: `Return only the verified outcome of this request: ${text}`,
-        kind: 'answer',
-        required: true,
-      }],
-      successCriteria: [{
-        id: 'surface_outcome_verified',
-        description: 'Any claimed action is backed by a Kernel receipt and capability-owned verification.',
-      }],
-      budgets: {
-        maxSteps: 12,
-        maxModelTurns: 10,
-        maxToolCalls: 8,
-        maxWallTimeMs: 3 * 60 * 1000,
-        maxFailures: 3,
-        maxConsecutiveNoProgress: 3,
-        maxComputeClass: 'medium',
-      },
+    const zeroRetention = this.getOwnerDevSettings().zeroRetentionEnabled;
+    const privacyMode = zeroRetention ? 'incognito' as const : 'persistent' as const;
+    if (submission.confirmed || submission.confirmationToken) {
+      throw new MonarchApplicationError(
+        410,
+        'legacy-text-confirmation-disabled',
+        'Text confirmation tokens cannot authorize an action. Use the exact structured Agent approval endpoint.',
+      );
+    }
+    const conversationId = surfaceConversationId(submission.source, context);
+    const activeApproval = isNonAuthoritativeConfirmationText(text)
+      ? await this.oscarTurnCoordinator.findLatestTurn({
+        conversationId,
+        source: submission.source,
+        statuses: ['waiting-for-approval'],
+        privacyMode,
+      })
+      : null;
+    if (activeApproval) {
+      const refocused = await this.oscarTurnCoordinator.sendMessage(activeApproval.turn.id, {
+        content: text,
+        messageId: readBoundedContextId(context.clientMessageId)
+          || readBoundedContextId(context.clientRequestId)
+          || createMonarchId('surface_confirmation_message'),
+        source: submission.source,
+      });
+      return this.surfaceTurnResult(refocused, text, submission.source, context);
+    }
+    const clientRequestId = readBoundedContextId(context.clientRequestId)
+      || createMonarchId('surface_turn_request');
+    const checkpoint = await this.oscarTurnCoordinator.submit({
+      clientRequestId,
+      conversationId,
+      text,
+      privacyMode,
+      source: submission.source,
+      inputMessageId: readBoundedContextId(context.clientMessageId) || clientRequestId,
+      ...(!zeroRetention && submission.replyToTurnId
+        ? { replyToTurnId: readBoundedContextId(submission.replyToTurnId) }
+        : {}),
     });
-    await this.agentRuntime.waitForIdle(created.task.id);
-    return this.agentSurfaceTaskResult(created.task.id, text, submission.source, context);
+    const settled = await this.waitForSurfaceTurn(checkpoint, 5 * 60 * 1000);
+    return this.surfaceTurnResult(settled, text, submission.source, context);
   }
 
   async submitIntentJob(submission: MonarchIntentJobSubmission): Promise<MonarchIntentJobSnapshot> {
@@ -450,107 +746,46 @@ export class MonarchApplication {
       throw new Error('Intent text is required.');
     }
 
-    const timeoutMs = normalizeJobTimeout(submission.timeoutMs);
     const now = nowIso();
-    const clientConversationId = readContextString(submission.context, 'clientConversationId');
-    const clientSessionId = readContextString(submission.context, 'clientSessionId');
-    const job: PendingIntentJob = {
-      id: createMonarchId('job'),
+    const result = await this.submitIntent({ ...submission, text });
+    const output = result.execution?.output && typeof result.execution.output === 'object'
+      ? result.execution.output as Record<string, unknown>
+      : {};
+    const ok = result.execution?.ok === true;
+    return {
+      id: typeof output.turnId === 'string' ? output.turnId : result.intent.id,
       text,
-      source: submission.source || 'desktop',
-      status: 'queued',
-      createdAt: now,
+      source: result.intent.source,
+      status: ok ? 'completed' : 'failed',
+      createdAt: result.intent.createdAt,
       updatedAt: now,
-      startedAt: null,
-      finishedAt: null,
-      timeoutMs,
-      summary: 'Intent queued.',
-      progress: ['queued'],
-      result: null,
-      error: null,
-      cancelled: false,
+      startedAt: result.intent.createdAt,
+      finishedAt: now,
+      timeoutMs: normalizeJobTimeout(submission.timeoutMs),
+      summary: result.summary,
+      progress: [`turn:${String(output.status || (ok ? 'succeeded' : 'failed'))}`],
+      result,
+      error: ok ? null : result.execution?.error || 'turn-failed',
     };
-    if (clientConversationId) {
-      job.clientConversationId = clientConversationId;
-    }
-    if (clientSessionId) {
-      job.clientSessionId = clientSessionId;
-    }
-
-    this.intentJobs.set(job.id, job);
-    this.pruneIntentJobs();
-    this.queueIntentJob(job, {
-      ...submission,
-      text,
-      source: job.source,
-      context: {
-        ...(submission.context || {}),
-        timeoutMs,
-        jobId: job.id,
-      },
-    });
-
-    await this.runtime.kernel.getSnapshot();
-    return snapshotIntentJob(job);
   }
 
-  listIntentJobs(limit = 20): MonarchIntentJobSnapshot[] {
-    const normalizedLimit = Math.max(1, Math.min(Math.floor(limit), 100));
-    return Array.from(this.intentJobs.values())
-      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
-      .slice(0, normalizedLimit)
-      .map(snapshotIntentJob);
+  listIntentJobs(_limit = 20): MonarchIntentJobSnapshot[] {
+    return [];
   }
 
   listRecentIntentJobs(query: MonarchRecentIntentJobQuery): readonly MonarchRecentIntentJobSnapshot[] {
-    const source = readQueryString(query.source);
-    const clientConversationId = readQueryString(query.clientConversationId);
-    const clientSessionId = readQueryString(query.clientSessionId);
-    if (!source || !clientConversationId || !clientSessionId) {
-      return [];
-    }
-
-    const excludeJobId = readQueryString(query.excludeJobId);
-    const limit = normalizeRecentJobLimit(query.limit);
-    const maxAgeMs = normalizeRecentJobMaxAge(query.maxAgeMs);
-    const now = Date.now();
-
-    return Array.from(this.intentJobs.values())
-      .filter((job) => job.source === source)
-      .filter((job) => job.clientConversationId === clientConversationId)
-      .filter((job) => job.clientSessionId === clientSessionId)
-      .filter((job) => !excludeJobId || job.id !== excludeJobId)
-      .map(buildRecentIntentJobSnapshot)
-      .filter((job) => now - job.updatedAt <= maxAgeMs)
-      .filter((job) => isInjectableRecentJobStatus(job.normalizedStatus))
-      .sort((left, right) => right.updatedAt - left.updatedAt)
-      .slice(0, limit);
+    void query;
+    return [];
   }
 
   getIntentJob(id: string): MonarchIntentJobSnapshot | null {
-    const job = this.intentJobs.get(id);
-    return job ? snapshotIntentJob(job) : null;
+    void id;
+    return null;
   }
 
   cancelIntentJob(id: string): MonarchIntentJobSnapshot | null {
-    const job = this.intentJobs.get(id);
-    if (!job) {
-      return null;
-    }
-    if (job.status === 'completed' || job.status === 'failed' || job.status === 'timeout') {
-      return snapshotIntentJob(job);
-    }
-
-    job.cancelled = true;
-    job.status = 'cancelled';
-    job.finishedAt = nowIso();
-    job.summary = job.startedAt
-      ? 'Intent job cancellation requested. Active assistant calls will be aborted when possible.'
-      : 'Intent job cancelled before execution.';
-    job.progress.push('cancelled');
-    touchIntentJob(job);
-    this.abortActiveAssistantJob(job.id);
-    return snapshotIntentJob(job);
+    void id;
+    return null;
   }
 
   async executeCapability(
@@ -563,8 +798,12 @@ export class MonarchApplication {
       throw new Error('moduleId and capabilityId are required.');
     }
 
-    if (execution.confirmed) {
-      return this.executeConfirmedCapability(execution, moduleId, capabilityId);
+    if (execution.confirmed || execution.confirmationToken) {
+      throw new MonarchApplicationError(
+        410,
+        'legacy-text-confirmation-disabled',
+        'Text confirmation tokens cannot authorize a capability execution.',
+      );
     }
 
     const request: MonarchExecutionRequest = {
@@ -579,9 +818,7 @@ export class MonarchApplication {
       confirmed: false,
     };
 
-    const result = withUserFacingExecutionResult(await this.runtime.kernel.execute(request));
-    this.attachExecutionConfirmationIfNeeded(result, request);
-    return result;
+    return withUserFacingExecutionResult(await this.runtime.kernel.execute(request));
   }
 
   async submitActionProposal(submission: MonarchActionProposalSubmission): Promise<MonarchActionProposalResult> {
@@ -589,45 +826,15 @@ export class MonarchApplication {
     const originatingUserText = String(submission.originatingUserText || '').trim().slice(0, 8_000);
     const requestedBy = String(submission.requestedBy || 'api').trim().slice(0, 200) || 'api';
 
-    if (submission.confirmed) {
-      const pending = this.consumeConfirmation(submission.confirmationToken, 'proposal');
-      if (!pending.proposal) {
-        throw new MonarchApplicationError(400, 'invalid-confirmation', 'Confirmation token is not valid for an action proposal.');
+    if (submission.confirmed || submission.confirmationToken) {
+      if (submission.executionMode !== 'agent-runtime' || !submission.agentApprovalBinding) {
+        throw new MonarchApplicationError(
+          410,
+          'legacy-text-confirmation-disabled',
+          'Text confirmation tokens cannot authorize an action. Use a durable exact Agent approval binding.',
+        );
       }
-      const supplied = this.runtime.kernel.prepareActionProposal(submission.proposal, {
-        intentId: pending.proposal.intentId,
-        originatingUserText: pending.originatingUserText || '',
-        requestedBy,
-        ...(submission.model ? { model: submission.model } : {}),
-        ...(submission.skillIds ? { skillIds: submission.skillIds } : {}),
-      });
-      if (supplied.proposalId !== pending.proposal.proposalId
-        || supplied.canonicalHash !== pending.proposal.canonicalHash) {
-        throw new MonarchApplicationError(400, 'confirmation-target-mismatch', 'Confirmation token belongs to a different canonical action.');
-      }
-      const grantScope = submission.grantScope === 'task' ? 'task' : 'once';
-      if (grantScope === 'task' && !canGrantTaskLease(pending.proposal)) {
-        throw new MonarchApplicationError(400, 'task-grant-not-allowed', 'This action cannot be expanded into a task lease.');
-      }
-      const lease = grantScope === 'task'
-        ? this.runtime.kernel.issueTaskLease(pending.proposal)
-        : undefined;
-      const executed = await this.runtime.kernel.executeActionProposal(pending.proposal, {
-        intentId: pending.proposal.intentId,
-        originatingUserText: pending.originatingUserText || '',
-        requestedBy,
-        ...(submission.source ? { source: submission.source } : {}),
-        confirmed: true,
-        securityOverrideConfirmed: pending.securityOverride === true,
-        ...(lease ? { leaseId: lease.leaseId } : {}),
-        ...(submission.executionMode ? { executionMode: submission.executionMode } : {}),
-        ...(submission.signal ? { signal: submission.signal } : {}),
-      });
-      return {
-        proposal: executed.proposal,
-        result: withUserFacingExecutionResult(executed.result),
-        ...(lease ? { lease } : {}),
-      };
+      return this.executeDurablyApprovedActionProposal(submission, originatingUserText, requestedBy);
     }
 
     const executed = await this.runtime.kernel.executeActionProposal(submission.proposal, {
@@ -638,37 +845,106 @@ export class MonarchApplication {
       ...(submission.skillIds ? { skillIds: submission.skillIds } : {}),
       ...(submission.leaseId ? { leaseId: submission.leaseId } : {}),
       ...(submission.executionMode ? { executionMode: submission.executionMode } : {}),
+      ...(submission.permissionProfileOverride ? { permissionProfileOverride: submission.permissionProfileOverride } : {}),
       ...(submission.signal ? { signal: submission.signal } : {}),
     });
     const result = withUserFacingExecutionResult(executed.result);
-    if (result.error !== 'confirmation-required') return { proposal: executed.proposal, result };
+    return { proposal: executed.proposal, result };
+  }
 
-    const grantTask = canGrantTaskLease(executed.proposal);
-    const capability = this.runtime.kernel.getCapability(executed.proposal.capabilityId);
-    const target: MonarchConfirmationChallenge['target'] = {
-      intentId: executed.proposal.intentId,
-      moduleId: capability?.moduleId || 'unknown',
-      capabilityId: executed.proposal.capabilityId,
-      ...(capability ? { risk: capability.risk } : {}),
-    };
-    const confirmation = this.createConfirmation({
-      mode: 'proposal',
-      proposal: executed.proposal,
+  private async executeDurablyApprovedActionProposal(
+    submission: MonarchActionProposalSubmission,
+    originatingUserText: string,
+    requestedBy: string,
+  ): Promise<MonarchActionProposalResult> {
+    const binding = submission.agentApprovalBinding;
+    if (!binding) {
+      throw new MonarchApplicationError(409, 'agent-approval-unavailable', 'Durable Agent approval is unavailable.');
+    }
+    const runtime = await this.resolveAgentRuntimeForTask(binding.taskId);
+    if (!runtime) {
+      throw new MonarchApplicationError(409, 'agent-approval-unavailable', 'Durable Agent approval is unavailable.');
+    }
+    const checkpoint = await runtime.getTask(binding.taskId);
+    const approval = checkpoint?.approvals.find((entry) => entry.id === binding.approvalId);
+    const reference = checkpoint?.task.approvals.find((entry) => entry.id === binding.approvalId);
+    const pending = checkpoint?.task.pendingAction;
+    if (
+      !checkpoint
+      || !approval
+      || approval.status !== 'approved'
+      || reference?.status !== 'approved'
+      || checkpoint.task.status !== 'running'
+      || pending?.status !== 'dispatched'
+      || pending.canonicalProposalHash !== binding.canonicalProposalHash
+      || approval.canonicalProposalHash !== binding.canonicalProposalHash
+      || approval.capabilityId !== binding.capabilityId
+      || reference.purpose !== approval.purpose
+      || reference.policyDecisionHash !== approval.policyDecisionHash
+      || reference.authorityTierAtRequest !== approval.authorityTierAtRequest
+      || binding.purpose !== approval.purpose
+      || binding.policyDecisionHash !== approval.policyDecisionHash
+      || binding.authorityTierAtRequest !== approval.authorityTierAtRequest
+      || checkpoint.task.source.surface !== submission.source
+    ) {
+      throw new MonarchApplicationError(409, 'agent-approval-binding-mismatch', 'Durable Agent approval no longer matches the dispatched action.');
+    }
+    const ownerOverride = approval.purpose === 'owner-security-override';
+    if (ownerOverride && (
+      approval.authorityTierAtRequest !== 'owner'
+      || !approval.policyDecisionHash
+      || this.authorityContext.tier !== 'owner'
+      || this.authorityContext.source !== 'signed-device-entitlement'
+      || (submission.source !== 'desktop' && submission.source !== 'coder')
+      || approval.grantScope !== 'once'
+      || submission.grantScope === 'task'
+    )) {
+      throw new MonarchApplicationError(
+        409,
+        'owner-authority-changed',
+        'Owner authority or the exact one-time override binding changed; review a new action-card.',
+      );
+    }
+    const approvedProposal = approval.proposal as unknown as MonarchActionProposalV1;
+    const supplied = this.runtime.kernel.prepareActionProposal(submission.proposal, {
+      intentId: approvedProposal.intentId,
       originatingUserText,
-      securityOverride: result.metadata?.securityOverride === true,
-      target,
-      grantOptions: grantTask ? ['once', 'task'] : ['once'],
-      ...(grantTask ? {
-        suggestedLease: {
-          capabilities: [executed.proposal.capabilityId],
-          ...(executed.proposal.scope.roots ? { roots: executed.proposal.scope.roots } : {}),
-          expiresInMs: 30 * 60 * 1000,
-          budgets: { maxActions: 80, maxFiles: 50, maxBytesWritten: 5 * 1024 * 1024, maxDeletes: 0, maxNetworkRequests: 0 },
-        },
-      } : {}),
+      requestedBy,
+      ...(submission.model ? { model: submission.model } : {}),
+      ...(submission.skillIds ? { skillIds: submission.skillIds } : {}),
     });
-    result.metadata = { ...(result.metadata || {}), confirmation };
-    return { proposal: executed.proposal, result, confirmation };
+    if (
+      supplied.proposalId !== approvedProposal.proposalId
+      || supplied.canonicalHash !== binding.canonicalProposalHash
+      || supplied.capabilityId !== binding.capabilityId
+    ) {
+      throw new MonarchApplicationError(409, 'agent-approval-binding-mismatch', 'Prepared action changed after durable approval.');
+    }
+    const grantScope = submission.grantScope === 'task' ? 'task' : 'once';
+    if (grantScope === 'task' && !canGrantTaskLease(supplied)) {
+      throw new MonarchApplicationError(400, 'task-grant-not-allowed', 'This action cannot be expanded into a task lease.');
+    }
+    const lease = grantScope === 'task' ? this.runtime.kernel.issueTaskLease(supplied) : undefined;
+    const executed = await this.runtime.kernel.executeActionProposal(supplied, {
+      intentId: supplied.intentId,
+      originatingUserText,
+      requestedBy,
+      ...(submission.source ? { source: submission.source } : {}),
+      confirmed: true,
+      securityOverrideConfirmed: ownerOverride,
+      ...(approval.policyDecisionHash ? { approvalPolicyDecisionHash: approval.policyDecisionHash } : {}),
+      ...(approval.purpose ? { approvalPurpose: approval.purpose } : {}),
+      ...(approval.authorityTierAtRequest ? { authorityTierAtApproval: approval.authorityTierAtRequest } : {}),
+      ...(lease ? { leaseId: lease.leaseId } : {}),
+      executionMode: 'agent-runtime',
+      ...(submission.permissionProfileOverride ? { permissionProfileOverride: submission.permissionProfileOverride } : {}),
+      ...(submission.signal ? { signal: submission.signal } : {}),
+    });
+    return {
+      proposal: executed.proposal,
+      result: withUserFacingExecutionResult(executed.result),
+      ...(lease ? { lease } : {}),
+    };
   }
 
   async prepareActionProposal(submission: MonarchActionProposalSubmission): Promise<MonarchActionProposalV1> {
@@ -685,6 +961,14 @@ export class MonarchApplication {
 
   get isAgentRuntimeV2Enabled(): boolean {
     return this.agentRuntime !== null;
+  }
+
+  async resolveAgentRuntimeForTask(taskId: string): Promise<MonarchAgentRuntime | null> {
+    if (this.incognitoAgentRuntime && await this.incognitoAgentRuntime.getTask(taskId)) {
+      return this.incognitoAgentRuntime;
+    }
+    if (this.agentRuntime && await this.agentRuntime.getTask(taskId)) return this.agentRuntime;
+    return null;
   }
 
   async createAgentTask(input: CreateAgentTaskInput) {
@@ -726,25 +1010,69 @@ export class MonarchApplication {
     return this.modelCatalog;
   }
 
-  private queueIntentJob(job: PendingIntentJob, submission: MonarchIntentSubmission): void {
-    if (shouldBypassIntentJobQueue(job.text)) {
-      void this.runIntentJob(job, submission).catch((error: unknown) => {
-        this.failIntentJob(job, error);
-      });
-      return;
-    }
-
-    const run = this.intentJobQueue
-      .catch(() => undefined)
-      .then(() => this.runIntentJob(job, submission));
-
-    this.intentJobQueue = run.catch((error: unknown) => {
-      this.failIntentJob(job, error);
-    });
-  }
-
   getPermissionProfile(): MonarchPermissionProfile {
     return this.runtime.kernel.getPermissionProfile();
+  }
+
+  getComponentManagerSnapshot(): MonarchComponentManagerSnapshot | MonarchModelProvisioningSnapshot {
+    return this.modelComponentManager.snapshot();
+  }
+
+  async ensureRequiredComponents(): Promise<MonarchComponentManagerSnapshot | MonarchModelProvisioningSnapshot> {
+    const snapshot = await this.modelComponentManager.ensureRequiredModel();
+    this.cachedRuntimeState = null;
+    return snapshot;
+  }
+
+  startRequiredComponents(): MonarchComponentManagerSnapshot | MonarchModelProvisioningSnapshot {
+    void this.ensureRequiredComponents();
+    return this.modelComponentManager.snapshot();
+  }
+
+  startModelInstall(
+    roles: MonarchInstallableModelRole[],
+    source: 'onboarding' | 'settings',
+  ): MonarchComponentManagerSnapshot | MonarchModelProvisioningSnapshot {
+    if (!this.modelComponentManager.startInstallModels) {
+      void this.ensureRequiredComponents();
+      return this.modelComponentManager.snapshot();
+    }
+    const snapshot = this.modelComponentManager.startInstallModels(roles, source);
+    this.cachedRuntimeState = null;
+    return snapshot;
+  }
+
+  async skipModelOnboarding(): Promise<MonarchComponentManagerSnapshot | MonarchModelProvisioningSnapshot> {
+    if (!this.modelComponentManager.skipOnboarding) return this.modelComponentManager.snapshot();
+    const snapshot = await this.modelComponentManager.skipOnboarding();
+    this.cachedRuntimeState = null;
+    return snapshot;
+  }
+
+  async acknowledgeModelOnboardingWelcome(): Promise<MonarchComponentManagerSnapshot | MonarchModelProvisioningSnapshot> {
+    if (!this.modelComponentManager.acknowledgeOnboardingWelcome) return this.modelComponentManager.snapshot();
+    const snapshot = await this.modelComponentManager.acknowledgeOnboardingWelcome();
+    this.cachedRuntimeState = null;
+    return snapshot;
+  }
+
+  getAuthorityContext(): MonarchAuthorityContext {
+    return this.authorityContext;
+  }
+
+  getOwnerDevSettings(): MonarchOwnerDevSettingsV1 {
+    return this.ownerDevSettingsStore.snapshot();
+  }
+
+  getOwnerUnrestrictedOverride(): MonarchOwnerUnrestrictedOverride {
+    return this.ownerUnrestrictedOverrideStore.snapshot();
+  }
+
+  private async emitOwnerUnrestrictedOverrideState(): Promise<void> {
+    await this.runtime.kernel.emitRuntimeEvent('security.owner_override.changed', 'security', {
+      ownerOverride: this.getOwnerUnrestrictedOverride(),
+      localOwnerOnly: true,
+    });
   }
 
   setPermissionProfile(profile: MonarchPermissionProfile): MonarchPermissionProfile {
@@ -777,8 +1105,6 @@ export class MonarchApplication {
 
   private buildRuntimeDiagnostics(cached: CachedRuntimeState): MonarchRuntimeDiagnostics {
     const now = Date.now();
-    const jobs = Array.from(this.intentJobs.values());
-    const runningJob = jobs.find((job) => job.status === 'running') || null;
     return {
       generatedAt: nowIso(),
       cache: {
@@ -787,539 +1113,261 @@ export class MonarchApplication {
         ttlMs: MonarchApplication.STATE_CACHE_TTL_MS,
       },
       queue: {
-        queued: jobs.filter((job) => job.status === 'queued').length,
-        running: jobs.filter((job) => job.status === 'running').length,
-        terminal: jobs.filter((job) => ['completed', 'failed', 'cancelled', 'timeout'].includes(job.status)).length,
-        total: jobs.length,
-        activeJobId: runningJob?.id || null,
-        activeJobAgeMs: runningJob?.startedAt ? Math.max(0, now - Date.parse(runningJob.startedAt)) : null,
+        queued: 0,
+        running: 0,
+        terminal: 0,
+        total: 0,
+        activeJobId: null,
+        activeJobAgeMs: null,
       },
     };
   }
 
-  private failIntentJob(job: PendingIntentJob, error: unknown): void {
-    if (job.status === 'cancelled') {
-      return;
+  async resolveAgentSurfaceApproval(request: TelegramIntentDispatchRequest): Promise<MonarchIntentResult> {
+    await this.ensureStarted();
+    if (!request.approval || (!this.agentRuntime && !this.incognitoAgentRuntime)) {
+      throw new MonarchApplicationError(409, 'agent-approval-unavailable', 'Durable Agent approval is unavailable.');
     }
-    job.status = 'failed';
-    job.finishedAt = nowIso();
-    const diagnostic = error instanceof Error ? error.message : String(error);
-    this.runtime.kernel.audit('intent-job', 'Intent job failed.', {
-      jobId: job.id,
-      error: diagnostic,
-    }, 'error');
-    job.error = 'internal-error';
-    job.summary = 'Monarch столкнулся с внутренней ошибкой. Подробности сохранены в локальном журнале.';
-    job.progress.push('failed');
-    touchIntentJob(job);
-  }
-
-  private async runIntentJob(job: PendingIntentJob, submission: MonarchIntentSubmission): Promise<void> {
-    if (job.cancelled) {
-      return;
-    }
-
-    job.status = 'running';
-    job.startedAt = nowIso();
-    job.summary = 'Intent is running through Monarch kernel.';
-    job.progress.push('running');
-    touchIntentJob(job);
-
-    let timeout: NodeJS.Timeout | undefined;
-    const timeoutPromise = new Promise<never>((_resolve, reject) => {
-      timeout = setTimeout(() => {
-        reject(new Error(`Intent job timed out after ${job.timeoutMs}ms.`));
-      }, job.timeoutMs);
+    const context = request.context || {};
+    const conversationId = surfaceConversationId('telegram', context);
+    const privacyMode = this.getOwnerDevSettings().zeroRetentionEnabled ? 'incognito' as const : 'persistent' as const;
+    const turnCheckpoint = await this.oscarTurnCoordinator.findLatestTurn({
+      conversationId,
+      source: 'telegram',
+      statuses: ['waiting-for-approval'],
+      activeApprovalId: request.approval.approvalId,
+      privacyMode,
     });
-
-    try {
-      const result = await Promise.race([
-        this.submitIntent(submission),
-        timeoutPromise,
-      ]);
-
-      if (job.cancelled) {
-        return;
-      }
-
-      job.status = 'completed';
-      job.result = result;
-      job.summary = result.summary;
-      job.progress.push(result.execution?.ok ? 'completed:ok' : result.execution?.error || 'completed');
-      touchIntentJob(job);
-    } catch (error) {
-      if (job.cancelled) {
-        return;
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      const timedOut = /timed out/i.test(message);
-      job.status = timedOut ? 'timeout' : 'failed';
-      job.error = timedOut ? 'intent-timeout' : 'internal-error';
-      job.summary = timedOut
-        ? 'Задача не успела завершиться вовремя. Повтори запрос или сократи его.'
-        : 'Monarch столкнулся с внутренней ошибкой. Подробности сохранены в локальном журнале.';
-      this.runtime.kernel.audit('intent-job', 'Intent job execution failed.', {
-        jobId: job.id,
-        timeout: timedOut,
-        error: message,
-      }, timedOut ? 'warn' : 'error');
-      job.progress.push(job.status);
-      touchIntentJob(job);
-    } finally {
-      if (timeout) {
-        clearTimeout(timeout);
-      }
-      if (!job.finishedAt) {
-        const finishedAt = nowIso();
-        job.finishedAt = finishedAt;
-        job.updatedAt = finishedAt;
-      }
+    if (!turnCheckpoint?.turn.taskId) {
+      throw new MonarchApplicationError(409, 'approval-presentation-stale', 'The Telegram approval card is stale or belongs to another chat/user.');
     }
-  }
-
-
-
-
-  private async submitConfirmedIntent(
-    submission: MonarchIntentSubmission,
-    text: string
-  ): Promise<MonarchIntentResult> {
-    const pending = this.consumeConfirmation(submission.confirmationToken, 'intent');
-    if (pending.mode !== 'intent' || !pending.intent || !pending.route || !pending.plan) {
-      throw new MonarchApplicationError(400, 'invalid-confirmation', 'Confirmation token is not valid for an intent.');
+    const surfaceRuntime = await this.resolveAgentRuntimeForTask(turnCheckpoint.turn.taskId);
+    const taskCheckpoint = await surfaceRuntime?.getTask(turnCheckpoint.turn.taskId);
+    const approval = taskCheckpoint?.approvals.find((entry) => (
+      entry.id === request.approval!.approvalId
+      && entry.status === 'pending'
+      && taskCheckpoint.task.activeApprovalId === entry.id
+    ));
+    if (!surfaceRuntime || !taskCheckpoint || !approval || taskCheckpoint.task.source.surface !== 'telegram') {
+      throw new MonarchApplicationError(409, 'approval-presentation-stale', 'The exact pending Agent approval no longer exists.');
     }
-    if (pending.text !== text) {
-      throw new MonarchApplicationError(400, 'confirmation-target-mismatch', 'Confirmation token belongs to a different intent.');
-    }
-
-    const intent: MonarchIntent = {
-      ...pending.intent,
-      source: submission.source || pending.intent.source,
-      context: {
-        ...(pending.intent.context || {}),
-        ...(submission.context || {}),
-        confirmed: true,
-      },
-    };
-    const planExecution = await this.runtime.kernel.executePlan(pending.plan, {
-      requestedBy: intent.source,
-      confirmed: true,
-      securityOverrideConfirmed: pending.securityOverride === true,
-    });
-    const execution = planExecution.stepResults.at(-1)?.result || null;
-    this.lastIntent = withUserFacingIntentResult({
-      intent,
-      route: pending.route,
-      plan: planExecution.plan,
-      execution,
-      summary: planExecution.summary,
-    });
-
-    this.attachIntentConfirmationIfNeeded(this.lastIntent);
-    const operationalScope = readOperationalScope(submission.context);
-    if (operationalScope) {
-      this.operationalContexts.set(
-        operationalScope,
-        reduceOperationalContext(this.operationalContexts.get(operationalScope) || {}, this.lastIntent),
-      );
-    }
-    return this.lastIntent;
-  }
-
-  private async resolveAgentSurfaceConfirmation(
-    submission: MonarchIntentSubmission & { source: Extract<MonarchIntentSource, 'telegram' | 'voice' | 'api'> },
-    text: string,
-  ): Promise<MonarchIntentResult> {
-    this.pruneExpiredAgentSurfaceConfirmations();
-    const token = String(submission.confirmationToken || '').trim();
-    const pending = token ? this.pendingAgentSurfaceConfirmations.get(token) : undefined;
-    if (token) this.pendingAgentSurfaceConfirmations.delete(token);
-    if (
-      !pending
-      || pending.source !== submission.source
-      || pending.text !== text
-      || pending.contextKey !== agentSurfaceContextKey(submission.context)
-      || Date.parse(pending.expiresAt) <= Date.now()
-    ) {
-      throw new MonarchApplicationError(
-        400,
-        'invalid-agent-confirmation-token',
-        'Agent Task confirmation token is invalid, expired, or belongs to another surface request.',
-      );
-    }
-    await this.agentRuntime!.resolveApproval(pending.taskId, pending.approvalId, {
-      decision: 'approve',
-      grantScope: 'once',
-      requestId: createMonarchId('agent_surface_approval'),
-    });
-    await this.agentRuntime!.waitForIdle(pending.taskId);
-    return this.agentSurfaceTaskResult(
-      pending.taskId,
-      pending.text,
-      pending.source,
-      submission.context || {},
+    const requestId = readBoundedContextId(
+      `telegram:${String(context.telegramChatId || '')}:${String(context.telegramUserId || '')}:${approval.id}:${request.approval.action}`,
     );
+    if (request.approval.action === 'arm') {
+      const armed = await surfaceRuntime.armApproval(taskCheckpoint.task.id, approval.id, {
+        canonicalProposalHash: approval.canonicalProposalHash,
+        capabilityId: approval.capabilityId,
+        actorSurface: 'telegram',
+        requestId,
+      });
+      const latest = await this.oscarTurnCoordinator.getTurn(turnCheckpoint.turn.id) || turnCheckpoint;
+      const result = this.surfaceTurnResult(latest, taskCheckpoint.task.goal.originalRequest, 'telegram', context);
+      if (result.execution) {
+        result.execution.metadata = {
+          ...(result.execution.metadata || {}),
+          armExpiresAt: armed.approvals.find((entry) => entry.id === approval.id)?.arm?.expiresAt || null,
+        };
+      }
+      return result;
+    }
+    await surfaceRuntime.resolveApproval(taskCheckpoint.task.id, approval.id, {
+      decision: request.approval.action,
+      grantScope: 'once',
+      requestId,
+      actorSurface: 'telegram',
+      requireArm: request.approval.action === 'approve' && requiresSensitiveAgentApproval(approval),
+    });
+    const current = await this.oscarTurnCoordinator.getTurn(turnCheckpoint.turn.id) || turnCheckpoint;
+    const settled = await this.waitForSurfaceTurn(
+      current,
+      5 * 60 * 1000,
+      (checkpoint) => isSurfaceTurnSettled(checkpoint.turn.status)
+        && !(checkpoint.turn.status === 'waiting-for-approval' && checkpoint.turn.activeApprovalId === approval.id),
+    );
+    return this.surfaceTurnResult(settled, taskCheckpoint.task.goal.originalRequest, 'telegram', context);
   }
 
-  private async agentSurfaceTaskResult(
-    taskId: string,
+  private async waitForSurfaceTurn(
+    initial: OscarTurnCheckpoint,
+    timeoutMs: number,
+    isSettled: (checkpoint: OscarTurnCheckpoint) => boolean = (checkpoint) => isSurfaceTurnSettled(checkpoint.turn.status),
+  ): Promise<OscarTurnCheckpoint> {
+    if (isSettled(initial)) return initial;
+    return new Promise((resolve) => {
+      let finished = false;
+      let latest = initial;
+      let unsubscribe: () => void = () => undefined;
+      const finish = (checkpoint: OscarTurnCheckpoint) => {
+        if (finished) return;
+        latest = checkpoint;
+        if (!isSettled(checkpoint)) return;
+        finished = true;
+        clearTimeout(timeout);
+        unsubscribe();
+        resolve(checkpoint);
+      };
+      const timeout = setTimeout(() => {
+        if (finished) return;
+        finished = true;
+        unsubscribe();
+        resolve(latest);
+      }, timeoutMs);
+      unsubscribe = this.oscarTurnCoordinator.subscribe(initial.turn.id, (commit) => {
+        finish({ turn: commit.turn, events: [...latest.events, ...commit.appendedEvents] });
+      });
+      void this.oscarTurnCoordinator.getTurn(initial.turn.id).then((checkpoint) => {
+        if (checkpoint) finish(checkpoint);
+      });
+    });
+  }
+
+  private surfaceTurnResult(
+    checkpoint: OscarTurnCheckpoint,
     text: string,
-    source: Extract<MonarchIntentSource, 'telegram' | 'voice' | 'api'>,
+    source: Extract<MonarchIntentSource, 'desktop' | 'telegram' | 'voice' | 'api' | 'system'>,
     context: Record<string, unknown>,
-  ): Promise<MonarchIntentResult> {
-    const checkpoint = await this.agentRuntime!.getTask(taskId);
-    if (!checkpoint) {
-      throw new MonarchApplicationError(500, 'agent-task-missing', 'Agent Task disappeared before its result was read.');
-    }
-    const task = checkpoint.task;
+  ): MonarchIntentResult {
+    const turn = checkpoint.turn;
     const intent: MonarchIntent = {
-      id: task.id,
+      id: turn.id,
       source,
       text,
-      createdAt: task.createdAt,
+      createdAt: turn.createdAt,
       context,
     };
-    let summary = String(task.terminalReason?.summary || '').trim();
+    const presentation = approvalPresentation(checkpoint);
+    const question = [...checkpoint.events].reverse().find((event) => event.type === 'user.input.required')?.payload.question;
+    const summary = turn.outcome?.summary
+      || (typeof question === 'string' ? question : '')
+      || (presentation ? `Нужно решение по точной capability ${presentation.capabilityId}.` : '')
+      || (isSurfaceTurnSettled(turn.status)
+        ? 'Проверенный результат не получен.'
+        : 'Задача остаётся в durable Turn; финального исхода пока нет.');
     let execution: MonarchExecutionResult;
-    let confirmation: MonarchConfirmationChallenge | undefined;
-
-    if (task.status === 'completed') {
-      summary = summary || 'Задача выполнена и проверена.';
+    if (turn.status === 'waiting-for-approval' && presentation) {
+      execution = {
+        ok: false,
+        error: 'confirmation-required',
+        summary,
+        output: { reply: summary, turnId: turn.id, agentTaskId: turn.taskId, status: turn.status },
+        metadata: { approvalPresentation: presentation },
+      };
+    } else if (turn.status === 'waiting-for-user') {
+      execution = {
+        ok: false,
+        error: 'clarification-required',
+        summary,
+        output: { reply: summary, turnId: turn.id, agentTaskId: turn.taskId, status: turn.status },
+      };
+    } else if (turn.status === 'succeeded' && turn.outcome) {
       execution = {
         ok: true,
         summary,
         output: {
           reply: summary,
-          agentTaskId: task.id,
-          status: task.status,
-          verified: true,
+          turnId: turn.id,
+          agentTaskId: turn.taskId,
+          status: turn.status,
+          outcome: turn.outcome.kind,
+          verified: turn.outcome.kind === 'verified',
+          partial: turn.outcome.kind === 'partial',
+          evidenceRefs: turn.outcome.evidenceRefs,
         },
-      };
-    } else if (task.status === 'waiting-for-approval') {
-      const approval = checkpoint.approvals.find((entry) => (
-        entry.id === task.activeApprovalId && entry.status === 'pending'
-      )) || checkpoint.approvals.find((entry) => entry.status === 'pending');
-      if (!approval) {
-        throw new MonarchApplicationError(
-          500,
-          'agent-approval-missing',
-          'Agent Task is waiting for approval but no exact pending proposal exists.',
-        );
-      }
-      const token = randomBytes(32).toString('base64url');
-      const expiresAt = approval.expiresAt
-        && Date.parse(approval.expiresAt) > Date.now()
-        ? approval.expiresAt
-        : new Date(Date.now() + 5 * 60 * 1000).toISOString();
-      const moduleId = approval.capabilityId.split('.')[0] || 'agent';
-      confirmation = {
-        token,
-        mode: 'proposal',
-        expiresAt,
-        target: {
-          intentId: task.id,
-          ...(approval.stepId ? { stepId: approval.stepId } : {}),
-          moduleId,
-          capabilityId: approval.capabilityId,
-        },
-        grantOptions: ['once'],
-      };
-      this.pruneExpiredAgentSurfaceConfirmations();
-      this.pendingAgentSurfaceConfirmations.set(token, {
-        token,
-        taskId: task.id,
-        approvalId: approval.id,
-        source,
-        text,
-        contextKey: agentSurfaceContextKey(context),
-        expiresAt,
-      });
-      summary = `Нужно одноразовое подтверждение точного действия: ${approval.capabilityId}.`;
-      execution = {
-        ok: false,
-        error: 'confirmation-required',
-        summary,
-        metadata: {
-          agentTaskId: task.id,
-          approvalId: approval.id,
-          canonicalProposalHash: approval.canonicalProposalHash,
-        },
-      };
-    } else if (task.status === 'waiting-for-user') {
-      summary = [...task.messages]
-        .reverse()
-        .find((message) => message.kind === 'clarification')?.content
-        || 'Нужно уточнение, чтобы продолжить задачу.';
-      execution = {
-        ok: false,
-        error: 'clarification-required',
-        summary,
-        output: { reply: summary, agentTaskId: task.id, status: task.status },
       };
     } else {
-      const cancelled = task.status === 'cancelled' || task.status === 'cancelling';
-      summary = cancelled
-        ? 'Задача остановлена. Новые действия и повторные шаги не будут запущены.'
-        : summary || (task.status === 'failed'
-          ? 'Задача не завершилась: проверенный результат не получен.'
-          : 'Задача приостановлена до готовности локального runtime.');
+      const error = turn.status === 'blocked'
+        ? 'turn-blocked'
+        : turn.status === 'failed'
+          ? 'turn-failed'
+          : turn.status === 'cancelled'
+            ? 'turn-cancelled'
+            : 'turn-running';
       execution = {
         ok: false,
-        error: cancelled ? 'agent-task-cancelled' : `agent-task-${task.status}`,
+        error,
         summary,
-        output: { reply: summary, agentTaskId: task.id, status: task.status },
+        output: { reply: summary, turnId: turn.id, agentTaskId: turn.taskId, status: turn.status },
       };
     }
-
-    this.lastIntent = withUserFacingIntentResult({
-      intent,
-      route: null,
-      plan: null,
-      execution,
-      summary,
-      ...(confirmation ? { confirmation } : {}),
-    });
+    this.lastIntent = withUserFacingIntentResult({ intent, route: null, plan: null, execution, summary });
     return this.lastIntent;
   }
 
-  private async executeConfirmedCapability(
-    execution: MonarchCapabilityExecution,
-    moduleId: string,
-    capabilityId: string
-  ): Promise<MonarchExecutionResult> {
-    const pending = this.consumeConfirmation(execution.confirmationToken, 'execution');
-    if (pending.mode !== 'execution' || !pending.request) {
-      throw new MonarchApplicationError(400, 'invalid-confirmation', 'Confirmation token is not valid for direct execution.');
-    }
-    if (pending.request.moduleId !== moduleId || pending.request.capabilityId !== capabilityId) {
-      throw new MonarchApplicationError(400, 'confirmation-target-mismatch', 'Confirmation token belongs to a different capability.');
-    }
-
-    const request: MonarchExecutionRequest = {
-      ...pending.request,
-      id: createMonarchId('exec_api'),
-      createdAt: nowIso(),
-      requestedBy: execution.requestedBy || pending.request.requestedBy,
-      confirmed: true,
-      securityOverrideConfirmed: pending.securityOverride === true,
-    };
-    const result = withUserFacingExecutionResult(await this.runtime.kernel.execute(request));
-    this.attachExecutionConfirmationIfNeeded(result, request);
-    return result;
-  }
-
-  private abortActiveAssistantJob(jobId: string): void {
-    void this.runtime.kernel.execute({
-      id: createMonarchId('exec_cancel_job'),
-      intentId: jobId,
-      moduleId: 'assistant',
-      capabilityId: 'assistant.cancel',
-      input: { intentId: jobId },
-      createdAt: nowIso(),
-      requestedBy: 'intent-job-cancel',
-      confirmed: true,
-    }).catch(() => undefined);
-  }
-
-  private attachIntentConfirmationIfNeeded(result: MonarchIntentResult): void {
-    if (result.execution?.error !== 'confirmation-required' || !result.route || !result.plan) {
-      return;
-    }
-    const step = result.plan.steps.at(-1);
-    if (!step) {
-      return;
-    }
-
-    const confirmation = this.createConfirmation({
-      mode: 'intent',
-      text: result.intent.text,
-      intent: result.intent,
-      route: result.route,
-      plan: result.plan,
-      securityOverride: result.execution.metadata?.securityOverride === true,
-      target: {
-        intentId: result.intent.id,
-        planId: result.plan.id,
-        stepId: step.id,
-        moduleId: step.moduleId,
-        capabilityId: step.capabilityId,
-        risk: step.expectedRisk,
-      },
-    });
-    result.confirmation = confirmation;
-    result.execution.metadata = {
-      ...(result.execution.metadata || {}),
-      confirmation,
-    };
-  }
-
-  private attachExecutionConfirmationIfNeeded(
-    result: MonarchExecutionResult,
-    request: MonarchExecutionRequest
-  ): void {
-    if (result.error !== 'confirmation-required') {
-      return;
-    }
-
-    const risk = typeof result.metadata?.permission === 'object' && result.metadata.permission
-      ? (result.metadata.permission as { risk?: unknown }).risk
-      : undefined;
-    const target: MonarchConfirmationChallenge['target'] = {
-      intentId: request.intentId,
-      moduleId: request.moduleId,
-      capabilityId: request.capabilityId,
-    };
-    if (request.planId) {
-      target.planId = request.planId;
-    }
-    if (request.stepId) {
-      target.stepId = request.stepId;
-    }
-    if (isMonarchRisk(risk)) {
-      target.risk = risk;
-    }
-
-    const confirmation = this.createConfirmation({
-      mode: 'execution',
-      request,
-      target,
-      securityOverride: result.metadata?.securityOverride === true,
-    });
-    result.metadata = {
-      ...(result.metadata || {}),
-      confirmation,
-    };
-  }
-
-  private createConfirmation(
-    options: Omit<PendingConfirmation, 'token' | 'expiresAt' | 'challenge'>
-  ): MonarchConfirmationChallenge {
-    this.pruneExpiredConfirmations();
-    const token = randomBytes(32).toString('base64url');
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-    const challenge: MonarchConfirmationChallenge = {
-      token,
-      mode: options.mode,
-      expiresAt,
-      target: options.target,
-      ...(options.grantOptions ? { grantOptions: options.grantOptions } : {}),
-      ...(options.suggestedLease ? { suggestedLease: options.suggestedLease } : {}),
-    };
-    this.pendingConfirmations.set(token, {
-      ...options,
-      token,
-      expiresAt,
-      challenge,
-    });
-    return challenge;
-  }
-
-  private consumeConfirmation(
-    token: string | undefined,
-    mode: PendingConfirmation['mode']
-  ): PendingConfirmation {
-    this.pruneExpiredConfirmations();
-    if (!token) {
-      throw new MonarchApplicationError(400, 'missing-confirmation-token', 'Confirmed execution requires a confirmation token.');
-    }
-    const pending = this.pendingConfirmations.get(token);
-    this.pendingConfirmations.delete(token);
-    if (!pending || pending.mode !== mode) {
-      throw new MonarchApplicationError(400, 'invalid-confirmation-token', 'Confirmation token is invalid or expired.');
-    }
-    if (Date.parse(pending.expiresAt) <= Date.now()) {
-      throw new MonarchApplicationError(400, 'expired-confirmation-token', 'Confirmation token expired.');
-    }
-    return pending;
-  }
-
-  private pruneExpiredConfirmations(): void {
-    const now = Date.now();
-    for (const [token, pending] of this.pendingConfirmations) {
-      if (Date.parse(pending.expiresAt) <= now) {
-        this.pendingConfirmations.delete(token);
-      }
-    }
-  }
-
-  private pruneExpiredAgentSurfaceConfirmations(): void {
-    const now = Date.now();
-    for (const [token, pending] of this.pendingAgentSurfaceConfirmations) {
-      if (Date.parse(pending.expiresAt) <= now) {
-        this.pendingAgentSurfaceConfirmations.delete(token);
-      }
-    }
-  }
-
-  private pruneIntentJobs(): void {
-    const maxJobs = 50;
-    if (this.intentJobs.size <= maxJobs) {
-      return;
-    }
-
-    const removable = Array.from(this.intentJobs.values())
-      .filter((job) => job.status !== 'running' && job.status !== 'queued')
-      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
-
-    for (const job of removable) {
-      if (this.intentJobs.size <= maxJobs) {
-        return;
-      }
-      this.intentJobs.delete(job.id);
-    }
-  }
-}
-
-interface PendingConfirmation {
-  token: string;
-  mode: 'intent' | 'execution' | 'proposal';
-  expiresAt: string;
-  challenge: MonarchConfirmationChallenge;
-  target: MonarchConfirmationChallenge['target'];
-  text?: string;
-  intent?: MonarchIntent;
-  route?: MonarchRouteDecision;
-  plan?: MonarchPlan;
-  request?: MonarchExecutionRequest;
-  proposal?: MonarchActionProposalV1;
-  originatingUserText?: string;
-  grantOptions?: Array<'once' | 'task'>;
-  suggestedLease?: MonarchConfirmationChallenge['suggestedLease'];
-  securityOverride?: boolean;
-}
-
-interface PendingAgentSurfaceConfirmation {
-  token: string;
-  taskId: string;
-  approvalId: string;
-  source: Extract<MonarchIntentSource, 'telegram' | 'voice' | 'api'>;
-  text: string;
-  contextKey: string;
-  expiresAt: string;
-}
-
-interface PendingIntentJob extends MonarchIntentJobSnapshot {
-  cancelled: boolean;
 }
 
 function readBoundedContextId(value: unknown): string {
-  const normalized = typeof value === 'string'
-    ? value.trim().replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 256)
-    : '';
+  const raw = typeof value === 'string'
+    ? value
+    : typeof value === 'number' && Number.isSafeInteger(value)
+      ? String(value)
+      : '';
+  const normalized = raw.trim().replace(/[^A-Za-z0-9._:-]/g, '_').slice(0, 256);
   return normalized;
 }
 
-function agentSurfaceContextKey(context: Record<string, unknown> | undefined): string {
-  return JSON.stringify([
-    String(context?.clientConversationId || ''),
-    String(context?.clientSessionId || ''),
-    String(context?.telegramChatId || ''),
-    String(context?.telegramUserId || ''),
-  ]);
+function surfaceConversationId(
+  source: Extract<MonarchIntentSource, 'desktop' | 'telegram' | 'voice' | 'api' | 'system'>,
+  context: Record<string, unknown>,
+): string {
+  if (source === 'telegram') {
+    const chatId = readBoundedContextId(context.telegramChatId);
+    const userId = readBoundedContextId(context.telegramUserId);
+    if (!chatId || !userId) {
+      throw new MonarchApplicationError(400, 'telegram-actor-binding-required', 'Telegram Turn requires exact chat_id and user_id bindings.');
+    }
+    return `telegram:${chatId}:${userId}`;
+  }
+  return readBoundedContextId(context.clientConversationId)
+    || readBoundedContextId(context.clientSessionId)
+    || `${source}:default`;
+}
+
+function isSurfaceTurnSettled(status: OscarTurnCheckpoint['turn']['status']): boolean {
+  return [
+    'waiting-for-user',
+    'waiting-for-approval',
+    'succeeded',
+    'blocked',
+    'failed',
+    'cancelled',
+  ].includes(status);
+}
+
+function approvalPresentation(checkpoint: OscarTurnCheckpoint): Record<string, unknown> | null {
+  const activeApprovalId = checkpoint.turn.activeApprovalId;
+  const event = [...checkpoint.events].reverse().find((candidate) => (
+    candidate.type === 'approval.required'
+    && (!activeApprovalId || candidate.payload.approvalId === activeApprovalId)
+  ));
+  if (!event) return null;
+  const required = ['taskId', 'approvalId', 'capabilityId', 'canonicalProposalHash', 'expiresAt'] as const;
+  if (required.some((key) => typeof event.payload[key] !== 'string' || !String(event.payload[key]).trim())) return null;
+  return {
+    turnId: checkpoint.turn.id,
+    taskId: String(event.payload.taskId),
+    approvalId: String(event.payload.approvalId),
+    capabilityId: String(event.payload.capabilityId),
+    canonicalProposalHash: String(event.payload.canonicalProposalHash),
+    target: String(event.payload.target || ''),
+    risk: String(event.payload.risk || 'action'),
+    expiresAt: String(event.payload.expiresAt),
+    requiresArm: event.payload.requiresArm === true,
+  };
+}
+
+function requiresSensitiveAgentApproval(approval: AgentApproval): boolean {
+  if (approval.purpose === 'owner-security-override') return true;
+  const riskVector = approval.proposal.riskVector;
+  const effect = riskVector && typeof riskVector === 'object' && !Array.isArray(riskVector)
+    ? String((riskVector as Record<string, unknown>).effect || '')
+    : '';
+  return /(?:delete|device-control|identity|irreversible|sensitive)/iu.test(effect)
+    || /(?:delete|trash|recycle-bin\.empty|identity|credential)/iu.test(approval.capabilityId);
 }
 
 function canGrantTaskLease(proposal: MonarchActionProposalV1): boolean {
-  return proposal.capabilityId.startsWith('workspace.')
+  return supportsWorkspaceTaskLease(proposal.capabilityId)
     && proposal.riskVector.effect !== 'delete'
     && proposal.riskVector.effect !== 'network'
     && proposal.riskVector.effect !== 'execute'
@@ -1330,29 +1378,32 @@ function canGrantTaskLease(proposal: MonarchActionProposalV1): boolean {
     && proposal.riskVector.data !== 'secret';
 }
 
-function snapshotIntentJob(job: PendingIntentJob): MonarchIntentJobSnapshot {
-  const snapshot: MonarchIntentJobSnapshot = {
-    id: job.id,
-    text: job.text,
-    source: job.source,
-    status: job.status,
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    startedAt: job.startedAt,
-    finishedAt: job.finishedAt,
-    timeoutMs: job.timeoutMs,
-    summary: job.summary,
-    progress: [...job.progress],
-    result: job.result,
-    error: job.error,
-  };
-  if (job.clientConversationId) {
-    snapshot.clientConversationId = job.clientConversationId;
-  }
-  if (job.clientSessionId) {
-    snapshot.clientSessionId = job.clientSessionId;
-  }
-  return snapshot;
+function readOscarAnswer(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const record = value as Record<string, unknown>;
+  if (typeof record.answer === 'string' && record.answer.trim()) return record.answer;
+  if (typeof record.content === 'string' && record.content.trim()) return record.content;
+  const choices = Array.isArray(record.choices) ? record.choices : [];
+  const first = choices[0];
+  if (!first || typeof first !== 'object' || Array.isArray(first)) return '';
+  const choice = first as Record<string, unknown>;
+  if (typeof choice.text === 'string' && choice.text.trim()) return choice.text;
+  const message = choice.message;
+  return message && typeof message === 'object' && !Array.isArray(message)
+    && typeof (message as Record<string, unknown>).content === 'string'
+    ? String((message as Record<string, unknown>).content)
+    : '';
+}
+
+function isOscarRecoveryPayload(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const usage = (value as Record<string, unknown>).usage;
+  return Boolean(
+    usage
+    && typeof usage === 'object'
+    && !Array.isArray(usage)
+    && (usage as Record<string, unknown>).runtime_recovery === true,
+  );
 }
 
 function permissionProfilePath(stateRoot: string): string {
@@ -1384,149 +1435,32 @@ function readStoredPermissionProfile(stateRoot: string): MonarchPermissionProfil
   return undefined;
 }
 
+function migrateStoredOwnerPermissionProfile(
+  profile: MonarchPermissionProfile | undefined,
+  authority: MonarchAuthorityContext,
+): MonarchPermissionProfile | undefined {
+  if (!profile || authority.tier !== 'owner') return profile;
+  if (profile.sandboxMode !== 'danger-full-access' || profile.approvalPolicy !== 'never') return profile;
+  return {
+    autonomyMode: 'full-local',
+    sandboxMode: 'danger-full-access',
+    approvalPolicy: 'on-request',
+  };
+}
+
 function persistPermissionProfile(stateRoot: string, profile: MonarchPermissionProfile): void {
   try {
     const filePath = permissionProfilePath(stateRoot);
     mkdirSync(path.dirname(filePath), { recursive: true });
-    writeFileSync(filePath, `${JSON.stringify(profile, null, 2)}\n`, 'utf8');
+    writeFileSync(filePath, `${JSON.stringify({ schemaVersion: 2, ...profile }, null, 2)}\n`, 'utf8');
   } catch {
     // The in-memory profile remains active when a read-only workspace cannot persist settings.
   }
 }
 
-function buildRecentIntentJobSnapshot(job: PendingIntentJob): MonarchRecentIntentJobSnapshot {
-  const result = job.result;
-  const step = result?.plan?.steps.at(-1);
-  const execution = result?.execution;
-  const executionRecord = execution as (MonarchExecutionResult & { result?: unknown }) | null | undefined;
-  const snapshot: MonarchRecentIntentJobSnapshot = {
-    jobId: job.id,
-    source: job.source,
-    createdAt: parseTimestamp(job.createdAt),
-    updatedAt: parseTimestamp(job.updatedAt),
-    normalizedStatus: normalizeRecentIntentJobStatus(job),
-  };
-
-  if (job.clientConversationId) {
-    (snapshot as WritableRecentIntentJobSnapshot).clientConversationId = job.clientConversationId;
-  }
-  if (job.clientSessionId) {
-    (snapshot as WritableRecentIntentJobSnapshot).clientSessionId = job.clientSessionId;
-  }
-
-  const routeTarget = result?.route?.targetModuleId || step?.moduleId;
-  if (routeTarget) {
-    (snapshot as WritableRecentIntentJobSnapshot).routeTarget = routeTarget;
-  }
-
-  const capability = result?.route?.capabilityId || step?.capabilityId;
-  if (capability) {
-    (snapshot as WritableRecentIntentJobSnapshot).capability = capability;
-  }
-
-  const inputSummary = safePreview(step?.input ?? result?.route?.input ?? { text: job.text });
-  if (inputSummary) {
-    (snapshot as WritableRecentIntentJobSnapshot).inputSummary = inputSummary;
-  }
-
-  const resultSummary = safePreview(execution?.output ?? executionRecord?.result ?? result?.summary ?? job.summary);
-  if (resultSummary) {
-    (snapshot as WritableRecentIntentJobSnapshot).resultSummary = resultSummary;
-  }
-
-  const errorSummary = safePreview(job.error ?? execution?.error);
-  if (errorSummary) {
-    (snapshot as WritableRecentIntentJobSnapshot).errorSummary = errorSummary;
-  }
-
-  return Object.freeze(snapshot);
-}
-
-type WritableRecentIntentJobSnapshot = {
-  -readonly [Key in keyof MonarchRecentIntentJobSnapshot]: MonarchRecentIntentJobSnapshot[Key];
-};
-
-function normalizeRecentIntentJobStatus(job: PendingIntentJob): MonarchRecentIntentJobNormalizedStatus {
-  if (job.status === 'queued' || job.status === 'running') {
-    return 'running';
-  }
-  if (job.status === 'cancelled') {
-    return 'user_aborted';
-  }
-  if (job.status === 'failed' || job.status === 'timeout') {
-    return 'runtime_failure';
-  }
-  if (job.status !== 'completed') {
-    return 'unknown';
-  }
-
-  const execution = job.result?.execution;
-  if (execution?.error === 'confirmation-required') {
-    return 'paused_at_security_gate';
-  }
-  if (execution?.ok) {
-    return 'success';
-  }
-  if (execution?.error) {
-    return 'execution_failed';
-  }
-  return 'unknown';
-}
-
-function isInjectableRecentJobStatus(status: MonarchRecentIntentJobNormalizedStatus): boolean {
-  return status === 'success'
-    || status === 'paused_at_security_gate'
-    || status === 'user_aborted'
-    || status === 'execution_failed'
-    || status === 'runtime_failure';
-}
-
-function touchIntentJob(job: PendingIntentJob): void {
-  job.updatedAt = nowIso();
-}
-
 function normalizeJobTimeout(value: unknown): number {
   const parsed = typeof value === 'number' && Number.isFinite(value) ? value : 90000;
   return Math.max(5000, Math.min(Math.floor(parsed), 30 * 60 * 1000));
-}
-
-function shouldBypassIntentJobQueue(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  return /(cancel|abort|status|health|diagnose|diagnostic|audit|logs?|integrity|queue|отмени|прерви|статус|здоров|диагност|аудит|логи|целост|очеред)/i.test(normalized)
-    && /(oscar|security|protect|model|runtime|monarch|безопас|защит|модель|рантайм|монарх)/i.test(normalized);
-}
-
-function normalizeRecentJobLimit(value: unknown): number {
-  const parsed = typeof value === 'number' && Number.isFinite(value) ? value : 1;
-  return Math.max(1, Math.min(Math.floor(parsed), 20));
-}
-
-function normalizeRecentJobMaxAge(value: unknown): number {
-  const parsed = typeof value === 'number' && Number.isFinite(value) ? value : 5 * 60 * 1000;
-  return Math.max(1000, Math.min(Math.floor(parsed), 30 * 60 * 1000));
-}
-
-function readContextString(context: Record<string, unknown> | undefined, key: string): string {
-  const value = context?.[key];
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function readOperationalScope(context: Record<string, unknown> | undefined): string {
-  const conversationId = readContextString(context, 'clientConversationId');
-  const sessionId = readContextString(context, 'clientSessionId');
-  return conversationId && sessionId ? `${sessionId}\u0000${conversationId}` : '';
-}
-
-function readQueryString(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function parseTimestamp(value: string): number {
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 class MonarchApplicationError extends Error {
@@ -1537,19 +1471,6 @@ class MonarchApplicationError extends Error {
   ) {
     super(message);
   }
-}
-
-function isMonarchRisk(value: unknown): value is MonarchRisk {
-  return value === 'none'
-    || value === 'read'
-    || value === 'write'
-    || value === 'delete'
-    || value === 'execute'
-    || value === 'network'
-    || value === 'device-control'
-    || value === 'money'
-    || value === 'identity'
-    || value === 'security-sensitive';
 }
 
 function readBooleanEnvironment(name: string, fallback: boolean): boolean {

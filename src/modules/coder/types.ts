@@ -1,3 +1,5 @@
+import type { MonarchPersonalityContextV2 } from '../../settings';
+
 export type CoderProjectSource = 'created' | 'imported';
 
 export interface CoderProject {
@@ -81,6 +83,10 @@ export interface CoderRun {
   projectId: string;
   projectName?: string;
   projectRoot?: string;
+  /** Common Oscar Turn and AgentTask identities for Agent-First runs. */
+  oscarTurnId?: string;
+  agentTaskId?: string;
+  agentEventSequence?: number;
   prompt: string;
   model: CoderModelId;
   fallbackModel: CoderModelId;
@@ -94,9 +100,21 @@ export interface CoderRun {
   iteration: number;
   maxIterations: number;
   cancelled: boolean;
+  /** Immutable project-scoped style snapshot. Missing only on legacy/pending runs. */
+  personality?: MonarchPersonalityContextV2 | null;
   events: CoderRunEvent[];
   summary: CoderContextSummary;
   context: CoderContextMetrics;
+  /** Exact durable action-card projected from the linked AgentTask. */
+  agentApproval?: {
+    id: string;
+    capabilityId: string;
+    canonicalProposalHash: string;
+    reason: string;
+    expiresAt?: string;
+    purpose?: 'policy' | 'owner-security-override';
+    proposal: Record<string, unknown>;
+  };
 }
 
 export interface CoderProjectSnapshot {

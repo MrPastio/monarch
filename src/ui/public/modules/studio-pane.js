@@ -1,5 +1,6 @@
 import { executeCapability, executeConfirmedCapability } from './api.js';
 import { escapeHtml, readErrorMessage } from './utils.js';
+import { swapUiSurface } from './ui-motion.js';
 
 const ICON_ROOT = '/assets/icons/phosphor';
 const DEFAULT_IMAGE = '/assets/studio/guided-portrait.png';
@@ -122,6 +123,7 @@ export function initStudioPane() {
   bindMediaInputs();
   bindKeyboardShortcuts();
   bindAnnotationCanvas();
+  openModulesPanel('library', false);
   const image = byId('studio-photo-after');
   image?.addEventListener('load', () => syncSourceDimensions(false));
   resetPhotoEditor(false);
@@ -147,7 +149,8 @@ function bindTabs() {
   });
 }
 
-function openModulesPanel(panelName) {
+function openModulesPanel(panelName, animate = true) {
+  const applyPanel = () => {
   document.querySelectorAll('[data-modules-tab]').forEach((button) => {
     const active = button.dataset.modulesTab === panelName;
     button.classList.toggle('active', active);
@@ -158,6 +161,9 @@ function openModulesPanel(panelName) {
   });
   if (panelName !== 'studio') byId('studio-video')?.pause();
   if (panelName === 'library') void loadModuleLibrary();
+  };
+  if (animate) void swapUiSurface(byId('modules-workspace'), applyPanel, { direction: panelName === 'studio' ? 1 : -1 });
+  else applyPanel();
 }
 
 function bindPhotoEditor() {
@@ -372,7 +378,7 @@ function switchStudioMode(mode) {
   });
   renderSaveLabel();
   setStudioStatus(isVideo
-    ? (studioState.videoUrl ? 'Видео готово к монтажу · экспорт WebM работает локально' : 'Добавь видео, задай границы и экспортируй WebM')
+    ? (studioState.videoUrl ? 'Видео готово к монтажу' : 'Добавь видео, задай границы и экспортируй WebM')
     : 'Фото готово к обработке · всё работает локально');
 }
 
@@ -974,7 +980,7 @@ function bindLibrary() {
 }
 
 async function loadModuleLibrary() {
-  setLibraryStatus('Обновляю локальный каталог…');
+  setLibraryStatus('Обновляю список…');
   try {
     const payload = await executeCapability('monarch-modules', 'monarch-modules.catalog.list', {}, 'studio-ui', false);
     const result = unwrapCapabilityResponse(payload);
@@ -989,16 +995,21 @@ async function loadModuleLibrary() {
 
 function renderModuleLibrary(modules) {
   const grid = byId('module-library-grid');
-  const cards = modules.map((module) => `
+  const cards = modules.map((module) => {
+    const description = module.id === 'studio'
+      ? 'Работа с фото и видео внутри Monarch Modules.'
+      : module.description || '';
+    return `
     <article class="module-library-card ${module.id === 'studio' ? 'featured' : ''}">
       <div class="module-card-icon"><img src="${ICON_ROOT}/${module.id === 'studio' ? 'image' : 'cube'}.svg" alt=""></div>
-      <div><span>${escapeHtml(module.stage ? `${module.stage} · ${module.status || 'registered'}` : module.status || 'registered')}</span><h3>${escapeHtml(module.name || module.id)}</h3><p>${escapeHtml(module.description || '')}</p></div>
+      <div><span>${escapeHtml(module.stage ? `${module.stage} · ${module.status || 'active'}` : module.status || 'active')}</span><h3>${escapeHtml(module.name || module.id)}</h3><p>${escapeHtml(description)}</p></div>
       ${module.id === 'studio' ? '<button type="button" data-open-studio>Открыть Studio</button>' : `<button type="button" disabled>${Number(module.capabilities || 0)} возможностей</button>`}
-    </article>`).join('');
+    </article>`;
+  }).join('');
   grid.innerHTML = `${cards}
     <article class="module-library-card create-card">
       <div class="module-card-icon"><img src="${ICON_ROOT}/magic-wand.svg" alt=""></div>
-      <div><span>Guided Builder</span><h3>Создать следующий</h3><p>Выбери рецепт, посмотри каждый файл и создай безопасный scaffold.</p></div>
+      <div><span>Пошаговое создание</span><h3>Создать модуль</h3><p>Выбери основу, проверь будущие файлы и создай модуль.</p></div>
       <button type="button" data-open-builder>Начать</button>
     </article>`;
   grid.querySelector('[data-open-studio]')?.addEventListener('click', () => openModulesPanel('studio'));

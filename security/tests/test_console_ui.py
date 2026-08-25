@@ -1,5 +1,7 @@
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from monarch_security.cli import _format_payload, _split_console_command, main
@@ -19,11 +21,14 @@ class ConsoleUiTests(unittest.TestCase):
         self.assertIn("attack-simulation", output)
 
     def test_tui_once_shows_quick_actions_and_full_catalog(self):
-        stream = StringIO()
-        with redirect_stdout(stream):
-            code = main(["tui", "--once"])
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "monarch_security.toml"
+            config_path.write_text("[runtime]\n", encoding="utf-8")
+            stream = StringIO()
+            with redirect_stdout(stream):
+                code = main(["--config", str(config_path), "tui", "--once"])
 
-        output = stream.getvalue()
+            output = stream.getvalue()
         self.assertEqual(code, 0)
         self.assertIn("Быстрые действия", output)
         self.assertIn("Команды Monarch Security", output)

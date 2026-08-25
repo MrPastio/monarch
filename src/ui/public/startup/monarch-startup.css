@@ -150,7 +150,7 @@
     transparent 72%
   );
   filter: blur(18px);
-  animation: monarch-aura 2.6s ease-in-out infinite;
+  animation: monarch-aura 5.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
 }
 
 .monarch-startup__logo {
@@ -233,7 +233,7 @@
   stroke-width: 0.8;
   opacity: 0;
   transform-origin: 90px 98px;
-  animation: monarch-core-ring 1.8s 1.15s ease-out infinite;
+  animation: monarch-core-ring 1.08s 1.15s ease-out infinite;
 }
 
 .monarch-startup__core {
@@ -252,7 +252,7 @@
   border: 1px solid rgba(189, 161, 255, 0.2);
   border-radius: 50%;
   opacity: 0;
-  animation: monarch-pulse 2.2s 1.25s ease-out infinite;
+  animation: monarch-pulse 1.08s 1.25s ease-out infinite;
 }
 
 .monarch-startup__identity {
@@ -332,7 +332,7 @@
   box-shadow:
     0 0 7px rgba(201, 166, 255, 0.85),
     0 0 16px rgba(201, 166, 255, 0.35);
-  animation: monarch-indicator 1.35s ease-in-out infinite;
+  animation: monarch-indicator 1.08s ease-in-out infinite;
 }
 
 .monarch-startup__status-text--change {

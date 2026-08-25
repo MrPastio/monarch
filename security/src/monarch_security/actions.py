@@ -8,8 +8,10 @@ import ctypes
 import base64
 import json
 import os
+import re
 import secrets
 import subprocess
+import sys
 import time
 from multiprocessing.connection import Client, Listener
 
@@ -38,6 +40,24 @@ ACTION_STATES = {"pending", "active", "rolled_back", "failed"}
 RESPONSE_EXECUTOR_TASK = "MonarchSecurityResponseExecutor"
 RESPONSE_EXECUTOR_PIPE = r"\\.\pipe\MonarchSecurityResponseExecutor"
 RESPONSE_EXECUTOR_AUTH = b"monarch-security-response-v1"
+RESPONSE_RUNTIME_DIGEST_PATTERN = re.compile(r"^[a-f0-9]{64}$")
+RESPONSE_EXECUTOR_ENVIRONMENT = (
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramData",
+    "USERPROFILE",
+    "SystemRoot",
+    "WINDIR",
+    "MONARCH_DATA_ROOT",
+    "MONARCH_LOGS_ROOT",
+    "MONARCH_MODELS_ROOT",
+    "MONARCH_PAYLOAD_ROOT",
+    "MONARCH_SAFE_ROOT",
+    "MONARCH_SECURITY_DATA_ROOT",
+    "MONARCH_SECURITY_LOGS_ROOT",
+    "MONARCH_SECURITY_PROTECTED_ROOTS",
+    "MONARCH_WORKSPACE_ROOT",
+)
 
 
 class ResponseActionError(RuntimeError):
@@ -46,6 +66,12 @@ class ResponseActionError(RuntimeError):
 
 class ResponseGrantError(ResponseActionError):
     pass
+
+
+@dataclass(frozen=True)
+class ResponseRuntimeLayout:
+    attested_roots: tuple[Path, ...]
+    import_roots: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -610,16 +636,25 @@ def install_response_executor_task(
     python_path = python_path.resolve(strict=True)
     launcher_path = launcher_path.resolve(strict=True)
     config_path = config_path.resolve(strict=True)
-    for value in (str(python_path), str(launcher_path), str(config_path)):
-        if "'" in value or '"' in value or "\r" in value or "\n" in value:
-            raise ResponseActionError("Response executor path contains unsupported characters")
-    arguments = (
-        f"\"{launcher_path}\" --config \"{config_path}\" "
-        "response-service-run --confirm-service-action --poll-seconds 5"
+    layout = _resolve_response_runtime_layout(python_path, config_path)
+    digest = _attest_response_runtime(layout.attested_roots)
+    if not RESPONSE_RUNTIME_DIGEST_PATTERN.fullmatch(digest):
+        raise ResponseActionError("Response runtime attestation returned an invalid digest")
+    launch_script = _response_runtime_preflight_script(
+        layout.attested_roots,
+        expected_digest=digest,
+        python_path=python_path,
+        config_path=config_path,
+        import_roots=layout.import_roots,
+        environment=_response_executor_environment(),
     )
+    encoded_launch = base64.b64encode(launch_script.encode("utf-16le")).decode("ascii")
+    arguments = f"-NoProfile -NonInteractive -EncodedCommand {encoded_launch}"
+    powershell_path = _windows_powershell_path()
     command = (
         "$ErrorActionPreference='Stop';"
-        f"$a=New-ScheduledTaskAction -Execute '{python_path}' -Argument '{arguments}';"
+        f"$a=New-ScheduledTaskAction -Execute '{_powershell_quote(str(powershell_path))}' "
+        f"-Argument '{arguments}';"
         "$t=New-ScheduledTaskTrigger -AtLogOn;"
         "$s=New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) "
         "-ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable;"
@@ -628,6 +663,240 @@ def install_response_executor_task(
         f"Start-ScheduledTask -TaskName '{RESPONSE_EXECUTOR_TASK}'"
     )
     (runner or _run_admin_powershell)(command)
+
+
+def _resolve_response_runtime_layout(
+    python_path: Path,
+    config_path: Path,
+) -> ResponseRuntimeLayout:
+    current_python = Path(sys.executable).resolve(strict=True)
+    if not _same_path(python_path, current_python):
+        raise ResponseActionError("Response executor must attest the active Python runtime")
+
+    runtime_root = Path(sys.prefix).resolve(strict=True)
+    base_runtime_root = Path(sys.base_prefix).resolve(strict=True)
+    source_root = Path(__file__).resolve(strict=True).parents[1]
+    import_roots = [source_root]
+    configured_site_packages = os.getenv("MONARCH_SECURITY_SITE_PACKAGES", "").strip()
+    if configured_site_packages:
+        import_roots.append(Path(configured_site_packages).resolve(strict=True))
+
+    roots = [
+        runtime_root,
+        base_runtime_root,
+        *import_roots,
+        config_path,
+        _windows_powershell_path(),
+    ]
+    return ResponseRuntimeLayout(
+        attested_roots=_minimal_attestation_roots(roots),
+        import_roots=tuple(_unique_paths(import_roots)),
+    )
+
+
+def _attest_response_runtime(roots: tuple[Path, ...]) -> str:
+    script = _response_runtime_preflight_script(roots)
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    completed = subprocess.run(
+        [
+            str(_windows_powershell_path()),
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            encoded,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    output = "\n".join((completed.stdout or "", completed.stderr or ""))
+    marker = "MONARCH_RESPONSE_RUNTIME_SHA256="
+    error_marker = "MONARCH_RESPONSE_RUNTIME_ERROR="
+    digest = ""
+    reported_error = ""
+    for line in output.splitlines():
+        if line.strip().startswith(marker):
+            digest = line.strip()[len(marker):].lower()
+        if line.strip().startswith(error_marker):
+            reported_error = line.strip()[len(error_marker):]
+    if completed.returncode != 0 or not RESPONSE_RUNTIME_DIGEST_PATTERN.fullmatch(digest):
+        detail = reported_error or (
+            completed.stderr or completed.stdout or "runtime attestation failed"
+        ).strip()
+        raise ResponseActionError(f"Response runtime attestation failed: {detail[:1000]}")
+    return digest
+
+
+def _response_runtime_preflight_script(
+    roots: tuple[Path, ...],
+    *,
+    expected_digest: str = "",
+    python_path: Path | None = None,
+    config_path: Path | None = None,
+    import_roots: tuple[Path, ...] = (),
+    environment: dict[str, str] | None = None,
+) -> str:
+    if expected_digest and not RESPONSE_RUNTIME_DIGEST_PATTERN.fullmatch(expected_digest):
+        raise ResponseActionError("Response runtime expected digest is invalid")
+    launch_requested = python_path is not None or config_path is not None
+    if launch_requested and (python_path is None or config_path is None):
+        raise ResponseActionError("Response runtime launch paths are incomplete")
+
+    roots_payload = _base64_json([str(path) for path in roots])
+    launch_payload = _base64_json({
+        "python": str(python_path or ""),
+        "config": str(config_path or ""),
+        "import_roots": [str(path) for path in import_roots],
+        "environment": environment or {},
+    })
+    expected = expected_digest.lower()
+    launch = "$true" if launch_requested else "$false"
+    return f"""$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
+[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
+try {{
+$roots=([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{roots_payload}'))|ConvertFrom-Json)
+$launchPayload=([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{launch_payload}'))|ConvertFrom-Json)
+$trusted=@('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+$writeMask=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+$checked=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+function Assert-MonarchRuntimePath([IO.FileSystemInfo]$item) {{
+  if (-not $checked.Add($item.FullName)) {{ return }}
+  if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{ throw "Runtime path is a reparse point: $($item.FullName)" }}
+  $sections=[Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
+  try {{ $acl=$item.GetAccessControl($sections); $owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value }} catch {{ throw "Runtime ACL cannot be read: $($item.FullName)" }}
+  if ($trusted -notcontains $owner) {{ throw "Runtime owner is not trusted: $($item.FullName)" }}
+  foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {{
+    if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or (($rule.FileSystemRights -band $writeMask) -eq 0)) {{ continue }}
+    $sid=$rule.IdentityReference.Value
+    if ($trusted -notcontains $sid) {{ throw "Runtime path grants write-like access outside trusted principals: $($item.FullName)" }}
+  }}
+}}
+function Get-MonarchRuntimeSha256([string]$path) {{
+  $fileSha=[Security.Cryptography.SHA256]::Create()
+  $stream=[IO.File]::OpenRead($path)
+  try {{ return ([BitConverter]::ToString($fileSha.ComputeHash($stream))).Replace('-','').ToLowerInvariant() }} finally {{ $stream.Dispose(); $fileSha.Dispose() }}
+}}
+$records=New-Object 'System.Collections.Generic.List[string]'
+$rootIndex=0
+foreach ($rootValue in $roots) {{
+  $root=[IO.Path]::GetFullPath([string]$rootValue)
+  $rootItem=Get-Item -LiteralPath $root -Force
+  $cursor=$rootItem
+  while ($null -ne $cursor) {{ Assert-MonarchRuntimePath $cursor; $cursor=$cursor.Parent }}
+  $items=@($rootItem)
+  if ($rootItem.PSIsContainer) {{ $items+=@(Get-ChildItem -LiteralPath $root -Recurse -Force) }}
+  foreach ($item in $items) {{
+    Assert-MonarchRuntimePath $item
+    if (-not $item.PSIsContainer) {{
+      $relative=if ($rootItem.PSIsContainer) {{ $item.FullName.Substring($root.TrimEnd('\\').Length).TrimStart('\\').Replace('\\','/') }} else {{ $item.Name }}
+      $hash=Get-MonarchRuntimeSha256 $item.FullName
+      $records.Add("$rootIndex/$relative`0$($item.Length)`0$hash`n")
+    }}
+  }}
+  $rootIndex++
+}}
+$sorted=$records.ToArray()
+[Array]::Sort($sorted,[StringComparer]::Ordinal)
+$bytes=(New-Object Text.UTF8Encoding($false)).GetBytes(($sorted -join ''))
+$sha=[Security.Cryptography.SHA256]::Create()
+try {{ $digest=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }} finally {{ $sha.Dispose() }}
+$expected='{expected}'
+if ($expected -and $digest -ne $expected) {{ throw 'Response runtime digest mismatch' }}
+Write-Output "MONARCH_RESPONSE_RUNTIME_SHA256=$digest"
+if ({launch}) {{
+  Get-ChildItem Env: | Where-Object {{ $_.Name -like 'MONARCH_*' -or $_.Name -like 'PYTHON*' }} | Remove-Item
+  foreach ($property in $launchPayload.environment.PSObject.Properties) {{ Set-Item -LiteralPath "Env:$($property.Name)" -Value ([string]$property.Value) }}
+  $env:PYTHONDONTWRITEBYTECODE='1'
+  $pythonDirectory=[IO.Path]::GetDirectoryName([string]$launchPayload.python)
+  $env:PATH="$pythonDirectory;$env:SystemRoot\\System32;$env:SystemRoot;$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0"
+  Set-Location -LiteralPath "$env:SystemRoot\\System32"
+  $env:MONARCH_RESPONSE_IMPORT_ROOTS=($launchPayload.import_roots|ConvertTo-Json -Compress)
+  $bootstrap="import json,os,sys;roots=json.loads(os.environ.pop('MONARCH_RESPONSE_IMPORT_ROOTS'));sys.path[:0]=roots;from monarch_security.cli import main;raise SystemExit(main())"
+  & ([string]$launchPayload.python) '-I' '-P' '-B' '-c' $bootstrap '--config' ([string]$launchPayload.config) 'response-service-run' '--confirm-service-action' '--poll-seconds' '5'
+  if ($LASTEXITCODE -ne 0) {{ throw "Response executor exited with code $LASTEXITCODE" }}
+}}
+}} catch {{
+  Write-Output "MONARCH_RESPONSE_RUNTIME_ERROR=$($_.Exception.Message)"
+  exit 1
+}}
+"""
+
+
+def _base64_json(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    return base64.b64encode(encoded).decode("ascii")
+
+
+def _response_executor_environment() -> dict[str, str]:
+    values = {
+        name: os.environ[name]
+        for name in RESPONSE_EXECUTOR_ENVIRONMENT
+        if os.environ.get(name)
+    }
+    windows_root = str(_windows_powershell_path().parents[3])
+    values["SystemRoot"] = windows_root
+    values["WINDIR"] = windows_root
+    return values
+
+
+def _windows_powershell_path() -> Path:
+    if sys.platform != "win32":
+        raise ResponseActionError("Windows PowerShell is unavailable")
+    buffer = ctypes.create_unicode_buffer(32_768)
+    length = ctypes.windll.kernel32.GetWindowsDirectoryW(buffer, len(buffer))
+    if length <= 0 or length >= len(buffer):
+        raise ResponseActionError("Windows directory cannot be resolved")
+    candidate = (
+        Path(buffer.value)
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    try:
+        return candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ResponseActionError("Windows PowerShell executable is unavailable") from exc
+
+
+def _powershell_quote(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _minimal_attestation_roots(paths: list[Path]) -> tuple[Path, ...]:
+    unique = _unique_paths(paths)
+    selected: list[Path] = []
+    for candidate in sorted(unique, key=lambda item: len(item.parts)):
+        if any(_is_relative_to(candidate, parent) for parent in selected if parent.is_dir()):
+            continue
+        selected.append(candidate)
+    return tuple(selected)
+
+
+def _unique_paths(paths: list[Path]) -> list[Path]:
+    values: list[Path] = []
+    for candidate in paths:
+        resolved = candidate.resolve(strict=True)
+        if not any(_same_path(resolved, current) for current in values):
+            values.append(resolved)
+    return values
+
+
+def _same_path(first: Path, second: Path) -> bool:
+    return os.path.normcase(str(first)) == os.path.normcase(str(second))
+
+
+def _is_relative_to(candidate: Path, parent: Path) -> bool:
+    try:
+        candidate.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 def uninstall_response_executor_task(*, runner: Callable[[str], None] | None = None) -> None:
@@ -643,7 +912,15 @@ def uninstall_response_executor_task(*, runner: Callable[[str], None] | None = N
 
 def _run_admin_powershell(command: str) -> None:
     completed = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+        [
+            str(_windows_powershell_path()),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -683,6 +960,7 @@ def _run_powershell(arguments: list[str]) -> None:
     if arguments[0] == "add" and len(arguments) == 7:
         _, name, direction, protocol, address, port, expires_at = arguments
         task_name = f"MonarchSecurityRollback-{name.removeprefix('MonarchSecurity-')}"
+        powershell_path = _powershell_quote(str(_windows_powershell_path()))
         rollback_script = (
             "$ErrorActionPreference='SilentlyContinue';"
             f"Get-NetFirewallRule -Name '{name}' | Remove-NetFirewallRule;"
@@ -698,7 +976,7 @@ def _run_powershell(arguments: list[str]) -> None:
             f"-Direction '{direction}' -Action Block -Protocol '{protocol}' "
             f"-RemoteAddress '{address}' -RemotePort {int(port)} -Profile Any | Out-Null;"
             f"$at=[DateTimeOffset]::Parse('{expires_at}').LocalDateTime;"
-            f"$a=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -NonInteractive -EncodedCommand {encoded_rollback}';"
+            f"$a=New-ScheduledTaskAction -Execute '{powershell_path}' -Argument '-NoProfile -NonInteractive -EncodedCommand {encoded_rollback}';"
             "$t=New-ScheduledTaskTrigger -Once -At $at;"
             "Register-ScheduledTask -TaskName $taskName -Action $a -Trigger $t -User 'SYSTEM' -RunLevel Highest -Force | Out-Null"
             "} catch {"
@@ -718,7 +996,15 @@ def _run_powershell(arguments: list[str]) -> None:
     else:
         raise ResponseActionError("Invalid firewall service arguments")
     completed = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+        [
+            str(_windows_powershell_path()),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
         check=False,
         capture_output=True,
         text=True,

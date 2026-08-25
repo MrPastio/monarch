@@ -3,8 +3,8 @@ import type {
   MonarchActionProposalInput,
   MonarchActionProposalV1,
   MonarchCapabilityLeaseV1,
-  MonarchConfirmationChallenge,
   MonarchExecutionResult,
+  MonarchPermissionProfile,
 } from '../core/contracts';
 
 export interface AgentActionGatewaySubmission {
@@ -15,17 +15,28 @@ export interface AgentActionGatewaySubmission {
   model?: string;
   skillIds?: string[];
   confirmed?: boolean;
-  confirmationToken?: string;
   grantScope?: 'once' | 'task';
   leaseId?: string;
   executionMode?: 'agent-runtime';
+  /** Trusted task-owned profile; never accepted from model output or HTTP. */
+  permissionProfileOverride?: MonarchPermissionProfile;
+  agentApprovalBinding?: AgentActionGatewayApprovalBinding;
   signal?: AbortSignal;
+}
+
+export interface AgentActionGatewayApprovalBinding {
+  taskId: string;
+  approvalId: string;
+  capabilityId: string;
+  canonicalProposalHash: string;
+  purpose?: 'policy' | 'owner-security-override';
+  policyDecisionHash?: string;
+  authorityTierAtRequest?: 'public' | 'owner';
 }
 
 export interface AgentActionGatewayResult {
   proposal: MonarchActionProposalV1;
   result: MonarchExecutionResult;
-  confirmation?: MonarchConfirmationChallenge;
   lease?: MonarchCapabilityLeaseV1;
 }
 
@@ -45,12 +56,18 @@ export interface ExecuteAgentActionInput {
   model?: string;
   skillIds?: string[];
   leaseId?: string;
+  permissionProfileOverride?: MonarchPermissionProfile;
   signal?: AbortSignal;
 }
 
 export interface ExecuteApprovedAgentActionInput extends ExecuteAgentActionInput {
   expectedCanonicalHash: string;
+  taskId: string;
+  approvalId: string;
   grantScope?: 'once' | 'task';
+  purpose?: 'policy' | 'owner-security-override';
+  policyDecisionHash?: string;
+  authorityTierAtRequest?: 'public' | 'owner';
 }
 
 /**
@@ -79,6 +96,7 @@ export class AgentKernelExecutionAdapter {
       ...(input.model ? { model: input.model } : {}),
       ...(input.skillIds ? { skillIds: input.skillIds } : {}),
       ...(input.leaseId ? { leaseId: input.leaseId } : {}),
+      ...(input.permissionProfileOverride ? { permissionProfileOverride: input.permissionProfileOverride } : {}),
       executionMode: 'agent-runtime',
       ...(input.signal ? { signal: input.signal } : {}),
     });
@@ -93,14 +111,16 @@ export class AgentKernelExecutionAdapter {
       ...(input.model ? { model: input.model } : {}),
       ...(input.skillIds ? { skillIds: input.skillIds } : {}),
       ...(input.leaseId ? { leaseId: input.leaseId } : {}),
+      ...(input.permissionProfileOverride ? { permissionProfileOverride: input.permissionProfileOverride } : {}),
       executionMode: 'agent-runtime',
       ...(input.signal ? { signal: input.signal } : {}),
     });
   }
 
   async executeApproved(input: ExecuteApprovedAgentActionInput): Promise<AgentActionGatewayResult> {
-    // Re-preflight the exact durable proposal. The fresh challenge is kept only
-    // in memory and consumed immediately; no confirmation token is persisted.
+    // Re-preflight the exact durable proposal, then let Application validate the
+    // durable Agent approval binding. Model text and ephemeral tokens never
+    // become execution authority.
     const canonical = await this.prepare(input);
     if (canonical.canonicalHash !== input.expectedCanonicalHash) {
       throw new AgentActionGatewayError(
@@ -108,33 +128,26 @@ export class AgentKernelExecutionAdapter {
         'Stored approval no longer matches the canonical action proposal.',
       );
     }
-    const prepared = await this.execute({ ...input, proposal: canonical });
-    if (prepared.proposal.canonicalHash !== input.expectedCanonicalHash) {
-      throw new AgentActionGatewayError(
-        'approval-target-mismatch',
-        'Stored approval no longer matches the canonical action proposal.',
-      );
-    }
-    if (prepared.result.error !== 'confirmation-required') {
-      return prepared;
-    }
-    if (!prepared.confirmation?.token) {
-      throw new AgentActionGatewayError(
-        'fresh-confirmation-missing',
-        'Action requires confirmation but the Application gateway did not issue a fresh challenge.',
-      );
-    }
     const executed = await this.submit({
-      proposal: prepared.proposal,
+      proposal: canonical,
       originatingUserText: input.originatingUserText,
       requestedBy: input.requestedBy,
       source: input.source,
       ...(input.model ? { model: input.model } : {}),
       ...(input.skillIds ? { skillIds: input.skillIds } : {}),
       confirmed: true,
-      confirmationToken: prepared.confirmation.token,
       grantScope: input.grantScope || 'once',
       executionMode: 'agent-runtime',
+      ...(input.permissionProfileOverride ? { permissionProfileOverride: input.permissionProfileOverride } : {}),
+      agentApprovalBinding: {
+        taskId: input.taskId,
+        approvalId: input.approvalId,
+        capabilityId: canonical.capabilityId,
+        canonicalProposalHash: input.expectedCanonicalHash,
+        ...(input.purpose ? { purpose: input.purpose } : {}),
+        ...(input.policyDecisionHash ? { policyDecisionHash: input.policyDecisionHash } : {}),
+        ...(input.authorityTierAtRequest ? { authorityTierAtRequest: input.authorityTierAtRequest } : {}),
+      },
       ...(input.signal ? { signal: input.signal } : {}),
     });
     if (executed.proposal.canonicalHash !== input.expectedCanonicalHash) {

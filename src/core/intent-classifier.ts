@@ -24,6 +24,10 @@ export interface OscarRequestDisposition {
   kind: MonarchIntentKind;
   confidence: number;
   reason: string;
+  /** A fresh/public-source answer is required; this never implies local execution authority. */
+  requiresExternalResearch: boolean;
+  /** The request names a canonical filesystem/workspace target for a local effect. */
+  hasLocalEffectTarget: boolean;
 }
 
 const INTENT_KINDS: MonarchIntentKind[] = [
@@ -70,7 +74,7 @@ export function classifyIntentText(text: string): MonarchIntentClassification {
 
   addIf(scores, signals, normalized, 'multimodal', 0.86, 'multimodal input', /(image|vision|picture|photo|screenshot|screen shot|audio|voice|изображ|картин|фото|скрин|визуал|аудио|голос)/i);
   addIf(scores, signals, normalized, 'search', 0.78, 'explicit web knowledge', /(?:web|internet|online|search web|find online|интернет|в сети|найди в интернете|поищи в интернете)/i);
-  addIf(scores, signals, normalized, 'file_operation', 0.74, 'file operation', /(read|open|delete|remove|rename|move|copy|list files|scan files|find file|find in project|search project|search code|прочитай|прочитать|открой|открыть|удали|переименуй|перемести|скопируй|список файлов|найди файл|найди.+(?:в проекте|по проекту|в коде|в репозитории)|поиск.+(?:в проекте|по проекту|в коде|в репозитории))/i);
+  addIf(scores, signals, normalized, 'file_operation', 0.74, 'file operation', /(\b(?:read|open|delete|remove|rename|move|copy|list files|scan files|audit (?:files|folders|directories|drive)|find file|find in project|search project|search code)\b|прочитай|прочитать|открой|открыть|удали|переименуй|перемести|скопируй|список файлов|(?:проведи|сделай|выполни) аудит (?:файлов|папок|каталогов|директорий|диска)|просканируй (?:файлы|папки|каталоги|диск)|найди файл|найди.+(?:в проекте|по проекту|в коде|в репозитории)|поиск.+(?:в проекте|по проекту|в коде|в репозитории))/i);
   addIf(scores, signals, normalized, 'file_generation', 0.76, 'file authoring', /(create|write|generate|draft|compose).{0,32}(file|doc|document|report|html|json|markdown|md)|(?:создай|сгенерируй|составь|напиши).{0,32}(файл|документ|отчет|html|json|md)/i);
   addIf(scores, signals, normalized, 'system_action', 0.78, 'system action', /(?:\b(?:run|execute|start|stop|restart|install|launch)\b.{0,32}\b(?:command|script|process|service|terminal|shell|runtime|backend)\b|(?:запусти|выполни|останови|перезапусти|установи).{0,32}(?:команду|скрипт|процесс|сервис|терминал|рантайм|бэкенд))/i);
   addIf(scores, signals, normalized, 'tool_use', 0.66, 'tool request', /(tool|tools|grep|rg|script|automation|use tool|run script|what can you do|available actions|инструмент|инструменты|тул|скрипт|автоматизац|что ты умеешь|что можешь|какими инструментами|доступные действия)/i);
@@ -264,7 +268,12 @@ function isExplicitSystemAction(text: string): boolean {
 }
 
 function isExplicitWebSearch(text: string): boolean {
-  return /(найди|поищи|search|find).{0,32}(?:в интернете|в сети|online|web|internet)/i.test(text)
+  const lookupVerb = /(?:^|[^\p{L}])(?:найди|поищи|подбери|search|find|look\s+up)(?:[^\p{L}]|$)/iu;
+  const explicitWebScope = /(?:\b(?:web|online|internet)\b|в\s+сети|в\s+интернете|веб[- ]?поиск|онлайн)/iu;
+  const externalResource = /(?:\b(?:website|site|service|platform|course|tutorial|resource|documentation|docs)\b|сайт\p{L}*|сервис\p{L}*|платформ\p{L}*|курс\p{L}*|учебник\p{L}*|ресурс\p{L}*|документац\p{L}*)/iu;
+  const lookupRequested = lookupVerb.test(text);
+  return (lookupRequested && explicitWebScope.test(text))
+    || (lookupRequested && externalResource.test(text) && !hasExplicitLocalLookupScope(text))
     || isBareExternalLookup(text)
     || hasFreshnessSignal(text);
 }
@@ -274,7 +283,11 @@ function isExplicitWebSearch(text: string): boolean {
  * model-driven inside Agent Runtime; ordinary answers stay on the chat path.
  */
 export function classifyOscarRequestDisposition(text: string): OscarRequestDisposition {
-  const classification = classifyIntentText(text);
+  const normalizedDispositionText = stripOperationalPrelude(normalizeText(text).toLowerCase());
+  const classification = classifyIntentText(normalizedDispositionText || text);
+  const suppliedMaterial = looksLikeSuppliedMaterial(normalizedDispositionText);
+  const responseOnlyMaterialReview = suppliedMaterial
+    || looksLikeResponseOnlyMaterialReview(normalizedDispositionText);
   const classifiedAsOperational = (
     classification.kind === 'file_generation'
     || classification.kind === 'file_operation'
@@ -283,40 +296,69 @@ export function classifyOscarRequestDisposition(text: string): OscarRequestDispo
   );
   const directOperationalRequest = looksLikeDirectOperationalRequest(text);
   const explicitNonActionRequest = looksLikeExplicitNonActionRequest(text);
+  const hasLocalEffectTarget = hasConcreteFilesystemTarget(text);
+  const requiresExternalResearch = !suppliedMaterial
+    && classification.kind === 'search'
+    && isExplicitWebSearch(text)
+    && !hasLocalEffectTarget;
+  const answerContentRequest = looksLikeContentGenerationWithoutLocalEffect(
+    normalizedDispositionText,
+  );
   // Broad intent classification may notice action words while the user is
   // discussing, criticizing, or explicitly refusing an action. It can label
   // the request, but only positive request shape may open the Agent surface.
-  const mode = !explicitNonActionRequest && directOperationalRequest
+  const mode = !explicitNonActionRequest
+    && !requiresExternalResearch
+    && !answerContentRequest
+    && !responseOnlyMaterialReview
+    && directOperationalRequest
     ? 'agent'
     : 'chat';
-  const dispositionKind = mode === 'agent' && !classifiedAsOperational
-    ? (hasConcreteFilesystemTarget(text) ? 'file_operation' : 'system_action')
-    : classification.kind;
+  const dispositionKind = requiresExternalResearch
+    ? classification.kind
+    : responseOnlyMaterialReview
+      ? 'text_generation'
+      : mode === 'agent' && !classifiedAsOperational
+        ? (hasConcreteFilesystemTarget(text) ? 'file_operation' : 'system_action')
+        : classification.kind;
 
   return {
     mode,
     kind: dispositionKind,
     confidence: classification.confidence,
+    requiresExternalResearch,
+    hasLocalEffectTarget,
     reason: mode === 'agent'
       ? `Operational intent requires a verified Agent Task (${dispositionKind}).`
-      : `No verified system effect is required (${dispositionKind}).`,
+      : requiresExternalResearch
+        ? 'The request requires a current external-source answer, not a local system effect.'
+        : responseOnlyMaterialReview
+          ? 'The request reviews supplied or conversational material and carries no local execution authority.'
+        : `No verified system effect is required (${dispositionKind}).`,
   };
 }
 
 const RU_OPERATION_WORDS = [
   'открой', 'открыть', 'запусти', 'запустить', 'создай', 'создать',
+  'проведи', 'провести', 'проверь', 'проверить', 'просканируй', 'просканировать',
+  'проаудируй', 'проаудировать',
   'допиши', 'дописать', 'сделай', 'сделать', 'скопируй', 'скопировать',
   'переименуй', 'переименовать', 'перемести', 'переместить', 'убери',
   'убрать', 'удали', 'удалить', 'очисти', 'очистить', 'поставь',
   'поставить', 'прочитай', 'прочитать', 'найди', 'найти', 'сохрани',
   'сохранить', 'запиши', 'записать', 'замени', 'заменить', 'закрой',
   'закрыть', 'выполни', 'выполнить', 'установи', 'установить',
+  'изучи', 'изучить', 'исследуй', 'исследовать', 'проанализируй',
+  'проанализировать', 'разбери', 'разобрать',
+  'перескажи', 'пересказать', 'обобщи', 'обобщить', 'суммируй', 'суммировать',
 ] as const;
 
 const EN_OPERATION_WORDS = [
   'open', 'launch', 'start', 'run', 'execute', 'install', 'create', 'write',
   'append', 'make', 'copy', 'rename', 'move', 'delete', 'remove', 'read',
   'inspect', 'find', 'set', 'close', 'empty', 'save', 'replace', 'bring',
+  'study', 'analyze', 'review', 'investigate',
+  'summarize', 'summarise',
 ] as const;
 
 const OPERATION_WORDS = [...RU_OPERATION_WORDS, ...EN_OPERATION_WORDS];
@@ -329,13 +371,19 @@ const OPERATION_WORDS = [...RU_OPERATION_WORDS, ...EN_OPERATION_WORDS];
 function looksLikeDirectOperationalRequest(value: string): boolean {
   const text = stripOperationalPrelude(normalizeText(value).toLowerCase());
   if (!text || looksLikeExplicitNonActionRequest(text)) return false;
+  if (looksLikeContentGenerationWithoutLocalEffect(text)) return false;
+  if (looksLikeSuppliedMaterial(text)) return false;
+
+  if (looksLikeOperationalChecklist(text)) return true;
+
+  if (looksLikeKnownFolderOrganizationRequest(text)) return true;
 
   const directQuestion = text.match(
-    /^(?:(?:ты\s+)?(?:можешь|сможешь)|could\s+you|can\s+you|would\s+you)\s+([\s\S]+)$/iu,
+    /(?:^|[.!?]\s*|,\s*)(?:(?:ты\s+)?(?:можешь|сможешь)|could\s+you|can\s+you|would\s+you)\s+([\s\S]+)$/iu,
   );
   if (directQuestion?.[1]) {
     const requestedEffect = directQuestion[1].replace(
-      /^(?:(?:мне|сейчас|пожалуйста|прямо|just|please|now|for\s+me)\s+)+/iu,
+      /^(?:(?:мне|сейчас|пожалуйста|прямо|самостоятельно|just|please|now|independently|for\s+me)\s+)+/iu,
       '',
     );
     if (startsWithOperationalVerbAndTarget(requestedEffect)) return true;
@@ -346,7 +394,7 @@ function looksLikeDirectOperationalRequest(value: string): boolean {
     && ['можешь', 'сможешь'].some((candidate) => isSingleEditApart(candidate, requestWords[0]!))
   ) {
     const requestedEffect = requestWords.slice(1).join(' ').replace(
-      /^(?:(?:мне|сейчас|пожалуйста|прямо)\s+)+/iu,
+      /^(?:(?:мне|сейчас|пожалуйста|прямо|самостоятельно)\s+)+/iu,
       '',
     );
     if (startsWithOperationalVerbAndTarget(requestedEffect)) return true;
@@ -354,9 +402,7 @@ function looksLikeDirectOperationalRequest(value: string): boolean {
 
   if (startsWithOperationalVerbAndTarget(text)) return true;
 
-  if (hasConcreteFilesystemTarget(text)) {
-    return words(text).some((word) => isOperationWord(word));
-  }
+  if (hasConcreteFilesystemTarget(text) && looksLikeTargetBoundOperationalRequest(text)) return true;
 
   return false;
 }
@@ -375,10 +421,31 @@ function looksLikeExplicitNonActionRequest(value: string): boolean {
   return false;
 }
 
+function looksLikeResponseOnlyMaterialReview(text: string): boolean {
+  if (!text || hasConcreteFilesystemTarget(text) || hasExplicitLocalReviewScope(text)) return false;
+  const reviewLead = /^(?:(?:просто|только|пожалуйста|just|only|please)\s+)*(?:проверь|посмотри|просмотри|изучи|проанализируй|разбери|оцени|прочитай|сверь|review|inspect|study|analy[sz]e|check|read|look\s+(?:at|over))(?:\s*,?\s*(?:пожалуйста|please)\s*,?)?\s+/iu;
+  const subject = text.replace(reviewLead, '');
+  if (subject === text) return false;
+  if (/^(?:(?:этот|эти|данный|следующий|this|these|the\s+following)\s+)?(?:(?:ч[её]тк\p{L}*\s+)?список\s+обновлен\p{L}*|обновлен\p{L}*|changelog|release\s+notes?|update\s+list|updates?)(?:\s|[,.:;!?]|$)/iu.test(subject)) {
+    return true;
+  }
+  return /^(?:этот|эти|данный|следующий|this|these|the\s+following)\s+(?:список|текст|материал|лог|код|вывод|ответ|сообщение|list|text|material|log|code|output|answer|message)(?:\s|[,.:;!?]|$)/iu.test(subject);
+}
+
+function hasExplicitLocalReviewScope(text: string): boolean {
+  return /(?:^|\s)(?:в|во|на|из|по|inside|within|on|from)\s+(?:(?:этом|мо[её]м|текущем|локальном|this|my|current|local|the)\s+)?(?:компьютер\p{L}*|пк|устройств\p{L}*|систем\p{L}*|проект\p{L}*|репозитор\p{L}*|workspace|codebase|filesystem|диск\p{L}*|drive|folder|directory|file|backend|runtime|windows\s+update)(?:\s|[,.:;!?]|$)/iu.test(text);
+}
+
 function stripOperationalPrelude(value: string): string {
   let text = value.trim();
   const prefixes = [
+    /^(?:\/\/+|#+)\s*/u,
+    /^(?:вот\s+)?(?:задача|задание|task)(?:\s*№?\s*\d+)?\s*[:—;-]\s*/iu,
     /^(?:плиз|пожалуйста)\s*[,—:;-]?\s*/iu,
+    /^(?:спасибо|благодарю|thanks|thank\s+you)\s*[.!?,—:;-]*\s*/iu,
+    /^(?:а\s+)?(?:теперь|вместо\s+этого|ладно|хорошо|окей|ок|now|then|instead|okay|ok)\s*[,—:;-]?\s*/iu,
+    /^(?:список\s+посмотрел|материал\s+прочитал|текст\s+прочитал|понял|got\s+it)\s*[,.;!?—:-]*\s*(?:(?:а\s+)?(?:теперь|then|now)\s*[,—:;-]?\s*)?/iu,
+    /^(?:после\s+(?:просмотра|проверки|изучения)\s+(?:этого\s+)?(?:списка|материала|текста)|after\s+(?:reviewing|reading|checking)\s+(?:(?:this|the)\s+)?(?:list|material|text|release\s+notes?))\s*[,—:;-]?\s*/iu,
     /^короче\s+задача\s+такая\s*[,—:;-]?\s*/iu,
     /^а\s+можешь\s*:\s*/iu,
     /^please\s*[,—:;-]?\s*/iu,
@@ -396,7 +463,79 @@ function stripOperationalPrelude(value: string): string {
       }
     }
   }
-  return text;
+  return text.replace(/^[«„“”"']+\s*|\s*[»„“”"']+$/gu, '').trim();
+}
+
+function looksLikeKnownFolderOrganizationRequest(text: string): boolean {
+  if (!hasKnownLocalFilesystemTarget(text)) return false;
+  return /(?:^|[^\p{L}])(?:наведи\s+порядок|разложи|рассортируй|отсортируй|организуй|сгруппируй|архивируй|заархивируй|clean\s+up|organize|sort|group|archive)(?:[^\p{L}]|$)/iu.test(text);
+}
+
+function looksLikeSuppliedMaterial(text: string): boolean {
+  if (/^(?:```|~~~|\{|\[)/u.test(text)) return true;
+  if (/^(?:вот|держи|скидываю|присылаю|отправляю|показываю|here(?:'s|\s+is)|sharing|sending)\s+(?:лог|вывод|трассировк\p{L}*|код|json|текст|цитат\p{L}*|changelog|release\s+notes?)(?:\s|:|$)/iu.test(text)) {
+    return true;
+  }
+  if (/^(?:ч[её]тк\p{L}*\s+)?(?:список\s+обновлен\p{L}*|changelog|release\s+notes?)(?:\s|:|$)/iu.test(text)) {
+    return true;
+  }
+  const items = extractNumberedItems(text);
+  if (items.length < 2) return false;
+  if (hasLeadingOperationalRequestBeforeNumberedMaterial(text)) return false;
+  return items.every((item) => {
+    const normalizedItem = stripOperationalPrelude(item);
+    return !startsWithOperationalVerbAndTarget(normalizedItem)
+      || looksLikeDescriptiveListItem(normalizedItem);
+  });
+}
+
+function hasLeadingOperationalRequestBeforeNumberedMaterial(text: string): boolean {
+  const firstItem = /(?:^|\s)\d{1,3}[.)]\s+/u.exec(text);
+  if (!firstItem || firstItem.index <= 0) return false;
+  const prefix = text.slice(0, firstItem.index).trim();
+  if (!prefix || looksLikeMaterialReviewPrefix(prefix)) return false;
+  const normalizedPrefix = stripOperationalPrelude(prefix);
+  return startsWithOperationalVerbAndTarget(normalizedPrefix)
+    || (hasConcreteFilesystemTarget(normalizedPrefix) && looksLikeTargetBoundOperationalRequest(normalizedPrefix));
+}
+
+function looksLikeMaterialReviewPrefix(text: string): boolean {
+  return /^(?:проверь|посмотри|изучи|проанализируй|разбери|review|inspect|study|analyze)\s+(?:(?:этот|данный|следующий|this|the\s+following)\s+)?(?:список(?:\s+обновлен\p{L}*)?|changelog|release\s+notes?|лог|текст|материал|вывод)\s*[:—-]?$/iu.test(text);
+}
+
+function looksLikeOperationalChecklist(text: string): boolean {
+  const items = extractNumberedItems(text);
+  return items.length >= 2
+    && items.some((item) => startsWithOperationalVerbAndTarget(stripOperationalPrelude(item)));
+}
+
+function extractNumberedItems(text: string): string[] {
+  return [...text.matchAll(/(?:^|\s)\d{1,3}[.)]\s+([\s\S]*?)(?=(?:\s+\d{1,3}[.)]\s+)|$)/gu)]
+    .map((match) => String(match[1] || '').trim())
+    .filter(Boolean);
+}
+
+function looksLikeDescriptiveListItem(text: string): boolean {
+  const leadingWords = words(text).slice(0, 4);
+  const firstWord = leadingWords[0] || '';
+  if (!firstWord || isOperationWord(firstWord)) return false;
+  return leadingWords.some((word) => (
+    /^(?:восстановлен|добавлен|исправлен|удален|обновлен|сохранен|защищен|переработан|подготовлен|выполнен|привязан|перенесен|усилен|запущен|завершен|создан|изменен)\p{L}*$/iu.test(word)
+    || /(?:ил|ила|или|ено|ены)$/iu.test(word)
+  ));
+}
+
+function looksLikeTargetBoundOperationalRequest(text: string): boolean {
+  const clauses = text.split(/[\r\n;]+|(?<=[.!?])\s+(?=[\p{Lu}\p{N}])/u);
+  return clauses.some((rawClause) => {
+    const clause = stripOperationalPrelude(rawClause.replace(/^\s*(?:[-*•]|\d{1,3}[.)])\s*/u, ''));
+    if (!clause || !hasConcreteFilesystemTarget(clause)) return false;
+    if (startsWithOperationalVerbAndTarget(clause)) return true;
+    const targetFirst = /^(?:(?:в|во|на|in|inside|within|under)\s+|(?:monarch|current|this|my)\s+(?:project|repo(?:sitory)?|workspace|codebase)\b)/iu.test(clause)
+      || /^(?:[a-z]:[\\/]|\\\\|\/[^\s]+)/iu.test(clause);
+    if (!targetFirst) return false;
+    return words(clause).slice(0, 14).some((word) => isExactOperationWord(word));
+  });
 }
 
 function startsWithOperationalVerbAndTarget(value: string): boolean {
@@ -405,12 +544,19 @@ function startsWithOperationalVerbAndTarget(value: string): boolean {
   let index = 0;
   while (
     index < tokens.length
-    && index < 3
-    && /^(?:безвозвратно|навсегда|permanently|irreversibly|exactly)$/iu.test(tokens[index]!)
+    && index < 5
+    && (isOperationalModifier(tokens[index]!) || (index > 0 && /^(?:и|and)$/iu.test(tokens[index]!)))
   ) {
     index += 1;
   }
   return index < tokens.length - 1 && isOperationWord(tokens[index]!);
+}
+
+function isOperationalModifier(word: string): boolean {
+  const modifiers = ['безвозвратно', 'навсегда', 'точно', 'permanently', 'irreversibly', 'exactly'];
+  return modifiers.some((candidate) => candidate === word || (
+    candidate.slice(0, 2) === word.slice(0, 2) && isSingleEditApart(candidate, word)
+  ));
 }
 
 function words(value: string): string[] {
@@ -418,11 +564,47 @@ function words(value: string): string[] {
 }
 
 function isOperationWord(word: string): boolean {
-  if (OPERATION_WORDS.some((candidate) => candidate === word)) return true;
+  if (isExactOperationWord(word)) return true;
   if (word.length < 4) return false;
+  // Past-tense status prose and the common noun `записи` must not gain
+  // execution authority merely because they are one edit away from an
+  // imperative (`выполнил`/`выполни`, `запустил`/`запусти`, `записи`/`запиши`).
+  if (word === 'записи' || /(?:л|ла|ли|ло)$/iu.test(word) || /^[a-z]+ed$/iu.test(word)) return false;
   return OPERATION_WORDS.some((candidate) => (
-    isSingleEditApart(candidate, word)
+    belongsToSameOperationLexemeFamily(candidate, word)
+    && isSingleEditApart(candidate, word)
   ));
+}
+
+function isExactOperationWord(word: string): boolean {
+  return OPERATION_WORDS.some((candidate) => candidate === word);
+}
+
+function belongsToSameOperationLexemeFamily(candidate: string, word: string): boolean {
+  // Fuzzy recovery is intentionally narrow. In particular, Russian content
+  // generation `напиши` must never cross the local-effect boundary into
+  // `запиши`; the first two letters keep typo recovery inside one lexeme family.
+  return candidate.slice(0, 2) === word.slice(0, 2);
+}
+
+function looksLikeContentGenerationWithoutLocalEffect(text: string): boolean {
+  const directContentVerb = /^(?:напиши|составь|сгенерируй|придумай|write|draft|compose|generate)(?:\s|$)/iu.test(text);
+  const buildContentVerb = /^(?:создай|сделай|собери|реализуй|create|make|build|implement)(?:\s|$)/iu.test(text);
+  if (!directContentVerb && !buildContentVerb) {
+    return false;
+  }
+  if (hasConcreteFilesystemTarget(text)) return false;
+  if (/(?:\b(?:в|into)\s+(?:проект|репозитор|workspace|файл|file)\b|\b(?:inside|within)\s+(?:the\s+)?(?:project|repo(?:sitory)?|workspace)\b)/iu.test(text)) {
+    return false;
+  }
+  if (directContentVerb) {
+    return !/\b(?:проект|репозитор|workspace|project|repo(?:sitory)?)\b/iu.test(text);
+  }
+  // `create/make/build` can describe either an answer artifact or a real local
+  // mutation. Treat it as answer content only when the requested artifact is
+  // itself representable in the response and no canonical local target exists.
+  return /(?:\b(?:html|css|javascript|typescript|код|code|текст|text|документ|document|отч[её]т|report|макет|mockup|страниц\p{L}*|page|website|сайт|приложен\p{L}*|app|интерфейс|interface|ui|game)\b|игр\p{L}*|змейк\p{L}*|тетрис\p{L}*)/iu.test(text)
+    || /(?:формат\s+ответа|выдай|верни|в\s+ответе|одним\s+блоком|single\s+code\s+block|return\s+(?:the\s+)?(?:full|complete)\s+code)/iu.test(text);
 }
 
 function isSingleEditApart(left: string, right: string): boolean {
@@ -454,14 +636,27 @@ function isSingleEditApart(left: string, right: string): boolean {
 }
 
 function hasConcreteFilesystemTarget(value: string): boolean {
-  return /(?:[a-z]:[\\/]|\\\\|\/[\w.-]+|[\w ()-]+\.(?:txt|json|md|html|csv|log|tmp|yaml|yml|toml|ini)\b)/iu.test(value);
+  return /(?:[a-z]:[\\/]|\\\\|\/[\w.-]+|(?:диск|drive)\s+[a-z](?::)?\b|[\w ()-]+\.(?:txt|json|md|html|csv|log|tmp|yaml|yml|toml|ini)\b|(?:код|исходник|проект|репозитор|workspace)\p{L}*\s+(?:monarch|текущ\p{L}*|эт\p{L}*|мо\p{L}*)|\b(?:monarch|current|this|my)\s+(?:codebase|source|code|project|repo(?:sitory)?|workspace)\b)/iu.test(value)
+    || hasKnownLocalFilesystemTarget(value);
+}
+
+function hasKnownLocalFilesystemTarget(value: string): boolean {
+  return /(?:\bdownloads?\b|(?:^|[^\p{L}])загрузк(?:и|ах|ам|ами|ок)(?:[^\p{L}]|$)|\bdesktop\b|рабоч\p{L}*\s+стол\p{L}*)/iu.test(value);
 }
 
 function isBareExternalLookup(text: string): boolean {
   if (!/^\s*(?:найди|поищи)(?:\s|$)/i.test(text)) return false;
-  const webLocation = /(?:\b(?:web|online|internet|website|site)\b|в\s+сети|в\s+интернете|на\s+сайте|веб[- ]?поиск|онлайн)/i;
-  const localTarget = /\b(?:file|folder|project|repo(?:sitory)?|code|workspace|memory|conversation|chat\s+history|branch|process|installed)\b|файл|папк|проект|репозитор|код|workspace|памят|переписк|истори\w*\s+чат|ветк\w*\s+git|процесс|установлен|баг|ошибк|тест/i;
-  return webLocation.test(text) || !localTarget.test(text);
+  const explicitWebScope = /(?:\b(?:web|online|internet)\b|в\s+сети|в\s+интернете|на\s+сайте|веб[- ]?поиск|онлайн)/iu;
+  return explicitWebScope.test(text) || !hasLocalLookupTarget(text);
+}
+
+function hasLocalLookupTarget(text: string): boolean {
+  return /\b(?:file|folder|project|repo(?:sitory)?|code|codebase|workspace|memory|conversation|chat\s+history|branch|process|installed)\b|файл|папк|проект|репозитор|код|workspace|памят|переписк|истори\p{L}*\s+чат|ветк\p{L}*\s+git|процесс|устан\p{L}{2,12}|баг|ошибк|тест/iu.test(text);
+}
+
+function hasExplicitLocalLookupScope(text: string): boolean {
+  if (hasConcreteFilesystemTarget(text)) return true;
+  return /(?:\b(?:in|inside|within|under)\s+(?:the\s+|this\s+|my\s+|current\s+)?(?:file|folder|project|repo(?:sitory)?|codebase|workspace|memory|conversation|chat\s+history)\b|(?:^|[^\p{L}])(?:в|во|на|по|из)\s+(?:(?:этом|мо[её]м|текущем|локальном)\s+)?(?:файл\p{L}*|папк\p{L}*|проект\p{L}*|репозитор\p{L}*|коде|workspace|памят\p{L}*|переписк\p{L}*|истори\p{L}*\s+чат\p{L}*)|(?:installed|установ\p{L}*)\s+(?:app|application|program|приложен\p{L}*|программ\p{L}*))/iu.test(text);
 }
 
 function isExternalComparativeResearch(text: string): boolean {

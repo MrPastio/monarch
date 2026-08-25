@@ -40,6 +40,8 @@ export interface MonarchFilesystemPolicyOptions {
   blockRedZoneWrite?: boolean;
   blockRedZoneDelete?: boolean;
   protectWorkspaceInternals?: boolean;
+  /** Internal Owner path: keep immutable Safe roots but omit ordinary software red zones. */
+  includeDefaultRedZones?: boolean;
 }
 
 export interface MonarchFilesystemPolicy {
@@ -87,7 +89,10 @@ export function createFilesystemPolicy(
       ? options.allowedRoots
       : [sandboxRoot], workspaceRoot);
   const redZoneRoots = uniqueStrings([
-    ...defaultRedZoneRoots(workspaceRoot, options.protectWorkspaceInternals !== false),
+    ...immutableMonarchSafeRoots(workspaceRoot),
+    ...(options.includeDefaultRedZones === false
+      ? []
+      : defaultRedZoneRoots(workspaceRoot, options.protectWorkspaceInternals !== false)),
     ...normalizeRoots(options.redZoneRoots || [], workspaceRoot),
   ]);
   const readOnlyRoots = uniqueStrings([
@@ -212,6 +217,22 @@ export function defaultLocalReadOnlyRoots(): string[] {
     ...knownUserFolderCandidates('downloads'),
   ];
   return normalizeRoots([...userRoots, ...configuredRoots], process.cwd());
+}
+
+/**
+ * Safe is not a tunable red zone. It is projected on every Windows drive so
+ * Full Access and hidden Owner overrides cannot remove it from filesystem policy.
+ */
+export function immutableMonarchSafeRoots(workspaceRoot = process.cwd()): string[] {
+  const configured = String(process.env.MONARCH_SAFE_ROOT || '').trim();
+  const workspaceDrive = path.parse(workspaceRoot).root || systemDriveRoot();
+  const driveRoots = process.platform === 'win32'
+    ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((letter) => `${letter}:\\`)
+    : [workspaceDrive];
+  return normalizeRoots([
+    configured,
+    ...driveRoots.map((root) => path.join(root, 'MonarchData', 'Safe')),
+  ].filter(Boolean), workspaceRoot);
 }
 
 export function resolveKnownUserFolder(kind: MonarchKnownUserFolder): string {
@@ -368,12 +389,10 @@ function windowsKnownUserFolderCandidates(kind: MonarchKnownUserFolder): string[
 
 function defaultRedZoneRoots(workspaceRoot: string, protectWorkspaceInternals: boolean): string[] {
   const systemRoot = process.env.SystemRoot || path.join(systemDriveRoot(), 'Windows');
-  const workspaceDriveRoot = path.parse(workspaceRoot).root || systemDriveRoot();
   const userProfile = process.env.USERPROFILE || process.env.HOME || '';
   const appData = process.env.APPDATA || '';
   const localAppData = process.env.LOCALAPPDATA || '';
   const roots = [
-    path.join(workspaceDriveRoot, 'MonarchData', 'Safe'),
     systemRoot,
     process.env.ProgramFiles || path.join(systemDriveRoot(), 'Program Files'),
     process.env['ProgramFiles(x86)'] || path.join(systemDriveRoot(), 'Program Files (x86)'),

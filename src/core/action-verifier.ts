@@ -17,6 +17,7 @@ export async function verifyActionPredicates(
     workspaceRoot: string;
     allowedRoots?: string[];
     result?: MonarchExecutionResult;
+    ownerUnrestricted?: boolean;
   },
 ): Promise<MonarchActionObservationV1[]> {
   if (!predicates?.length) return [];
@@ -34,6 +35,7 @@ async function evaluatePredicate(
     workspaceRoot: string;
     allowedRoots?: string[];
     result?: MonarchExecutionResult;
+    ownerUnrestricted?: boolean;
   },
 ): Promise<MonarchActionObservationV1> {
   const valueError = actionPredicateValueError(predicate as unknown as Record<string, unknown>);
@@ -58,7 +60,8 @@ async function evaluatePredicate(
     sandboxRoot: options.workspaceRoot,
     fallbackRoot: options.workspaceRoot,
     allowedRoots,
-    protectWorkspaceInternals: true,
+    protectWorkspaceInternals: options.ownerUnrestricted !== true,
+    ...(options.ownerUnrestricted === true ? { includeDefaultRedZones: false } : {}),
   });
   if (!filesystemAccess.allowed) {
     return observation(

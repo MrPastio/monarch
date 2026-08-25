@@ -45,6 +45,7 @@ export const securityManifest: MonarchModuleManifest = {
     'security.protection.changed',
     'security.profile.changed',
     'security.model_policy.changed',
+    'security.action.reviewed',
     'security.integrity.checked',
     'security.audit.tail_read',
     'security.report.generated',
@@ -115,7 +116,10 @@ export const securityManifest: MonarchModuleManifest = {
       risk: 'device-control',
       inputSchema: {
         type: 'object',
-        properties: { level: { type: 'string', enum: ['off', 'minimal', 'balanced', 'strict', 'maximum'] } },
+        properties: {
+          level: { type: 'string', enum: ['off', 'minimal', 'balanced', 'strict', 'maximum'] },
+          pin: { type: 'string', pattern: '^\\d{6}$' },
+        },
         required: ['level'],
         additionalProperties: false,
       },
@@ -129,8 +133,8 @@ export const securityManifest: MonarchModuleManifest = {
     {
       id: 'security.model_policy.get',
       moduleId: 'security',
-      title: 'Read Oscar command security policy',
-      description: 'Read whether Oscar may propose system commands and how confirmations are requested.',
+      title: 'Read Oscar Action Guard policy',
+      description: 'Read whether Oscar may propose actions and whether Security observes, guards, or confirms every exact effect.',
       risk: 'read',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       routing: {
@@ -143,16 +147,18 @@ export const securityManifest: MonarchModuleManifest = {
     {
       id: 'security.model_policy.set',
       moduleId: 'security',
-      title: 'Change Oscar command security policy',
-      description: 'Enable or disable Oscar command proposals and choose adaptive or always-confirm behavior.',
+      title: 'Change Oscar Action Guard policy',
+      description: 'Enable or disable Oscar action proposals and choose observe, guard, or confirm-all behavior independently from autonomy scope.',
       risk: 'device-control',
       inputSchema: {
         type: 'object',
         properties: {
           enabled: { type: 'boolean' },
+          agentSecurityMode: { type: 'string', enum: ['off', 'observe', 'guard', 'strict'] },
+          actionGuardReaction: { type: 'string', enum: ['observe', 'guard', 'confirm-all'] },
           confirmationMode: { type: 'string', enum: ['adaptive', 'always'] },
         },
-        required: ['enabled', 'confirmationMode'],
+        required: ['enabled'],
         additionalProperties: false,
       },
       routing: {
@@ -679,6 +685,7 @@ export const securityManifest: MonarchModuleManifest = {
         type: 'object',
         properties: {
           waitSeconds: { type: 'number' },
+          pin: { type: 'string', pattern: '^\\d{6}$' },
         },
         additionalProperties: false,
       },
@@ -852,6 +859,10 @@ export const securityManifest: MonarchModuleManifest = {
           requestedBy: { type: 'string' },
           monarchConfirmed: { type: 'boolean' },
           modelProposed: { type: 'boolean' },
+          runtimeOwnedExactAction: { type: 'boolean' },
+          actionGuardReaction: { type: 'string', enum: ['observe', 'guard', 'confirm-all'] },
+          agentSecurityMode: { type: 'string', enum: ['off', 'observe', 'guard', 'strict'] },
+          trustedActionContext: { type: 'object', additionalProperties: true },
           passkey: { type: 'string' },
           noLlm: { type: 'boolean' },
         },

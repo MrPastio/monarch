@@ -8,7 +8,10 @@ import {
 } from '../../src/core';
 import type { MonarchCapability, MonarchModuleManifest } from '../../src/core';
 import { deviceManifest } from '../../src/modules/device/manifest';
+import { astraManifest } from '../../src/modules/astra/manifest';
+import { modelsManifest } from '../../src/modules/models/manifest';
 import { workspaceManifest } from '../../src/modules/workspace/manifest';
+import { computerManifest } from '../../src/modules/computer/manifest';
 
 describe('Agent capability metadata', () => {
   it('gives unmigrated capabilities conservative, deterministic legacy defaults', () => {
@@ -109,6 +112,53 @@ describe('Agent capability metadata', () => {
     }))).toThrowError(/status predicates require/i);
   });
 
+  it('admits only bounded capability-owned mutation reconciliation contracts', () => {
+    const reconciliation = {
+      capabilityId: 'workspace.files.read',
+      inputBindings: { path: 'path' },
+      constantInput: { maxBytes: 1024 },
+      targetInputKey: 'path',
+      observationTargetPath: 'path',
+      assertion: {
+        kind: 'equals-source-input' as const,
+        observationPath: 'content',
+        sourceInputKey: 'content',
+      },
+    };
+    expect(resolveAgentCapabilityMetadata(capability({
+      risk: 'write',
+      agent: { reconciliation },
+    })).reconciliation).toEqual(reconciliation);
+
+    expect(() => resolveAgentCapabilityMetadata(capability({
+      risk: 'write',
+      agent: {
+        reconciliation: { ...reconciliation, targetInputKey: 'unbound' },
+      },
+    }))).toThrowError(/targetInputKey must name one inputBindings target/i);
+    expect(() => resolveAgentCapabilityMetadata(capability({
+      risk: 'write',
+      agent: {
+        reconciliation: { ...reconciliation, unexpected: true } as never,
+      },
+    }))).toThrowError(/unexpected is not supported/i);
+    expect(() => resolveAgentCapabilityMetadata(capability({
+      risk: 'write',
+      agent: {
+        reconciliation: {
+          ...reconciliation,
+          assertion: { ...reconciliation.assertion, kind: 'equals-baseline-plus-source-input' },
+        },
+      },
+    }))).toThrowError(/requiresPreActionBaseline must be true/i);
+
+    const append = workspaceManifest.capabilities.find((entry) => entry.id === 'workspace.files.append');
+    expect(resolveAgentCapabilityMetadata(append!).reconciliation).toMatchObject({
+      requiresPreActionBaseline: true,
+      assertion: { kind: 'equals-baseline-plus-source-input' },
+    });
+  });
+
   it.each([
     {
       name: 'write mutation',
@@ -127,6 +177,41 @@ describe('Agent capability metadata', () => {
       match: /financialImpact cannot weaken/i,
     },
   ])('rejects explicit metadata that weakens the legacy $name floor', ({ capability: item, match }) => {
+    expect(() => resolveAgentCapabilityMetadata(item)).toThrowError(match);
+  });
+
+  it.each([
+    {
+      name: 'read capability hiding a persistent mutation',
+      item: capability({ risk: 'read', agent: { effectProfile: { mutation: 'persistent' } } }),
+      match: /risk 'read' cannot declare persistent mutation/i,
+    },
+    {
+      name: 'read capability hiding internet access',
+      item: capability({ risk: 'read', agent: { effectProfile: { communication: 'internet' } } }),
+      match: /risk 'read' cannot declare external communication 'internet'/i,
+    },
+    {
+      name: 'workspace write targeting the device',
+      item: capability({ risk: 'write', agent: { effectProfile: { targetScope: 'device' } } }),
+      match: /risk 'write' cannot declare target scope 'device'/i,
+    },
+    {
+      name: 'workspace write requiring elevation',
+      item: capability({ risk: 'write', agent: { effectProfile: { privilege: 'elevated' } } }),
+      match: /risk 'write' cannot declare elevated privilege/i,
+    },
+    {
+      name: 'workspace write claiming irreversible effects',
+      item: capability({ risk: 'write', agent: { effectProfile: { reversibility: 'irreversible' } } }),
+      match: /risk 'write' cannot declare irreversible effects/i,
+    },
+    {
+      name: 'workspace write hiding a security impact',
+      item: capability({ risk: 'write', agent: { effectProfile: { securityImpact: true } } }),
+      match: /risk 'write' cannot declare securityImpact/i,
+    },
+  ])('rejects an auto-allowed risk vector mismatch: $name', ({ item, match }) => {
     expect(() => resolveAgentCapabilityMetadata(item)).toThrowError(match);
   });
 
@@ -164,6 +249,49 @@ describe('Agent capability metadata', () => {
     expect(() => registry.registerModule(moduleManifest(unknownKey))).toThrowError(/unexpected is not supported/i);
   });
 
+  it.each([0, 1, 2])('preflights every capability before mutating the registry when invalid metadata is at index %i', (invalidIndex) => {
+    const registry = new MonarchCapabilityRegistry();
+    const invalid = capability({
+      id: 'smoke.metadata.invalid',
+      risk: 'read',
+      agent: { effectProfile: { mutation: 'persistent' } },
+    });
+    const entries = [
+      capability({ id: 'smoke.metadata.valid-before', risk: 'read' }),
+      capability({ id: 'smoke.metadata.valid-after', risk: 'read' }),
+    ];
+    entries.splice(invalidIndex, 0, invalid);
+
+    expect(() => registry.registerModule({
+      ...moduleManifest(entries[0]!),
+      capabilities: entries,
+    })).toThrowError(/cannot declare persistent mutation/i);
+    expect(registry.list()).toHaveLength(0);
+  });
+
+  it('rejects a foreign module capability before registering valid siblings', () => {
+    const registry = new MonarchCapabilityRegistry();
+    const valid = capability({ id: 'smoke.metadata.valid', risk: 'read' });
+    const foreign = capability({
+      id: 'smoke.metadata.foreign',
+      moduleId: 'other-module',
+      risk: 'read',
+    });
+
+    expect(() => registry.registerModule({
+      ...moduleManifest(valid),
+      capabilities: [valid, foreign],
+    })).toThrowError(/must belong to module smoke-metadata/i);
+    expect(registry.list()).toHaveLength(0);
+  });
+
+  it('admits the current explicit production capability manifests under the truthful risk envelope', () => {
+    const registry = new MonarchCapabilityRegistry();
+    for (const manifest of [workspaceManifest, deviceManifest, astraManifest, modelsManifest, computerManifest]) {
+      expect(() => registry.registerModule(manifest)).not.toThrow();
+    }
+  });
+
   it('keeps destructive local actions off Voice, Telegram, and API surfaces', () => {
     const destructive = [
       ...workspaceManifest.capabilities.filter((entry) => [
@@ -198,10 +326,14 @@ describe('Agent capability metadata', () => {
 
     expect(explicitIds).toEqual([
       'workspace.root.get',
+      'workspace.storage.audit',
       'workspace.files.read',
       'workspace.files.list',
       'workspace.files.search',
       'workspace.files.write',
+      'workspace.files.inspect-batch',
+      'workspace.known-folder.resolve',
+      'workspace.known-folder.write',
       'workspace.files.append',
       'workspace.files.mkdir',
       'workspace.files.copy',
@@ -216,7 +348,13 @@ describe('Agent capability metadata', () => {
       expect(capabilityEntry).toBeDefined();
       const resolved = resolveAgentCapabilityMetadata(capabilityEntry!);
       expect(resolved.source).toBe('explicit');
-      expect(resolved.effectProfile.targetScope).toBe('workspace');
+      expect(resolved.effectProfile.targetScope).toBe(
+        id === 'workspace.storage.audit'
+          ? 'device'
+          : id === 'workspace.known-folder.write'
+            ? 'application'
+            : 'workspace',
+      );
       expect(resolved.effects).not.toEqual(expect.arrayContaining([
         expect.objectContaining({ kind: 'legacy-observation' }),
       ]));

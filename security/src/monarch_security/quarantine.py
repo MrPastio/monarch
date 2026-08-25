@@ -2,14 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterable, Literal
 import hashlib
 import json
 import os
 import shutil
+import stat
 import uuid
 
 from .events import utc_now
+from .filesystem_policy import (
+    FileIdentity,
+    FilesystemMutationPolicy,
+    PathPolicyDecision,
+    same_file_identity,
+)
 from .integrity import GENESIS_HASH, INTEGRITY_FIELD, audit_record_integrity, get_or_create_key
 from .state import FileLock
 
@@ -74,12 +81,46 @@ class QuarantineRecord:
 class QuarantineVault:
     """Local quarantine with an append-only HMAC manifest and safe restore."""
 
-    def __init__(self, root: Path, manifest_path: Path, integrity_key_path: Path) -> None:
-        self.root = root.resolve()
+    def __init__(
+        self,
+        root: Path,
+        manifest_path: Path,
+        integrity_key_path: Path,
+        *,
+        application_root: Path | None = None,
+        workspace_root: Path | None = None,
+        state_root: Path | None = None,
+        additional_protected_roots: Iterable[Path] = (),
+    ) -> None:
+        self.root = root.expanduser().resolve(strict=False)
+        self.manifest_path = manifest_path.expanduser().resolve(strict=False)
+        self.integrity_key_path = integrity_key_path.expanduser().resolve(strict=False)
+        inferred_state_root = state_root or _common_parent(
+            self.root,
+            self.manifest_path.parent,
+            self.integrity_key_path.parent,
+        )
+        self._path_policy = FilesystemMutationPolicy(
+            application_root=application_root,
+            workspace_root=workspace_root,
+            state_root=inferred_state_root,
+            additional_protected_roots=additional_protected_roots,
+        )
+        for candidate in (self.root, self.manifest_path, self.integrity_key_path):
+            decision = self._path_policy.evaluate_vault_storage(candidate)
+            if not decision.allowed:
+                raise QuarantineError(
+                    f"Quarantine storage is blocked by protected path policy ({decision.reason})"
+                )
+        if _is_within(self.manifest_path, self.root) or _is_within(self.integrity_key_path, self.root):
+            raise QuarantineError("Quarantine manifest and integrity key must stay outside the object vault")
+        if _same_path(self.manifest_path, self.integrity_key_path):
+            raise QuarantineError("Quarantine manifest and integrity key must use distinct paths")
         self.root.mkdir(parents=True, exist_ok=True)
-        self.manifest_path = manifest_path.resolve()
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        self._key = get_or_create_key(integrity_key_path)
+        self.integrity_key_path.parent.mkdir(parents=True, exist_ok=True)
+        self._root_identity = _directory_identity(self.root)
+        self._key = get_or_create_key(self.integrity_key_path)
         self._latest, self._last_hash = self._read_all()
 
     def list(self, *, include_restored: bool = False) -> list[QuarantineRecord]:
@@ -92,16 +133,15 @@ class QuarantineVault:
         return self._latest.get(str(quarantine_id))
 
     def isolate(self, source: Path, *, incident_id: str | None = None) -> QuarantineRecord:
-        supplied_path = source.expanduser()
-        if supplied_path.is_symlink():
-            raise QuarantineError("Only a regular, non-symlink file can be isolated")
-        source_path = supplied_path.resolve(strict=True)
-        if not source_path.is_file():
-            raise QuarantineError("Only a regular, non-symlink file can be isolated")
-        if _is_within(source_path, self.root):
-            raise QuarantineError("File is already inside the quarantine vault")
+        self._validate_vault_root()
+        initial = self._path_policy.evaluate_source(source)
+        source_path = _require_allowed_path(initial, "Isolation source")
 
         digest, size = _hash_file(source_path)
+        final = self._path_policy.evaluate_source(source_path)
+        final_path = _require_allowed_path(final, "Isolation source")
+        if not _same_path(source_path, final_path) or not same_file_identity(initial.identity, final.identity):
+            raise QuarantineError("Isolation source identity changed before the move")
         quarantine_id = str(uuid.uuid4())
         vault_path = self.root / f"{quarantine_id}.bin"
         record = QuarantineRecord(
@@ -115,6 +155,9 @@ class QuarantineVault:
         )
         _move_file(source_path, vault_path)
         try:
+            moved_digest, moved_size = _hash_file(vault_path)
+            if moved_digest != digest or moved_size != size:
+                raise QuarantineIntegrityError("Isolated object changed during the move")
             os.chmod(vault_path, 0o600)
             self._append(record)
         except Exception:
@@ -124,25 +167,26 @@ class QuarantineVault:
         return record
 
     def restore(self, quarantine_id: str, *, destination: Path | None = None) -> QuarantineRecord:
+        self._validate_vault_root()
         record = self.get(quarantine_id)
         if record is None:
             raise QuarantineError("Unknown quarantine record")
         if record.status != "isolated":
             raise QuarantineError("Quarantine record is not active")
-        vault_path = Path(record.vault_path).resolve(strict=True)
-        if not _is_within(vault_path, self.root) or vault_path.is_symlink() or not vault_path.is_file():
-            raise QuarantineIntegrityError("Vault object escaped the configured quarantine root")
+        vault_path = _validated_vault_object(Path(record.vault_path), self.root)
         digest, size = _hash_file(vault_path)
         if digest != record.sha256 or size != record.size:
             raise QuarantineIntegrityError("Vault object hash or size mismatch")
 
-        target = (destination or Path(record.original_path)).expanduser().resolve(strict=False)
-        if _is_within(target, self.root):
-            raise QuarantineError("Restore destination cannot be inside the quarantine vault")
-        if target.exists():
-            raise QuarantineError("Restore destination already exists")
-        if not target.parent.exists() or not target.parent.is_dir():
-            raise QuarantineError("Restore destination parent does not exist")
+        initial_target = self._path_policy.evaluate_restore_target(destination or Path(record.original_path))
+        target = _require_allowed_path(initial_target, "Restore destination")
+        final_target = self._path_policy.evaluate_restore_target(target)
+        final_target_path = _require_allowed_path(final_target, "Restore destination")
+        if not _same_path(target, final_target_path) or not same_file_identity(
+            initial_target.parent_identity,
+            final_target.parent_identity,
+        ):
+            raise QuarantineError("Restore destination parent identity changed before the move")
 
         restored = replace(
             record,
@@ -152,6 +196,9 @@ class QuarantineVault:
         )
         _move_file(vault_path, target)
         try:
+            restored_digest, restored_size = _hash_file(target)
+            if restored_digest != record.sha256 or restored_size != record.size:
+                raise QuarantineIntegrityError("Restored object changed during the move")
             self._append(restored)
         except Exception:
             if target.exists() and not vault_path.exists():
@@ -160,20 +207,26 @@ class QuarantineVault:
         return restored
 
     def verify_objects(self) -> dict[str, Any]:
+        self._validate_vault_root()
         failures: list[dict[str, str]] = []
         checked = 0
         for record in self.list():
             checked += 1
             try:
-                path = Path(record.vault_path).resolve(strict=True)
-                if not _is_within(path, self.root) or path.is_symlink() or not path.is_file():
-                    raise QuarantineIntegrityError("invalid vault path")
+                path = _validated_vault_object(Path(record.vault_path), self.root)
                 digest, size = _hash_file(path)
                 if digest != record.sha256 or size != record.size:
                     raise QuarantineIntegrityError("hash or size mismatch")
             except (OSError, QuarantineError) as exc:
                 failures.append({"quarantine_id": record.quarantine_id, "error": str(exc)})
         return {"ok": not failures, "checked": checked, "failures": failures}
+
+    def _validate_vault_root(self) -> None:
+        current = self.root.resolve(strict=True)
+        if not _same_path(current, self.root):
+            raise QuarantineIntegrityError("Quarantine vault root changed identity")
+        if not same_file_identity(_directory_identity(current), self._root_identity):
+            raise QuarantineIntegrityError("Quarantine vault root changed identity")
 
     def _append(self, record: QuarantineRecord) -> None:
         with FileLock(self.manifest_path):
@@ -218,7 +271,10 @@ class QuarantineVault:
                     )
                 expected = audit_record_integrity(payload, self._key, previous)
                 integrity = payload[INTEGRITY_FIELD]
-                if integrity.get("previous_hash") != previous or integrity.get("record_hash") != expected["record_hash"]:
+                if (
+                    integrity.get("previous_hash") != previous
+                    or integrity.get("record_hash") != expected["record_hash"]
+                ):
                     raise QuarantineIntegrityError(
                         f"Quarantine manifest line {line_number} integrity mismatch"
                     )
@@ -253,9 +309,77 @@ def _move_file(source: Path, destination: Path) -> None:
         shutil.move(str(source), str(destination))
 
 
+def _validated_vault_object(candidate: Path, root: Path) -> Path:
+    supplied = candidate.expanduser()
+    value = os.lstat(supplied)
+    attributes = int(getattr(value, "st_file_attributes", 0))
+    if stat.S_ISLNK(value.st_mode) or bool(
+        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    ):
+        raise QuarantineIntegrityError("Vault object escaped the configured quarantine root")
+    resolved = supplied.resolve(strict=True)
+    resolved_value = os.stat(resolved, follow_symlinks=False)
+    if (
+        not _is_within(resolved, root)
+        or not stat.S_ISREG(resolved_value.st_mode)
+        or int(getattr(resolved_value, "st_nlink", 1)) != 1
+    ):
+        raise QuarantineIntegrityError("Vault object escaped the configured quarantine root")
+    return resolved
+
+
 def _is_within(path: Path, root: Path) -> bool:
     try:
-        path.relative_to(root)
-        return True
-    except ValueError:
+        return os.path.commonpath((_path_key(path), _path_key(root))) == _path_key(root)
+    except (OSError, ValueError):
         return False
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return _path_key(left) == _path_key(right)
+
+
+def _path_key(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _common_parent(*paths: Path) -> Path:
+    try:
+        return Path(os.path.commonpath(tuple(os.fspath(path) for path in paths))).resolve(strict=False)
+    except ValueError as exc:
+        raise QuarantineError("Quarantine storage paths must share one state root") from exc
+
+
+def _directory_identity(path: Path) -> FileIdentity:
+    value = os.lstat(path)
+    attributes = int(getattr(value, "st_file_attributes", 0))
+    if not stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode) or bool(
+        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    ):
+        raise QuarantineIntegrityError("Quarantine vault root must be a real directory")
+    return FileIdentity(
+        device=int(value.st_dev),
+        inode=int(value.st_ino),
+        mode=int(value.st_mode),
+        links=int(getattr(value, "st_nlink", 1)),
+        size=0,
+        modified_ns=0,
+        changed_ns=0,
+    )
+
+
+def _require_allowed_path(decision: PathPolicyDecision, label: str) -> Path:
+    if not decision.allowed or decision.resolved_path is None:
+        messages = {
+            "restore-target-exists": "Restore destination already exists",
+            "restore-parent-unavailable": "Restore destination parent does not exist",
+            "restore-parent-not-directory": "Restore destination parent is not a directory",
+            "linked-or-reparse-source": "Only a regular, non-symlink, non-reparse file can be isolated",
+            "source-not-regular-file": "Only a regular, non-symlink, non-reparse file can be isolated",
+            "source-unavailable": "Isolation source is unavailable",
+        }
+        message = messages.get(decision.reason)
+        if message is not None:
+            raise QuarantineError(message)
+        raise QuarantineError(f"{label} is blocked by protected path policy ({decision.reason})")
+    return decision.resolved_path

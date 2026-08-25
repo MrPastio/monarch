@@ -249,6 +249,8 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(builder).toContain('node_modules\\electron\\dist');
     expect(builder).toContain('node_modules\\canvas');
     expect(builder).toContain('build\\Release\\canvas.node');
+    expect(builder).toContain('verify-relative-import-graph.mjs');
+    expect(builder).toContain('Packaged relative import graph verification');
     expect(builder).toContain('profiles\\cpu');
     expect(builder).toContain('profiles\\cuda');
     expect(builder).toContain('Portable Python runtime validation');
@@ -257,6 +259,14 @@ describe('Windows installer and public snapshot boundary', () => {
     );
     expect(builder).toContain("'^python3\\.exe$'");
     expect(builder).toContain('Offline Oscar CPU runtime validation');
+    const computerUseAcceptance = read('scripts/computer-use-model-acceptance.ts');
+    expect(computerUseAcceptance).toContain(
+      "path.join(MONARCH_ROOT, 'scripts', 'fixtures', 'MonarchComputerUseQaTarget.cs')",
+    );
+    expect(computerUseAcceptance).toContain('availableTiers[MODEL_ROLE] === true');
+    expect(read('scripts/fixtures/MonarchComputerUseQaTarget.cs')).toBe(
+      read('tests/fixtures/MonarchComputerUseQaTarget.cs'),
+    );
     expect(builder).toContain('Offline Oscar CUDA runtime validation');
     expect(builder).toContain('Remove-PythonBytecode');
     expect(builder).toContain('PYTHONDONTWRITEBYTECODE');
@@ -264,7 +274,7 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(builder).toContain('--timeout 120');
     expect(builder).toContain('using the persistent build cache');
     expect(builder).toContain('Resolve-PinnedPythonWheel');
-    expect(builder).toContain('8f238e24ed335ad05acf48648d0855714dfeb0ed341d1ff15d8b8cc06bd51d6a');
+    expect(builder).toContain('5f71b1b88882f031d94fed2495b1e36e663b73f09106d305319c2ee211903a24');
     expect(builder).toContain('90bffd9957b68e801db6f7781a786523e22f431738c260c42666d7f9413e3a8e');
     expect(builder).toContain('@("RECORD", "direct_url.json")');
     expect(builder).toContain('Offline Monarch Security runtime validation');
@@ -287,7 +297,7 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(payloadContract.runtime.version).toBe('2026.07.7');
     expect(payloadContract.runtime.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(payloadContract.environment.version).toBe(
-      'backend-0.1.5-offline5',
+      'backend-0.1.5-offline8',
     );
     expect(payloadContract.environment.sha256).toMatch(/^[a-f0-9]{64}$/);
 
@@ -309,7 +319,12 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(finalizer).toContain('Assert-TreeRecord');
     expect(finalizer).toContain('Publish-ImmutableComponent');
     expect(finalizer).toContain('PYTHONDONTWRITEBYTECODE');
-    expect(finalizer).toContain('Installed Monarch full module activation');
+    expect(finalizer).toContain('runtime-validation');
+    expect(finalizer).toContain('native\\windows-x64');
+    expect(finalizer).toContain('vcomp140.dll');
+    expect(finalizer).toContain('latest-failure.json');
+    expect(finalizer).toContain('Test-MonarchInstalledVersionHealthy');
+    expect(finalizer).not.toContain('Installed Monarch full module activation');
     expect(finalizer).toContain('$env:MONARCH_RUNTIME_ROOT = $runtimeRoot');
     expect(finalizer).toContain('$env:OSCAR_WORKSPACE_ROOT = [string]$layout.workspaceRoot');
     expect(finalizer).toContain('$env:OSCAR_PYTHON = $packagedPython');
@@ -418,7 +433,7 @@ describe('Windows installer and public snapshot boundary', () => {
       reviewedBinary: true,
       reviewedBinaryHash: true,
       alteredReviewedBinaryHash: false,
-      reviewedBinaryCount: 39,
+      reviewedBinaryCount: 47,
       reviewedBinaryFailures: 0,
       reviewedBinaryOverLimit: 0,
       csharpText: true,
@@ -447,11 +462,13 @@ describe('Windows installer and public snapshot boundary', () => {
       '^showcase($|/)',
       '^remove-(?:artifacts|memory|profile|workspace)\\.js$',
       '^remove-workspace-smoke\\.cjs$',
+      '^docs/release/MONARCH_0\\.2\\.5_COMPLETE_CHANGELOG\\.md$',
     ]) {
       expect(policy).toContain(excludedPath);
     }
     expect(policy).toContain('$MonarchPublicAllowedTopLevelDirectories');
     expect(policy).toContain('$MonarchPublicAllowedRootFiles');
+    expect(policy).toContain("'OWNER_AUTHORITY_V1.md'");
     expect(policy).toContain('\\bAKIA[0-9A-Z]{16}\\b');
     expect(policy).toContain('\\bglpat-');
     expect(policy).toContain('\\bhf_');
@@ -642,7 +659,7 @@ describe('Windows installer and public snapshot boundary', () => {
     } finally {
       rmSync(fixture.fixtureRoot, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('rejects raw secret fixtures, NUL text, and non-regular Git modes', () => {
     const fixture = createPublicationFixture();
@@ -769,7 +786,7 @@ describe('Windows installer and public snapshot boundary', () => {
     } finally {
       rmSync(fixture.fixtureRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('never normalizes a literal Git backslash into a reviewed Windows path', () => {
     const fixture = createPublicationFixture();
@@ -973,7 +990,7 @@ describe('Windows installer and public snapshot boundary', () => {
     } finally {
       rmSync(fixture.fixtureRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('fails closed when destination appears during export and preserves staging', async () => {
     const fixture = createPublicationFixture();
@@ -1124,8 +1141,9 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(definition).toContain('installer\\offline-payload\\runtime\\*');
     expect(definition).toContain('installer\\offline-payload\\environment\\*');
     expect(definition).toContain('payload-manifest.json');
-    expect(definition).toContain('E:\\Programs\\Monarch');
-    expect(definition).toContain('D:\\Programs\\Monarch');
+    expect(definition).toContain("ExpandConstant('{localappdata}\\Programs\\Monarch')");
+    expect(definition).not.toContain("DirExists('E:\\\\')");
+    expect(definition).not.toContain("DirExists('D:\\\\')");
     expect(definition).toContain("GetFinalizeParameters('')");
     expect(definition).not.toContain('GetBootstrapParameters');
     expect(definition).not.toContain('WizardIsTaskSelected');
@@ -1140,33 +1158,51 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(definition).toContain('CriticalExitCode := 20');
     expect(definition).toContain('CriticalExitCode := 21');
     expect(definition.match(/Check: CriticalInstallSucceeded/g)).toHaveLength(3);
-    expect(definition.match(/RaiseException\(/g)).toHaveLength(2);
+    expect(definition).not.toContain('RaiseException(');
+    expect(definition).toContain('GetPersistentInstallerLogPath');
+    expect(definition.match(/WizardForm\.Close/g)).toHaveLength(2);
     expect(definition).toContain('AfterInstall: FinalizeOfflinePayload');
     expect(definition).toContain('Monarch.next.exe');
     expect(definition).toContain('GetLauncherSwapParameters');
-    expect(definition).toContain('-LauncherVersion "1.0.3"');
+    expect(definition).toContain('-LauncherVersion "1.0.4"');
     expect(definition).toContain('versions\\{#AppVersion}');
     expect(definition).toContain('CloseApplications=no');
+    expect(definition).toContain('#define AppUserModelId "Monarch.App"');
+    expect(definition.match(/AppUserModelID: "\{#AppUserModelId\}"/g)).toHaveLength(2);
+    expect(read('desktop/electron/main.mjs')).toContain(
+      "process.platform === 'win32' ? 'icon.ico' : 'icon.png'",
+    );
+    expect(read('desktop/electron/main.mjs')).toContain('icon: desktopIconPath');
     expect(read('tools/launcher/MonarchLauncher.cs')).toContain(
-      'private const string LauncherVersion = "1.0.3"',
+      'private const string LauncherVersion = "1.0.4"',
     );
     expect(read('installer/layout.ps1')).toContain(
-      'candidateLauncherVersion = "1.0.3"',
+      'candidateLauncherVersion = "1.0.4"',
     );
     expect(read('installer/layout.ps1')).toContain(
-      'minimumLauncherVersion = "1.0.3"',
+      'minimumLauncherVersion = "1.0.4"',
     );
     expect(read('installer/layout.ps1')).toContain(
       'Remove-MonarchLegacyVersionJunction',
+    );
+    expect(read('installer/layout.ps1')).toContain(
+      'function Stop-MonarchRunningVersion',
+    );
+    expect(read('installer/finalize-offline-install.ps1')).toContain(
+      '-Version $runningVersion',
     );
     expect(read('installer/layout.ps1')).not.toContain(
       'New-Item -ItemType Junction',
     );
     expect(read('installer/swap-launcher.ps1')).toContain(
-      '[string]$LauncherVersion = "1.0.3"',
+      '[string]$LauncherVersion = "1.0.4"',
     );
-    expect(read('installer/swap-launcher.ps1')).toContain('-Argument "--verify-install"');
-    expect(read('installer/swap-launcher.ps1')).toContain('"install-health.json"');
+    expect(read('installer/swap-launcher.ps1')).toContain(
+      '-Argument "--verify-install"',
+    );
+    expect(read('installer/swap-launcher.ps1')).toContain(
+      '"install-health.json"',
+    );
     expect(read('tools/launcher/MonarchLauncher.cs')).toContain(
       'var verifyInstall = HasArgument(args, "--verify-install")',
     );

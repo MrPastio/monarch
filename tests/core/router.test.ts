@@ -222,6 +222,13 @@ describe('Router Mesh & Intent Classifier', () => {
 
     const socialChat = classifyIntentText('как дела?');
     expect(socialChat.kind).toBe('chat');
+
+    expect(classifyOscarRequestDisposition('Ответь ровно одним словом: READY')).toMatchObject({
+      mode: 'chat',
+      hasLocalEffectTarget: false,
+    });
+    expect(classifyIntentText('Are you ready?').kind).not.toBe('file_operation');
+    expect(classifyIntentText('Read README.md').kind).toBe('file_operation');
     expect(selectModelRouteForText('как дела?', socialChat).selectedRole).toBe('gemma4-fast');
 
     const shortQuestion = classifyIntentText('Почему небо голубое?');
@@ -247,9 +254,123 @@ describe('Router Mesh & Intent Classifier', () => {
       mode: 'agent',
       kind: 'system_action',
     });
+    expect(classifyOscarRequestDisposition('проведи аудит папок на диске D')).toMatchObject({
+      mode: 'agent',
+      kind: 'file_operation',
+    });
+    expect(classifyOscarRequestDisposition(
+      '// задача: «Наведи порядок в „Загрузках“: разложи файлы по типам, устаревшее — в архив, дубликаты удали»',
+    )).toMatchObject({
+      mode: 'agent',
+      kind: 'file_operation',
+    });
+    expect(classifyOscarRequestDisposition('Наведи порядок в Загрузках')).toMatchObject({
+      mode: 'agent',
+      kind: 'file_operation',
+    });
+    expect(classifyOscarRequestDisposition('как навести порядок в Загрузках?')).toMatchObject({
+      mode: 'chat',
+    });
     expect(classifyOscarRequestDisposition('создай файл notes.txt с текстом test')).toMatchObject({
       mode: 'agent',
     });
+    expect(classifyOscarRequestDisposition('напиши тетрис на html')).toMatchObject({
+      mode: 'chat',
+    });
+    expect(classifyOscarRequestDisposition('Создай змейку на HTML с уклонам на дизайн')).toMatchObject({
+      mode: 'chat',
+      requiresExternalResearch: false,
+      hasLocalEffectTarget: false,
+    });
+    expect(classifyOscarRequestDisposition(
+      'Сделай полностью рабочую игру Змейка одним HTML-файлом. Формат ответа: выдай полный HTML-код одним блоком.',
+    )).toMatchObject({
+      mode: 'chat',
+      kind: 'code',
+      hasLocalEffectTarget: false,
+    });
+    for (const externalLookup of [
+      'Найди мне последние новости OpenAI',
+      'мне нужен какой то сайт который позволит эффективно учить пайтон,найди такой сайт',
+      'I need a website that helps me learn Python effectively, find one for me',
+    ]) {
+      expect(classifyOscarRequestDisposition(externalLookup)).toMatchObject({
+        mode: 'chat',
+        kind: 'search',
+        requiresExternalResearch: true,
+        hasLocalEffectTarget: false,
+      });
+    }
+    expect(classifyOscarRequestDisposition('создай tetris.html в проекте')).toMatchObject({
+      mode: 'agent',
+      hasLocalEffectTarget: true,
+    });
+    for (const localWebsiteLookup of [
+      'найди упоминания сайта в проекте Monarch',
+      'find website references in the current project',
+    ]) {
+      expect(classifyOscarRequestDisposition(localWebsiteLookup)).toMatchObject({
+        mode: 'agent',
+        kind: 'file_operation',
+        requiresExternalResearch: false,
+        hasLocalEffectTarget: true,
+      });
+    }
+    expect(classifyOscarRequestDisposition(
+      'Интересно более детально чем они отличаются, можешь самостоятельно изучить код Monarch и сказать в чем разница?',
+    )).toMatchObject({
+      mode: 'agent',
+      kind: 'file_operation',
+    });
+    for (const materialReview of [
+      'Проверь обновления Monarch 0.2.5.',
+      'Проверь этот список обновлений: 1. Исправлена маршрутизация. 2. Добавлена история.',
+      'Проверь, пожалуйста, этот список обновлений: 1. Исправлена маршрутизация. 2. Добавлена история.',
+      'Review these release notes: 1. Fixed routing. 2. Added history.',
+      'Проверь этот changelog.',
+      'Вот текст: «Найди последние новости OpenAI». Это пример запроса для проверки интерфейса.',
+    ]) {
+      expect(classifyOscarRequestDisposition(materialReview)).toMatchObject({
+        mode: 'chat',
+        kind: 'text_generation',
+        requiresExternalResearch: false,
+      });
+    }
+    for (const localReview of [
+      'Проверь обновления на этом компьютере',
+      'Проверь список обновлений в проекте Monarch',
+      'Review release notes in E:\\Monarch\\CHANGELOG.md',
+    ]) {
+      expect(classifyOscarRequestDisposition(localReview).mode).toBe('agent');
+    }
+    for (const operationalFollowUp of [
+      'А теперь запусти backend',
+      'Список посмотрел, теперь запусти backend',
+      'Спасибо. Открой Steam',
+      'Хорошо, открой Steam',
+      'После просмотра списка запусти backend',
+      'Теперь проверь CHANGELOG.md в проекте Monarch',
+      'А вместо этого удали C:\\Temp\\state.json',
+      'After reviewing the release notes, run backend',
+    ]) {
+      expect(classifyOscarRequestDisposition(operationalFollowUp).mode).toBe('agent');
+    }
+    expect(classifyOscarRequestDisposition('Спасибо. Открой Steam')).toMatchObject({
+      mode: 'agent',
+      kind: 'system_action',
+    });
+    expect(classifyOscarRequestDisposition('Спасибо. Найди последние новости OpenAI')).toMatchObject({
+      mode: 'chat',
+      kind: 'search',
+      requiresExternalResearch: true,
+    });
+    for (const nonOperationalFollowUp of [
+      'А теперь объясни, как работает backend',
+      'Спасибо. Как открыть Steam?',
+      'Хорошо, не открывай Steam, просто расскажи про обновление',
+    ]) {
+      expect(classifyOscarRequestDisposition(nonOperationalFollowUp).mode).toBe('chat');
+    }
     expect(classifyOscarRequestDisposition('как открыть Steam?')).toMatchObject({
       mode: 'chat',
       kind: 'explanation',
@@ -316,7 +437,7 @@ describe('Router Mesh & Intent Classifier', () => {
     expect(telegramPost.riskHint).toBe('none');
 
     const routerArchitecture = classifyIntentText('Спроектируй архитектуру роутера и проверь риски');
-    expect(selectModelRouteForText('Спроектируй архитектуру роутера и проверь риски', routerArchitecture).selectedRole).toBe('gemma4-deepthinking');
+    expect(selectModelRouteForText('Спроектируй архитектуру роутера и проверь риски', routerArchitecture).selectedRole).toBe('qwen3.8-27b-pro');
   });
 
   it('should route to fallback candidate', async () => {

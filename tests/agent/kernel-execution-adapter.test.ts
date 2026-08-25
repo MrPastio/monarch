@@ -12,16 +12,26 @@ const proposal = {
 };
 
 describe('agent Kernel execution adapter', () => {
-  it('re-preflights a durable approved proposal and consumes only a fresh challenge', async () => {
-    const submit = vi.fn()
-      .mockResolvedValueOnce({ proposal, result: { ok: false, summary: 'confirm', error: 'confirmation-required' }, confirmation: { token: 'fresh', message: 'confirm', expiresAt: '2026-01-01T00:00:00.000Z', target: { intentId: 'task_1', moduleId: 'workspace', capabilityId: proposal.capabilityId }, grantOptions: ['once'] } })
-      .mockResolvedValueOnce({ proposal, result: { ok: true, summary: 'done' } });
+  it('re-preflights a durable approved proposal and submits one exact structured approval binding', async () => {
+    const submit = vi.fn().mockResolvedValue({ proposal, result: { ok: true, summary: 'done' } });
     const adapter = new AgentKernelExecutionAdapter(submit, () => proposal);
     await expect(adapter.executeApproved({
       proposal, expectedCanonicalHash: proposal.canonicalHash,
+      taskId: 'task_1', approvalId: 'approval_1', source: 'api',
       originatingUserText: 'write', requestedBy: 'agent:task_1',
     })).resolves.toMatchObject({ result: { ok: true } });
-    expect(submit.mock.calls[1]?.[0]).toMatchObject({ confirmed: true, confirmationToken: 'fresh' });
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0]?.[0]).toMatchObject({
+      confirmed: true,
+      executionMode: 'agent-runtime',
+      agentApprovalBinding: {
+        taskId: 'task_1',
+        approvalId: 'approval_1',
+        capabilityId: proposal.capabilityId,
+        canonicalProposalHash: proposal.canonicalHash,
+      },
+    });
+    expect(submit.mock.calls[0]?.[0]).not.toHaveProperty('confirmationToken');
   });
 
   it('fails closed before submission if canonicalization changes after approval', async () => {
@@ -31,6 +41,7 @@ describe('agent Kernel execution adapter', () => {
     const prepare = vi.fn().mockResolvedValue({ ...proposal, canonicalHash: 'changed' });
     await expect(new AgentKernelExecutionAdapter(submit, prepare).executeApproved({
       proposal, expectedCanonicalHash: proposal.canonicalHash,
+      taskId: 'task_1', approvalId: 'approval_1', source: 'api',
       originatingUserText: 'write', requestedBy: 'agent:task_1',
     })).rejects.toMatchObject({ code: 'approval-target-mismatch' });
     expect(prepare).toHaveBeenCalledTimes(1);

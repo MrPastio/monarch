@@ -36,6 +36,7 @@ export interface SecurityCommandResult {
 
 export interface SecurityCommandRunOptions {
   timeoutMs?: number;
+  stdinPayload?: string;
 }
 
 export type SecurityBenchmarkJobStatus = 'running' | 'completed' | 'failed' | 'cancelled';
@@ -95,21 +96,38 @@ export class SecurityClient {
     return this.run(['profile'], { timeoutMs: 8000 });
   }
 
-  async setProfile(level: 'off' | 'minimal' | 'balanced' | 'strict' | 'maximum'): Promise<SecurityCommandResult> {
-    return this.run(['profile-set', '--level', level, '--confirm'], { timeoutMs: 12000 });
+  async setProfile(
+    level: 'off' | 'minimal' | 'balanced' | 'strict' | 'maximum',
+    pin = '',
+  ): Promise<SecurityCommandResult> {
+    const args = ['profile-set', '--level', level, '--confirm'];
+    if (level !== 'off') {
+      return this.run(args, { timeoutMs: 12000 });
+    }
+    return this.runSensitiveRequest(args, {
+      pin,
+      purpose: 'security.profile.off',
+      request_id: randomUUID(),
+    }, 12000);
   }
 
   async modelPolicy(): Promise<SecurityCommandResult> {
     return this.run(['model-policy'], { timeoutMs: 8000 });
   }
 
-  async setModelPolicy(input: { enabled: boolean; confirmationMode: 'adaptive' | 'always' }): Promise<SecurityCommandResult> {
-    return this.run([
+  async setModelPolicy(input: {
+    enabled: boolean;
+    actionGuardReaction: 'observe' | 'guard' | 'confirm-all';
+    agentSecurityMode?: 'off' | 'observe' | 'guard' | 'strict';
+  }): Promise<SecurityCommandResult> {
+    const args = [
       'model-policy-set',
       '--enabled', input.enabled ? 'true' : 'false',
-      '--confirmation', input.confirmationMode,
-      '--confirm',
-    ], { timeoutMs: 30000 });
+      '--reaction', input.actionGuardReaction,
+    ];
+    if (input.agentSecurityMode) args.push('--agent-security-mode', input.agentSecurityMode);
+    args.push('--confirm');
+    return this.run(args, { timeoutMs: 30000 });
   }
 
   async incidents(limit: number): Promise<SecurityCommandResult> {
@@ -186,21 +204,11 @@ export class SecurityClient {
   }
 
   async approveResponse(proposalId: string, pin: string): Promise<SecurityCommandResult> {
-    const requestDirectory = path.join(this.config.dataRoot, 'pin-requests');
-    await mkdir(requestDirectory, { recursive: true, mode: 0o700 });
-    const requestPath = path.join(requestDirectory, `${process.pid}-${randomUUID()}.json`);
-    await writeFile(requestPath, `${JSON.stringify({ pin })}\n`, {
-      encoding: 'utf8', mode: 0o600, flag: 'wx',
-    });
-    try {
-      const result = await this.run([
-        'approve-response', proposalId, '--request-file', requestPath, '--confirm-approval',
-      ], { timeoutMs: 15000 });
-      result.args = ['approve-response', proposalId, '--request-file', '<ephemeral-local-request>', '--confirm-approval'];
-      return result;
-    } finally {
-      await unlink(requestPath).catch(() => undefined);
-    }
+    return this.runSensitiveRequest(
+      ['approve-response', proposalId, '--confirm-approval'],
+      { pin },
+      15000,
+    );
   }
 
   async listResponseActions(): Promise<SecurityCommandResult> {
@@ -216,25 +224,14 @@ export class SecurityClient {
   }
 
   async resolveEmergency(input: { decision: 'release' | 'continue'; pin: string }): Promise<SecurityCommandResult> {
-    const requestDirectory = path.join(this.config.dataRoot, 'pin-requests');
-    await mkdir(requestDirectory, { recursive: true, mode: 0o700 });
-    const requestPath = path.join(requestDirectory, `${process.pid}-${randomUUID()}.json`);
-    await writeFile(requestPath, `${JSON.stringify({ pin: input.pin })}\n`, {
-      encoding: 'utf8', mode: 0o600, flag: 'wx',
-    });
-    try {
-      const result = await this.run([
+    return this.runSensitiveRequest(
+      [
         'emergency-resolve', '--decision', input.decision,
-        '--request-file', requestPath, '--confirm-emergency',
-      ], { timeoutMs: 15000 });
-      result.args = [
-        'emergency-resolve', '--decision', input.decision,
-        '--request-file', '<ephemeral-local-request>', '--confirm-emergency',
-      ];
-      return result;
-    } finally {
-      await unlink(requestPath).catch(() => undefined);
-    }
+        '--confirm-emergency',
+      ],
+      { pin: input.pin },
+      15000,
+    );
   }
 
   async pinStatus(): Promise<SecurityCommandResult> {
@@ -269,9 +266,17 @@ export class SecurityClient {
     return this.run(['start', ...(noLlm ? ['--no-llm'] : [])], { timeoutMs: 15000 });
   }
 
-  async stop(waitSeconds: number): Promise<SecurityCommandResult> {
+  async stop(waitSeconds: number, pin = ''): Promise<SecurityCommandResult> {
     const boundedWait = boundedNumber(waitSeconds, 10, 0, MAX_STOP_WAIT_SECONDS);
-    return this.run(['stop', '--wait', String(boundedWait)], { timeoutMs: Math.max(15000, boundedWait * 1000 + 3000) });
+    return this.runSensitiveRequest(
+      ['stop', '--wait', String(boundedWait), '--confirm'],
+      {
+        pin,
+        purpose: 'security.protection.stop',
+        request_id: randomUUID(),
+      },
+      Math.max(15000, boundedWait * 1000 + 3000),
+    );
   }
 
   async verifyIntegrity(): Promise<SecurityCommandResult> {
@@ -507,6 +512,7 @@ export class SecurityClient {
     actionModule: string;
     actionCapability: string;
     actionInput: string;
+    actionRisk: string;
     passkey?: string;
     noLlm?: boolean;
     monarchConfirmed?: boolean;
@@ -519,6 +525,7 @@ export class SecurityClient {
       action_module: input.actionModule,
       action_capability: input.actionCapability,
       action_input: input.actionInput,
+      action_risk: input.actionRisk,
       passkey: input.passkey || '',
       no_llm: input.noLlm === true,
       // Confirmation is owned by Monarch Access / ExecutionEngine. The Python
@@ -555,12 +562,18 @@ export class SecurityClient {
         cwd: this.config.projectRoot,
         env: {
           ...process.env,
+          // The TypeScript side owns the ephemeral action-request location.
+          // Always give the Python controller the exact same resolved root,
+          // including when SecurityClientOptions overrides the process env.
+          MONARCH_SECURITY_DATA_ROOT: this.config.dataRoot,
           PYTHONPATH: securityPythonPath(this.config.projectRoot),
           PYTHONUTF8: '1',
         },
         windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
+      child.stdin.on('error', () => undefined);
+      child.stdin.end(options.stdinPayload || '');
 
       const timeout = setTimeout(() => {
         if (settled) {
@@ -617,21 +630,21 @@ export class SecurityClient {
   }
 
   private async runPinRequest(command: 'pin-set' | 'pin-verify' | 'pin-recover', payload: Record<string, string>): Promise<SecurityCommandResult> {
-    const requestDirectory = path.join(this.config.dataRoot, 'pin-requests');
-    await mkdir(requestDirectory, { recursive: true, mode: 0o700 });
-    const requestPath = path.join(requestDirectory, `${process.pid}-${randomUUID()}.json`);
-    await writeFile(requestPath, `${JSON.stringify(payload)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600,
-      flag: 'wx',
+    return this.runSensitiveRequest([command], payload, 15000);
+  }
+
+  private async runSensitiveRequest(
+    args: string[],
+    payload: Record<string, string>,
+    timeoutMs: number,
+  ): Promise<SecurityCommandResult> {
+    const safeArgs = [...args, '--request-stdin'];
+    const result = await this.run(safeArgs, {
+      timeoutMs,
+      stdinPayload: `${JSON.stringify(payload)}\n`,
     });
-    try {
-      const result = await this.run([command, '--request-file', requestPath], { timeoutMs: 15000 });
-      result.args = [command, '--request-file', '<ephemeral-local-request>'];
-      return result;
-    } finally {
-      await unlink(requestPath).catch(() => undefined);
-    }
+    result.args = safeArgs;
+    return result;
   }
 
   private finishBenchmarkJob(

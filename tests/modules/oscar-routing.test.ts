@@ -19,19 +19,6 @@ describe('OscarModule Routing & Filtering', () => {
         ]
       }),
       status: vi.fn().mockResolvedValue({ connected: true }),
-      voiceFast: vi.fn().mockResolvedValue({
-        text: 'Короткий Fast-ответ.',
-        model: 'gemma4-fast',
-        generation_ms: 720,
-      }),
-      voiceRealtime: vi.fn().mockResolvedValue({
-        text: 'В Киеве сейчас двадцать градусов.',
-        model: 'open-meteo',
-        kind: 'weather',
-        source_count: 1,
-        search_ms: 180,
-        generation_ms: 0,
-      }),
       cancelGeneration: vi.fn().mockResolvedValue({ ok: true, cancelled: true }),
       appendConversationMessage: vi.fn().mockResolvedValue({ ok: true }),
     };
@@ -59,63 +46,6 @@ describe('OscarModule Routing & Filtering', () => {
     expect(mockClient.chat.mock.calls[0][0].web_search).toBe(false);
     expect(result.output?.response.answer).toBe('Test answer');
     expect(result.output?.response.sources).toEqual([{ source: 'internal_memory_doc' }]);
-  });
-
-  it('runs the isolated Fast voice contract without building a normal chat request', async () => {
-    const result = await module.executeCapability({
-      capabilityId: 'oscar.voice.fast',
-      input: { text: '  Сравни два варианта  ', language: 'ru' },
-    } as any, mockContext);
-
-    expect(result).toMatchObject({
-      ok: true,
-      output: { text: 'Короткий Fast-ответ.', model: 'gemma4-fast' },
-    });
-    expect(mockClient.voiceFast).toHaveBeenCalledWith({ text: 'Сравни два варианта', language: 'ru' });
-    expect(mockClient.chat).not.toHaveBeenCalled();
-    expect(mockContext.emit).toHaveBeenCalledWith(
-      'oscar.voice.fast.completed',
-      'oscar',
-      expect.objectContaining({ model: 'gemma4-fast' }),
-    );
-  });
-
-  it('runs realtime voice search through its network capability without building normal chat', async () => {
-    const result = await module.executeCapability({
-      capabilityId: 'oscar.voice.realtime',
-      input: { text: '  Погода в Киеве  ', kind: 'weather', language: 'ru', location: 'Киев' },
-    } as any, mockContext);
-
-    expect(result).toMatchObject({
-      ok: true,
-      output: { text: 'В Киеве сейчас двадцать градусов.', kind: 'weather', source_count: 1, model: 'open-meteo' },
-    });
-    expect(mockClient.voiceRealtime).toHaveBeenCalledWith({
-      text: 'Погода в Киеве',
-      kind: 'weather',
-      language: 'ru',
-      location: 'Киев',
-    });
-    expect(mockClient.chat).not.toHaveBeenCalled();
-    expect(mockContext.emit).toHaveBeenCalledWith(
-      'oscar.voice.realtime.completed',
-      'oscar',
-      expect.objectContaining({ sourceCount: 1, kind: 'weather', model: 'open-meteo', generationMs: 0 }),
-    );
-  });
-
-  it('rejects weather without a location before calling the realtime backend', async () => {
-    const result = await module.executeCapability({
-      capabilityId: 'oscar.voice.realtime',
-      input: { text: 'Погода прямо сейчас', kind: 'weather', language: 'ru' },
-    } as any, mockContext);
-
-    expect(result).toMatchObject({
-      ok: false,
-      error: 'voice-weather-location-required',
-    });
-    expect(mockClient.voiceRealtime).not.toHaveBeenCalled();
-    expect(mockClient.chat).not.toHaveBeenCalled();
   });
 
   it.each(['none', 'gemma4-fast', 'gemma4-balanced', 'gemma4-deepthinking', 'gemma4-31b'])(
@@ -204,7 +134,7 @@ describe('OscarModule Routing & Filtering', () => {
     expect(chatReq.web_search).toBeUndefined();
   });
 
-  it('activates matched SKILL.md workflows before calling the Oscar backend', async () => {
+  it('keeps SKILL.md workflows out of answer-only prompts', async () => {
     mockClient.streamChat = vi.fn().mockImplementation(async function* () {
       yield { type: 'done', data: { ok: true } };
     });
@@ -237,17 +167,73 @@ describe('OscarModule Routing & Filtering', () => {
       input: { messages: [{ role: 'user', content: 'review this worktree' }] },
     } as any, mockContext);
 
-    expect(activateForPrompt).toHaveBeenCalledWith('review this worktree', expect.objectContaining({
-      limit: 2,
-      minimumScore: 0.55,
-    }));
-    expect(mockClient.streamChat.mock.calls[0][0].skills).toEqual([expect.objectContaining({
-      name: 'review-worktree',
-      instructions: 'Inspect the diff and run focused tests.',
-    })]);
-    expect(mockContext.emit).toHaveBeenCalledWith('oscar.skills.activated', 'oscar', expect.objectContaining({
-      skills: ['review-worktree'],
-    }));
+    expect(activateForPrompt).not.toHaveBeenCalled();
+    expect(mockClient.streamChat.mock.calls[0][0]).toMatchObject({
+      execution_authority: 'none',
+      capabilities: [],
+      skills: [],
+    });
+    expect(mockContext.emit).not.toHaveBeenCalledWith('oscar.skills.activated', 'oscar', expect.anything());
+  });
+
+  it('propagates a rejected nonstream backend response instead of reporting chat completion', async () => {
+    mockClient.chat.mockResolvedValue({
+      ok: false,
+      answer: 'Оборванный ответ',
+      sources: [],
+      usage: { generation_stop_reason: 'length', likely_truncated: true },
+    });
+
+    const result = await module.executeCapability({
+      capabilityId: 'oscar.chat.local',
+      input: { messages: [{ role: 'user', content: 'Расскажи подробно' }] },
+    } as any, mockContext);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'model-output-truncated',
+      output: { response: { answer: 'Оборванный ответ', ok: false } },
+    });
+    expect(mockContext.emit).toHaveBeenCalledWith(
+      'oscar.chat.failed',
+      'oscar',
+      expect.objectContaining({ error: 'model-output-truncated' }),
+    );
+    expect(mockContext.emit).not.toHaveBeenCalledWith(
+      'oscar.chat.completed',
+      'oscar',
+      expect.anything(),
+    );
+  });
+
+  it('rejects contradictory nonstream success when completion telemetry says length', async () => {
+    mockClient.chat.mockResolvedValue({
+      ok: true,
+      answer: 'Правдоподобный, но оборванный ответ',
+      sources: [],
+      usage: { generation_stop_reason: 'length', likely_truncated: true },
+    });
+
+    const result = await module.executeCapability({
+      capabilityId: 'oscar.chat.local',
+      input: { messages: [{ role: 'user', content: 'Расскажи подробно' }] },
+    } as any, mockContext);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'model-output-truncated',
+      output: { response: { answer: 'Правдоподобный, но оборванный ответ', ok: true } },
+    });
+    expect(mockContext.emit).toHaveBeenCalledWith(
+      'oscar.chat.failed',
+      'oscar',
+      expect.objectContaining({ error: 'model-output-truncated' }),
+    );
+    expect(mockContext.emit).not.toHaveBeenCalledWith(
+      'oscar.chat.completed',
+      'oscar',
+      expect.anything(),
+    );
   });
 
   it('attaches the native Security contract only to Security prompts', async () => {
@@ -267,15 +253,11 @@ describe('OscarModule Routing & Filtering', () => {
       input: { messages: [{ role: 'user', content: 'Расскажи про Monarch Security' }] },
     } as any, mockContext);
 
-    expect(mockClient.streamChat.mock.calls[1][0].skills).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        name: 'monarch-security',
-        instructions: expect.stringContaining('security.scan.system'),
-      }),
-    ]));
+    expect(mockClient.streamChat.mock.calls[1][0].skills).toEqual([]);
+    expect(mockClient.streamChat.mock.calls[1][0].execution_authority).toBe('none');
   });
 
-  it('keeps a compact full capability index available to the model', async () => {
+  it('does not expose the capability index to an answer-only model', async () => {
     mockClient.streamChat = vi.fn().mockImplementation(async function* () {
       yield { type: 'done', data: { ok: true } };
     });
@@ -292,10 +274,14 @@ describe('OscarModule Routing & Filtering', () => {
       input: { messages: [{ role: 'user', content: 'прочитай проект' }] },
     } as any, mockContext);
 
-    expect(mockClient.streamChat.mock.calls[0][0].capabilities).toHaveLength(40);
+    expect(mockClient.streamChat.mock.calls[0][0]).toMatchObject({
+      execution_authority: 'none',
+      capabilities: [],
+    });
+    expect(mockClient.streamChat.mock.calls[0][0].access).toBeUndefined();
   });
 
-  it('prioritizes Device capabilities from Russian routing metadata in ordinary chat', async () => {
+  it('does not leak Device action contracts into ordinary Russian chat', async () => {
     const deviceCapability = {
       id: 'device.app.open',
       moduleId: 'device',
@@ -326,12 +312,9 @@ describe('OscarModule Routing & Filtering', () => {
     } as any, mockContext);
 
     const request = mockClient.chat.mock.calls[0][0];
-    expect(request.capabilities[0]).toMatchObject({
-      id: 'device.app.open',
-      module: 'device',
-      system: 'Monarch Device',
-    });
-    expect(request.capabilities[0].inputSchema).toBeTruthy();
+    expect(request.execution_authority).toBe('none');
+    expect(request.capabilities).toEqual([]);
+    expect(request.access).toBeUndefined();
   });
 
   it('restricts a trusted Coder turn to coder capabilities', async () => {
@@ -413,6 +396,47 @@ describe('OscarModule Routing & Filtering', () => {
     expect((mockContext as any).execute).not.toHaveBeenCalled();
   });
 
+  it('applies zero-retention and context removal to the Coder chat lane too', async () => {
+    module.setOwnerDevSettingsProvider(() => ({
+      zeroRetentionEnabled: true,
+      internetEnabled: false,
+      memoryEnabled: false,
+      historyContextEnabled: false,
+      runtimeContextEnabled: false,
+    }));
+    (mockContext.listCapabilities as any).mockReturnValue([{
+      id: 'coder.files.read', moduleId: 'coder', title: 'Coder read', description: 'read', risk: 'read',
+    }]);
+    const marker = '<monarch_coder_mode>{"project":{"root":"E:\\\\Work"}}</monarch_coder_mode>';
+
+    await module.executeCapability({
+      capabilityId: 'oscar.chat.local',
+      input: {
+        messages: [
+          { role: 'system', content: marker },
+          { role: 'user', content: 'Старый Coder ход' },
+          { role: 'assistant', content: 'Старый Coder ответ' },
+          { role: 'user', content: 'Новый Coder ход' },
+        ],
+        web_search: true,
+        use_memory: true,
+      },
+    } as any, mockContext);
+
+    const request = mockClient.chat.mock.calls[0][0];
+    expect(request).toMatchObject({
+      incognito: true,
+      web_search: false,
+      use_memory: false,
+      capabilities: [],
+      dev_mode: { zero_retention: true, history_context_enabled: false },
+    });
+    expect(request.messages).toEqual([
+      { role: 'system', content: marker },
+      { role: 'user', content: 'Новый Coder ход' },
+    ]);
+  });
+
   it('keeps the full Coder index while bounding detailed schemas to the relevant working set', async () => {
     (mockContext.listCapabilities as any).mockReturnValue(Array.from({ length: 20 }, (_, index) => ({
       id: `coder.demo.${index}`,
@@ -441,7 +465,7 @@ describe('OscarModule Routing & Filtering', () => {
     expect(capabilities.find((capability: any) => capability.id === 'coder.demo.19').inputSchema).toBeTruthy();
   });
 
-  it('provides the complete Security capability catalog for Security conversations', async () => {
+  it('keeps the Security action catalog out of answer-only Security conversations', async () => {
     mockClient.streamChat = vi.fn().mockImplementation(async function* () {
       yield { type: 'done', data: { ok: true } };
     });
@@ -463,7 +487,8 @@ describe('OscarModule Routing & Filtering', () => {
     } as any, mockContext);
 
     const catalog = mockClient.streamChat.mock.calls[0][0].capabilities;
-    expect(catalog.filter((item: any) => item.module === 'security')).toHaveLength(30);
+    expect(catalog).toEqual([]);
+    expect(mockClient.streamChat.mock.calls[0][0].execution_authority).toBe('none');
   });
 
   it('grounds named module questions for the model and raises the automatic route floor', async () => {
@@ -520,7 +545,8 @@ describe('OscarModule Routing & Filtering', () => {
     expect(systemContext?.content).toContain('отдельные модули');
     expect(systemContext?.content).toContain('"resolvedMentionIds":["safe","sharing"]');
     expect(systemContext?.content).toContain('не выгружай сырой JSON');
-    expect(request.capabilities.map((item: any) => item.id)).toEqual(expect.arrayContaining(['safe.status', 'sharing.status']));
+    expect(request.capabilities).toEqual([]);
+    expect(request.execution_authority).toBe('none');
   });
 
   it('treats a leading Oscar address as a vocative instead of a registry module mention', async () => {
@@ -550,7 +576,8 @@ describe('OscarModule Routing & Filtering', () => {
 
     const request = mockClient.streamChat.mock.calls[0][0];
     expect(request.messages.some((message: any) => message.content.includes('<live_monarch_system>'))).toBe(false);
-    expect(request.capabilities.map((item: any) => item.id)).toContain('oscar.status');
+    expect(request.capabilities).toEqual([]);
+    expect(request.execution_authority).toBe('none');
   });
 
   it('still grounds an explicit Oscar module question', async () => {

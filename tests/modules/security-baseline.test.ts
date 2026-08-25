@@ -81,7 +81,7 @@ describe('Security persistence baseline approval', () => {
     expect(route).toMatchObject({
       capabilityId: 'security.model_policy.set',
       permissionMode: 'confirm',
-      input: { enabled: true, confirmationMode: 'always' },
+      input: { enabled: true, actionGuardReaction: 'confirm-all' },
     });
   });
 

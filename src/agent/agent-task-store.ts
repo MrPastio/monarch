@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, readdir, rename, stat, unlink } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { writeDurableJsonAtomically } from '../core/durable-json-file';
 import {
   AGENT_CHECKPOINT_SCHEMA_VERSION,
   AGENT_APPROVAL_SCHEMA_VERSION,
@@ -8,6 +9,8 @@ import {
   AGENT_RUNNER_CLAIM_SCHEMA_VERSION,
   AGENT_TASK_EVENT_SCHEMA_VERSION,
   AGENT_TASK_SCHEMA_VERSION,
+  AGENT_COGNITIVE_PROFILE_SCHEMA_VERSION,
+  AGENT_WORKING_STATE_SCHEMA_VERSION,
   type AgentClientRequestReceipt,
   type AgentApproval,
   type AgentJsonObject,
@@ -26,7 +29,11 @@ import {
   type AgentTaskStoreListener,
 } from './types';
 
-export const AGENT_TASK_STORE_SCHEMA_VERSION = 'monarch.agent-task-store.v2' as const;
+export const AGENT_TASK_STORE_SCHEMA_VERSION = 'monarch.agent-task-store.v3' as const;
+const LEGACY_AGENT_TASK_STORE_SCHEMA_VERSION = 'monarch.agent-task-store.v2';
+const LEGACY_AGENT_TASK_SCHEMA_VERSION = 'monarch.agent-task.v2';
+const LEGACY_AGENT_CHECKPOINT_SCHEMA_VERSION = 'monarch.agent-checkpoint.v2';
+const LEGACY_AGENT_COGNITIVE_PROFILE_SCHEMA_VERSION = 'monarch.agent-cognitive-profile.v1';
 const AGENT_TASK_LOCK_SCHEMA_VERSION = 'monarch.agent-task-lock.v1' as const;
 
 const ACTIVE_RECOVERY_STATUSES = new Set<AgentTaskStatus>([
@@ -56,10 +63,12 @@ const EVENT_TYPES = new Set<AgentTaskEventType>([
   'plan.created',
   'plan.revised',
   'resolver.completed',
+  'resolver.discovery.requested',
   'model.started',
   'model.completed',
   'step.started',
   'approval.required',
+  'approval.armed',
   'approval.resolved',
   'tool.started',
   'tool.completed',
@@ -136,6 +145,8 @@ export interface LocalJsonAgentTaskStoreOptions {
   now?: () => Date;
   pid?: number;
   isProcessAlive?: (pid: number) => boolean;
+  /** Read-only migration source used only when the v3 file does not exist. */
+  legacyFilePath?: string;
   /**
    * @internal Deterministic filesystem fault injection for store tests only.
    * Production callers must leave this undefined.
@@ -250,6 +261,7 @@ abstract class BaseAgentTaskStore implements AgentTaskStore {
   ): Promise<AgentTaskStoreCommit> {
     const task = cloneInput(taskInput, 'agent task');
     assertTask(task, 'agent task');
+    assertCompletedPlanInvariant(task, 'agent task');
     assertInitialTask(task);
     const normalizedOptions = normalizeMutationOptions(options);
     const requestFingerprint = fingerprintRequest({
@@ -323,6 +335,7 @@ abstract class BaseAgentTaskStore implements AgentTaskStore {
   async saveTask(taskInput: AgentTask, optionsInput: AgentTaskSaveOptions): Promise<AgentTaskStoreCommit> {
     const task = cloneInput(taskInput, 'agent task');
     assertTask(task, 'agent task');
+    assertCompletedPlanInvariant(task, 'agent task');
     const options = normalizeSaveOptions(optionsInput);
     const requestFingerprint = fingerprintRequest(options.idempotencyPayload === undefined
       ? { operation: 'save-task', task, options }
@@ -331,6 +344,11 @@ abstract class BaseAgentTaskStore implements AgentTaskStore {
       const replay = replayClientRequest(document, options.clientRequestId, requestFingerprint, task.id);
       if (replay) return unchanged(replay);
       const current = requireCheckpoint(document, task.id);
+      if (current.task.legacyReadOnly === true) {
+        throw new AgentTaskStoreValidationError(
+          `Migrated terminal agent task ${task.id} is read-only; repeat it as a new v3 task.`,
+        );
+      }
       if (options.expectedRunnerClaimId) {
         const claim = current.task.runnerClaim;
         if (!claim || claim.claimId !== options.expectedRunnerClaimId) {
@@ -471,6 +489,14 @@ abstract class BaseAgentTaskStore implements AgentTaskStore {
         expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
       };
       task.runnerClaim = claim;
+      if (!existing && (task.status === 'created' || task.status === 'preparing')) {
+        const previousStatus = task.status;
+        task.status = 'running';
+        drafts.push({
+          type: 'task.status.changed',
+          payload: { from: previousStatus, to: 'running', reason: 'runner-claimed' },
+        });
+      }
       const payload: AgentJsonObject = {
         claimId: claim.claimId,
         runnerId: claim.runnerId,
@@ -637,6 +663,67 @@ abstract class BaseAgentTaskStore implements AgentTaskStore {
     return cloneStored(result.value);
   }
 
+  async reconcileLegacyCompletedPlans(): Promise<AgentTaskStoreCommit[]> {
+    const savedAt = this.nowIso();
+    const result = await this.mutateDocument((document) => {
+      const commits: AgentTaskStoreCommit[] = [];
+      for (const taskId of Object.keys(document.tasks).sort()) {
+        const current = document.tasks[taskId];
+        if (!current) continue;
+        if (current.task.legacyReadOnly === true) continue;
+        const recovery = legacyCompletedPlanRecovery(current.task);
+        if (!recovery) continue;
+
+        const previousTerminalReason = current.task.terminalReason;
+        const summary = recovery.missingCompletedStep
+          ? 'Legacy completed checkpoint had no completed plan step and was recovered as failed.'
+          : 'Legacy completed checkpoint had unfinished plan steps and was recovered as failed.';
+        const task: AgentTask = {
+          ...current.task,
+          status: 'failed',
+          terminalReason: {
+            code: 'verification-failed',
+            summary,
+            detail: {
+              recoveryReason: 'legacy-completed-plan-invariant',
+              recoveredAt: savedAt,
+              previousStatus: 'completed',
+              previousTerminalCode: previousTerminalReason?.code ?? null,
+              unfinishedSteps: recovery.unfinishedSteps,
+              missingCompletedStep: recovery.missingCompletedStep,
+            },
+          },
+        };
+        const mutation = mutateCheckpoint(document, current, task, [
+          {
+            type: 'task.status.changed',
+            payload: {
+              from: 'completed',
+              to: 'failed',
+              reason: 'legacy-completed-plan-invariant',
+            },
+          },
+          {
+            type: 'task.failed',
+            payload: {
+              code: 'verification-failed',
+              summary,
+              reason: 'legacy-completed-plan-invariant',
+              unfinishedSteps: recovery.unfinishedSteps,
+              missingCompletedStep: recovery.missingCompletedStep,
+            },
+          },
+        ], undefined, undefined, savedAt);
+        commits.push(mutation.value);
+      }
+      return commits.length > 0
+        ? { changed: true, value: commits, commits }
+        : unchanged<AgentTaskStoreCommit[]>([]);
+    });
+    this.publish(result.commits);
+    return cloneStored(result.value);
+  }
+
   subscribe(taskIdInput: string | '*', listener: AgentTaskStoreListener): () => void {
     if (typeof listener !== 'function') {
       throw new AgentTaskStoreValidationError('Agent task store listener must be a function.');
@@ -708,6 +795,20 @@ export class InMemoryAgentTaskStore extends BaseAgentTaskStore {
     });
   }
 
+  async discardTask(taskIdInput: string): Promise<boolean> {
+    const taskId = normalizeIdentifier(taskIdInput, 'task id');
+    const result = await this.mutateDocument((document) => {
+      if (!document.tasks[taskId]) return unchanged(false);
+      delete document.tasks[taskId];
+      for (const [requestId, receipt] of Object.entries(document.clientRequests)) {
+        if (receipt.taskId === taskId) delete document.clientRequests[requestId];
+      }
+      document.updatedAt = normalizeDate(this.now()).toISOString();
+      return changed(true, []);
+    });
+    return result.value;
+  }
+
   private enqueue<T>(operation: () => T | Promise<T>): Promise<T> {
     const running = this.queue.then(operation, operation);
     this.queue = running.then(() => undefined, () => undefined);
@@ -724,6 +825,7 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
   private readonly processId: number;
   private readonly processAlive: (pid: number) => boolean;
   private readonly testHooks: LocalJsonAgentTaskStoreTestHooks | undefined;
+  private readonly legacyFilePath: string | undefined;
   private queue: Promise<void> = Promise.resolve();
 
   constructor(filePathInput: string, options: LocalJsonAgentTaskStoreOptions = {}) {
@@ -740,6 +842,10 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
     this.processId = normalizeProcessId(options.pid ?? process.pid);
     this.processAlive = options.isProcessAlive ?? isProcessAlive;
     this.testHooks = options.__testHooks;
+    this.legacyFilePath = options.legacyFilePath ? path.resolve(options.legacyFilePath) : undefined;
+    if (this.legacyFilePath === this.filePath) {
+      throw new AgentTaskStoreValidationError('Legacy Agent task store path must differ from the v3 store path.');
+    }
   }
 
   protected readDocument(): Promise<AgentTaskStoreDocument> {
@@ -779,15 +885,28 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
 
   private async loadDocument(): Promise<AgentTaskStoreDocument> {
     let raw: string;
+    let sourcePath = this.filePath;
     try {
       raw = await readFile(this.filePath, 'utf8');
     } catch (error) {
       if (errorCode(error) === 'ENOENT') {
-        return createEmptyDocument(normalizeDate(this.now()).toISOString());
+        if (!this.legacyFilePath) return createEmptyDocument(normalizeDate(this.now()).toISOString());
+        try {
+          raw = await readFile(this.legacyFilePath, 'utf8');
+          sourcePath = this.legacyFilePath;
+        } catch (legacyError) {
+          if (errorCode(legacyError) === 'ENOENT') {
+            return createEmptyDocument(normalizeDate(this.now()).toISOString());
+          }
+          throw new AgentTaskStoreError(`Unable to read legacy agent task store ${this.legacyFilePath}.`, {
+            cause: legacyError,
+          });
+        }
+      } else {
+        throw new AgentTaskStoreError(`Unable to read agent task store ${this.filePath}.`, {
+          cause: error,
+        });
       }
-      throw new AgentTaskStoreError(`Unable to read agent task store ${this.filePath}.`, {
-        cause: error,
-      });
     }
 
     let parsed: unknown;
@@ -795,20 +914,23 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
       parsed = JSON.parse(raw) as unknown;
     } catch (error) {
       throw new AgentTaskStoreCorruptionError(
-        `Agent task store ${this.filePath} contains invalid JSON and was not modified.`,
-        this.filePath,
+        `Agent task store ${sourcePath} contains invalid JSON and was not modified.`,
+        sourcePath,
         { cause: error },
       );
     }
     try {
+      migratePersistedAgentContractV2(parsed);
+      migrateLegacyEvidenceClasses(parsed);
+      migrateLegacyCognitiveProfiles(parsed);
       assertStoredDocument(parsed);
       return cloneStored(parsed);
     } catch (error) {
       if (error instanceof AgentTaskStoreCorruptionError) throw error;
       const detail = error instanceof Error ? error.message : String(error);
       throw new AgentTaskStoreCorruptionError(
-        `Agent task store ${this.filePath} is invalid (${detail}) and was not modified.`,
-        this.filePath,
+        `Agent task store ${sourcePath} is invalid (${detail}) and was not modified.`,
+        sourcePath,
         { cause: error },
       );
     }
@@ -818,22 +940,12 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
     document: AgentTaskStoreDocument,
     lease: AgentTaskStoreLockLease,
   ): Promise<void> {
-    const temporaryPath = path.join(
-      path.dirname(this.filePath),
-      `.${path.basename(this.filePath)}.${this.processId}.${randomUUID()}.tmp`,
-    );
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
-      handle = await open(temporaryPath, 'wx', 0o600);
-      await handle.writeFile(`${JSON.stringify(document, null, 2)}\n`, 'utf8');
-      await handle.sync();
-      await handle.close();
-      handle = undefined;
-      await lease.assertOwned();
-      await rename(temporaryPath, this.filePath);
+      await writeDurableJsonAtomically(this.filePath, document, {
+        processId: this.processId,
+        assertOwned: () => lease.assertOwned(),
+      });
     } catch (error) {
-      if (handle) await handle.close().catch(() => undefined);
-      await unlink(temporaryPath).catch(() => undefined);
       if (error instanceof AgentTaskStoreLockLostError) throw error;
       throw new AgentTaskStoreError(`Unable to atomically persist agent task store ${this.filePath}.`, {
         cause: error,
@@ -1034,7 +1146,12 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
     contenders: AgentTaskLockContender[];
     hasYoungMalformedClaim: boolean;
   }> {
-    const maximumAttempts = 4;
+    // Windows can keep an in-place claim update briefly unreadable after the
+    // writer closes it (and endpoint protection can extend that sharing
+    // window). Keep the contender fail-closed, but tolerate a bounded sequence
+    // longer than the old four-read window before surfacing the filesystem
+    // error. Other platforms retain the narrower retry budget.
+    const maximumAttempts = process.platform === 'win32' ? 12 : 4;
     for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
       try {
         return await this.readLockContendersOnce(ownerId);
@@ -1046,7 +1163,8 @@ export class LocalJsonAgentTaskStore extends BaseAgentTaskStore {
         // A competing writer updates its claim in-place under Windows. Re-enumerate
         // every time so a disappeared/replaced contender is never inferred stale
         // from a path captured before the sharing violation.
-        await delay(Math.max(2, Math.min(this.retryDelayMs, 25)) * (attempt + 1));
+        const retryBaseMs = Math.max(2, Math.min(this.retryDelayMs, 10));
+        await delay(Math.min(25, retryBaseMs * (attempt + 1)));
       }
     }
     throw new AgentTaskStoreError(`Unable to read agent task store lock contenders for ${this.lockPath}.`);
@@ -1504,6 +1622,71 @@ function assertTask(value: unknown, label: string): asserts value is AgentTask {
   if (task.parentTaskId !== undefined) {
     normalizeIdentifier(readString(task.parentTaskId, `${label}.parentTaskId`), 'parent task id');
   }
+  if (
+    task.actionApprovalPolicy !== undefined
+    && task.actionApprovalPolicy !== 'kernel'
+    && task.actionApprovalPolicy !== 'all-effects'
+  ) {
+    throw new AgentTaskStoreValidationError(`${label}.actionApprovalPolicy is unsupported.`);
+  }
+  if (
+    task.planningMode !== undefined
+    && task.planningMode !== 'adaptive'
+    && task.planningMode !== 'model-first'
+  ) {
+    throw new AgentTaskStoreValidationError(`${label}.planningMode is unsupported.`);
+  }
+  if (task.decisionModelPolicy !== undefined) {
+    const policy = asRecord(task.decisionModelPolicy, `${label}.decisionModelPolicy`);
+    const requestedRole = readString(policy.requestedRole, `${label}.decisionModelPolicy.requestedRole`);
+    if (![
+      'gemma4-fast',
+      'gemma4-balanced',
+      'gemma4-deepthinking',
+      'gemma4-31b',
+      'qwen3.8-27b-pro',
+      'qwen3-coder-30b-a3b-instruct',
+      'deepseek-coder-v2-lite-instruct',
+    ].includes(requestedRole)) {
+      throw new AgentTaskStoreValidationError(`${label}.decisionModelPolicy.requestedRole is unsupported.`);
+    }
+    if (policy.selectionSource !== 'user-explicit' || policy.fallback !== 'exact') {
+      throw new AgentTaskStoreValidationError(`${label}.decisionModelPolicy is unsupported.`);
+    }
+  }
+  if (task.executionProfile !== undefined) {
+    const executionProfile = asRecord(task.executionProfile, `${label}.executionProfile`);
+    assertEqual(
+      executionProfile.schemaVersion,
+      'monarch.agent-execution-profile.v1',
+      `${label}.executionProfile.schemaVersion`,
+    );
+    if (executionProfile.kind !== 'coder-project' || surface !== 'coder') {
+      throw new AgentTaskStoreValidationError(`${label}.executionProfile is unsupported for this surface.`);
+    }
+    normalizeIdentifier(readString(executionProfile.projectId, `${label}.executionProfile.projectId`), 'Coder project id');
+    const projectRoot = readString(executionProfile.projectRoot, `${label}.executionProfile.projectRoot`);
+    if (!/^[A-Za-z]:[\\/]/u.test(projectRoot) || projectRoot.length > 2_048) {
+      throw new AgentTaskStoreValidationError(`${label}.executionProfile.projectRoot must be an exact Windows path.`);
+    }
+    const permissionProfile = asRecord(
+      executionProfile.permissionProfile,
+      `${label}.executionProfile.permissionProfile`,
+    );
+    if (!['read-only', 'workspace-write', 'danger-full-access'].includes(String(permissionProfile.sandboxMode))) {
+      throw new AgentTaskStoreValidationError(`${label}.executionProfile.permissionProfile.sandboxMode is unsupported.`);
+    }
+    if (!['on-request', 'never'].includes(String(permissionProfile.approvalPolicy))) {
+      throw new AgentTaskStoreValidationError(`${label}.executionProfile.permissionProfile.approvalPolicy is unsupported.`);
+    }
+    if (permissionProfile.autonomyMode !== undefined
+      && !['guided', 'workspace-autonomous', 'full-local'].includes(String(permissionProfile.autonomyMode))) {
+      throw new AgentTaskStoreValidationError(`${label}.executionProfile.permissionProfile.autonomyMode is unsupported.`);
+    }
+  }
+  if (task.legacyReadOnly !== undefined && typeof task.legacyReadOnly !== 'boolean') {
+    throw new AgentTaskStoreValidationError(`${label}.legacyReadOnly must be boolean.`);
+  }
   const goal = asRecord(task.goal, `${label}.goal`);
   readString(goal.originalRequest, `${label}.goal.originalRequest`);
   readString(goal.normalizedObjective, `${label}.goal.normalizedObjective`);
@@ -1580,6 +1763,86 @@ function assertTask(value: unknown, label: string): asserts value is AgentTask {
         `${label}.pendingAction.dispatchedAt`,
       );
     }
+  }
+  if (task.toolDiscovery !== undefined) {
+    const discovery = asRecord(task.toolDiscovery, `${label}.toolDiscovery`);
+    readString(discovery.query, `${label}.toolDiscovery.query`);
+    readString(discovery.reason, `${label}.toolDiscovery.reason`);
+    readPositiveInteger(discovery.revision, `${label}.toolDiscovery.revision`);
+    normalizeIso(
+      readString(discovery.requestedAt, `${label}.toolDiscovery.requestedAt`),
+      `${label}.toolDiscovery.requestedAt`,
+    );
+  }
+  if (task.cognitiveProfile !== undefined) {
+    const profile = asRecord(task.cognitiveProfile, `${label}.cognitiveProfile`);
+    assertEqual(
+      profile.schemaVersion,
+      AGENT_COGNITIVE_PROFILE_SCHEMA_VERSION,
+      `${label}.cognitiveProfile.schemaVersion`,
+    );
+    if (!['adaptive-local', 'small-local', 'full-local'].includes(String(profile.mode))) {
+      throw new AgentTaskStoreValidationError(`${label}.cognitiveProfile.mode is unsupported.`);
+    }
+    if (!['unknown', 'fast', 'balanced'].includes(String(profile.activeTier))) {
+      throw new AgentTaskStoreValidationError(`${label}.cognitiveProfile.activeTier is unsupported.`);
+    }
+    readPositiveInteger(profile.maxDecisionSchemas, `${label}.cognitiveProfile.maxDecisionSchemas`);
+    readPositiveInteger(profile.maxObservationFacts, `${label}.cognitiveProfile.maxObservationFacts`);
+    if (profile.agentCapabilityClass !== 'basic' && profile.agentCapabilityClass !== 'full') {
+      throw new AgentTaskStoreValidationError(`${label}.cognitiveProfile.agentCapabilityClass is unsupported.`);
+    }
+    if (profile.planningAuthority !== 'runtime-only' && profile.planningAuthority !== 'model-adaptive') {
+      throw new AgentTaskStoreValidationError(`${label}.cognitiveProfile.planningAuthority is unsupported.`);
+    }
+    readPositiveInteger(profile.maxPlanSteps, `${label}.cognitiveProfile.maxPlanSteps`);
+    if (profile.runtimeDecomposition !== true || profile.runtimeRecovery !== true) {
+      throw new AgentTaskStoreValidationError(`${label}.cognitiveProfile runtime controls must remain enabled.`);
+    }
+    normalizeIso(
+      readString(profile.updatedAt, `${label}.cognitiveProfile.updatedAt`),
+      `${label}.cognitiveProfile.updatedAt`,
+    );
+  }
+  if (task.workingState !== undefined) {
+    const working = asRecord(task.workingState, `${label}.workingState`);
+    assertEqual(
+      working.schemaVersion,
+      AGENT_WORKING_STATE_SCHEMA_VERSION,
+      `${label}.workingState.schemaVersion`,
+    );
+    readPositiveInteger(working.revision, `${label}.workingState.revision`);
+    if (!['decide', 'inspect', 'act', 'verify', 'recover', 'synthesize', 'complete'].includes(String(working.phase))) {
+      throw new AgentTaskStoreValidationError(`${label}.workingState.phase is unsupported.`);
+    }
+    if (working.activeStepId !== undefined) {
+      normalizeIdentifier(readString(working.activeStepId, `${label}.workingState.activeStepId`), 'step id');
+    }
+    for (const key of ['goalTargetIds', 'causalObservationIds', 'failedActionFingerprints'] as const) {
+      const values = readArray(working[key], `${label}.workingState.${key}`);
+      if (values.length > 64) {
+        throw new AgentTaskStoreValidationError(`${label}.workingState.${key} exceeds 64 entries.`);
+      }
+      values.forEach((entry, index) => readString(entry, `${label}.workingState.${key}[${index}]`));
+    }
+    if (working.lastFailure !== undefined) {
+      const failure = asRecord(working.lastFailure, `${label}.workingState.lastFailure`);
+      readString(failure.capabilityId, `${label}.workingState.lastFailure.capabilityId`);
+      normalizeIdentifier(
+        readString(failure.observationId, `${label}.workingState.lastFailure.observationId`),
+        'observation id',
+      );
+      if (!['runtime', 'permission', 'verification', 'tool', 'cancelled', 'unknown'].includes(String(failure.failureClass))) {
+        throw new AgentTaskStoreValidationError(`${label}.workingState.lastFailure.failureClass is unsupported.`);
+      }
+      if (typeof failure.retryable !== 'boolean') {
+        throw new AgentTaskStoreValidationError(`${label}.workingState.lastFailure.retryable must be boolean.`);
+      }
+    }
+    normalizeIso(
+      readString(working.updatedAt, `${label}.workingState.updatedAt`),
+      `${label}.workingState.updatedAt`,
+    );
   }
   if (task.pauseRequested !== undefined && typeof task.pauseRequested !== 'boolean') {
     throw new AgentTaskStoreValidationError(`${label}.pauseRequested must be boolean.`);
@@ -1673,6 +1936,47 @@ function assertPlan(value: unknown, label: string): void {
   });
 }
 
+function assertCompletedPlanInvariant(task: AgentTask, label: string): void {
+  if (task.status !== 'completed') return;
+  // Legacy/imported checkpoints may predate durable plans. New Agent Runtime
+  // tasks always carry one; when present, the store must reject impossible
+  // terminal snapshots instead of persisting them.
+  if (!task.plan) return;
+  const requiredSteps = task.plan.steps.filter((step) => step.status !== 'skipped');
+  const unfinished = requiredSteps.find((step) => step.status !== 'completed' && step.status !== 'failed');
+  if (unfinished) {
+    throw new AgentTaskStoreValidationError(
+      `${label} cannot be completed while plan step ${unfinished.id} is ${unfinished.status}.`,
+    );
+  }
+  if (!requiredSteps.some((step) => step.status === 'completed')) {
+    throw new AgentTaskStoreValidationError(`${label} cannot be completed without a completed plan step.`);
+  }
+  if (task.currentStepId) {
+    const current = task.plan.steps.find((step) => step.id === task.currentStepId);
+    if (current && current.status !== 'completed' && current.status !== 'skipped') {
+      throw new AgentTaskStoreValidationError(
+        `${label}.currentStepId cannot reference unfinished step ${current.id} after completion.`,
+      );
+    }
+  }
+}
+
+function legacyCompletedPlanRecovery(task: AgentTask): {
+  unfinishedSteps: Array<{ id: string; status: string }>;
+  missingCompletedStep: boolean;
+} | null {
+  if (task.status !== 'completed' || !task.plan) return null;
+  const requiredSteps = task.plan.steps.filter((step) => step.status !== 'skipped');
+  const unfinishedSteps = requiredSteps
+    .filter((step) => step.status !== 'completed' && step.status !== 'failed')
+    .map((step) => ({ id: step.id, status: step.status }));
+  const missingCompletedStep = !requiredSteps.some((step) => step.status === 'completed');
+  return unfinishedSteps.length > 0 || missingCompletedStep
+    ? { unfinishedSteps, missingCompletedStep }
+    : null;
+}
+
 function assertObservationReference(value: unknown, taskId: string, label: string): void {
   const reference = asRecord(value, label);
   normalizeIdentifier(readString(reference.id, `${label}.id`), 'observation id');
@@ -1704,6 +2008,7 @@ function assertApprovalReference(value: unknown, taskId: string, label: string):
   }
   readString(reference.capabilityId, `${label}.capabilityId`);
   readString(reference.canonicalProposalHash, `${label}.canonicalProposalHash`);
+  assertApprovalPolicyBinding(reference, label);
 }
 
 function assertArtifactReference(value: unknown, label: string): void {
@@ -1803,6 +2108,15 @@ function assertObservation(value: unknown, taskId: string, label: string): asser
     const evidenceLabel = `${label}.evidence[${index}]`;
     const evidence = asRecord(entry, evidenceLabel);
     readString(evidence.kind, `${evidenceLabel}.kind`);
+    if (![
+      'model-generated',
+      'external-source',
+      'kernel-observation',
+      'kernel-verification',
+      'user-assertion',
+    ].includes(String(evidence.evidenceClass || ''))) {
+      throw new AgentTaskStoreValidationError(`${evidenceLabel}.evidenceClass is unsupported.`);
+    }
     readString(evidence.reference, `${evidenceLabel}.reference`);
     if (evidence.summary !== undefined) readString(evidence.summary, `${evidenceLabel}.summary`);
     if (evidence.checksum !== undefined) readString(evidence.checksum, `${evidenceLabel}.checksum`);
@@ -1829,6 +2143,7 @@ function assertApproval(value: unknown, taskId: string, label: string): asserts 
   }
   readString(approval.capabilityId, `${label}.capabilityId`);
   readString(approval.canonicalProposalHash, `${label}.canonicalProposalHash`);
+  assertApprovalPolicyBinding(approval, label);
   asRecord(approval.proposal, `${label}.proposal`);
   if (
     approval.status !== 'pending'
@@ -1863,6 +2178,35 @@ function assertApproval(value: unknown, taskId: string, label: string): asserts 
       throw new AgentTaskStoreValidationError(`${label}.decision.decidedBy is unsupported.`);
     }
     normalizeIso(readString(decision.decidedAt, `${label}.decision.decidedAt`), `${label}.decision.decidedAt`);
+  }
+  if (approval.arm !== undefined) {
+    const arm = asRecord(approval.arm, `${label}.arm`);
+    readString(arm.canonicalProposalHash, `${label}.arm.canonicalProposalHash`);
+    readString(arm.capabilityId, `${label}.arm.capabilityId`);
+    normalizeIso(readString(arm.armedAt, `${label}.arm.armedAt`), `${label}.arm.armedAt`);
+    normalizeIso(readString(arm.expiresAt, `${label}.arm.expiresAt`), `${label}.arm.expiresAt`);
+    if (!TASK_SURFACES.has(String(arm.armedBySurface || ''))) {
+      throw new AgentTaskStoreValidationError(`${label}.arm.armedBySurface is unsupported.`);
+    }
+  }
+}
+
+function assertApprovalPolicyBinding(value: Record<string, unknown>, label: string): void {
+  if (value.purpose !== undefined && value.purpose !== 'policy' && value.purpose !== 'owner-security-override') {
+    throw new AgentTaskStoreValidationError(`${label}.purpose is unsupported.`);
+  }
+  if (value.policyDecisionHash !== undefined) {
+    const hash = readString(value.policyDecisionHash, `${label}.policyDecisionHash`);
+    if (!/^[a-f0-9]{64}$/u.test(hash)) throw new AgentTaskStoreValidationError(`${label}.policyDecisionHash is invalid.`);
+  }
+  if (value.authorityTierAtRequest !== undefined
+    && value.authorityTierAtRequest !== 'public'
+    && value.authorityTierAtRequest !== 'owner') {
+    throw new AgentTaskStoreValidationError(`${label}.authorityTierAtRequest is unsupported.`);
+  }
+  if (value.purpose === 'owner-security-override'
+    && (value.authorityTierAtRequest !== 'owner' || value.policyDecisionHash === undefined)) {
+    throw new AgentTaskStoreValidationError(`${label} Owner override binding is incomplete.`);
   }
 }
 
@@ -1981,6 +2325,95 @@ function assertStoredDocument(value: unknown): asserts value is AgentTaskStoreDo
     if (eventSequenceStart > (receipt.eventSequence as number) + 1) {
       throw new AgentTaskStoreValidationError(`Client request ${requestId} has an invalid event range.`);
     }
+  }
+}
+
+function migratePersistedAgentContractV2(value: unknown): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const document = value as Record<string, unknown>;
+  if (document.schemaVersion !== LEGACY_AGENT_TASK_STORE_SCHEMA_VERSION) return;
+  const tasks = document.tasks;
+  if (!tasks || typeof tasks !== 'object' || Array.isArray(tasks)) return;
+  document.schemaVersion = AGENT_TASK_STORE_SCHEMA_VERSION;
+  for (const checkpointValue of Object.values(tasks as Record<string, unknown>)) {
+    if (!checkpointValue || typeof checkpointValue !== 'object' || Array.isArray(checkpointValue)) continue;
+    const checkpoint = checkpointValue as Record<string, unknown>;
+    const taskValue = checkpoint.task;
+    if (checkpoint.schemaVersion !== LEGACY_AGENT_CHECKPOINT_SCHEMA_VERSION
+      || !taskValue || typeof taskValue !== 'object' || Array.isArray(taskValue)) continue;
+    const task = taskValue as Record<string, unknown>;
+    if (task.schemaVersion !== LEGACY_AGENT_TASK_SCHEMA_VERSION) continue;
+    checkpoint.schemaVersion = AGENT_CHECKPOINT_SCHEMA_VERSION;
+    task.schemaVersion = AGENT_TASK_SCHEMA_VERSION;
+    if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
+      task.legacyReadOnly = true;
+    }
+  }
+}
+
+function migrateLegacyEvidenceClasses(value: unknown): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const tasks = (value as Record<string, unknown>).tasks;
+  if (!tasks || typeof tasks !== 'object' || Array.isArray(tasks)) return;
+  for (const checkpoint of Object.values(tasks as Record<string, unknown>)) {
+    if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) continue;
+    const observations = (checkpoint as Record<string, unknown>).observations;
+    if (!Array.isArray(observations)) continue;
+    for (const observation of observations) {
+      if (!observation || typeof observation !== 'object' || Array.isArray(observation)) continue;
+      const record = observation as Record<string, unknown>;
+      const capabilityId = String(record.capabilityId || '');
+      const evidence = Array.isArray(record.evidence) ? record.evidence : [];
+      for (const entry of evidence) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+        const item = entry as Record<string, unknown>;
+        if (typeof item.evidenceClass === 'string') continue;
+        const reference = String(item.reference || '');
+        item.evidenceClass = capabilityId === 'models.agent.respond'
+          ? 'model-generated'
+          : item.kind === 'user'
+            ? 'user-assertion'
+            : /:verification:/i.test(reference)
+              ? 'kernel-verification'
+              : /^https?:\/\//i.test(reference)
+                ? 'external-source'
+                : 'kernel-observation';
+      }
+    }
+  }
+}
+
+function migrateLegacyCognitiveProfiles(value: unknown): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const tasks = (value as Record<string, unknown>).tasks;
+  if (!tasks || typeof tasks !== 'object' || Array.isArray(tasks)) return;
+  for (const checkpoint of Object.values(tasks as Record<string, unknown>)) {
+    if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) continue;
+    const task = (checkpoint as Record<string, unknown>).task;
+    if (!task || typeof task !== 'object' || Array.isArray(task)) continue;
+    const taskRecord = task as Record<string, unknown>;
+    const policy = taskRecord.decisionModelPolicy;
+    let requestedRole = policy && typeof policy === 'object' && !Array.isArray(policy)
+      ? String((policy as Record<string, unknown>).requestedRole || '')
+      : '';
+    if (
+      (requestedRole === 'gemma4-deepthinking' || requestedRole === 'gemma4-31b')
+      && policy && typeof policy === 'object' && !Array.isArray(policy)
+    ) {
+      (policy as Record<string, unknown>).requestedRole = 'qwen3.8-27b-pro';
+      requestedRole = 'qwen3.8-27b-pro';
+    }
+    const profile = taskRecord.cognitiveProfile;
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) continue;
+    const profileRecord = profile as Record<string, unknown>;
+    if (profileRecord.schemaVersion !== LEGACY_AGENT_COGNITIVE_PROFILE_SCHEMA_VERSION) continue;
+    const full = requestedRole === 'qwen3.8-27b-pro';
+    profileRecord.schemaVersion = AGENT_COGNITIVE_PROFILE_SCHEMA_VERSION;
+    profileRecord.agentCapabilityClass = full ? 'full' : 'basic';
+    profileRecord.planningAuthority = full ? 'model-adaptive' : 'runtime-only';
+    profileRecord.maxDecisionSchemas = full ? 24 : 3;
+    profileRecord.maxObservationFacts = full ? 48 : 10;
+    profileRecord.maxPlanSteps = full ? 12 : 3;
   }
 }
 

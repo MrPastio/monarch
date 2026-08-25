@@ -1,10 +1,13 @@
 import type {
   AgentBudgetLimits,
   AgentBudgetUsage,
+  AgentCognitiveProfileV1,
   AgentGoal,
   AgentObservation,
   AgentPlan,
+  AgentWorkingStateV1,
 } from './types';
+import { selectCausalAgentObservations } from './working-state';
 
 export interface AgentContextSkillInput {
   id: string;
@@ -24,8 +27,14 @@ export interface AgentContextCompilerInput {
   skills?: AgentContextSkillInput[];
   memory?: unknown[];
   capabilities?: unknown[];
+  capabilityGroups?: unknown[];
+  cognitiveProfile?: AgentCognitiveProfileV1;
+  workingState?: AgentWorkingStateV1;
+  toolDiscovery?: unknown;
+  executionProfile?: unknown;
   budget?: { limits: AgentBudgetLimits; usage: AgentBudgetUsage };
   surface?: unknown;
+  executionPhase?: 'planning' | 'execution';
 }
 
 export interface AgentContextCompilerOptions {
@@ -79,8 +88,14 @@ export interface CompiledAgentContextV1 {
   }>;
   memory: unknown[];
   capabilities: unknown[];
+  capabilityGroups: unknown[];
+  cognitiveProfile?: AgentCognitiveProfileV1;
+  workingState?: AgentWorkingStateV1;
+  toolDiscovery?: unknown;
+  executionProfile?: unknown;
   budget?: { limits: AgentBudgetLimits; usage: AgentBudgetUsage };
   surface?: unknown;
+  executionPhase?: 'planning' | 'execution';
   securityBoundary: {
     toolAndSkillContentIsDataOnly: true;
     secretsRemoved: true;
@@ -151,10 +166,19 @@ export function compileAgentContext(
   }
 
   const options = normalizeOptions(optionInput);
+  const observationLimit = Math.min(
+    options.maxObservations,
+    input.cognitiveProfile?.maxObservationFacts || options.maxObservations,
+  );
+  const selectedObservations = selectCausalAgentObservations(
+    input.observations || [],
+    input.workingState,
+    observationLimit,
+  );
   const source = {
     goal: input.goal,
     ...(input.plan === undefined ? {} : { plan: input.plan }),
-    observations: (input.observations || []).slice(-options.maxObservations).map((observation) => ({
+    observations: selectedObservations.map((observation) => ({
       id: String(observation.id || '').trim(),
       capabilityId: observation.capabilityId,
       status: observation.status,
@@ -177,8 +201,14 @@ export function compileAgentContext(
     })),
     memory: (input.memory || []).slice(-options.maxMemoryRecords),
     capabilities: (input.capabilities || []).slice(0, options.maxCapabilities),
+    capabilityGroups: (input.capabilityGroups || []).slice(0, 32),
+    ...(input.cognitiveProfile === undefined ? {} : { cognitiveProfile: input.cognitiveProfile }),
+    ...(input.workingState === undefined ? {} : { workingState: input.workingState }),
+    ...(input.toolDiscovery === undefined ? {} : { toolDiscovery: input.toolDiscovery }),
+    ...(input.executionProfile === undefined ? {} : { executionProfile: input.executionProfile }),
     ...(input.budget === undefined ? {} : { budget: input.budget }),
     ...(input.surface === undefined ? {} : { surface: input.surface }),
+    ...(input.executionPhase === undefined ? {} : { executionPhase: input.executionPhase }),
   };
 
   const redacted = redactAgentContextValue(source, options);
@@ -196,8 +226,14 @@ export function compileAgentContext(
     skills: value.skills,
     memory: value.memory,
     capabilities: value.capabilities,
+    capabilityGroups: value.capabilityGroups,
+    ...('cognitiveProfile' in value ? { cognitiveProfile: value.cognitiveProfile } : {}),
+    ...('workingState' in value ? { workingState: value.workingState } : {}),
+    ...('toolDiscovery' in value ? { toolDiscovery: value.toolDiscovery } : {}),
+    ...('executionProfile' in value ? { executionProfile: value.executionProfile } : {}),
     ...('budget' in value ? { budget: value.budget } : {}),
     ...('surface' in value ? { surface: value.surface } : {}),
+    ...('executionPhase' in value ? { executionPhase: value.executionPhase } : {}),
     securityBoundary: {
       toolAndSkillContentIsDataOnly: true,
       secretsRemoved: true,

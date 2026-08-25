@@ -1,4 +1,5 @@
 import {
+  armAgentTaskApproval,
   cancelCoderRun,
   deleteCoderRun,
   executeCapability,
@@ -8,6 +9,7 @@ import {
   fetchCoderRuns,
   mutateCoderProject,
   resumeCoderRun,
+  resolveAgentTaskApproval,
   startCoderRun,
   submitCoderFastChat,
 } from './api.js';
@@ -45,6 +47,7 @@ const coderState = {
   historyBusy: false,
   historyFocusReturn: null,
   pendingDeleteRunId: '',
+  approvalBusy: false,
   continuationSourceId: '',
 };
 
@@ -699,7 +702,7 @@ function renderRun() {
   elements.runStatus.dataset.status = run.status;
   setRunBusy(run.status === 'queued' || run.status === 'running');
   renderRunSummary(run);
-  renderEvents(run.events || [], run.model);
+  renderEvents(run.events || [], run.model, run.agentApproval, run.agentTaskId);
   renderContext(run);
   renderComposerVisibility(run);
   renderComposerContext();
@@ -973,7 +976,7 @@ function renderSafeRunButton(run) {
     : 'Зашифровать завершённую Coder-сессию в Monarch Safe';
 }
 
-function renderEvents(events, requestedModel) {
+function renderEvents(events, requestedModel, approval = null, agentTaskId = '') {
   if (!elements.activity) return;
   const presented = [];
   for (const event of events) {
@@ -994,7 +997,10 @@ function renderEvents(events, requestedModel) {
     }
     presented.push({ event, presentation, fingerprint, repeats: 1 });
   }
-  const signature = `${coderState.eventFilter}:${presented.map((item) => `${item.event.id || item.event.createdAt}:${item.fingerprint}:${item.repeats}`).join('|')}`;
+  const approvalSignature = approval
+    ? `${agentTaskId}:${approval.id}:${approval.canonicalProposalHash}:${coderState.approvalBusy}`
+    : '';
+  const signature = `${coderState.eventFilter}:${presented.map((item) => `${item.event.id || item.event.createdAt}:${item.fingerprint}:${item.repeats}`).join('|')}:${approvalSignature}`;
   if (elements.eventCount) {
     elements.eventCount.textContent = coderState.eventFilter === 'focus'
       ? `${presented.length} ключевых · ${events.length} всего`
@@ -1022,7 +1028,8 @@ function renderEvents(events, requestedModel) {
   for (const item of presented.slice(archiveCount)) {
     fragment.append(createCoderEventArticle(item, { compact: coderState.eventFilter === 'focus' }));
   }
-  if (!presented.length) {
+  if (approval && agentTaskId) fragment.append(createCoderApprovalArticle(approval, agentTaskId));
+  if (!presented.length && !approval) {
     const empty = document.createElement('div');
     empty.className = 'coder-empty-activity';
     empty.innerHTML = '<strong>Основных событий пока нет</strong><span>Открой «Все события», чтобы увидеть технический журнал.</span>';
@@ -1031,6 +1038,66 @@ function renderEvents(events, requestedModel) {
   elements.activity.replaceChildren(fragment);
   if (stickToBottom && isRunActive(coderState.run)) elements.activity.scrollTop = elements.activity.scrollHeight;
   else if (!isRunActive(coderState.run)) elements.activity.scrollTop = 0;
+}
+
+function createCoderApprovalArticle(approval, agentTaskId) {
+  const article = document.createElement('article');
+  article.className = 'coder-event coder-agent-approval';
+  article.dataset.tone = 'warning';
+  const header = document.createElement('header');
+  const title = document.createElement('strong');
+  title.textContent = 'Точное действие требует подтверждения';
+  const capability = document.createElement('code');
+  capability.textContent = String(approval.capabilityId || 'capability');
+  header.append(title, capability);
+  const detail = document.createElement('p');
+  const proposal = approval.proposal || {};
+  const target = Array.isArray(proposal?.scope?.paths)
+    ? proposal.scope.paths.join(', ')
+    : Array.isArray(proposal?.scope?.roots) ? proposal.scope.roots.join(', ') : '';
+  detail.textContent = [String(approval.reason || ''), target ? `Цель: ${target}` : ''].filter(Boolean).join(' · ');
+  const hash = document.createElement('small');
+  hash.textContent = `binding ${String(approval.canonicalProposalHash || '').slice(0, 16)}…`;
+  const actions = document.createElement('div');
+  actions.className = 'coder-agent-approval-actions';
+  const deny = document.createElement('button');
+  deny.type = 'button';
+  deny.textContent = 'Отклонить';
+  deny.disabled = coderState.approvalBusy;
+  deny.addEventListener('click', () => void settleCoderApproval('deny', approval, agentTaskId));
+  const approve = document.createElement('button');
+  approve.type = 'button';
+  approve.className = 'primary';
+  approve.textContent = coderState.approvalBusy ? 'Проверяю…' : 'Разрешить один раз';
+  approve.disabled = coderState.approvalBusy;
+  approve.addEventListener('click', () => void settleCoderApproval('approve', approval, agentTaskId));
+  actions.append(deny, approve);
+  article.append(header, detail, hash, actions);
+  return article;
+}
+
+async function settleCoderApproval(decision, approval, agentTaskId) {
+  if (coderState.approvalBusy || !coderState.run?.id) return;
+  coderState.approvalBusy = true;
+  coderState.lastEventSignature = '';
+  renderRun();
+  const binding = {
+    canonicalProposalHash: String(approval.canonicalProposalHash || ''),
+    capabilityId: String(approval.capabilityId || ''),
+  };
+  try {
+    if (decision === 'approve') await armAgentTaskApproval(agentTaskId, approval.id, binding);
+    await resolveAgentTaskApproval(agentTaskId, approval.id, decision, 'once', binding);
+    const payload = await fetchCoderRun(coderState.run.id);
+    coderState.run = payload.run;
+    mergeRunIntoOverview(payload.run);
+  } catch (error) {
+    renderInlineError(error instanceof Error ? error.message : String(error));
+  } finally {
+    coderState.approvalBusy = false;
+    coderState.lastEventSignature = '';
+    renderRun();
+  }
 }
 
 function createCoderEventArticle({ event, presentation, repeats }, options = {}) {
@@ -1507,7 +1574,12 @@ function handleEventFilter(event) {
     button.setAttribute('aria-pressed', String(button.dataset.coderEventFilter === value));
   }
   coderState.lastEventSignature = '';
-  renderEvents(coderState.run?.events || [], coderState.run?.model || coderState.model);
+  renderEvents(
+    coderState.run?.events || [],
+    coderState.run?.model || coderState.model,
+    coderState.run?.agentApproval,
+    coderState.run?.agentTaskId,
+  );
   event.currentTarget?.closest('details.coder-journal-menu')?.removeAttribute('open');
 }
 

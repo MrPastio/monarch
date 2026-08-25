@@ -62,6 +62,21 @@ export function createWindowsSpeechOutput({
     ? path.join(packagedPayloadRoot, 'cache', 'voice', 'hf')
     : path.join(root, 'runtime', 'voice', 'hf-cache');
   const fallbackWorkerPath = path.join(root, 'tools', 'local-windows-tts.ps1');
+  const stressPackagePath = path.resolve(
+    path.dirname(neuralPythonPath), '..', 'Lib', 'site-packages', 'silero_stress',
+  );
+
+  const capabilities = () => createVoiceRuntimeCapabilities({
+    platform,
+    neuralInstalled: Boolean(
+      fileExists(neuralPythonPath)
+      && fileExists(neuralWorkerPath)
+      && fileExists(neuralModelPath)
+      && fileExists(neuralReferencePath)
+    ),
+    fallbackInstalled: fileExists(fallbackWorkerPath),
+    stressInstalled: fileExists(stressPackagePath),
+  });
 
   let neural = null;
   let active = null;
@@ -571,6 +586,7 @@ export function createWindowsSpeechOutput({
     warmup,
     releaseNeural,
     dispose,
+    capabilities,
     isSpeaking: () => Boolean(active && !active.settled),
     isNeuralReady: () => neural?.status === 'ready',
   };
@@ -749,7 +765,14 @@ export function normalizeSpeechRequest(input) {
   if (!sourceText) throw new Error('Нет текста для озвучки.');
   if (sourceText.length > MAX_SPEECH_TEXT_CHARS) throw new Error('Ответ слишком длинный для одного локального сеанса озвучки.');
   const language = normalizeSpeechLanguage(value.language);
-  const text = language === 'ru-RU' ? normalizeRussianSpeechText(sourceText) : sourceText;
+  const normalizedText = language === 'ru-RU' ? normalizeRussianSpeechText(sourceText) : sourceText;
+  // Qwen3-TTS 0.6B Base was not trained with Russian stress markup. Feeding
+  // `+`, combining acute accents, or modifier accents into this engine makes
+  // otherwise ordinary words unstable. Keep the durable lexicon as user data,
+  // but never inject unsupported markup into the Base-model request.
+  const text = language === 'ru-RU'
+    ? stripUnsupportedSpeechStressMarkup(normalizedText)
+    : normalizedText;
   if (text.length > MAX_SPEECH_TEXT_CHARS) throw new Error('Нормализованный ответ слишком длинный для одного локального сеанса озвучки.');
   const voice = normalizeSpeechOption(value.voice, SPEECH_VOICES, 'oscar');
   const style = normalizeSpeechOption(value.style, SPEECH_STYLES, 'natural');
@@ -762,11 +785,53 @@ export function normalizeSpeechRequest(input) {
   const pace = speed < 96 ? 'slow' : speed > 104 ? 'fast' : 'normal';
   const fallbackRate = speed <= 88 ? -2 : speed < 98 ? -1 : speed >= 114 ? 2 : speed > 102 ? 1 : 0;
   const rate = Math.max(-2, Math.min(2, Math.round(Number(value.rate) || fallbackRate)));
-  const instruction = String(value.instruction || '')
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
-    .trim()
-    .slice(0, 300);
+  // The installed 0.6B Base voice-clone model is not instruction-controlled.
+  // Do not pretend renderer prose can steer it; a future capable variant gets
+  // a separate capability and request contract.
+  const instruction = '';
   return { text, language, rate, voice, style, pace, speed, pitch, expressiveness, pauseMs, volume, instruction };
+}
+
+export function createVoiceRuntimeCapabilities({
+  platform = process.platform,
+  neuralInstalled = false,
+  fallbackInstalled = false,
+  stressInstalled = false,
+} = {}) {
+  const windows = platform === 'win32';
+  const neural = windows && neuralInstalled === true;
+  const fallback = windows && fallbackInstalled === true;
+  return {
+    schemaVersion: 1,
+    platform: String(platform || 'unknown').slice(0, 40),
+    primaryEngine: neural ? 'qwen3-tts-0.6b-base' : fallback ? 'windows-sapi' : 'unavailable',
+    neuralInstalled: neural,
+    modelVariant: neural ? 'base' : 'none',
+    instructionControlled: false,
+    // Analysis and synthesis control are separate capabilities. Silero can
+    // predict a stress position, but the installed Qwen Base model cannot
+    // consume that prediction without corrupting pronunciation.
+    stressAnalyzer: neural && stressInstalled ? 'silero-stress-1.4' : 'unavailable',
+    stressAccentor: 'unavailable',
+    pronunciationControl: 'unavailable',
+    pronunciationDiagnostic: neural
+      ? 'qwen-base-stress-markup-unsupported'
+      : 'voice-engine-unavailable',
+    controls: {
+      speed: neural ? 'dsp' : 'unavailable',
+      pitch: neural ? 'dsp' : 'unavailable',
+      volume: neural ? 'audio-gain' : fallback ? 'system' : 'unavailable',
+      pause: neural ? 'audio-pipeline' : 'unavailable',
+      expressiveness: neural ? 'generation-parameters' : 'unavailable',
+      freeFormInstruction: false,
+    },
+  };
+}
+
+export function stripUnsupportedSpeechStressMarkup(value) {
+  return String(value || '')
+    .replace(/([аеёиоуыэюя])[\u0301\u02ca\u00b4]/giu, '$1')
+    .replace(/\+([аеёиоуыэюя])/giu, '$1');
 }
 
 function normalizeSpeechOption(value, allowed, fallback) {

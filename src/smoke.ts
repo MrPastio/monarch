@@ -61,7 +61,6 @@ async function runSmokeSuite(): Promise<void> {
   assertModelOutputNormalizer();
   await assertModelsCompletionUsesOpenAiCompatibleEndpoint();
   await assertFallbackCandidateRouting();
-  await assertAssistantPlainChatRoutes();
   await assertAmbiguousStatusLikeRequestDoesNotRoute();
   await assertRiskThresholdBlocksLowConfidenceAction();
   await assertRouteTraceIsGenerated();
@@ -425,18 +424,44 @@ async function assertModelsCompletionUsesOpenAiCompatibleEndpoint(): Promise<voi
     }
 
     if (request.method === 'POST' && request.url === '/v1/chat/completions') {
-      request.resume();
-      response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({
-        model: 'smoke-model',
-        choices: [
-          {
-            message: {
-              content: '{"output_type":"json","data":{"reply":"ok"},"user_message":"ok"}',
+      let body = '';
+      request.setEncoding('utf8');
+      request.on('data', (chunk) => {
+        body += String(chunk);
+      });
+      request.on('end', () => {
+        let stream = false;
+        try {
+          stream = JSON.parse(body || '{}').stream === true;
+        } catch {
+          response.writeHead(400, { 'Content-Type': 'application/json' });
+          response.end(JSON.stringify({ error: 'invalid json' }));
+          return;
+        }
+
+        if (stream) {
+          response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          response.end([
+            'data: {"model":"smoke-model","choices":[{"delta":{"content":"Monarch smoke reply"},"finish_reason":"stop"}]}',
+            '',
+            'data: [DONE]',
+            '',
+          ].join('\n'));
+          return;
+        }
+
+        response.writeHead(200, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({
+          model: 'smoke-model',
+          choices: [
+            {
+              message: {
+                content: '{"output_type":"json","data":{"reply":"ok"},"user_message":"ok"}',
+              },
             },
-          },
-        ],
-      }));
+          ],
+        }));
+      });
       return;
     }
 
@@ -492,6 +517,8 @@ async function assertModelsCompletionUsesOpenAiCompatibleEndpoint(): Promise<voi
     ) {
       throw new Error(`Models endpoint completion smoke failed: ${result.summary}`);
     }
+
+    await assertAssistantPlainChatRoutes();
   } finally {
     await runtime.kernel.stop().catch(() => undefined);
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -818,6 +845,8 @@ async function assertOscarClientTimeoutMessageIsReadable(): Promise<void> {
       max_new_tokens: 32,
       temperature: 0,
       top_p: 1,
+      execution_authority: 'none',
+      persistence_owner: 'backend',
     });
     throw new Error('Oscar timeout smoke failed: hanging chat should time out.');
   } catch (error) {
@@ -882,6 +911,7 @@ async function assertApplicationLayerAssemblesProgram(): Promise<void> {
     const profile = app.getSystemProfile();
     const result = await app.submitIntent({
       text: 'Покажи плагины',
+      source: 'smoke',
     });
 
     if (!state.runtime.health.ok) {
@@ -1006,8 +1036,8 @@ async function assertHttpMutationApiRequiresSessionToken(): Promise<void> {
         confirmed: true,
       }),
     });
-    if (directMissingConfirmation.status !== 400) {
-      throw new Error(`HTTP direct confirmation smoke failed: missing token returned ${directMissingConfirmation.status}.`);
+    if (directMissingConfirmation.status !== 410) {
+      throw new Error(`HTTP direct authority smoke failed: confirmed=true returned ${directMissingConfirmation.status}.`);
     }
 
     const directBlocked = await fetch(`${baseUrl}/api/execute`, {
@@ -1020,15 +1050,17 @@ async function assertHttpMutationApiRequiresSessionToken(): Promise<void> {
         moduleId: 'smoke-confirm-risk',
         capabilityId: 'smoke.confirm.write',
         input: { value: 'original-direct-request' },
-        confirmed: false,
       }),
     });
-    const directBlockedPayload = await directBlocked.json() as {
-      result?: { error?: string; metadata?: { confirmation?: { token?: string } } };
-    };
-    const directToken = directBlockedPayload.result?.metadata?.confirmation?.token;
-    if (!directBlocked.ok || directBlockedPayload.result?.error !== 'confirmation-required' || !directToken) {
-      throw new Error('HTTP direct confirmation smoke failed: unconfirmed execute did not return a confirmation token.');
+    const directBlockedPayload = await directBlocked.json() as { accepted?: boolean; successor?: string };
+    if (
+      directBlocked.status !== 202
+      || directBlockedPayload.accepted !== true
+      || directBlockedPayload.successor !== '/api/oscar/turns'
+      || directBlocked.headers.get('deprecation') !== 'true'
+      || JSON.stringify(directBlockedPayload).includes('confirmationToken')
+    ) {
+      throw new Error('HTTP direct authority smoke failed: effectful execute did not become a token-free Turn adapter.');
     }
 
     const directConfirmed = await fetch(`${baseUrl}/api/execute`, {
@@ -1042,12 +1074,11 @@ async function assertHttpMutationApiRequiresSessionToken(): Promise<void> {
         capabilityId: 'smoke.confirm.write',
         input: { value: 'tampered-direct-request' },
         confirmed: true,
-        confirmationToken: directToken,
+        confirmationToken: 'obsolete-text-token',
       }),
     });
-    const directConfirmedPayload = await directConfirmed.json() as { result?: { ok?: boolean; summary?: string } };
-    if (!directConfirmed.ok || !directConfirmedPayload.result?.ok || !/original-direct-request/.test(directConfirmedPayload.result.summary || '')) {
-      throw new Error('HTTP direct confirmation smoke failed: confirmed execute did not replay the original saved request.');
+    if (directConfirmed.status !== 410) {
+      throw new Error(`HTTP direct authority smoke failed: obsolete token returned ${directConfirmed.status}.`);
     }
 
     const missingConfirmationToken = await fetch(`${baseUrl}/api/intent`, {
@@ -1061,8 +1092,8 @@ async function assertHttpMutationApiRequiresSessionToken(): Promise<void> {
         confirmed: true,
       }),
     });
-    if (missingConfirmationToken.status !== 400) {
-      throw new Error(`HTTP confirmation smoke failed: missing token returned ${missingConfirmationToken.status}.`);
+    if (missingConfirmationToken.status !== 410) {
+      throw new Error(`HTTP intent authority smoke failed: confirmed=true returned ${missingConfirmationToken.status}.`);
     }
 
     const blockedIntent = await fetch(`${baseUrl}/api/intent`, {
@@ -1073,19 +1104,16 @@ async function assertHttpMutationApiRequiresSessionToken(): Promise<void> {
       },
       body: JSON.stringify({
         text: 'smoke confirm write intent',
-        confirmed: false,
       }),
     });
-    const blockedPayload = await blockedIntent.json() as {
-      result?: {
-        execution?: { error?: string; metadata?: { confirmation?: { token?: string } } };
-        confirmation?: { token?: string };
-      };
-    };
-    const confirmationToken = blockedPayload.result?.confirmation?.token
-      || blockedPayload.result?.execution?.metadata?.confirmation?.token;
-    if (!blockedIntent.ok || blockedPayload.result?.execution?.error !== 'confirmation-required' || !confirmationToken) {
-      throw new Error('HTTP confirmation smoke failed: unconfirmed intent did not return a confirmation token.');
+    const blockedPayload = await blockedIntent.json() as { ok?: boolean; result?: unknown };
+    if (
+      !blockedIntent.ok
+      || blockedPayload.ok !== true
+      || blockedIntent.headers.get('deprecation') !== 'true'
+      || JSON.stringify(blockedPayload).includes('confirmationToken')
+    ) {
+      throw new Error('HTTP intent authority smoke failed: legacy intent was not adapted to a token-free Turn.');
     }
 
     const badConfirmation = await fetch(`${baseUrl}/api/intent`, {
@@ -1100,25 +1128,8 @@ async function assertHttpMutationApiRequiresSessionToken(): Promise<void> {
         confirmationToken: 'wrong-token',
       }),
     });
-    if (badConfirmation.status !== 400) {
-      throw new Error(`HTTP confirmation smoke failed: bad token returned ${badConfirmation.status}.`);
-    }
-
-    const confirmedIntent = await fetch(`${baseUrl}/api/intent`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Monarch-Session': 'smoke-session-token',
-      },
-      body: JSON.stringify({
-        text: 'smoke confirm write intent',
-        confirmed: true,
-        confirmationToken,
-      }),
-    });
-    const confirmedPayload = await confirmedIntent.json() as { result?: { execution?: { ok?: boolean }; plan?: { status?: string } } };
-    if (!confirmedIntent.ok || !confirmedPayload.result?.execution?.ok || confirmedPayload.result?.plan?.status !== 'completed') {
-      throw new Error(`HTTP confirmation smoke failed: confirmed token returned ${confirmedIntent.status}.`);
+    if (badConfirmation.status !== 410) {
+      throw new Error(`HTTP intent authority smoke failed: bad token returned ${badConfirmation.status}.`);
     }
 
     const replayConfirmation = await fetch(`${baseUrl}/api/intent`, {
@@ -1130,11 +1141,11 @@ async function assertHttpMutationApiRequiresSessionToken(): Promise<void> {
       body: JSON.stringify({
         text: 'smoke confirm write intent',
         confirmed: true,
-        confirmationToken,
+        confirmationToken: 'replayed-obsolete-token',
       }),
     });
-    if (replayConfirmation.status !== 400) {
-      throw new Error(`HTTP confirmation smoke failed: replay token returned ${replayConfirmation.status}.`);
+    if (replayConfirmation.status !== 410) {
+      throw new Error(`HTTP intent authority smoke failed: replay token returned ${replayConfirmation.status}.`);
     }
 
     const index = await fetch(baseUrl).then((response) => response.text());
@@ -1245,7 +1256,7 @@ function createSmokeConfirmationModule(): MonarchModule {
       name: 'Smoke Confirm Risk',
       version: '0.1.0',
       kind: 'system',
-      description: 'Smoke-only module for API confirmation and token flows.',
+      description: 'Smoke-only module for structured approval and legacy authority rejection.',
       owns: ['smoke confirmation'],
       permissions: ['none', 'execute'],
       capabilities: [
@@ -1259,8 +1270,8 @@ function createSmokeConfirmationModule(): MonarchModule {
           id: 'smoke.confirm.write',
           moduleId: 'smoke-confirm-risk',
           title: 'Smoke write',
-          // Auto mode intentionally permits workspace writes. Use an execute
-          // risk here so this smoke keeps validating one-time approval tokens.
+          // Effectful legacy calls must become Agent Turns; text tokens never
+          // authorize this capability.
           risk: 'execute',
           routing: {
             aliases: ['smoke confirm write'],

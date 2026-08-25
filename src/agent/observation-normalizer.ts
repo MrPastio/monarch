@@ -155,6 +155,20 @@ export function deriveAgentMutationTruth(
     };
   }
 
+  const output = readRecord(input.result.output);
+  if (
+    input.result.ok === false
+    && output?.performed === false
+    && output.verified === false
+    && (output.reconciliation === 'not-dispatched' || output.reconciliation === 'fresh-observation-required')
+  ) {
+    return {
+      state: 'no-effect',
+      source: 'pre-execution-receipt',
+      summary: 'Kernel receipt proves the requested effect was not dispatched.',
+    };
+  }
+
   const ledger = readRecord(input.result.metadata?.ledger);
   const rollback = readRecord(ledger?.rollback);
   const rollbackStatus = typeof rollback?.status === 'string' ? rollback.status : '';
@@ -261,14 +275,18 @@ function buildEvidence(
   sideEffects: AgentActualSideEffect[],
   error: string,
 ): AgentEvidenceReference[] {
+  const modelGenerated = capabilityId === 'models.agent.respond'
+    || capabilityId === 'models.agent.synthesize';
   const evidence: AgentEvidenceReference[] = [{
     kind: 'api',
+    evidenceClass: modelGenerated ? 'model-generated' : 'kernel-observation',
     reference: 'execution:' + executionId,
     summary: 'Kernel execution provenance for ' + capabilityId + '.',
   }];
   if (schema) {
     evidence.push({
       kind: 'other',
+      evidenceClass: modelGenerated ? 'model-generated' : 'kernel-verification',
       reference: 'observation:' + observationId + ':output-schema',
       summary: schema.ok
         ? 'Capability output matches its declared schema.'
@@ -277,17 +295,20 @@ function buildEvidence(
   }
   kernelVerification.forEach((entry, index) => evidence.push({
     kind: 'other',
+    evidenceClass: 'kernel-verification',
     reference: 'execution:' + executionId + ':verification:' + String(index + 1),
     summary: (entry.ok ? 'Verified: ' : 'Verification failed: ') + entry.message,
   }));
   sideEffects.forEach((entry, index) => evidence.push({
     kind: 'other',
+    evidenceClass: 'kernel-observation',
     reference: 'execution:' + executionId + ':side-effect:' + String(index + 1),
     summary: entry.summary,
   }));
   if (error) {
     evidence.push({
       kind: 'other',
+      evidenceClass: modelGenerated ? 'model-generated' : 'kernel-observation',
       reference: 'execution:' + executionId + ':error',
       summary: error,
     });

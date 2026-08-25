@@ -1,6 +1,7 @@
 import type {
   MonarchAgentCapabilityIdempotency,
   MonarchAgentCapabilityMetadataInput,
+  MonarchAgentCapabilityReconciliationDescriptor,
   MonarchAgentCapabilityVerificationDescriptor,
   MonarchActionPredicate,
   MonarchCapability,
@@ -28,6 +29,12 @@ const VERIFICATION_VALUES: readonly MonarchAgentCapabilityVerificationDescriptor
   'schema',
   'runtime-status',
   'external-receipt',
+];
+const RECONCILIATION_ASSERTION_VALUES: readonly MonarchAgentCapabilityReconciliationDescriptor['assertion']['kind'][] = [
+  'equals-source-input',
+  'equals-baseline-plus-source-input',
+  'ends-with-source-input',
+  'contains-source-input',
 ];
 const PREDICATE_VALUES: readonly MonarchActionPredicate['kind'][] = [
   'exists',
@@ -169,6 +176,7 @@ export function resolveAgentCapabilityMetadata(
     'computeClass',
     'cancellation',
     'verification',
+    'reconciliation',
     'examples',
   ], 'agent', capability.id);
 
@@ -218,6 +226,7 @@ export function resolveAgentCapabilityMetadata(
     ...(explicitReversibility === undefined ? {} : { reversibility: explicitReversibility }),
   };
   assertRiskFloor(capability.risk, input.idempotency ?? defaults.idempotency, effectProfile, capability.id);
+  assertAutoAllowedRiskEnvelope(capability.risk, effectProfile, capability.id);
 
   const tags = validateStringArray(input.tags, 'agent.tags', capability.id);
   const requiredRuntime = validateStringArray(input.requiredRuntime, 'agent.requiredRuntime', capability.id);
@@ -226,6 +235,7 @@ export function resolveAgentCapabilityMetadata(
   const preconditions = validateDescriptors(input.preconditions, 'agent.preconditions', capability.id);
   const effects = validateEffects(input.effects, capability.id);
   const verification = validateVerification(input.verification, capability.id);
+  const reconciliation = validateReconciliation(input.reconciliation, capability.id);
   const examples = validateExamples(input.examples, capability.id);
 
   return {
@@ -242,6 +252,7 @@ export function resolveAgentCapabilityMetadata(
     computeClass: input.computeClass ?? defaults.computeClass,
     cancellation: input.cancellation ?? defaults.cancellation,
     verification: mergeVerification(defaults.verification, verification),
+    ...(reconciliation ? { reconciliation } : {}),
     examples,
     source: 'explicit',
   };
@@ -398,6 +409,58 @@ function assertRiskFloor(
   }
 }
 
+/**
+ * `none`, `read`, and workspace `write` are auto-allowed by the default
+ * Permission Gate. Explicit vector metadata may refine those capabilities,
+ * but it must not hide an effect that belongs to a confirming/denied class.
+ */
+function assertAutoAllowedRiskEnvelope(
+  risk: MonarchRisk,
+  profile: MonarchCapabilityEffectProfile,
+  capabilityId: string,
+): void {
+  if (risk === 'none' || risk === 'read') {
+    if (profile.mutation !== 'none') {
+      fail(`risk '${risk}' cannot declare ${profile.mutation} mutation.`, capabilityId);
+    }
+    if (profile.privilege !== 'normal') {
+      fail(`risk '${risk}' cannot declare ${profile.privilege} privilege.`, capabilityId);
+    }
+    if (profile.communication === 'lan' || profile.communication === 'internet' || profile.communication === 'third-party') {
+      fail(`risk '${risk}' cannot declare external communication '${profile.communication}'.`, capabilityId);
+    }
+    assertNoSensitiveImpact(risk, profile, capabilityId);
+    return;
+  }
+
+  if (risk !== 'write') return;
+  if (profile.targetScope === 'device' || profile.targetScope === 'external-service') {
+    fail(`risk 'write' cannot declare target scope '${profile.targetScope}'.`, capabilityId);
+  }
+  if (profile.privilege !== 'normal') {
+    fail(`risk 'write' cannot declare ${profile.privilege} privilege.`, capabilityId);
+  }
+  if (profile.communication !== 'none' && profile.communication !== 'loopback') {
+    fail(`risk 'write' cannot declare external communication '${profile.communication}'.`, capabilityId);
+  }
+  if (profile.reversibility === 'irreversible') {
+    fail("risk 'write' cannot declare irreversible effects.", capabilityId);
+  }
+  assertNoSensitiveImpact(risk, profile, capabilityId);
+}
+
+function assertNoSensitiveImpact(
+  risk: 'none' | 'read' | 'write',
+  profile: MonarchCapabilityEffectProfile,
+  capabilityId: string,
+): void {
+  for (const field of ['financialImpact', 'identityImpact', 'securityImpact'] as const) {
+    if (profile[field]) {
+      fail(`risk '${risk}' cannot declare ${field}.`, capabilityId);
+    }
+  }
+}
+
 function assertRankAtLeast<T extends string>(
   value: T,
   floor: T,
@@ -497,6 +560,145 @@ function validateVerification(
       ...(predicate === undefined ? {} : { predicate }),
     };
   });
+}
+
+function validateReconciliation(
+  value: unknown,
+  capabilityId: string,
+): MonarchAgentCapabilityReconciliationDescriptor | undefined {
+  if (value === undefined) return undefined;
+  const descriptorPath = 'agent.reconciliation';
+  assertPlainObject(value, descriptorPath, capabilityId);
+  assertKnownKeys(value, [
+    'capabilityId',
+    'inputBindings',
+    'constantInput',
+    'requiresPreActionBaseline',
+    'targetInputKey',
+    'observationTargetPath',
+    'assertion',
+  ], descriptorPath, capabilityId);
+  const reconciliationCapabilityId = validateMetadataKey(
+    value.capabilityId,
+    `${descriptorPath}.capabilityId`,
+    capabilityId,
+    true,
+  );
+  assertPlainObject(value.inputBindings, `${descriptorPath}.inputBindings`, capabilityId);
+  const inputBindings: Record<string, string> = {};
+  for (const [targetKey, sourceValue] of Object.entries(value.inputBindings)) {
+    if (Object.keys(inputBindings).length >= MAX_METADATA_ITEMS) {
+      fail(`${descriptorPath}.inputBindings exceeds ${MAX_METADATA_ITEMS} entries.`, capabilityId);
+    }
+    const normalizedTarget = validateMetadataKey(targetKey, `${descriptorPath}.inputBindings key`, capabilityId);
+    inputBindings[normalizedTarget] = validateMetadataKey(
+      sourceValue,
+      `${descriptorPath}.inputBindings.${normalizedTarget}`,
+      capabilityId,
+    );
+  }
+  if (Object.keys(inputBindings).length === 0) {
+    fail(`${descriptorPath}.inputBindings must not be empty.`, capabilityId);
+  }
+  const constantInput = value.constantInput === undefined
+    ? undefined
+    : validateReconciliationConstantInput(value.constantInput, descriptorPath, capabilityId);
+  if (value.requiresPreActionBaseline !== undefined && typeof value.requiresPreActionBaseline !== 'boolean') {
+    fail(`${descriptorPath}.requiresPreActionBaseline must be a boolean.`, capabilityId);
+  }
+  const requiresPreActionBaseline = value.requiresPreActionBaseline === true;
+  const targetInputKey = validateMetadataKey(
+    value.targetInputKey,
+    `${descriptorPath}.targetInputKey`,
+    capabilityId,
+  );
+  if (!(targetInputKey in inputBindings)) {
+    fail(`${descriptorPath}.targetInputKey must name one inputBindings target.`, capabilityId);
+  }
+  const observationTargetPath = validateMetadataPath(
+    value.observationTargetPath,
+    `${descriptorPath}.observationTargetPath`,
+    capabilityId,
+  );
+  assertPlainObject(value.assertion, `${descriptorPath}.assertion`, capabilityId);
+  assertKnownKeys(value.assertion, ['kind', 'observationPath', 'sourceInputKey'], `${descriptorPath}.assertion`, capabilityId);
+  validateOptionalEnum(
+    value.assertion.kind,
+    RECONCILIATION_ASSERTION_VALUES,
+    `${descriptorPath}.assertion.kind`,
+    capabilityId,
+  );
+  if (value.assertion.kind === undefined) fail(`${descriptorPath}.assertion.kind is required.`, capabilityId);
+  if ((value.assertion.kind === 'equals-baseline-plus-source-input') !== requiresPreActionBaseline) {
+    fail(`${descriptorPath}.requiresPreActionBaseline must be true exactly for equals-baseline-plus-source-input.`, capabilityId);
+  }
+  return {
+    capabilityId: reconciliationCapabilityId,
+    inputBindings,
+    ...(constantInput ? { constantInput } : {}),
+    ...(requiresPreActionBaseline ? { requiresPreActionBaseline: true } : {}),
+    targetInputKey,
+    observationTargetPath,
+    assertion: {
+      kind: value.assertion.kind,
+      observationPath: validateMetadataPath(
+        value.assertion.observationPath,
+        `${descriptorPath}.assertion.observationPath`,
+        capabilityId,
+      ),
+      sourceInputKey: validateMetadataKey(
+        value.assertion.sourceInputKey,
+        `${descriptorPath}.assertion.sourceInputKey`,
+        capabilityId,
+      ),
+    },
+  };
+}
+
+function validateReconciliationConstantInput(
+  value: unknown,
+  descriptorPath: string,
+  capabilityId: string,
+): Record<string, string | number | boolean> {
+  assertPlainObject(value, `${descriptorPath}.constantInput`, capabilityId);
+  const result: Record<string, string | number | boolean> = {};
+  for (const [rawKey, entry] of Object.entries(value)) {
+    if (Object.keys(result).length >= MAX_METADATA_ITEMS) {
+      fail(`${descriptorPath}.constantInput exceeds ${MAX_METADATA_ITEMS} entries.`, capabilityId);
+    }
+    const key = validateMetadataKey(rawKey, `${descriptorPath}.constantInput key`, capabilityId);
+    if (typeof entry !== 'string' && typeof entry !== 'number' && typeof entry !== 'boolean') {
+      fail(`${descriptorPath}.constantInput.${key} must be a string, number, or boolean.`, capabilityId);
+    }
+    if (typeof entry === 'number' && !Number.isFinite(entry)) {
+      fail(`${descriptorPath}.constantInput.${key} must be finite.`, capabilityId);
+    }
+    if (typeof entry === 'string' && entry.length > MAX_METADATA_TEXT) {
+      fail(`${descriptorPath}.constantInput.${key} exceeds ${MAX_METADATA_TEXT} characters.`, capabilityId);
+    }
+    result[key] = entry;
+  }
+  return result;
+}
+
+function validateMetadataKey(
+  value: unknown,
+  path: string,
+  capabilityId: string,
+  allowDots = false,
+): string {
+  const text = validateText(value, path, capabilityId);
+  const pattern = allowDots ? /^[A-Za-z0-9_.-]+$/u : /^[A-Za-z_][A-Za-z0-9_-]*$/u;
+  if (!pattern.test(text)) fail(`${path} contains unsupported characters.`, capabilityId);
+  return text;
+}
+
+function validateMetadataPath(value: unknown, path: string, capabilityId: string): string {
+  const text = validateText(value, path, capabilityId);
+  if (!/^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/u.test(text)) {
+    fail(`${path} must be a bounded dotted object path.`, capabilityId);
+  }
+  return text;
 }
 
 function validateVerificationPredicate(

@@ -8,6 +8,7 @@ import hashlib
 from html import escape as html_escape
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -15,6 +16,7 @@ import sys
 import time
 import threading
 import getpass
+import uuid
 from typing import Any
 
 from .adversary import run_attack_simulation, run_live_threat_simulation
@@ -56,6 +58,8 @@ from .network_history import (
 )
 from .policy import PolicyEngine
 from .profile import (
+    AGENT_SECURITY_MODES,
+    ACTION_GUARD_REACTIONS,
     MODEL_CONFIRMATION_MODES,
     SECURITY_LEVELS,
     read_model_command_policy,
@@ -102,12 +106,12 @@ COMMAND_CATALOG = (
     ConsoleCommand("tui", "Открыть это меню управления.", "tui", "Управление"),
     ConsoleCommand("commands", "Показать полный список команд и примеры.", "commands", "Управление"),
     ConsoleCommand("start", "Запустить фоновую защиту.", "start --no-llm", "Управление"),
-    ConsoleCommand("stop", "Остановить фоновую защиту через защищенный stop-token.", "stop", "Управление"),
+    ConsoleCommand("stop", "Остановить фоновую защиту после Security PIN-проверки.", "stop --confirm", "Управление"),
     ConsoleCommand("status", "Показать, запущена ли защита и где лежат логи.", "status", "Управление"),
     ConsoleCommand("profile", "Показать текущую строгость Security.", "profile", "Управление"),
     ConsoleCommand("profile-set", "Изменить строгость Security.", "profile-set --level balanced --confirm", "Управление"),
     ConsoleCommand("model-policy", "Показать политику команд Oscar/LLM.", "model-policy", "Управление"),
-    ConsoleCommand("model-policy-set", "Изменить политику команд Oscar/LLM.", "model-policy-set --enabled --confirmation adaptive --confirm", "Управление"),
+    ConsoleCommand("model-policy-set", "Изменить реакцию Action Guard для Oscar/LLM.", "model-policy-set --enabled true --reaction guard --confirm", "Управление"),
     ConsoleCommand("incidents", "Показать последние инциденты и ожидающие решения.", "incidents --limit 20", "Управление"),
     ConsoleCommand("quarantine-list", "Показать изолированные файлы и проверить их целостность.", "quarantine-list", "Управление"),
     ConsoleCommand("quarantine-isolate", "Изолировать подтвержденный пользователем файл без удаления.", r"quarantine-isolate C:\path\file.exe --confirm-isolate", "Управление"),
@@ -210,6 +214,13 @@ QUICK_ACTIONS = (
 COMMAND_NAMES = {command.name for command in COMMAND_CATALOG}
 
 
+def _add_pin_request_arguments(parser: argparse.ArgumentParser, *, allow_file: bool = True) -> None:
+    group = parser.add_mutually_exclusive_group()
+    if allow_file:
+        group.add_argument("--request-file", default="")
+    group.add_argument("--request-stdin", action="store_true")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="monarch_sec")
     parser.add_argument(
@@ -234,16 +245,21 @@ def main(argv: list[str] | None = None) -> int:
         default=10.0,
         help="Seconds to wait for graceful stop",
     )
+    stop.add_argument("--confirm", action="store_true")
+    _add_pin_request_arguments(stop, allow_file=False)
 
     subparsers.add_parser("status", help="Show background protection status")
     subparsers.add_parser("profile", help="Read Security strictness profile")
     profile_set = subparsers.add_parser("profile-set", help="Change Security strictness profile")
     profile_set.add_argument("--level", choices=SECURITY_LEVELS, required=True)
     profile_set.add_argument("--confirm", action="store_true")
+    _add_pin_request_arguments(profile_set, allow_file=False)
     subparsers.add_parser("model-policy", help="Read Oscar/LLM command security policy")
     model_policy_set = subparsers.add_parser("model-policy-set", help="Change Oscar/LLM command security policy")
     model_policy_set.add_argument("--enabled", choices=("true", "false"), required=True)
-    model_policy_set.add_argument("--confirmation", choices=MODEL_CONFIRMATION_MODES, required=True)
+    model_policy_set.add_argument("--reaction", choices=ACTION_GUARD_REACTIONS)
+    model_policy_set.add_argument("--agent-security-mode", choices=AGENT_SECURITY_MODES)
+    model_policy_set.add_argument("--confirmation", choices=MODEL_CONFIRMATION_MODES)
     model_policy_set.add_argument("--confirm", action="store_true")
     incidents = subparsers.add_parser("incidents", help="List latest security incidents")
     incidents.add_argument(
@@ -278,7 +294,7 @@ def main(argv: list[str] | None = None) -> int:
     evaluate_response.add_argument("proposal_id")
     approve_response = subparsers.add_parser("approve-response", help="Approve one bounded proposal with Security PIN and issue a one-time grant")
     approve_response.add_argument("proposal_id")
-    approve_response.add_argument("--request-file", default="")
+    _add_pin_request_arguments(approve_response)
     approve_response.add_argument("--confirm-approval", action="store_true")
     subparsers.add_parser("response-actions", help="List privileged response action lifecycle records")
     reconcile_response = subparsers.add_parser("response-service-reconcile", help="Elevated executor: roll back expired or interrupted actions")
@@ -298,15 +314,15 @@ def main(argv: list[str] | None = None) -> int:
     activate_emergency.add_argument("--confirm-emergency", action="store_true")
     resolve_emergency = subparsers.add_parser("emergency-resolve", help="Release or continue an active emergency response after Security PIN verification")
     resolve_emergency.add_argument("--decision", choices=("release", "continue"), required=True)
-    resolve_emergency.add_argument("--request-file", default="")
+    _add_pin_request_arguments(resolve_emergency)
     resolve_emergency.add_argument("--confirm-emergency", action="store_true")
     subparsers.add_parser("pin-status", help="Read Security PIN setup and lock status")
     pin_set = subparsers.add_parser("pin-set", help="Set or rotate the six-digit Security PIN")
-    pin_set.add_argument("--request-file", default="")
+    _add_pin_request_arguments(pin_set)
     pin_verify = subparsers.add_parser("pin-verify", help="Verify Security PIN with rate limiting")
-    pin_verify.add_argument("--request-file", default="")
+    _add_pin_request_arguments(pin_verify)
     pin_recover = subparsers.add_parser("pin-recover", help="Recover Security PIN with a one-time recovery code")
-    pin_recover.add_argument("--request-file", default="")
+    _add_pin_request_arguments(pin_recover)
 
     subparsers.add_parser("diagnose", help="Show local runtime status")
     report = subparsers.add_parser("report", help="Generate a read-only security report")
@@ -561,7 +577,27 @@ def main(argv: list[str] | None = None) -> int:
         print(json_line(payload))
         return _start_protector_exit_code(payload)
     if args.command == "stop":
-        print(json_line(stop_protector(args.config, wait_seconds=args.wait)))
+        if not args.confirm:
+            print(json_line({"ok": False, "error": "explicit --confirm is required"}))
+            return 2
+        config = load_config(args.config)
+        try:
+            authorization = _authorize_lifecycle(
+                config,
+                request_stdin=args.request_stdin,
+                purpose="security.protection.stop",
+            )
+        except (OSError, SecurityPinError, TimeoutError) as exc:
+            print(json_line({
+                "ok": False,
+                "error": "security-lifecycle-authorization-rejected",
+                "detail": str(exc),
+                "purpose": "security.protection.stop",
+            }))
+            return 2
+        payload = stop_protector(args.config, wait_seconds=args.wait)
+        payload.update(authorization)
+        print(json_line(payload))
         return 0
 
     config = load_config(args.config)
@@ -584,6 +620,22 @@ def main(argv: list[str] | None = None) -> int:
         if not args.confirm:
             print(json_line({"ok": False, "error": "explicit --confirm is required"}))
             return 2
+        authorization: dict[str, Any] = {}
+        if args.level == "off":
+            try:
+                authorization = _authorize_lifecycle(
+                    config,
+                    request_stdin=args.request_stdin,
+                    purpose="security.profile.off",
+                )
+            except (OSError, SecurityPinError, TimeoutError) as exc:
+                print(json_line({
+                    "ok": False,
+                    "error": "security-lifecycle-authorization-rejected",
+                    "detail": str(exc),
+                    "purpose": "security.profile.off",
+                }))
+                return 2
         previous_profile = read_security_profile(config)
         was_running = bool(protector_status(config).get("running"))
         profile = write_security_profile(config, args.level)
@@ -612,6 +664,7 @@ def main(argv: list[str] | None = None) -> int:
         running = bool(protector_status(config).get("running"))
         print(json_line({
             "ok": True,
+            **authorization,
             "profile": profile.to_dict(),
             "previously_running": was_running,
             "running": running,
@@ -627,11 +680,16 @@ def main(argv: list[str] | None = None) -> int:
         if not args.confirm:
             print(json_line({"ok": False, "error": "explicit --confirm is required"}))
             return 2
+        if not args.reaction and not args.confirmation:
+            print(json_line({"ok": False, "error": "--reaction is required"}))
+            return 2
         was_running = bool(protector_status(config).get("running"))
         policy_payload = write_model_command_policy(
             config,
             enabled=args.enabled == "true",
             confirmation_mode=args.confirmation,
+            action_guard_reaction=args.reaction,
+            agent_security_mode=args.agent_security_mode,
         )
         AuditLog(
             config.runtime.audit_log_path,
@@ -875,6 +933,21 @@ def _check_action(args, config, rules, router, policy) -> int:
             "decision": {"action": "block", "requires_passkey": False, "ttl_seconds": 0},
         }))
         return 0
+    action_risk = _resolve_action_risk(args.action_capability, getattr(args, "action_risk", ""))
+    if not action_risk:
+        payload = _action_decision_payload(
+            ok=False,
+            status="unregistered_capability",
+            report="Действие заблокировано: capability отсутствует в типизированном реестре Monarch.",
+            risk="blocked",
+            reasons=["Capability не имеет подтверждённого risk-контракта."],
+            action="block",
+            args=args,
+        )
+        _audit_action_decision(config, payload, args)
+        print(json_line(payload))
+        return 0
+    args.action_risk = action_risk
     state = StateStore(config.runtime.state_path, config.runtime.integrity_key_path)
     
     # 1. Permanent blocklist check
@@ -935,7 +1008,7 @@ def _check_action(args, config, rules, router, policy) -> int:
     capability = args.action_capability.lower()
     intent = args.intent_text.lower()
 
-    if "delete" in capability or "workspace.file.delete" in capability:
+    if args.action_risk == "delete":
         delete_keywords = ["удалить", "стереть", "очистить", "удали", "delete", "remove", "clean", "rm"]
         if not any(k in intent for k in delete_keywords):
             is_dangerous = True
@@ -955,15 +1028,23 @@ def _check_action(args, config, rules, router, policy) -> int:
                 + (f" Зарегистрированный риск: {tool_risk}." if tool_risk else " Инструмент не найден в реестре.")
             )
 
-    elif "execute" in capability or "run" in capability:
+    elif args.action_risk in {"execute", "device-control"}:
         is_dangerous = True
         reasons.append("Попытка запуска динамического скрипта в песочнице.")
 
-    elif "write" in capability or "edit" in capability or "create" in capability:
+    elif args.action_risk == "write":
         write_keywords = ["создать", "записать", "добавить", "изменить", "напиши", "create", "write", "edit", "add", "change"]
         if not any(k in intent for k in write_keywords):
             is_dangerous = True
             reasons.append(f"Попытка изменения файлов или структуры проекта ({args.action_capability}), что не соответствует запросу.")
+
+    elif args.action_risk == "network":
+        is_dangerous = True
+        reasons.append("Сетевое действие требует явно связанного подтверждения пользователя.")
+
+    elif args.action_risk in {"money", "identity", "security-sensitive"}:
+        is_dangerous = True
+        reasons.append("Действие затрагивает критическую доверенную область Monarch.")
 
     # LLM activity assessment
     if not args.no_llm and router.backend.status().available:
@@ -1126,6 +1207,64 @@ def _registered_custom_tool_risk(config, action_input: str) -> str:
     return ""
 
 
+def _resolve_action_risk(capability: str, explicit_risk: str) -> str:
+    allowed = {
+        "none", "read", "write", "delete", "execute", "network",
+        "device-control", "money", "identity", "security-sensitive",
+    }
+    explicit = str(explicit_risk or "").strip().lower()
+    if explicit:
+        if explicit not in allowed:
+            return ""
+        return explicit if _capability_matches_risk(capability, explicit) else ""
+
+    normalized = str(capability or "").strip().lower()
+    if normalized == "custom-tools.execute":
+        return "execute"
+    if any(token in normalized for token in ("delete", "remove", "unlink", "trash")):
+        return "delete"
+    if any(token in normalized for token in ("write", "create", "edit", "append", "replace", "copy", "move", "rename", "mkdir")):
+        return "write"
+    if any(token in normalized for token in ("execute", "run", "install", "start", "stop", "control", "block")):
+        return "execute"
+    if any(token in normalized for token in ("send", "upload", "network", "api.call")):
+        return "network"
+    return ""
+
+
+def _capability_matches_risk(capability: str, risk: str) -> bool:
+    normalized = str(capability or "").strip().lower()
+    if normalized == "custom-tools.execute" and risk == "execute":
+        return True
+    tokens_by_risk = {
+        "none": ("read", "get", "list", "status", "inspect", "search", "preview", "info"),
+        "read": ("read", "get", "list", "status", "inspect", "search", "preview", "info"),
+        "write": (
+            "write", "append", "mkdir", "copy", "replace", "update", "remember", "forget",
+            "create", "save", "export", "isolate", "restore", "propose", "approve", "resolve",
+            "set", "recover", "generate", "trust", "baseline", "block", "cancel", "import",
+            "activate", "patch", "init", "stage", "branch", "close_temporary", "incident.status",
+            "custom-tools.delete",
+        ),
+        "delete": ("delete", "remove", "unlink", "trash", "move", "empty", "close-active"),
+        "execute": (
+            "execute", "run", "install", "start", "stop", "control", "unload", "verify",
+            "attack", "simulation", "benchmark", "notification", "bridge", "revoke", "pause",
+            "resume", "api.call", "auto-create", "commit", "skills.create",
+            "custom-tools.create",
+        ),
+        "network": (
+            "network", "send", "upload", "fetch", "request", "push", "download", "realtime",
+            "chat", "search.ingest", "bot.start", "poll.send", "pr.create", "repo.info",
+        ),
+        "device-control": ("set", "open", "control", "profile", "policy"),
+        "money": ("money", "pay", "purchase", "transaction", "transfer"),
+        "identity": ("identity", "account", "auth", "credential", "sign"),
+        "security-sensitive": ("security", "pin", "credential", "secret", "verify"),
+    }
+    return any(token in normalized for token in tokens_by_risk.get(risk, ()))
+
+
 def _custom_tool_id_from_action_input(action_input: str) -> str:
     try:
         parsed = json.loads(action_input)
@@ -1168,6 +1307,7 @@ def _action_decision_payload(
         "checked_action": {
             "module": args.action_module.strip(),
             "capability": args.action_capability.strip(),
+            "risk": str(getattr(args, "action_risk", "") or ""),
             "input_hash": _sha256_text(_canonical_action_input(args.action_input)),
         },
     }
@@ -1267,11 +1407,12 @@ def _parse_approval_record(raw_record: str) -> dict | None:
 
 def _approval_record_for_action(args) -> dict:
     return {
-        "schema": 1,
+        "schema": 2,
         "issued_at": time.time(),
         "intent_hash": _sha256_text(args.intent_text.strip()),
         "action_module": args.action_module.strip(),
         "action_capability": args.action_capability.strip(),
+        "action_risk": str(getattr(args, "action_risk", "") or ""),
         "action_input_hash": _sha256_text(_canonical_action_input(args.action_input)),
     }
 
@@ -1286,6 +1427,7 @@ def _approval_record_matches(raw_record: str, args) -> bool:
         and record.get("intent_hash") == expected["intent_hash"]
         and record.get("action_module") == expected["action_module"]
         and record.get("action_capability") == expected["action_capability"]
+        and record.get("action_risk") == expected["action_risk"]
         and record.get("action_input_hash") == expected["action_input_hash"]
     )
 
@@ -1336,7 +1478,7 @@ def _diagnose(config, resources: ResourceGuard, router: LLMRouter) -> int:
 
 def _hydrate_action_request(args, config) -> str:
     if args.request_file:
-        allowed_root = (config.root / "data" / "action-requests").resolve()
+        allowed_root = (config.data_root / "action-requests").resolve()
         try:
             request_path = Path(args.request_file).resolve(strict=True)
             request_path.relative_to(allowed_root)
@@ -1354,15 +1496,20 @@ def _hydrate_action_request(args, config) -> str:
         args.action_module = payload.get("action_module")
         args.action_capability = payload.get("action_capability")
         args.action_input = _request_file_action_input(payload.get("action_input"))
+        args.action_risk = payload.get("action_risk") or ""
         args.passkey = payload.get("passkey") or ""
         args.no_llm = payload.get("no_llm") is True
         args.monarch_confirmed = False
+
+    if not hasattr(args, "action_risk"):
+        args.action_risk = ""
 
     string_limits = {
         "intent_text": 16_000,
         "action_module": 160,
         "action_capability": 240,
         "action_input": 64_000,
+        "action_risk": 64,
         "passkey": 256,
     }
     for field, limit in string_limits.items():
@@ -2308,10 +2455,19 @@ def _update_incident(args, config) -> int:
 
 
 def _quarantine_vault(config) -> QuarantineVault:
+    configured_workspace = os.getenv("MONARCH_WORKSPACE_ROOT", "").strip()
+    workspace_root = (
+        Path(configured_workspace)
+        if configured_workspace and Path(configured_workspace).is_absolute()
+        else config.root.parent
+    )
     return QuarantineVault(
         config.runtime.quarantine_path,
         config.runtime.quarantine_manifest_path,
         config.runtime.integrity_key_path,
+        application_root=config.root,
+        workspace_root=workspace_root,
+        state_root=config.runtime.state_path.parent,
     )
 
 
@@ -2438,13 +2594,13 @@ def _approve_response(args, config) -> int:
         print(json_line({"ok": False, "error": "response approval requires explicit confirmation"}))
         return 2
     try:
-        payload = _read_pin_request(args.request_file, config)
+        payload = _read_pin_request(args.request_file, config, from_stdin=args.request_stdin)
     except SecurityPinError as exc:
         print(json_line({"ok": False, "error": str(exc)}))
         return 2
     if payload is None:
         if not sys.stdin.isatty():
-            print(json_line({"ok": False, "error": "approve-response requires interactive PIN or a local request file"}))
+            print(json_line({"ok": False, "error": "approve-response requires interactive PIN or a bounded local request"}))
             return 2
         payload = {"pin": getpass.getpass("Security PIN: ")}
     try:
@@ -2660,13 +2816,13 @@ def _resolve_emergency(args, config) -> int:
         print(json_line({"ok": False, "error": "emergency decision requires explicit confirmation"}))
         return 2
     try:
-        payload = _read_pin_request(args.request_file, config)
+        payload = _read_pin_request(args.request_file, config, from_stdin=args.request_stdin)
     except SecurityPinError as exc:
         print(json_line({"ok": False, "error": str(exc)}))
         return 2
     if payload is None:
         if not sys.stdin.isatty():
-            print(json_line({"ok": False, "error": "emergency-resolve requires interactive PIN or a local request file"}))
+            print(json_line({"ok": False, "error": "emergency-resolve requires interactive PIN or a bounded local request"}))
             return 2
         payload = {"pin": getpass.getpass("Security PIN: ")}
     try:
@@ -2683,13 +2839,13 @@ def _resolve_emergency(args, config) -> int:
 
 def _set_security_pin(args, config) -> int:
     try:
-        payload = _read_pin_request(args.request_file, config)
+        payload = _read_pin_request(args.request_file, config, from_stdin=args.request_stdin)
     except SecurityPinError as exc:
         print(json_line({"ok": False, "error": str(exc)}))
         return 2
     if payload is None:
         if not sys.stdin.isatty():
-            print(json_line({"ok": False, "error": "pin-set requires interactive input or a local request file"}))
+            print(json_line({"ok": False, "error": "pin-set requires interactive input or a bounded local request"}))
             return 2
         current_pin = getpass.getpass("Current Security PIN (leave empty if not configured): ")
         new_pin = getpass.getpass("New 6-digit Security PIN: ")
@@ -2716,13 +2872,13 @@ def _set_security_pin(args, config) -> int:
 
 def _verify_security_pin(args, config) -> int:
     try:
-        payload = _read_pin_request(args.request_file, config)
+        payload = _read_pin_request(args.request_file, config, from_stdin=args.request_stdin)
     except SecurityPinError as exc:
         print(json_line({"ok": False, "error": str(exc)}))
         return 2
     if payload is None:
         if not sys.stdin.isatty():
-            print(json_line({"ok": False, "error": "pin-verify requires interactive input or a local request file"}))
+            print(json_line({"ok": False, "error": "pin-verify requires interactive input or a bounded local request"}))
             return 2
         payload = {"pin": getpass.getpass("Security PIN: ")}
     try:
@@ -2740,13 +2896,13 @@ def _verify_security_pin(args, config) -> int:
 
 def _recover_security_pin(args, config) -> int:
     try:
-        payload = _read_pin_request(args.request_file, config)
+        payload = _read_pin_request(args.request_file, config, from_stdin=args.request_stdin)
     except SecurityPinError as exc:
         print(json_line({"ok": False, "error": str(exc)}))
         return 2
     if payload is None:
         if not sys.stdin.isatty():
-            print(json_line({"ok": False, "error": "pin-recover requires interactive input or a local request file"}))
+            print(json_line({"ok": False, "error": "pin-recover requires interactive input or a bounded local request"}))
             return 2
         recovery_code = getpass.getpass("One-time recovery code: ")
         new_pin = getpass.getpass("New 6-digit Security PIN: ")
@@ -2776,27 +2932,147 @@ def _recover_security_pin(args, config) -> int:
         return 1
 
 
-def _read_pin_request(value: str, config) -> dict[str, Any] | None:
-    if not value:
+def _authorize_lifecycle(config, *, request_stdin: bool, purpose: str) -> dict[str, Any]:
+    try:
+        payload = _read_pin_request("", config, from_stdin=request_stdin)
+    except SecurityPinError as exc:
+        _audit_lifecycle_authorization(config, purpose, "", False, str(exc))
+        raise
+    if payload is None:
+        if not sys.stdin.isatty():
+            error = "Security PIN authorization requires an interactive terminal or --request-stdin"
+            _audit_lifecycle_authorization(config, purpose, "", False, error)
+            raise SecurityPinError(error)
+        payload = {
+            "pin": getpass.getpass("Security PIN: "),
+            "purpose": purpose,
+            "request_id": str(uuid.uuid4()),
+        }
+
+    supplied_purpose = str(payload.get("purpose") or "")
+    request_id = str(payload.get("request_id") or "")
+    if supplied_purpose != purpose:
+        error = "Security PIN request purpose does not match the requested lifecycle action"
+        _audit_lifecycle_authorization(config, purpose, request_id, False, error)
+        raise SecurityPinError(error)
+    try:
+        parsed_request_id = uuid.UUID(request_id)
+    except (ValueError, AttributeError) as exc:
+        error = "Security PIN request id is invalid"
+        _audit_lifecycle_authorization(config, purpose, "", False, error)
+        raise SecurityPinError(error) from exc
+    if str(parsed_request_id) != request_id:
+        error = "Security PIN request id must use canonical UUID form"
+        _audit_lifecycle_authorization(config, purpose, "", False, error)
+        raise SecurityPinError(error)
+
+    verification = SecurityPinManager(
+        config.runtime.security_pin_path,
+        config.runtime.integrity_key_path,
+    ).verify(str(payload.get("pin") or ""))
+    if not verification.ok:
+        _audit_lifecycle_authorization(
+            config,
+            purpose,
+            request_id,
+            False,
+            verification.reason,
+            verification=verification.to_dict(),
+        )
+        raise SecurityPinError(verification.reason)
+
+    state = StateStore(config.runtime.state_path, config.runtime.integrity_key_path)
+    with state.lock():
+        if "load_error" in state.data or "integrity_error" in state.data:
+            raise SecurityPinError("Security authorization state integrity check failed")
+        stored_request_ids = state.get_json("security_lifecycle_request_ids", [])
+        if not isinstance(stored_request_ids, list):
+            raise SecurityPinError("Security authorization request history is malformed")
+        consumed = [str(item) for item in stored_request_ids if isinstance(item, str)]
+        if request_id in consumed:
+            error = "Security PIN request was already consumed"
+            _audit_lifecycle_authorization(config, purpose, request_id, False, error)
+            raise SecurityPinError(error)
+        state.set_json("security_lifecycle_request_ids", [*consumed[-127:], request_id])
+
+    _audit_lifecycle_authorization(
+        config,
+        purpose,
+        request_id,
+        True,
+        "Security PIN verified",
+        verification=verification.to_dict(),
+    )
+    return {
+        "authenticated": True,
+        "authorization_purpose": purpose,
+        "authorization_request_id": request_id,
+    }
+
+
+def _audit_lifecycle_authorization(
+    config,
+    purpose: str,
+    request_id: str,
+    authorized: bool,
+    reason: str,
+    *,
+    verification: dict[str, Any] | None = None,
+) -> None:
+    details = verification or {}
+    AuditLog(
+        config.runtime.audit_log_path,
+        config.runtime.max_audit_log_bytes,
+        stdout=False,
+        integrity_key_path=config.runtime.integrity_key_path,
+    ).status({
+        "status": "security_lifecycle_authorized" if authorized else "security_lifecycle_rejected",
+        "purpose": purpose,
+        "request_id": request_id[:64],
+        "configured": bool(details.get("configured")),
+        "locked": bool(details.get("locked")),
+        "retry_after_seconds": max(0, int(details.get("retry_after_seconds") or 0)),
+        "reason": reason[:160],
+    })
+
+
+def _read_pin_request(value: str, config, *, from_stdin: bool = False) -> dict[str, Any] | None:
+    if value and from_stdin:
+        raise SecurityPinError("PIN request must use exactly one transport")
+    if not value and not from_stdin:
         return None
-    allowed_root = (config.root / "data" / "pin-requests").resolve()
+    allowed_root = (config.runtime.security_pin_path.parent / "pin-requests").resolve()
     request_path: Path | None = None
     try:
-        supplied_path = Path(value)
-        if supplied_path.is_symlink():
-            raise ValueError("PIN request file cannot be a symlink")
-        request_path = supplied_path.resolve(strict=True)
-        request_path.relative_to(allowed_root)
-        if request_path.stat().st_size > 4096:
-            raise ValueError("invalid PIN request file")
-        payload = json.loads(request_path.read_text(encoding="utf-8"))
+        if from_stdin:
+            raw = sys.stdin.read(4097)
+            if len(raw) > 4096:
+                raise ValueError("PIN request stdin exceeds 4096 characters")
+        else:
+            supplied_path = Path(value)
+            if supplied_path.is_symlink():
+                raise ValueError("PIN request file cannot be a symlink")
+            request_path = supplied_path.resolve(strict=True)
+            request_path.relative_to(allowed_root)
+            if request_path.stat().st_size > 4096:
+                raise ValueError("invalid PIN request file")
+            raw = request_path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
         if not isinstance(payload, dict):
             raise ValueError("PIN request payload is not an object")
-        allowed = {"pin", "new_pin", "current_pin", "confirmation", "recovery_code"}
+        limits = {
+            "pin": 32,
+            "new_pin": 32,
+            "current_pin": 32,
+            "confirmation": 32,
+            "recovery_code": 32,
+            "purpose": 64,
+            "request_id": 64,
+        }
         return {
-            key: str(value)[:32]
-            for key, value in payload.items()
-            if key in allowed and isinstance(value, str)
+            key: item[:limits[key]]
+            for key, item in payload.items()
+            if key in limits and isinstance(item, str)
         }
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
         raise SecurityPinError(f"PIN request rejected: {exc}") from exc
@@ -3251,6 +3527,8 @@ def _run_quick_action(
         _tui_call_pretty(config_path, ["scan-system", "--summary-only", "--no-llm"], console)
     elif command in {"scan-network", "scan-devices", "scan-persistence", "scan-posture", "simulate-risk"}:
         _tui_call_pretty(config_path, [command, "--no-llm"], console)
+    elif command == "stop":
+        _tui_call_pretty(config_path, ["stop", "--confirm"], console)
     elif command == "tail-audit":
         lines = input("Сколько строк показать? [20]> ").strip() or "20"
         try:

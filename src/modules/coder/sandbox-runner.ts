@@ -14,6 +14,7 @@ export interface CoderSandboxExecutionRequest {
   cwd: string;
   timeoutMs: number;
   allowNetwork?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface CoderSandboxIsolationReceipt {
@@ -92,6 +93,7 @@ export class CoderSandboxRunner {
   }
 
   async execute(request: CoderSandboxExecutionRequest): Promise<CoderSandboxExecutionResult> {
+    request.signal?.throwIfAborted();
     if (process.platform !== 'win32') throw new Error('Coder command execution is fail-closed outside Windows AppContainer.');
     const projectRoot = path.resolve(request.projectRoot);
     const cwd = path.resolve(request.cwd);
@@ -99,7 +101,8 @@ export class CoderSandboxRunner {
     const preferredExecutable = await resolveMonarchToolExecutable(request.executable, this.sourceOwnerRoot);
     const resolvedExecutable = preferredExecutable || await resolveExecutable(request.executable, cwd, process.env);
     await this.ensureBinary();
-    const executable = await this.stageExecutableRuntime(resolvedExecutable, projectRoot);
+    request.signal?.throwIfAborted();
+    const executable = await this.stageExecutableRuntime(resolvedExecutable, projectRoot, request.signal);
 
     const jobDirectory = path.join(this.jobsRoot, `job-${randomUUID()}`);
     await mkdir(jobDirectory, { recursive: true });
@@ -125,7 +128,14 @@ export class CoderSandboxRunner {
 
     try {
       const env = sanitizedProcessEnvironment(this.runtimeRoot, jobDirectory);
-      const broker = await runDirect(this.binaryPath, ['host', requestPath, resultPath], this.runtimeRoot, payload.timeoutMs + 120_000, env);
+      const broker = await runDirect(
+        this.binaryPath,
+        ['host', requestPath, resultPath],
+        this.runtimeRoot,
+        payload.timeoutMs + 120_000,
+        env,
+        request.signal,
+      );
       if (!existsSync(resultPath)) {
         throw new Error(`Coder sandbox broker returned no receipt (${broker.stderr || `exit ${broker.exitCode}`}).`);
       }
@@ -197,7 +207,8 @@ export class CoderSandboxRunner {
     await writeFile(markerPath, `${JSON.stringify({ sourceHash, sharedAcl: 'all-app-packages-read-v1' })}\n`, 'utf8');
   }
 
-  private async stageExecutableRuntime(executable: string, projectRoot: string): Promise<string> {
+  private async stageExecutableRuntime(executable: string, projectRoot: string, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     if (isWithin(executable, projectRoot) || isWithin(executable, this.runtimeRoot)) return executable;
     const systemRoot = path.resolve(process.env.SystemRoot || 'C:\\Windows');
     if (isWithin(executable, systemRoot)) return executable;
@@ -215,13 +226,14 @@ export class CoderSandboxRunner {
       .then((value) => JSON.parse(value) as Record<string, unknown>)
       .catch(() => ({}));
     if (markerData.sharedAcl !== 'all-app-packages-read-v1') {
-      const size = await boundedDirectorySize(sourceRoot, 1536 * 1024 * 1024);
+      const size = await boundedDirectorySize(sourceRoot, 1536 * 1024 * 1024, signal);
       if (size.exceeded) throw new Error(`Tool runtime is too large to stage safely for AppContainer: ${sourceRoot}`);
       const temporary = `${targetRoot}.tmp-${randomUUID()}`;
       await mkdir(path.dirname(targetRoot), { recursive: true });
       await mkdir(temporary, { recursive: false });
-      await this.grantSharedReadAccess(temporary);
+      await this.grantSharedReadAccess(temporary, signal);
       for (const entry of await readdir(sourceRoot)) {
+        signal?.throwIfAborted();
         await cp(path.join(sourceRoot, entry), path.join(temporary, entry), { recursive: true, force: false, errorOnExist: true });
       }
       await writeFile(path.join(temporary, '.monarch-tool-runtime'), JSON.stringify({
@@ -242,13 +254,14 @@ export class CoderSandboxRunner {
     return staged;
   }
 
-  private async grantSharedReadAccess(target: string): Promise<void> {
+  private async grantSharedReadAccess(target: string, signal?: AbortSignal): Promise<void> {
     const result = await runDirect(
       this.binaryPath,
       ['grant-read', target],
       this.runtimeRoot,
       60_000,
       sanitizedProcessEnvironment(this.runtimeRoot, path.join(this.runtimeRoot, 'build-temp')),
+      signal,
     );
     if (result.exitCode !== 0) throw new Error(`AppContainer read-only ACL initialization failed: ${result.stderr || result.stdout}`);
   }
@@ -257,7 +270,8 @@ export class CoderSandboxRunner {
 export function sanitizedProcessEnvironment(monarchRoot: string, tempRoot = path.join(monarchRoot, 'runtime', 'coder', 'tmp')): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (!/(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|CREDENTIAL)/i.test(key)) env[key] = value;
+    if (!/(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|CREDENTIAL)/i.test(key)
+      && !/(?:MONARCH.*SAFE|SAFE.*MONARCH)/i.test(key)) env[key] = value;
   }
   const dataRoot = path.join(path.parse(monarchRoot).root, 'MonarchData');
   env.HF_HOME = process.env.HF_HOME || path.join(dataRoot, 'HuggingFace');
@@ -353,10 +367,11 @@ async function detectToolRuntimeRoot(executable: string): Promise<string> {
   return directory;
 }
 
-async function boundedDirectorySize(root: string, limit: number): Promise<{ total: number; exceeded: boolean }> {
+async function boundedDirectorySize(root: string, limit: number, signal?: AbortSignal): Promise<{ total: number; exceeded: boolean }> {
   let total = 0;
   const queue = [root];
   while (queue.length > 0) {
+    signal?.throwIfAborted();
     const current = queue.shift()!;
     const entries = await readdir(current, { withFileTypes: true });
     for (const entry of entries) {
@@ -387,28 +402,54 @@ function runDirect(
   cwd: string,
   timeoutMs: number,
   env: NodeJS.ProcessEnv,
+  signal?: AbortSignal,
 ): Promise<{ exitCode: number | null; stdout: string; stderr: string; timedOut: boolean }> {
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { cwd, env, shell: false, windowsHide: true });
     let stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     let stderr: Buffer<ArrayBufferLike> = Buffer.alloc(0);
     let timedOut = false;
+    let cancelled = false;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const append = (current: Buffer<ArrayBufferLike>, value: Buffer<ArrayBufferLike>): Buffer<ArrayBufferLike> => {
       const remaining = MAX_BROKER_OUTPUT_BYTES - current.length;
       return remaining <= 0 ? current : Buffer.concat([current, value.subarray(0, remaining)]);
     };
     child.stdout.on('data', (value: Buffer) => { stdout = append(stdout, value); });
     child.stderr.on('data', (value: Buffer) => { stderr = append(stderr, value); });
-    child.once('error', reject);
-    const timer = setTimeout(() => {
+    const onAbort = () => {
+      cancelled = true;
+      child.kill('SIGTERM');
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const finish = (operation: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      operation();
+    };
+    child.once('error', (error) => finish(() => reject(cancelled && signal ? abortReason(signal) : error)));
+    timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
     }, timeoutMs);
     child.once('close', (exitCode) => {
-      clearTimeout(timer);
-      resolve({ exitCode, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), timedOut });
+      finish(() => cancelled
+        ? reject(abortReason(signal!))
+        : resolve({ exitCode, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), timedOut }));
     });
+    if (signal?.aborted) onAbort();
   });
+}
+
+function abortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const error = new Error(typeof signal.reason === 'string' && signal.reason.trim() ? signal.reason : 'Coder sandbox execution aborted.');
+  error.name = 'AbortError';
+  return error;
 }
 
 function assertWithin(candidate: string, root: string, label: string): void {

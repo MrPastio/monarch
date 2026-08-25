@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, realpathSync, statSync } from 'node:fs';
-import { mkdir, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, realpath, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { readDurableJson, writeDurableJson } from '../../core/durable-json';
 import { CoderHostPolicy } from './policy';
@@ -40,6 +40,7 @@ export class CoderProjectStore {
   readonly registryPath: string;
   readonly policy: CoderHostPolicy;
   private registry: CoderProjectRegistryV1;
+  private projectMutationTail: Promise<void> = Promise.resolve();
 
   constructor(options: CoderProjectStoreOptions) {
     this.monarchRoot = path.resolve(options.monarchRoot);
@@ -49,13 +50,14 @@ export class CoderProjectStore {
       monarchRoot: this.monarchRoot,
       workspaceCoderRoot: this.workspaceCoderRoot,
     });
-    this.registry = normalizeRegistry(readDurableJson<CoderProjectRegistryV1>(this.registryPath));
+    this.registry = normalizeRegistry(readDurableJson<unknown>(this.registryPath), this.registryPath);
   }
 
   async initialize(): Promise<void> {
-    await mkdir(this.workspaceCoderRoot, { recursive: true });
-    this.pruneMissingProjects();
-    this.persist();
+    await this.enqueueProjectMutation(async () => {
+      await mkdir(this.workspaceCoderRoot, { recursive: true });
+      this.commitRegistry(() => this.pruneMissingProjects());
+    });
   }
 
   list(): { activeProjectId: string | null; projects: CoderProject[]; workspaceCoderRoot: string } {
@@ -74,31 +76,52 @@ export class CoderProjectStore {
   }
 
   async create(nameInput: unknown): Promise<CoderProject> {
-    const name = normalizeProjectName(nameInput);
-    await mkdir(this.workspaceCoderRoot, { recursive: true });
-    const slug = uniqueProjectSlug(this.workspaceCoderRoot, slugify(name));
-    const root = this.policy.assertProjectRoot(path.join(this.workspaceCoderRoot, slug));
-    await mkdir(root, { recursive: false });
-    const project = this.createRecord(name, root, 'created');
-    await this.writeProjectMarker(project);
-    return project;
+    return await this.enqueueProjectMutation(async () => {
+      const name = normalizeProjectName(nameInput);
+      await mkdir(this.workspaceCoderRoot, { recursive: true });
+      const root = await this.allocateProjectRoot(slugify(name));
+      let markerCreated = false;
+      try {
+        const project = this.buildRecord(name, root, 'created');
+        markerCreated = await this.writeProjectMarker(project, false);
+        return this.registerRecord(project);
+      } catch (error) {
+        const markerDirectory = path.join(root, '.monarch');
+        if (markerCreated) await rm(path.join(markerDirectory, 'coder-project.json'), { force: true }).catch(() => undefined);
+        await rmdir(markerDirectory).catch(() => undefined);
+        await rmdir(root).catch(() => undefined);
+        throw error;
+      }
+    });
   }
 
   async import(existingPathInput: unknown, nameInput?: unknown): Promise<CoderProject> {
-    const existingPath = typeof existingPathInput === 'string' ? existingPathInput.trim() : '';
-    if (!existingPath) throw new Error('Existing project path is required.');
-    const requestedRoot = path.resolve(existingPath);
-    const rootStat = await stat(requestedRoot).catch(() => null);
-    const root = rootStat?.isDirectory()
-      ? this.policy.assertProjectRoot(await realpath(requestedRoot))
-      : requestedRoot;
-    if (!rootStat?.isDirectory()) throw new Error(`Project folder does not exist: ${root}`);
-    const duplicate = this.registry.projects.find((project) => samePath(project.root, root));
-    if (duplicate) return this.activate(duplicate.id);
-    const name = nameInput ? normalizeProjectName(nameInput) : normalizeProjectName(path.basename(root));
-    const project = this.createRecord(name, root, 'imported');
-    await this.writeProjectMarker(project).catch(() => undefined);
-    return project;
+    return await this.enqueueProjectMutation(async () => {
+      const existingPath = typeof existingPathInput === 'string' ? existingPathInput.trim() : '';
+      if (!existingPath) throw new Error('Existing project path is required.');
+      const requestedRoot = path.resolve(existingPath);
+      const rootStat = await stat(requestedRoot).catch(() => null);
+      const root = rootStat?.isDirectory()
+        ? this.policy.assertProjectRoot(await realpath(requestedRoot))
+        : requestedRoot;
+      if (!rootStat?.isDirectory()) throw new Error(`Project folder does not exist: ${root}`);
+      const duplicate = this.registry.projects.find((project) => samePath(project.root, root));
+      if (duplicate) return this.activate(duplicate.id);
+      const name = nameInput ? normalizeProjectName(nameInput) : normalizeProjectName(path.basename(root));
+      const project = this.buildRecord(name, root, 'imported');
+      const markerPath = path.join(project.root, '.monarch', 'coder-project.json');
+      const markerRootExisted = existsSync(path.dirname(markerPath));
+      const markerCreated = await this.writeProjectMarker(project, true).catch(() => false);
+      try {
+        return this.registerRecord(project);
+      } catch (error) {
+        if (markerCreated) {
+          await rm(markerPath, { force: true }).catch(() => undefined);
+          if (!markerRootExisted) await rmdir(path.dirname(markerPath)).catch(() => undefined);
+        }
+        throw error;
+      }
+    });
   }
 
   activate(projectId: string): CoderProject {
@@ -107,13 +130,15 @@ export class CoderProjectStore {
     if (!existsSync(project.root) || !statSync(project.root).isDirectory()) {
       throw new Error(`Coder project folder is unavailable: ${project.root}`);
     }
-    this.canonicalizeProject(project);
-    const now = new Date().toISOString();
-    project.lastOpenedAt = now;
-    project.updatedAt = now;
-    this.registry.activeProjectId = project.id;
-    this.persist();
-    return { ...project };
+    const canonical = this.policy.assertProjectRoot(realpathSync.native(project.root));
+    return this.commitRegistry(() => {
+      const now = new Date().toISOString();
+      project.root = canonical;
+      project.lastOpenedAt = now;
+      project.updatedAt = now;
+      this.registry.activeProjectId = project.id;
+      return { ...project };
+    });
   }
 
   async snapshot(projectId?: string, limit = 240): Promise<CoderProjectSnapshot> {
@@ -134,12 +159,13 @@ export class CoderProjectStore {
   private canonicalizeProject(project: CoderProject): void {
     const canonical = this.policy.assertProjectRoot(realpathSync.native(project.root));
     if (samePath(project.root, canonical)) return;
-    project.root = canonical;
-    project.updatedAt = new Date().toISOString();
-    this.persist();
+    this.commitRegistry(() => {
+      project.root = canonical;
+      project.updatedAt = new Date().toISOString();
+    });
   }
 
-  private createRecord(name: string, root: string, source: CoderProject['source']): CoderProject {
+  private buildRecord(name: string, root: string, source: CoderProject['source']): CoderProject {
     if (this.registry.projects.length >= MAX_PROJECTS) {
       throw new Error(`Coder project registry limit reached (${MAX_PROJECTS}).`);
     }
@@ -153,24 +179,47 @@ export class CoderProjectStore {
       updatedAt: now,
       lastOpenedAt: now,
     };
-    this.registry.projects.unshift(project);
-    this.registry.activeProjectId = project.id;
-    this.persist();
-    return { ...project };
+    return project;
   }
 
-  private async writeProjectMarker(project: CoderProject): Promise<void> {
+  private async allocateProjectRoot(base: string): Promise<string> {
+    for (let index = 1; index < 10_000; index += 1) {
+      const slug = index === 1 ? base : `${base}-${index}`;
+      const root = this.policy.assertProjectRoot(path.join(this.workspaceCoderRoot, slug));
+      try {
+        await mkdir(root, { recursive: false });
+        return root;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+    }
+    throw new Error('Could not allocate a unique project folder.');
+  }
+
+  private registerRecord(project: CoderProject): CoderProject {
+    return this.commitRegistry(() => {
+      this.registry.projects.unshift(project);
+      this.registry.activeProjectId = project.id;
+      return { ...project };
+    });
+  }
+
+  private async writeProjectMarker(project: CoderProject, allowExisting: boolean): Promise<boolean> {
     const directory = path.join(project.root, '.monarch');
     await mkdir(directory, { recursive: true });
-    await writeFile(path.join(directory, 'coder-project.json'), `${JSON.stringify({
-      version: 1,
-      id: project.id,
-      name: project.name,
-      source: project.source,
-      createdAt: project.createdAt,
-    }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' }).catch(async (error: NodeJS.ErrnoException) => {
-      if (error.code !== 'EEXIST') throw error;
-    });
+    try {
+      await writeFile(path.join(directory, 'coder-project.json'), `${JSON.stringify({
+        version: 1,
+        id: project.id,
+        name: project.name,
+        source: project.source,
+        createdAt: project.createdAt,
+      }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+      return true;
+    } catch (error) {
+      if (allowExisting && (error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      throw error;
+    }
   }
 
   private pruneMissingProjects(): void {
@@ -191,26 +240,65 @@ export class CoderProjectStore {
   private persist(): void {
     writeDurableJson(this.registryPath, this.registry);
   }
+
+  private commitRegistry<R>(mutation: () => R): R {
+    const previous = cloneRegistry(this.registry);
+    try {
+      const result = mutation();
+      this.persist();
+      return result;
+    } catch (error) {
+      this.registry = previous;
+      throw error;
+    }
+  }
+
+  private enqueueProjectMutation<R>(mutation: () => Promise<R>): Promise<R> {
+    const result = this.projectMutationTail.then(mutation);
+    this.projectMutationTail = result.then(() => undefined, () => undefined);
+    return result;
+  }
 }
 
-function normalizeRegistry(value: CoderProjectRegistryV1 | null): CoderProjectRegistryV1 {
-  if (!value || value.version !== 1 || !Array.isArray(value.projects)) {
-    return { version: 1, activeProjectId: null, projects: [] };
+function normalizeRegistry(value: unknown, registryPath: string): CoderProjectRegistryV1 {
+  if (value === null) return { version: 1, activeProjectId: null, projects: [] };
+  if (!isRecord(value)
+    || value.version !== 1
+    || (value.activeProjectId !== null && typeof value.activeProjectId !== 'string')
+    || !Array.isArray(value.projects)
+    || !value.projects.every(isValidProject)) {
+    throw new Error(`Coder project registry ${registryPath} has an invalid schema and was not modified.`);
   }
   const projects = value.projects
-    .filter((project): project is CoderProject => Boolean(
-      project
-      && typeof project.id === 'string'
-      && typeof project.name === 'string'
-      && typeof project.root === 'string'
-      && (project.source === 'created' || project.source === 'imported'),
-    ))
     .map((project) => ({ ...project, root: path.resolve(project.root) }))
     .slice(0, MAX_PROJECTS);
   return {
     version: 1,
     activeProjectId: typeof value.activeProjectId === 'string' ? value.activeProjectId : null,
     projects,
+  };
+}
+
+function isValidProject(value: unknown): value is CoderProject {
+  return isRecord(value)
+    && typeof value.id === 'string'
+    && typeof value.name === 'string'
+    && typeof value.root === 'string'
+    && (value.source === 'created' || value.source === 'imported')
+    && typeof value.createdAt === 'string'
+    && typeof value.updatedAt === 'string'
+    && typeof value.lastOpenedAt === 'string';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function cloneRegistry(registry: CoderProjectRegistryV1): CoderProjectRegistryV1 {
+  return {
+    version: 1,
+    activeProjectId: registry.activeProjectId,
+    projects: registry.projects.map((project) => ({ ...project })),
   };
 }
 
@@ -231,15 +319,6 @@ function slugify(value: string): string {
     .replace(/^-+|-+$/g, '')
     .slice(0, 64);
   return slug || 'new-project';
-}
-
-function uniqueProjectSlug(root: string, base: string): string {
-  if (!existsSync(path.join(root, base))) return base;
-  for (let index = 2; index < 10_000; index += 1) {
-    const candidate = `${base}-${index}`;
-    if (!existsSync(path.join(root, candidate))) return candidate;
-  }
-  throw new Error('Could not allocate a unique project folder.');
 }
 
 async function collectProjectEntries(root: string, limit: number): Promise<CoderProjectSnapshot['entries']> {

@@ -223,16 +223,21 @@ export class AssistantModule implements MonarchModule {
       const result = await completeWithModelRole(catalog, completionRequest);
 
       if (!result.ok) {
+        const completionError = result.error || 'model-completion-failed';
         return {
-          ok: true,
-          summary: `${selectedModel.label} prepared (local endpoint fallback): ${selectedModel.reason}.`,
+          ok: false,
+          summary: `${selectedModel.label} did not complete the assistant reply: ${completionError}.`,
+          error: completionError,
           output: {
             mode: 'assistant-reply-prepared',
             selectedModel,
             text,
-            error: result.error || 'completions-failed',
+            error: completionError,
             reply: result.rawText || '',
             degraded: Boolean(result.degraded),
+            finishReason: result.finishReason,
+            truncated: Boolean(result.truncated),
+            streamCompleted: result.streamCompleted,
             trace: result.trace,
             latency: {
               firstTokenMs: result.firstTokenLatencyMs,
@@ -259,14 +264,16 @@ export class AssistantModule implements MonarchModule {
         },
       };
     } catch (error) {
+      const errorCode = `assistant-model-${getSafeErrorCode(error)}`;
       return {
-        ok: true,
-        summary: `${selectedModel.label} prepared (error fallback): ${selectedModel.reason}.`,
+        ok: false,
+        summary: `${selectedModel.label} did not complete the assistant reply: ${errorCode}.`,
+        error: errorCode,
         output: {
           mode: 'assistant-reply-prepared',
           selectedModel,
           text,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorCode,
         },
       };
     } finally {
@@ -704,9 +711,12 @@ function normalizeAssistantModelOverride(value: unknown): string | undefined {
   case 'reasoning':
   case 'gemma4-fast':
   case 'gemma4-balanced':
+  case 'qwen3.8-27b-pro':
   case 'gemma4-deepthinking':
   case 'gemma4-31b':
-    return normalized;
+    return normalized === 'gemma4-deepthinking' || normalized === 'gemma4-31b'
+      ? 'qwen3.8-27b-pro'
+      : normalized;
   default:
     return undefined;
   }
@@ -726,9 +736,9 @@ function roleForAssistantModelOverride(value: string | undefined) {
   case 'powerful':
   case 'reasoning':
   case 'gemma4-deepthinking':
-    return 'gemma4-deepthinking' as const;
   case 'gemma4-31b':
-    return 'gemma4-31b' as const;
+  case 'qwen3.8-27b-pro':
+    return 'qwen3.8-27b-pro' as const;
   default:
     return undefined;
   }

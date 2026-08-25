@@ -147,6 +147,73 @@ describe('Telegram Module', () => {
     }
   });
 
+  it('never persists Telegram reminder text while Owner DEV zero-retention is active', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-telegram-zero-retention-reminder-'));
+    const statePath = path.join(root, 'data', 'local', 'telegram-state.json');
+    const secret = 'zero-retention reminder body must never reach disk';
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(statePath, JSON.stringify({
+      offset: 0,
+      pairings: [{ chatId: 1001, userId: 2002, username: 'tester', pairedAt: new Date(0).toISOString() }],
+      reminders: [],
+      remotePaused: false,
+    }), 'utf8');
+    const mock = await startTelegramMock();
+    const dispatched: string[] = [];
+    const module = new TelegramModule({ projectRoot: root, apiBase: mock.apiBase, token: 'test-token', autoStart: false });
+    module.setOwnerDevSettingsProvider(() => ({ zeroRetentionEnabled: true }));
+    module.setIntentDispatcher(async (request) => {
+      dispatched.push(request.text);
+      return {
+        intent: { id: 'intent_zero_retention_reminder', text: request.text, source: 'telegram', createdAt: new Date(0).toISOString() },
+        route: null,
+        plan: null,
+        execution: null,
+        summary: 'unexpected dispatch',
+      };
+    });
+    const kernel = new MonarchKernel();
+    kernel.registerModule(module);
+    await kernel.start();
+
+    try {
+      const capability = await kernel.execute({
+        id: 'exec_telegram_zero_retention_reminder',
+        intentId: 'intent_telegram_zero_retention_reminder',
+        moduleId: 'telegram',
+        capabilityId: 'telegram.reminder.create',
+        input: { chatId: 1001, text: secret, dueAt: '2030-01-01T12:00:00Z' },
+        requestedBy: 'smoke',
+        confirmed: true,
+        createdAt: new Date(0).toISOString(),
+      });
+      expect(capability).toMatchObject({
+        ok: false,
+        error: 'telegram-reminder-disabled-by-zero-retention',
+      });
+
+      await (module as unknown as { handleUpdate: (value: unknown) => Promise<void> }).handleUpdate({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          chat: { id: 1001, type: 'private' },
+          from: { id: 2002, username: 'tester' },
+          text: `/remind 10m ${secret}`,
+        },
+      });
+
+      expect(dispatched).toEqual([]);
+      expect(mock.sentMessages.some((message) => String(message.text).includes('Полная незапись'))).toBe(true);
+      const persistedText = await readFile(statePath, 'utf8');
+      expect(persistedText).not.toContain(secret);
+      expect((JSON.parse(persistedText) as { reminders: unknown[] }).reminders).toEqual([]);
+    } finally {
+      await kernel.stop();
+      await mock.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects oversized Telegram reminder capability text before persisting', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-telegram-reminder-capability-bounds-'));
     const statePath = path.join(root, 'data', 'local', 'telegram-state.json');
@@ -905,7 +972,7 @@ describe('Telegram Module', () => {
     }
   });
 
-  it('limits active Telegram API confirmations per chat and user', async () => {
+  it('routes every effectful Telegram API command through the Agent dispatcher without local confirmation authority', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-telegram-api-pending-cap-'));
     const statePath = path.join(root, 'data', 'local', 'telegram-state.json');
     await mkdir(path.dirname(statePath), { recursive: true });
@@ -917,7 +984,17 @@ describe('Telegram Module', () => {
     }), 'utf8');
     const mock = await startTelegramMock();
     const module = new TelegramModule({ projectRoot: root, apiBase: mock.apiBase, token: 'test-token', autoStart: false });
-    const internals = module as unknown as { pendingConfirmations: Map<string, unknown> };
+    const dispatches: Array<{ text: string; approval?: { action: string; approvalId: string }; context: Record<string, unknown> }> = [];
+    module.setIntentDispatcher(async (request) => {
+      dispatches.push(request);
+      return {
+        intent: { id: `intent_${dispatches.length}`, text: request.text, source: 'telegram', createdAt: new Date(0).toISOString() },
+        route: null,
+        plan: null,
+        execution: { ok: true, summary: 'Agent Turn accepted.', output: { reply: 'Agent Turn accepted.' } },
+        summary: 'Agent Turn accepted.',
+      };
+    });
     const kernel = new MonarchKernel();
     kernel.registerModule(module);
     await kernel.start();
@@ -940,10 +1017,11 @@ describe('Telegram Module', () => {
         });
       }
 
-      expect(mock.sentMessages.some((message) => String(message.text).includes('Слишком много ожидающих подтверждений'))).toBe(true);
-      const prompts = mock.sentMessages.filter((message) => String(message.text).includes('Bot API sendMessage изменит состояние Telegram'));
-      expect(prompts).toHaveLength(8);
-      expect(internals.pendingConfirmations.size).toBe(8);
+      expect(dispatches).toHaveLength(9);
+      expect(dispatches.every((request) => request.approval === undefined)).toBe(true);
+      expect(dispatches.every((request) => request.text.includes('telegram.api.call'))).toBe(true);
+      expect(dispatches.every((request) => request.context.telegramChatId === 1001 && request.context.telegramUserId === 2002)).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(module, 'pendingConfirmations')).toBe(false);
     } finally {
       await kernel.stop();
       await mock.close();
@@ -1097,7 +1175,7 @@ describe('Telegram Module', () => {
     }
   });
 
-  it('purges expired Telegram pending confirmations before exposing status', async () => {
+  it('does not recreate an in-memory Telegram confirmation store after restart', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-telegram-pending-expired-'));
     const statePath = path.join(root, 'data', 'local', 'telegram-state.json');
     await mkdir(path.dirname(statePath), { recursive: true });
@@ -1108,25 +1186,6 @@ describe('Telegram Module', () => {
       remotePaused: false,
     }), 'utf8');
     const module = new TelegramModule({ projectRoot: root, autoStart: false });
-    const internals = module as unknown as { pendingConfirmations: Map<string, Record<string, unknown>> };
-    internals.pendingConfirmations.set('expired', {
-      kind: 'api',
-      id: 'expired',
-      chatId: 1001,
-      userId: 2002,
-      method: 'sendMessage',
-      parameters: {},
-      expiresAt: Date.now() - 1,
-    });
-    internals.pendingConfirmations.set('active', {
-      kind: 'api',
-      id: 'active',
-      chatId: 1001,
-      userId: 2002,
-      method: 'sendMessage',
-      parameters: {},
-      expiresAt: Date.now() + 60_000,
-    });
     const kernel = new MonarchKernel();
     kernel.registerModule(module);
     await kernel.start();
@@ -1142,16 +1201,105 @@ describe('Telegram Module', () => {
         createdAt: new Date(0).toISOString(),
       });
 
-      expect((status.output as { pendingConfirmations: number }).pendingConfirmations).toBe(1);
-      expect(internals.pendingConfirmations.has('expired')).toBe(false);
-      expect(internals.pendingConfirmations.has('active')).toBe(true);
+      expect((status.output as { pendingConfirmations: number }).pendingConfirmations).toBe(0);
+      expect(Object.prototype.hasOwnProperty.call(module, 'pendingConfirmations')).toBe(false);
     } finally {
       await kernel.stop();
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  it('does not honor pending Telegram confirmations after remote access is paused elsewhere', async () => {
+  it('resolves a durable approval card after a Telegram module restart using only its exact approval id', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-telegram-durable-approval-restart-'));
+    const statePath = path.join(root, 'data', 'local', 'telegram-state.json');
+    await mkdir(path.dirname(statePath), { recursive: true });
+    await writeFile(statePath, JSON.stringify({
+      offset: 0,
+      pairings: [{ chatId: 1001, userId: 2002, username: 'tester', pairedAt: new Date(0).toISOString() }],
+      reminders: [],
+      remotePaused: false,
+    }), 'utf8');
+    const mock = await startTelegramMock();
+    const first = new TelegramModule({ projectRoot: root, apiBase: mock.apiBase, token: 'test-token', autoStart: false });
+    first.setIntentDispatcher(async (request) => ({
+      intent: { id: 'intent_before_restart', text: request.text, source: 'telegram', createdAt: new Date(0).toISOString() },
+      route: null,
+      plan: null,
+      execution: {
+        ok: false,
+        summary: 'Точная durable-карточка.',
+        error: 'confirmation-required',
+        metadata: {
+          approvalPresentation: {
+            turnId: 'turn_before_restart',
+            taskId: 'task_before_restart',
+            approvalId: 'approval_survives_restart',
+            canonicalProposalHash: 'b'.repeat(64),
+            capabilityId: 'workspace.files.write',
+            target: 'runtime/restart.txt',
+            risk: 'write',
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            requiresArm: false,
+          },
+        },
+      },
+      summary: 'Точная durable-карточка.',
+    }));
+    const firstKernel = new MonarchKernel();
+    firstKernel.registerModule(first);
+    await firstKernel.start();
+    const handleFirst = (update: unknown) => (
+      first as unknown as { handleUpdate: (value: unknown) => Promise<void> }
+    ).handleUpdate(update);
+
+    try {
+      await handleFirst({
+        update_id: 1,
+        message: { message_id: 1, chat: { id: 1001, type: 'private' }, from: { id: 2002, username: 'tester' }, text: 'создай файл' },
+      });
+      const card = mock.apiCalls.find((call) => call.method === 'editMessageText' && String(call.text).includes('workspace.files.write'));
+      const callbackData = (((card?.reply_markup as any)?.inline_keyboard?.[0]?.[0]?.callback_data) || '') as string;
+      expect(callbackData).toBe('approve:approval_survives_restart');
+      await firstKernel.stop();
+
+      const approvalDispatches: unknown[] = [];
+      const second = new TelegramModule({ projectRoot: root, apiBase: mock.apiBase, token: 'test-token', autoStart: false });
+      second.setIntentDispatcher(async (request) => {
+        if (request.approval) approvalDispatches.push(request.approval);
+        return {
+          intent: { id: 'intent_after_restart', text: '', source: 'telegram', createdAt: new Date(0).toISOString() },
+          route: null,
+          plan: null,
+          execution: { ok: true, summary: 'Durable approval resolved.', output: { reply: 'Durable approval resolved.' } },
+          summary: 'Durable approval resolved.',
+        };
+      });
+      const secondKernel = new MonarchKernel();
+      secondKernel.registerModule(second);
+      await secondKernel.start();
+      try {
+        await (second as unknown as { handleUpdate: (value: unknown) => Promise<void> }).handleUpdate({
+          update_id: 2,
+          callback_query: {
+            id: 'callback-after-restart',
+            from: { id: 2002, username: 'tester' },
+            data: callbackData,
+            message: { message_id: 10, chat: { id: 1001, type: 'private' }, from: { id: 1, is_bot: true }, text: 'approval card' },
+          },
+        });
+        expect(approvalDispatches).toEqual([{ action: 'approve', approvalId: 'approval_survives_restart' }]);
+        expect(Object.prototype.hasOwnProperty.call(second, 'pendingConfirmations')).toBe(false);
+      } finally {
+        await secondKernel.stop();
+      }
+    } finally {
+      await firstKernel.stop().catch(() => undefined);
+      await mock.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not forward a durable Telegram approval after remote access is paused elsewhere', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-telegram-paused-callback-'));
     const statePath = path.join(root, 'data', 'local', 'telegram-state.json');
     await mkdir(path.dirname(statePath), { recursive: true });
@@ -1162,32 +1310,33 @@ describe('Telegram Module', () => {
       remotePaused: false,
     }), 'utf8');
     const mock = await startTelegramMock();
-    let confirmedDispatches = 0;
+    const approvalDispatches: Array<{ action: string; approvalId: string }> = [];
     const module = new TelegramModule({ projectRoot: root, apiBase: mock.apiBase, token: 'test-token', autoStart: false });
     module.setIntentDispatcher(async (request) => {
-      if (request.confirmed) confirmedDispatches += 1;
+      if (request.approval) approvalDispatches.push(request.approval);
       return {
         intent: { id: 'intent_telegram_confirm', text: request.text, source: 'telegram', createdAt: new Date(0).toISOString() },
         route: null,
         plan: null,
         execution: {
           ok: false,
-          summary: 'Confirmation required: test action',
+          summary: 'Нужно разрешение для точного тестового действия.',
           error: 'confirmation-required',
-          metadata: { confirmation: { token: 'local-confirm-token' } },
-        },
-        confirmation: {
-          token: 'local-confirm-token',
-          mode: 'intent',
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          target: {
-            intentId: 'intent_telegram_confirm',
-            moduleId: 'workspace',
-            capabilityId: 'workspace.files.delete',
-            risk: 'delete',
+          metadata: {
+            approvalPresentation: {
+              turnId: 'turn_telegram_confirm',
+              taskId: 'task_telegram_confirm',
+              approvalId: 'approval_telegram_confirm',
+              canonicalProposalHash: 'a'.repeat(64),
+              capabilityId: 'workspace.files.delete',
+              target: 'runtime/test.txt',
+              risk: 'delete',
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              requiresArm: false,
+            },
           },
         },
-        summary: 'needs confirmation',
+        summary: 'Нужно разрешение для точного тестового действия.',
       };
     });
     const kernel = new MonarchKernel();
@@ -1209,10 +1358,10 @@ describe('Telegram Module', () => {
         update_id: 1,
         message: { message_id: 1, chat: { id: 1001, type: 'private' }, from: { id: 2002, username: 'tester' }, text: 'удали тестовый файл' },
       });
-      await waitUntil(() => mock.apiCalls.some((call) => call.method === 'editMessageText' && String(call.text).includes('Разрешить это действие')), 5_000);
-      const confirmationCall = mock.apiCalls.find((call) => call.method === 'editMessageText' && String(call.text).includes('Разрешить это действие'));
-      const callbackData = (((confirmationCall?.reply_markup as any)?.inline_keyboard?.[0]?.[0]?.callback_data) || '') as string;
-      expect(callbackData).toMatch(/^confirm:/);
+      await waitUntil(() => mock.apiCalls.some((call) => call.method === 'editMessageText' && String(call.text).includes('workspace.files.delete')), 5_000);
+      const approvalCall = mock.apiCalls.find((call) => call.method === 'editMessageText' && String(call.text).includes('workspace.files.delete'));
+      const callbackData = (((approvalCall?.reply_markup as any)?.inline_keyboard?.[0]?.[0]?.callback_data) || '') as string;
+      expect(callbackData).toBe('approve:approval_telegram_confirm');
 
       await writeFile(statePath, JSON.stringify({
         offset: 1,
@@ -1226,12 +1375,12 @@ describe('Telegram Module', () => {
           id: 'callback-1',
           from: { id: 2002, username: 'tester' },
           data: callbackData,
-          message: { message_id: 10, chat: { id: 1001, type: 'private' }, from: { id: 1, is_bot: true }, text: 'confirm' },
+          message: { message_id: 10, chat: { id: 1001, type: 'private' }, from: { id: 1, is_bot: true }, text: 'approval' },
         },
       });
 
       await waitUntil(() => mock.apiCalls.some((call) => call.method === 'answerCallbackQuery' && String(call.text).includes('Удалённые задачи остановлены')), 5_000);
-      expect(confirmedDispatches).toBe(0);
+      expect(approvalDispatches).toEqual([]);
     } finally {
       await kernel.stop();
       await mock.close();

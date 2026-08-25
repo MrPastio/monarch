@@ -61,11 +61,44 @@ describe('Monarch Security AgentActionGuard', () => {
       actionRisk: 'execute',
     }));
 
-    expect(escaped).toMatchObject({ status: 'blocked' });
+    expect(escaped).toMatchObject({ status: 'blocked', disposition: 'hard-deny' });
     expect(escaped.evidenceCodes).toContain('workspace.path.escape');
-    expect(catastrophic).toMatchObject({ status: 'blocked' });
+    expect(catastrophic).toMatchObject({ status: 'blocked', disposition: 'hard-deny' });
     expect(catastrophic.evidenceCodes).toContain('command.catastrophic');
     expect(JSON.stringify(catastrophic)).not.toContain('Remove-Item');
+  });
+
+  it('uses Full Local as authority without weakening protected red zones', () => {
+    const guard = new AgentActionGuard(workspaceRoot);
+    const ordinaryExternalPath = path.resolve(path.parse(workspaceRoot).root, 'Monarch-Agent-QA', 'outside-note.txt');
+    const workspaceOnly = guard.assess(request({
+      intentText: 'создай внешний файл',
+      actionCapability: 'workspace.files.write',
+      actionInput: JSON.stringify({ path: ordinaryExternalPath, content: 'ok' }),
+      actionRisk: 'write',
+      filesystemAuthority: 'workspace',
+    }));
+    const fullLocal = guard.assess(request({
+      intentText: 'создай внешний файл',
+      actionCapability: 'workspace.files.write',
+      actionInput: JSON.stringify({ path: ordinaryExternalPath, content: 'ok' }),
+      actionRisk: 'write',
+      filesystemAuthority: 'full-local',
+    }));
+    const protectedTarget = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts');
+    const protectedFullLocal = guard.assess(request({
+      intentText: 'измени системный hosts файл',
+      actionCapability: 'workspace.files.write',
+      actionInput: JSON.stringify({ path: protectedTarget, content: 'blocked' }),
+      actionRisk: 'write',
+      filesystemAuthority: 'full-local',
+    }));
+
+    expect(workspaceOnly).toMatchObject({ status: 'blocked', disposition: 'hard-deny' });
+    expect(workspaceOnly.evidenceCodes).toContain('workspace.path.escape');
+    expect(fullLocal).toMatchObject({ ok: true, status: 'allowed' });
+    expect(protectedFullLocal).toMatchObject({ status: 'blocked', disposition: 'hard-deny' });
+    expect(protectedFullLocal.evidenceCodes).toContain('workspace.path.red-zone');
   });
 
   it('allows local user roots for reads and mkdir but blocks file writes there', () => {
@@ -107,6 +140,43 @@ describe('Monarch Security AgentActionGuard', () => {
       else process.env.USERPROFILE = oldUserProfile;
       if (oldHome === undefined) delete process.env.HOME;
       else process.env.HOME = oldHome;
+    }
+  });
+
+  it('allows only the typed known-folder leaf contract and rejects traversal before dispatch', () => {
+    const oldDesktopDir = process.env.MONARCH_DESKTOP_DIR;
+    const desktop = path.join(path.parse(process.cwd()).root, 'Monarch-Agent-QA', 'agent-guard-known-desktop');
+    process.env.MONARCH_DESKTOP_DIR = desktop;
+
+    try {
+      const guard = new AgentActionGuard(workspaceRoot);
+      const allowed = guard.assess(request({
+        intentText: 'создай на рабочем столе текстовый файл с именем ромашка',
+        actionCapability: 'workspace.known-folder.write',
+        actionInput: JSON.stringify({
+          knownFolder: 'desktop',
+          basename: 'ромашка.txt',
+          content: '',
+        }),
+        actionRisk: 'write',
+      }));
+      const traversal = guard.assess(request({
+        intentText: 'создай файл на рабочем столе',
+        actionCapability: 'workspace.known-folder.write',
+        actionInput: JSON.stringify({
+          knownFolder: 'desktop',
+          basename: '..\\escape.txt',
+          content: 'blocked',
+        }),
+        actionRisk: 'write',
+      }));
+
+      expect(allowed).toMatchObject({ ok: true, status: 'allowed' });
+      expect(traversal).toMatchObject({ status: 'blocked', disposition: 'hard-deny' });
+      expect(traversal.evidenceCodes).toContain('workspace.path.policy-blocked');
+    } finally {
+      if (oldDesktopDir === undefined) delete process.env.MONARCH_DESKTOP_DIR;
+      else process.env.MONARCH_DESKTOP_DIR = oldDesktopDir;
     }
   });
 
@@ -162,12 +232,81 @@ describe('Monarch Security AgentActionGuard', () => {
       requestedBy: 'telegram',
     }));
 
-    expect(decision.status).toBe('approval_required');
+    expect(decision).toMatchObject({ status: 'blocked', disposition: 'hard-deny' });
     expect(decision.evidenceCodes).toEqual(expect.arrayContaining([
       'command.security-tamper',
       'source.telegram.remote',
     ]));
-    expect(guard.snapshot()).toMatchObject({ checks: 1, approvals: 1, lastStatus: 'approval_required' });
+    expect(guard.snapshot()).toMatchObject({ checks: 1, blocked: 1, lastStatus: 'blocked' });
+  });
+
+  it('uses Kernel-owned Computer Use target context for command and commit boundaries', () => {
+    const guard = new AgentActionGuard(workspaceRoot);
+    const destructiveText = '{"text":"Remove-Item C:\\\\ -Recurse -Force"}';
+    const terminal = guard.assess(request({
+      intentText: 'введи эту команду',
+      actionModule: 'computer',
+      actionCapability: 'computer.window.type',
+      actionInput: destructiveText,
+      actionRisk: 'device-control',
+      trustedActionContext: computerTarget('powershell.exe', 'Windows PowerShell', 'Console'),
+    }));
+    const editor = guard.assess(request({
+      intentText: 'вставь пример команды в заметку',
+      actionModule: 'computer',
+      actionCapability: 'computer.window.type',
+      actionInput: destructiveText,
+      actionRisk: 'device-control',
+      trustedActionContext: computerTarget('notepad.exe', 'Новая заметка', 'Editor'),
+    }));
+    const sensitiveClick = guard.assess(request({
+      intentText: 'открой настройки приложения',
+      actionModule: 'computer',
+      actionCapability: 'computer.window.click',
+      actionInput: '{"elementId":"commit"}',
+      actionRisk: 'device-control',
+      trustedActionContext: computerTarget('browser.exe', 'Checkout', 'Pay now'),
+    }));
+
+    expect(terminal).toMatchObject({ status: 'blocked', disposition: 'hard-deny' });
+    expect(terminal.evidenceCodes).toContain('command.catastrophic');
+    expect(editor).toMatchObject({ ok: true, status: 'allowed' });
+    expect(editor.evidenceCodes).not.toContain('command.catastrophic');
+    expect(sensitiveClick).toMatchObject({ status: 'approval_required', disposition: 'owner-confirmable' });
+    expect(sensitiveClick.evidenceCodes).toContain('computer.target.sensitive-commit');
+  });
+
+  it('requires confirmation instead of blindly hard-blocking command-like text without a trusted Computer target', () => {
+    const guard = new AgentActionGuard(workspaceRoot);
+    const decision = guard.assess(request({
+      intentText: 'введи этот текст',
+      actionModule: 'computer',
+      actionCapability: 'computer.window.type',
+      actionInput: '{"text":"Remove-Item C:\\\\ -Recurse -Force"}',
+      actionRisk: 'device-control',
+    }));
+
+    expect(decision).toMatchObject({ status: 'approval_required', disposition: 'owner-confirmable' });
+    expect(decision.evidenceCodes).toContain('computer.target.unverified');
+    expect(decision.evidenceCodes).not.toContain('command.catastrophic');
+  });
+
+  it('hard-blocks capabilities missing from the live Kernel registry', () => {
+    const guard = new AgentActionGuard(workspaceRoot);
+    const decision = guard.assess(request({
+      actionModule: 'device',
+      actionCapability: 'device.invented.root',
+      capabilityRegistered: false,
+      actionRisk: 'read',
+    }));
+
+    expect(decision).toMatchObject({
+      ok: false,
+      status: 'blocked',
+      disposition: 'hard-deny',
+      decision: { action: 'block' },
+    });
+    expect(decision.evidenceCodes).toContain('capability.unregistered');
   });
 });
 
@@ -176,9 +315,21 @@ function request(overrides: Partial<Parameters<AgentActionGuard['assess']>[0]> =
     intentText: 'покажи статус',
     actionModule: 'workspace',
     actionCapability: 'workspace.files.read',
+    capabilityRegistered: true,
     actionInput: '{}',
     actionRisk: 'read' as const,
     requestedBy: 'unit',
     ...overrides,
+  };
+}
+
+function computerTarget(processName: string, title: string, name: string): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    sourceModuleId: 'computer',
+    target: {
+      window: { processName, title },
+      subject: { kind: 'semantic', name, controlType: 'Button' },
+    },
   };
 }

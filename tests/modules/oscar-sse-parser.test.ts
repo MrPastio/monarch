@@ -49,6 +49,52 @@ describe('Oscar frontend SSE parser', () => {
     ]);
   });
 
+  it('settles on the first done event without waiting for EOF or emitting poisoned late events', async () => {
+    let delivered = false;
+    let cancelled = false;
+    const body = new ReadableStream({
+      pull(controller) {
+        if (delivered) return;
+        delivered = true;
+        controller.enqueue(new TextEncoder().encode(
+          'event: token\ndata: {"token":"complete"}\n\n'
+          + 'event: done\ndata: {"ok":true}\n\n'
+          + 'event: token\ndata: {"token":"poisoned-late-token"}\n\n'
+          + 'event: error\ndata: {"code":"poisoned-late-error"}\n\n',
+        ));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200 })));
+
+    const events: Array<{ event: string; data: unknown }> = [];
+    await streamChat(createChatRequest(), (event, data) => {
+      events.push({ event, data });
+    });
+
+    expect(events).toEqual([
+      { event: 'token', data: { token: 'complete' } },
+      { event: 'done', data: { ok: true } },
+    ]);
+    expect(cancelled).toBe(true);
+  });
+
+  it('propagates a consumer failure while processing the terminal event', async () => {
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: done\ndata: {"ok":true}\n\n'));
+        controller.close();
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200 })));
+
+    await expect(streamChat(createChatRequest(), (event) => {
+      if (event === 'done') throw new Error('synthetic-consumer-failure');
+    })).rejects.toThrow('synthetic-consumer-failure');
+  });
+
   it('rejects a clean EOF without done while preserving emitted tokens', async () => {
     const body = new ReadableStream({
       start(controller) {

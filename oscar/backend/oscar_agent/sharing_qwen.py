@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .model_runtime import configure_nvidia_dll_directories
+from .model_runtime import configure_nvidia_dll_directories, normalize_generation_stop_reason
 from .schemas import ChatMessage
 
 
@@ -91,6 +91,7 @@ class QwenSharingRuntime:
         self._model: Any | None = None
         self._model_id: str | None = None
         self.last_load_latency_ms = 0.0
+        self.last_generation_stop_reason = "unknown"
         self._generation_cancelled = threading.Event()
 
     def available_models(self) -> tuple[QwenChatModel, ...]:
@@ -125,6 +126,7 @@ class QwenSharingRuntime:
         top_p: float,
         response_format: dict[str, str] | None = None,
     ) -> Generator[str, None, None]:
+        self.last_generation_stop_reason = "unknown"
         model = find_qwen_chat_model(model_id)
         if model is None:
             raise ValueError(f"Unknown Qwen Sharing model: {model_id}")
@@ -142,12 +144,25 @@ class QwenSharingRuntime:
                 response_format=response_format,
                 stream=True,
             )
-            for chunk in stream:
+            try:
+                for chunk in stream:
+                    if self._generation_cancelled.is_set():
+                        self.last_generation_stop_reason = "cancelled"
+                        return
+                    finish_reason = read_stream_finish_reason(chunk)
+                    if finish_reason:
+                        self.last_generation_stop_reason = normalize_generation_stop_reason(finish_reason)
+                    content = read_stream_content(chunk)
+                    if content:
+                        yield content
+                    if finish_reason:
+                        return
+            except Exception:
+                self.last_generation_stop_reason = "error"
+                raise
+            finally:
                 if self._generation_cancelled.is_set():
-                    return
-                content = read_stream_content(chunk)
-                if content:
-                    yield content
+                    self.last_generation_stop_reason = "cancelled"
 
     def _load(self, model: QwenChatModel):
         if self._model is not None and self._model_id == model.id:
@@ -242,3 +257,13 @@ def read_stream_content(chunk: object) -> str:
         return ""
     content = delta.get("content")
     return content if isinstance(content, str) else ""
+
+
+def read_stream_finish_reason(chunk: object) -> str:
+    if not isinstance(chunk, dict):
+        return ""
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return ""
+    finish_reason = choices[0].get("finish_reason")
+    return finish_reason if isinstance(finish_reason, str) else ""

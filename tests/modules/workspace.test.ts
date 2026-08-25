@@ -142,6 +142,83 @@ describe('Workspace Module', () => {
     }
   });
 
+  it('applies a task-bound Owner override at dispatch while retaining the immutable Safe policy', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-workspace-owner-'));
+    const protectedFile = path.join(root, '.env');
+    const kernel = new MonarchKernel({
+      workspaceRoot: root,
+      agencyStateDirectory: false,
+      permissionProfile: {
+        sandboxMode: 'danger-full-access',
+        approvalPolicy: 'on-request',
+        autonomyMode: 'full-local',
+      },
+      authorityContext: {
+        tier: 'owner',
+        source: 'signed-device-entitlement',
+        entitlementId: 'owner_workspace_test',
+        keyId: 'owner-root-test',
+        verifiedAt: new Date(0).toISOString(),
+        deviceIdPrefix: '0123456789ab',
+        diagnostic: null,
+      },
+    });
+    kernel.registerModule(new WorkspaceModule({ workspaceRoot: root }));
+    await kernel.start();
+    try {
+      await kernel.emitRuntimeEvent('security.model_policy.changed', 'security', {
+        modelCommandsEnabled: true,
+        agentSecurityMode: 'observe',
+      });
+      const base = {
+        intentId: 'intent_workspace_owner',
+        moduleId: 'workspace',
+        capabilityId: 'workspace.files.write',
+        input: { path: protectedFile, content: 'owner override fixture' },
+        createdAt: new Date(0).toISOString(),
+        requestedBy: 'agent:task_workspace_owner',
+        source: 'desktop' as const,
+        executionMode: 'agent-runtime' as const,
+        originatingUserText: 'Запиши тестовый файл .env',
+      };
+      const blocked = await kernel.execute({ ...base, id: 'exec_owner_before' });
+      expect(blocked).toMatchObject({
+        ok: false,
+        error: 'permission-denied',
+        metadata: { policy: { evidence: expect.arrayContaining([
+          expect.objectContaining({ code: 'filesystem.red-zone-write-blocked', hard: true }),
+        ]) } },
+      });
+
+      await kernel.emitRuntimeEvent('security.owner_override.changed', 'security', {
+        ownerOverride: {
+          enabled: true,
+          lifetime: 'task',
+          taskId: 'task_workspace_owner',
+          shellApprovalPolicy: 'risk-based',
+        },
+      });
+      const allowed = await kernel.execute({ ...base, id: 'exec_owner_after' });
+      expect(allowed).toMatchObject({
+        ok: true,
+        metadata: { policy: { ownerUnrestrictedOverride: true } },
+      });
+      expect(await readFile(protectedFile, 'utf8')).toBe('owner override fixture');
+
+      const syntheticSafePath = path.join(path.parse(root).root, 'MonarchData', 'Safe', 'safe-v1', 'never-read.test');
+      expect(evaluateFilesystemAccess(syntheticSafePath, 'read', {
+        workspaceRoot: root,
+        sandboxRoot: root,
+        allowFullDiskAccess: true,
+        includeDefaultRedZones: false,
+        protectWorkspaceInternals: false,
+      })).toMatchObject({ allowed: false, reason: 'red-zone-read-blocked' });
+    } finally {
+      await kernel.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the authoritative AgentTask store outside ordinary workspace file access', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-workspace-agent-store-'));
     const storePath = path.join(root, 'runtime', 'agent', 'tasks.v2.json');
@@ -257,6 +334,259 @@ describe('Workspace Module', () => {
       await rm(root, { recursive: true, force: true });
       await rm(userHome, { recursive: true, force: true });
       await rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves a synthetic Desktop and inspects every file through freshness-bound pages', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-inspect-batch-workspace-'));
+    const userRoot = await mkdtemp(path.join(tmpdir(), 'monarch-inspect-batch-user-'));
+    const desktop = path.join(userRoot, 'Desktop');
+    const previousDesktop = process.env.MONARCH_DESKTOP_DIR;
+    process.env.MONARCH_DESKTOP_DIR = desktop;
+    await mkdir(path.join(desktop, 'nested'), { recursive: true });
+    await writeFile(path.join(desktop, 'a.txt'), 'Alpha desktop note', 'utf8');
+    await writeFile(path.join(desktop, 'b.md'), '# Beta desktop note', 'utf8');
+    await writeFile(path.join(desktop, 'image.png'), Buffer.from([0, 1, 2, 3, 4]));
+    await writeFile(path.join(desktop, 'nested', 'c.json'), '{"name":"Gamma"}', 'utf8');
+
+    const kernel = new MonarchKernel({
+      permissionProfile: { sandboxMode: 'workspace-write', approvalPolicy: 'never', autonomyMode: 'workspace-autonomous' },
+    });
+    kernel.registerModule(new WorkspaceModule({ workspaceRoot: root }));
+    await kernel.start();
+    try {
+      const resolved = await executeWorkspace(kernel, 'workspace.known-folder.resolve', { knownFolder: 'desktop' });
+      expect(resolved).toMatchObject({
+        ok: true,
+        output: { knownFolder: 'desktop', path: desktop, exists: true, directory: true },
+      });
+
+      const first = await executeWorkspace(kernel, 'workspace.files.inspect-batch', {
+        knownFolder: 'desktop',
+        recursive: true,
+        pageSize: 2,
+      });
+      const firstOutput = first.output as {
+        snapshotId: string;
+        items: Array<{ relativePath: string; status: string; content?: string; sha256?: string }>;
+        nextCursor: string | null;
+        complete: boolean;
+        coverage: { totalFiles: number; remainingFiles: number };
+      };
+      expect(first.ok).toBe(true);
+      expect(firstOutput).toMatchObject({
+        complete: false,
+        coverage: { totalFiles: 4, remainingFiles: 2 },
+      });
+      expect(firstOutput.items).toEqual([
+        expect.objectContaining({ relativePath: 'a.txt', status: 'read', content: 'Alpha desktop note' }),
+        expect.objectContaining({ relativePath: 'b.md', status: 'read', content: '# Beta desktop note' }),
+      ]);
+      expect(firstOutput.items.every((entry) => entry.sha256?.match(/^[a-f0-9]{64}$/u))).toBe(true);
+
+      const tampered = await executeWorkspace(kernel, 'workspace.files.inspect-batch', {
+        knownFolder: 'desktop',
+        recursive: true,
+        pageSize: 2,
+        cursor: `${firstOutput.nextCursor}x`,
+      });
+      expect(tampered).toMatchObject({ ok: false, error: 'stale-inspect-batch-cursor' });
+
+      const second = await executeWorkspace(kernel, 'workspace.files.inspect-batch', {
+        knownFolder: 'desktop',
+        recursive: true,
+        pageSize: 2,
+        cursor: firstOutput.nextCursor,
+      });
+      const secondOutput = second.output as {
+        snapshotId: string;
+        items: Array<{ relativePath: string; status: string; content?: string; reason?: string; sha256?: string }>;
+        skips: Array<{ path: string; reason: string }>;
+        nextCursor: string | null;
+        complete: boolean;
+        coverage: { totalFiles: number; remainingFiles: number; paginationComplete: boolean };
+      };
+      expect(second.ok).toBe(true);
+      expect(secondOutput.snapshotId).toBe(firstOutput.snapshotId);
+      expect(secondOutput).toMatchObject({
+        complete: true,
+        nextCursor: null,
+        coverage: { totalFiles: 4, remainingFiles: 0, paginationComplete: true },
+      });
+      expect(secondOutput.items).toEqual(expect.arrayContaining([
+        expect.objectContaining({ relativePath: 'image.png', status: 'metadata-only', reason: 'binary-or-unsupported-format' }),
+        expect.objectContaining({ relativePath: path.join('nested', 'c.json'), status: 'read', content: '{"name":"Gamma"}' }),
+      ]));
+      expect(secondOutput.skips).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: path.join(desktop, 'image.png'), reason: 'binary-or-unsupported-format' }),
+      ]));
+      expect(secondOutput.items.every((entry) => entry.sha256?.match(/^[a-f0-9]{64}$/u))).toBe(true);
+    } finally {
+      await kernel.stop();
+      if (previousDesktop === undefined) delete process.env.MONARCH_DESKTOP_DIR;
+      else process.env.MONARCH_DESKTOP_DIR = previousDesktop;
+      await rm(root, { recursive: true, force: true });
+      await rm(userRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('routes a named Desktop text file through the typed known-folder writer and keeps generic writes blocked', async () => {
+    const qaBase = path.join(path.parse(process.cwd()).root, 'Monarch-Agent-QA');
+    await mkdir(qaBase, { recursive: true });
+    const workspaceRoot = await mkdtemp(path.join(qaBase, 'known-folder-workspace-'));
+    const userRoot = await mkdtemp(path.join(qaBase, 'known-folder-user-'));
+    const desktop = path.join(userRoot, 'Desktop');
+    const downloads = path.join(userRoot, 'Downloads');
+    const desktopTarget = path.join(desktop, 'ромашка.txt');
+    const downloadsTarget = path.join(downloads, 'receipt.txt');
+    const journalTarget = path.join(desktop, 'journal.txt');
+    const oldDesktopDir = process.env.MONARCH_DESKTOP_DIR;
+    const oldDownloadsDir = process.env.MONARCH_DOWNLOADS_DIR;
+    const mutations: string[][] = [];
+    process.env.MONARCH_DESKTOP_DIR = desktop;
+    process.env.MONARCH_DOWNLOADS_DIR = downloads;
+    await mkdir(desktop, { recursive: true });
+    await mkdir(downloads, { recursive: true });
+
+    const kernel = new MonarchKernel({
+      permissionProfile: {
+        sandboxMode: 'workspace-write',
+        approvalPolicy: 'on-request',
+        autonomyMode: 'workspace-autonomous',
+      },
+    });
+    kernel.registerModule(new WorkspaceModule({
+      workspaceRoot,
+      beforeMutation: (_operation, targets) => {
+        mutations.push([...targets]);
+      },
+    }));
+    await kernel.start();
+    try {
+      const routed = await kernel.submitIntent(
+        'создай на рабочем столе текстовый файл с именем ромашка',
+        'smoke',
+        { confirmed: true },
+      );
+      const genericOutsideWrite = await executeWorkspace(kernel, 'workspace.files.write', {
+        path: path.join(desktop, 'generic.txt'),
+        content: 'must stay blocked',
+      }, true);
+      const downloadsWrite = await executeWorkspace(kernel, 'workspace.known-folder.write', {
+        knownFolder: 'downloads',
+        basename: 'receipt.txt',
+        content: 'verified downloads payload',
+      }, true);
+      const journaled = await kernel.executeActionProposal({
+        version: 1,
+        capabilityId: 'workspace.known-folder.write',
+        args: {
+          knownFolder: 'desktop',
+          basename: 'journal.txt',
+          content: 'rollback payload',
+          overwrite: false,
+        },
+        reason: 'Create one exact file in the Kernel-resolved synthetic Desktop.',
+        provenance: { source: 'runtime-grammar', model: 'unit-model', skillIds: [] },
+      }, {
+        intentId: 'intent_known_folder_journal',
+        originatingUserText: 'создай на рабочем столе файл journal.txt',
+        requestedBy: 'smoke',
+        source: 'smoke',
+        confirmed: true,
+      });
+
+      expect(routed.route, JSON.stringify(routed)).toMatchObject({
+        capabilityId: 'workspace.known-folder.write',
+        input: {
+          knownFolder: 'desktop',
+          basename: 'ромашка.txt',
+          content: '',
+          overwrite: false,
+        },
+      });
+      expect(routed.execution).toMatchObject({
+        ok: true,
+        output: {
+          knownFolder: 'desktop',
+          basename: 'ромашка.txt',
+          path: desktopTarget,
+          bytes: 0,
+          verified: true,
+          readbackSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        },
+      });
+      await expect(readFile(desktopTarget, 'utf8')).resolves.toBe('');
+      expect(genericOutsideWrite).toMatchObject({ ok: false, error: 'filesystem-policy-blocked' });
+      await expect(stat(path.join(desktop, 'generic.txt')).catch(() => undefined)).resolves.toBeUndefined();
+      expect(downloadsWrite).toMatchObject({
+        ok: true,
+        output: {
+          knownFolder: 'downloads',
+          basename: 'receipt.txt',
+          path: downloadsTarget,
+          verified: true,
+        },
+      });
+      await expect(readFile(downloadsTarget, 'utf8')).resolves.toBe('verified downloads payload');
+      expect(journaled.result).toMatchObject({
+        ok: true,
+        metadata: { ledger: { rollback: { status: 'available', targetPath: journalTarget } } },
+      });
+      const ledgerId = String((journaled.result.metadata?.ledger as { ledgerId?: unknown } | undefined)?.ledgerId || '');
+      expect(ledgerId).not.toBe('');
+      await expect(kernel.rollbackAction(ledgerId)).resolves.toMatchObject({
+        status: 'rolled-back',
+        targetPath: journalTarget,
+      });
+      await expect(readFile(journalTarget, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(mutations).toEqual([[desktopTarget], [downloadsTarget], [journalTarget]]);
+    } finally {
+      await kernel.stop().catch(() => undefined);
+      if (oldDesktopDir === undefined) delete process.env.MONARCH_DESKTOP_DIR;
+      else process.env.MONARCH_DESKTOP_DIR = oldDesktopDir;
+      if (oldDownloadsDir === undefined) delete process.env.MONARCH_DOWNLOADS_DIR;
+      else process.env.MONARCH_DOWNLOADS_DIR = oldDownloadsDir;
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(userRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects traversal, separators, device names, and unknown folders before a known-folder write', async () => {
+    const qaBase = path.join(path.parse(process.cwd()).root, 'Monarch-Agent-QA');
+    await mkdir(qaBase, { recursive: true });
+    const workspaceRoot = await mkdtemp(path.join(qaBase, 'known-folder-invalid-workspace-'));
+    const desktop = await mkdtemp(path.join(qaBase, 'known-folder-invalid-desktop-'));
+    const oldDesktopDir = process.env.MONARCH_DESKTOP_DIR;
+    process.env.MONARCH_DESKTOP_DIR = desktop;
+    const kernel = new MonarchKernel({
+      permissionProfile: { sandboxMode: 'workspace-write', approvalPolicy: 'on-request' },
+    });
+    kernel.registerModule(new WorkspaceModule({ workspaceRoot }));
+    await kernel.start();
+    try {
+      for (const basename of ['..', '../escape.txt', 'nested\\escape.txt', 'NUL.txt', 'bad:name.txt', 'trailing.']) {
+        const blocked = await executeWorkspace(kernel, 'workspace.known-folder.write', {
+          knownFolder: 'desktop',
+          basename,
+          content: 'blocked',
+        }, true);
+        expect(blocked).toMatchObject({ ok: false, error: 'invalid-known-folder-basename' });
+      }
+      const unknownFolder = await executeWorkspace(kernel, 'workspace.known-folder.write', {
+        knownFolder: 'documents',
+        basename: 'note.txt',
+        content: 'blocked',
+      }, true);
+      expect(unknownFolder).toMatchObject({ ok: false, error: 'invalid-known-folder' });
+      await expect(stat(path.join(qaBase, 'escape.txt')).catch(() => undefined)).resolves.toBeUndefined();
+      await expect(stat(path.join(desktop, 'note.txt')).catch(() => undefined)).resolves.toBeUndefined();
+    } finally {
+      await kernel.stop().catch(() => undefined);
+      if (oldDesktopDir === undefined) delete process.env.MONARCH_DESKTOP_DIR;
+      else process.env.MONARCH_DESKTOP_DIR = oldDesktopDir;
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(desktop, { recursive: true, force: true });
     }
   });
 

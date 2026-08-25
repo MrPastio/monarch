@@ -10,7 +10,7 @@ namespace MonarchLauncher
 {
     internal static class Program
     {
-        private const string LauncherVersion = "1.0.3";
+        private const string LauncherVersion = "1.0.4";
         private const int HealthTimeoutSeconds = 120;
         private const int MaximumCandidateAttempts = 2;
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
@@ -136,7 +136,11 @@ namespace MonarchLauncher
             var descriptor = ReadJson(descriptorPath);
             RequireInteger(descriptor, "descriptorVersion", 1);
             RequireInteger(descriptor, "layoutSchemaVersion", 1);
-            if (!String.Equals(RequireSafeVersion(descriptor, "appVersion"), currentVersion, StringComparison.Ordinal))
+            if (!String.Equals(
+                RequireSafeVersion(descriptor, "appVersion"),
+                currentVersion,
+                StringComparison.Ordinal
+            ))
             {
                 throw new InvalidDataException("The active Monarch version descriptor does not match its directory.");
             }
@@ -147,17 +151,41 @@ namespace MonarchLauncher
 
             var runtimeRoot = ValidatePayloadComponent(
                 payloadRoot,
-                Path.Combine(payloadRoot, "runtimes", "runtime-" + RequireSafeIdentifier(descriptor, "runtimeVersion"))
+                Path.Combine(
+                    payloadRoot,
+                    "runtimes",
+                    "runtime-" + RequireSafeIdentifier(descriptor, "runtimeVersion")
+                )
             );
-            ValidatePayloadComponent(
+            var environmentRoot = ValidatePayloadComponent(
                 payloadRoot,
-                Path.Combine(payloadRoot, "environments", RequireSafeIdentifier(descriptor, "backendEnvironment"))
+                Path.Combine(
+                    payloadRoot,
+                    "environments",
+                    RequireSafeIdentifier(descriptor, "backendEnvironment")
+                )
             );
-            RequireNonEmptyFile(Path.Combine(runtimeRoot, "electron", "electron.exe"), "The bundled Electron runtime is missing or empty.");
-            RequireNonEmptyFile(Path.Combine(runtimeRoot, "node", "node.exe"), "The bundled Node.js runtime is missing or empty.");
-            RequireNonEmptyFile(Path.Combine(runtimeRoot, "python", "python.exe"), "The bundled Python runtime is missing or empty.");
-            RequireNonEmptyFile(Path.Combine(versionRoot, "desktop", "electron", "main.mjs"), "The Monarch desktop entrypoint is missing or empty.");
-            RequireNonEmptyFile(Path.Combine(versionRoot, "dist", "monarch-server.mjs"), "The Monarch server entrypoint is missing or empty.");
+            ValidateWindowsNativeRuntime(environmentRoot);
+            RequireNonEmptyFile(
+                Path.Combine(runtimeRoot, "electron", "electron.exe"),
+                "The bundled Electron runtime is missing or empty."
+            );
+            RequireNonEmptyFile(
+                Path.Combine(runtimeRoot, "node", "node.exe"),
+                "The bundled Node.js runtime is missing or empty."
+            );
+            RequireNonEmptyFile(
+                Path.Combine(runtimeRoot, "python", "python.exe"),
+                "The bundled Python runtime is missing or empty."
+            );
+            RequireNonEmptyFile(
+                Path.Combine(versionRoot, "desktop", "electron", "main.mjs"),
+                "The Monarch desktop entrypoint is missing or empty."
+            );
+            RequireNonEmptyFile(
+                Path.Combine(versionRoot, "dist", "monarch-server.mjs"),
+                "The Monarch server entrypoint is missing or empty."
+            );
         }
 
         private static int RunCandidateTrial(
@@ -295,6 +323,7 @@ namespace MonarchLauncher
                     RequireSafeIdentifier(descriptor, "backendEnvironment")
                 )
             );
+            var windowsNativeRuntime = ValidateWindowsNativeRuntime(environmentRoot);
             var payloadRoot = Path.GetFullPath(RequireString(layout, "payloadRoot"));
             var dataRoot = Path.GetFullPath(RequireString(layout, "dataRoot"));
             var logsRoot = Path.GetFullPath(RequireString(layout, "logsRoot"));
@@ -332,7 +361,10 @@ namespace MonarchLauncher
             RequireNonEmptyFile(nodeExe, "Node.js runtime is missing or empty.");
             RequireNonEmptyFile(pythonExe, "Python runtime is missing or empty.");
             RequireNonEmptyFile(electronMain, "Monarch desktop entrypoint is missing or empty.");
-            RequireNonEmptyFile(Path.Combine(versionRoot, "dist", "monarch-server.mjs"), "Monarch server entrypoint is missing or empty.");
+            RequireNonEmptyFile(
+                Path.Combine(versionRoot, "dist", "monarch-server.mjs"),
+                "Monarch server entrypoint is missing or empty."
+            );
 
             var startInfo = new ProcessStartInfo();
             startInfo.FileName = electronExe;
@@ -346,6 +378,8 @@ namespace MonarchLauncher
             startInfo.EnvironmentVariables["MONARCH_PAYLOAD_ROOT"] = payloadRoot;
             startInfo.EnvironmentVariables["MONARCH_RUNTIME_ROOT"] = runtimeRoot;
             startInfo.EnvironmentVariables["MONARCH_BACKEND_ENVIRONMENT_ROOT"] = environmentRoot;
+            startInfo.EnvironmentVariables["PATH"] = windowsNativeRuntime + ";"
+                + (startInfo.EnvironmentVariables["PATH"] ?? "");
             startInfo.EnvironmentVariables["MONARCH_NODE_PATH"] = nodeExe;
             startInfo.EnvironmentVariables["OSCAR_PYTHON"] = pythonExe;
             startInfo.EnvironmentVariables["OSCAR_PROJECT_ROOT"] = Path.Combine(versionRoot, "oscar");
@@ -393,6 +427,28 @@ namespace MonarchLauncher
                 throw new InvalidOperationException("Windows did not start Monarch.");
             }
             return trackProcess ? process : null;
+        }
+
+        private static string ValidateWindowsNativeRuntime(string environmentRoot)
+        {
+            var runtimeRoot = RequireExistingDirectory(Path.Combine(
+                environmentRoot,
+                "native",
+                "windows-x64"
+            ));
+            foreach (var fileName in new[] {
+                "msvcp140.dll",
+                "vcruntime140.dll",
+                "vcruntime140_1.dll",
+                "vcomp140.dll",
+            })
+            {
+                RequireNonEmptyFile(
+                    Path.Combine(runtimeRoot, fileName),
+                    "The bundled Windows native runtime is missing or incomplete."
+                );
+            }
+            return runtimeRoot;
         }
 
         private static bool WaitForAcknowledgement(

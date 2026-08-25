@@ -277,6 +277,38 @@ h1, h2, h3, h4, h5, h6 {
   font-size: 12px;
 }
 
+.sidebar-history-error {
+  display: grid;
+  gap: 6px;
+  margin: 4px 3px 6px 0;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+  color: var(--text);
+  font-size: 12px;
+}
+
+.sidebar-history-error small {
+  color: var(--muted-2);
+  line-height: 1.35;
+}
+
+.sidebar-history-error button {
+  justify-self: start;
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  padding: 5px 8px;
+}
+
+.sidebar-history-error button:hover {
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+}
+
 .conversation-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -639,6 +671,21 @@ h1, h2, h3, h4, h5, h6 {
   font-weight: 600;
   color: var(--muted-2);
 }
+.oscar-provenance-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border: 1px solid rgba(255, 183, 51, .25);
+  border-radius: 999px;
+  background: rgba(255, 158, 11, .08);
+  color: #ffd486;
+  font-size: 9px;
+}
+.oscar-provenance-badge.is-verified { border-color: rgba(255,255,255,.28); color: #fff; }
+.oscar-provenance-badge.is-partial,
+.oscar-provenance-badge.is-sources { color: #ffc760; }
+.oscar-provenance-badge.is-blocked,
+.oscar-provenance-badge.is-legacy { color: #ffad70; }
 
 /* ==========================================================================
    COMPOSER
@@ -4260,6 +4307,36 @@ body[data-theme="dark"] .claude-composer {
   animation: oscarNoticeIn 180ms ease-out both;
 }
 
+.memory-cross-chat-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--surface-raised) 90%, transparent), color-mix(in srgb, var(--accent) 9%, transparent));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 7%, transparent), 0 12px 30px color-mix(in srgb, var(--accent) 5%, transparent);
+  backdrop-filter: blur(18px) saturate(120%);
+}
+
+.memory-cross-chat-card > span {
+  display: grid;
+  gap: 3px;
+}
+
+.memory-cross-chat-card strong { color: var(--text); font-size: 13px; }
+.memory-cross-chat-card small { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.memory-cross-chat-card input { accent-color: var(--accent); }
+
+.source-chip.is-memory {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--surface-inset) 82%, transparent), color-mix(in srgb, var(--accent) 15%, transparent));
+  color: color-mix(in srgb, var(--text) 88%, var(--accent));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 8%, transparent), 0 6px 18px color-mix(in srgb, var(--accent) 8%, transparent);
+  backdrop-filter: blur(14px) saturate(125%);
+}
+
 .audit-output,
 .tool-call-input,
 .output-preview {
@@ -6577,10 +6654,6 @@ body[data-theme="dark"] {
   min-width: 86px;
 }
 
-#oscar-composer #oscar-reasoning-dropdown-btn {
-  min-width: 96px;
-}
-
 #oscar-composer .composer-input-row {
   align-items: flex-end;
 }
@@ -7680,7 +7753,6 @@ body[data-theme="dark"] {
     display: none;
   }
 
-  .nav-item.optional-nav[data-scroll-target="models-section"],
   .nav-item.optional-nav[data-scroll-target="settings-section"]:not([data-settings-open]) {
     display: flex;
   }

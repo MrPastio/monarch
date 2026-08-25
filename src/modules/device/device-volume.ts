@@ -36,8 +36,13 @@ export interface VoiceVolumeResult {
   performed: true;
   status: 'completed';
   verified: true;
+  operation: VoiceVolumeAction['action'];
+  before: number;
+  beforeMuted: boolean;
   level: number;
   muted: boolean;
+  requestedValue?: number;
+  requestedDelta?: number;
 }
 
 export function isVoiceVolumeStatusQuery(value: string): boolean {
@@ -212,8 +217,13 @@ export async function executeSystemVolumeAction(
     performed: true,
     status: 'completed',
     verified: true,
+    operation: action.action,
+    before: state.before,
+    beforeMuted: state.beforeMuted,
     level: state.level,
     muted: state.muted,
+    ...(action.action === 'set' ? { requestedValue: action.value } : {}),
+    ...(action.action === 'change' ? { requestedDelta: action.delta } : {}),
   };
 }
 
@@ -232,6 +242,9 @@ export async function executeVoiceVolumeStatus(
     performed: true,
     status: 'completed',
     verified: true,
+    operation: 'get',
+    before: state.before,
+    beforeMuted: state.beforeMuted,
     level: state.level,
     muted: state.muted,
   };
@@ -330,11 +343,14 @@ function assertVerifiedVolumeAction(action: VoiceVolumeAction, state: VoiceVolum
       `Windows оставил громкость на ${state.level}% вместо ${action.value}%.`,
     );
   }
-  if (action.action === 'change' && action.delta > 0 && state.level <= state.before && state.before < 100) {
-    throw new VoiceVolumeError('voice-volume-unverified', `Громкость не увеличилась и осталась на ${state.level}%.`);
-  }
-  if (action.action === 'change' && action.delta < 0 && state.level >= state.before && state.before > 0) {
-    throw new VoiceVolumeError('voice-volume-unverified', `Громкость не уменьшилась и осталась на ${state.level}%.`);
+  if (action.action === 'change') {
+    const expected = boundedPercent(state.before + action.delta);
+    if (Math.abs(state.level - expected) > 1) {
+      throw new VoiceVolumeError(
+        'voice-volume-unverified',
+        `Windows оставил громкость на ${state.level}% вместо ожидаемых ${expected}%.`,
+      );
+    }
   }
 }
 

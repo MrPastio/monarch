@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -188,6 +188,47 @@ describe('Monarch Studio editor core', () => {
       createTestContext()
     );
     expect(blocked).toMatchObject({ ok: false, error: 'studio-project-path-blocked' });
+  });
+
+  it('keeps concurrent Studio replacements parseable without orphaned temp files', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-studio-concurrent-save-'));
+    temporaryRoots.push(root);
+    const projectsRoot = path.join(root, 'artifacts', 'studio', 'projects');
+    const target = path.join(projectsRoot, 'concurrent.monarch-studio.json');
+    const module = new StudioModule({ workspaceRoot: root, projectsRoot });
+    const projects = Array.from({ length: 24 }, (_, index) => (
+      createStudioProject({ name: `Concurrent Studio ${index}`, mode: 'photo' })
+    ));
+    expect(projects.every(Boolean)).toBe(true);
+
+    const results = await Promise.all(projects.map((project) => module.executeCapability(
+      createRequest('studio.project.save', { project, path: target }),
+      createTestContext(),
+    )));
+    expect(results.every((result) => result.ok)).toBe(true);
+
+    const persisted = JSON.parse(await readFile(target, 'utf8')) as { name: string };
+    expect(persisted.name).toMatch(/^Concurrent Studio (?:[0-9]|1[0-9]|2[0-3])$/);
+    expect((await readdir(projectsRoot)).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('preserves an occupied directory when Studio replacement fails', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-studio-failed-save-'));
+    temporaryRoots.push(root);
+    const projectsRoot = path.join(root, 'artifacts', 'studio', 'projects');
+    const target = path.join(projectsRoot, 'occupied.monarch-studio.json');
+    await mkdir(target, { recursive: true });
+    const module = new StudioModule({ workspaceRoot: root, projectsRoot });
+    const project = createStudioProject({ name: 'Must Not Replace Directory', mode: 'photo' });
+
+    const result = await module.executeCapability(
+      createRequest('studio.project.save', { project, path: target }),
+      createTestContext(),
+    );
+
+    expect(result).toMatchObject({ ok: false, error: 'studio-project-save-failed' });
+    expect((await readdir(projectsRoot)).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
+    await expect(readdir(target)).resolves.toEqual([]);
   });
 
   it('rejects malformed object ids instead of normalizing a damaged project', () => {

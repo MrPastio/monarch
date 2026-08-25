@@ -23,7 +23,9 @@ import type {
   MonarchCapabilityLeaseV1,
   MonarchActionLedgerRecord,
   MonarchActionRollbackState,
+  MonarchAuthorityContext,
 } from './contracts';
+import { MONARCH_PUBLIC_AUTHORITY_CONTEXT } from './contracts';
 import { MonarchAuditLog } from './audit-log';
 import { MonarchCapabilityRegistry } from './capability-registry';
 import { MonarchEventBus } from './event-bus';
@@ -38,6 +40,7 @@ import { normalizeActionProposal } from './action-protocol';
 import { MonarchActionLedger } from './action-ledger';
 import { MonarchCapabilityLeaseStore } from './capability-leases';
 import { MonarchPolicyKernel } from './policy-kernel';
+import type { MonarchLocalSettingsPolicyDecision, MonarchLocalSettingsPolicyInput } from './policy-kernel';
 import { MonarchMutationJournal } from './mutation-journal';
 import path from 'node:path';
 
@@ -54,6 +57,7 @@ export interface MonarchKernelOptions {
   llmRouter?: MonarchLlmRouter;
   recentIntentJobsProvider?: (query: MonarchRecentIntentJobQuery) => readonly MonarchRecentIntentJobSnapshot[];
   permissionProfile?: MonarchPermissionProfile;
+  authorityContext?: MonarchAuthorityContext;
 }
 
 export class MonarchKernel {
@@ -72,9 +76,11 @@ export class MonarchKernel {
   private readonly health = new MonarchHealthMonitor(this.modules);
   private recentIntentJobsProvider: (query: MonarchRecentIntentJobQuery) => readonly MonarchRecentIntentJobSnapshot[];
   private readonly workspaceRoot: string;
+  private readonly authorityContext: MonarchAuthorityContext;
 
   constructor(options: MonarchKernelOptions = {}) {
     this.workspaceRoot = options.workspaceRoot || process.cwd();
+    this.authorityContext = Object.freeze({ ...(options.authorityContext || MONARCH_PUBLIC_AUTHORITY_CONTEXT) });
     this.permissions = new MonarchPermissionGate(options.permissionProfile);
     const agencyRuntimeRoot = options.agencyStateDirectory === false
       ? null
@@ -95,7 +101,7 @@ export class MonarchKernel {
       this.workspaceRoot,
       agencyRuntimeRoot ? path.join(agencyRuntimeRoot, 'mutation-journal') : undefined,
     );
-    this.policy = new MonarchPolicyKernel(this.permissions, this.leases);
+    this.policy = new MonarchPolicyKernel(this.permissions, this.leases, this.authorityContext, this.workspaceRoot);
     this.execution = new MonarchExecutionEngine(
       this.modules,
       this.capabilities,
@@ -120,6 +126,11 @@ export class MonarchKernel {
 
   subscribeEvent(type: string, listener: (event: MonarchEvent) => void | Promise<void>): () => void {
     return this.eventBus.subscribe(type, listener);
+  }
+
+  /** Internal application bridge for local, non-capability runtime controls. */
+  emitRuntimeEvent(type: string, source: string, payload?: unknown): Promise<MonarchEvent> {
+    return this.eventBus.emit(type, source, payload);
   }
 
   setRecentIntentJobsProvider(
@@ -354,6 +365,9 @@ export class MonarchKernel {
       skillIds?: string[];
       confirmed?: boolean;
       securityOverrideConfirmed?: boolean;
+      approvalPolicyDecisionHash?: string;
+      approvalPurpose?: 'policy' | 'owner-security-override';
+      authorityTierAtApproval?: import('./contracts').MonarchAuthorityTier;
       leaseId?: string;
       source?: import('./contracts').MonarchAgentCapabilitySource;
       executionMode?: 'coder' | 'agent-runtime';
@@ -382,8 +396,12 @@ export class MonarchKernel {
       ...(options.source ? { source: options.source } : {}),
       confirmed: options.confirmed === true,
       securityOverrideConfirmed: options.securityOverrideConfirmed === true,
+      ...(options.approvalPolicyDecisionHash ? { approvalPolicyDecisionHash: options.approvalPolicyDecisionHash } : {}),
+      ...(options.approvalPurpose ? { approvalPurpose: options.approvalPurpose } : {}),
+      ...(options.authorityTierAtApproval ? { authorityTierAtApproval: options.authorityTierAtApproval } : {}),
       proposalId: proposal.proposalId,
       proposalHash: proposal.canonicalHash,
+      proposalSource: proposal.provenance.source,
       intentHash: proposal.intentHash,
       idempotencyKey: proposal.idempotencyKey,
       riskVector: proposal.riskVector,
@@ -450,6 +468,14 @@ export class MonarchKernel {
 
   getPermissionProfile(): MonarchPermissionProfile {
     return this.permissions.getProfile();
+  }
+
+  getAuthorityContext(): MonarchAuthorityContext {
+    return this.authorityContext;
+  }
+
+  evaluateLocalSettingsCommand(input: MonarchLocalSettingsPolicyInput): MonarchLocalSettingsPolicyDecision {
+    return this.policy.evaluateLocalSettingsCommand(input);
   }
 
   setPermissionProfile(profile: MonarchPermissionProfile): MonarchPermissionProfile {

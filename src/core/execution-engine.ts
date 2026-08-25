@@ -7,6 +7,7 @@ import type {
   MonarchPlanExecutionResult,
   MonarchPlanStep,
   MonarchRisk,
+  MonarchTrustedActionContext,
 } from './contracts';
 import { createHash } from 'node:crypto';
 import { MonarchCapabilityRegistry } from './capability-registry';
@@ -22,6 +23,7 @@ import { MonarchActionLedger } from './action-ledger';
 import { verifyActionPredicates } from './action-verifier';
 import { MonarchMutationJournal } from './mutation-journal';
 import { resolveAgentCapabilityMetadata } from './capability-metadata';
+import { isModelOwnedExecutionProposal, isTrustedRuntimeOwnedProposal } from './action-protocol';
 
 export class MonarchExecutionEngine {
   constructor(
@@ -172,7 +174,8 @@ export class MonarchExecutionEngine {
 
     const effectiveRisk = await this.resolveEffectiveRisk(module, request, capability, context);
     if (control.signal?.aborted) return cancelledExecutionResult(control.signal);
-    const preflight = this.policy.preflight(request, capability, effectiveRisk, readPolicyRuntimeFacts(context));
+    const runtimeFacts = readPolicyRuntimeFacts(context);
+    const preflight = this.policy.preflight(request, capability, effectiveRisk, runtimeFacts);
     const permission = preflight.permission;
     await context.emit('permission.evaluated', 'permission-gate', {
       requestId: request.id,
@@ -189,6 +192,17 @@ export class MonarchExecutionEngine {
       capabilityId: request.capabilityId,
       decision: policyDecision,
     });
+    if (policyDecision.dangerAssessment && policyDecision.dangerResponse) {
+      await context.emit('security.danger.assessed', 'policy-kernel', {
+        requestId: request.id,
+        intentId: request.intentId,
+        moduleId: request.moduleId,
+        capabilityId: request.capabilityId,
+        assessment: policyDecision.dangerAssessment,
+        response: policyDecision.dangerResponse,
+        receipt: null,
+      });
+    }
 
     if (policyDecision.outcome === 'deny') {
       await context.audit('permission', 'Capability execution denied.', {
@@ -207,29 +221,35 @@ export class MonarchExecutionEngine {
       };
     }
 
-    if (policyDecision.outcome === 'confirm') {
-      await context.audit('permission', 'Capability execution requires confirmation.', {
-        requestId: request.id,
-        moduleId: request.moduleId,
-        capabilityId: request.capabilityId,
-        permission,
-        policy: policyDecision,
-      }, 'info');
-
-      return {
-        ok: false,
-        summary: `Confirmation required: ${policyDecision.reason}`,
-        error: 'confirmation-required',
-        metadata: {
-          permission,
-          policy: policyDecision,
-          ...(policyDecision.securityOverride ? { securityOverride: true } : {}),
-        },
-      };
-    }
-
-    if (policyDecision.requiresSecurityReview && request.moduleId !== 'security') {
-      const secCheck = await this.runSecurityControllerCheck(request, context, effectiveRisk);
+    const securityModuleActive = hasActiveSecurityModule(context);
+    if (policyDecision.requiresSecurityReview
+      && request.moduleId !== 'security'
+      && (policyDecision.outcome !== 'confirm' || securityModuleActive)) {
+      let trustedActionContext: MonarchTrustedActionContext | undefined;
+      try {
+        trustedActionContext = await this.resolveTrustedSecurityActionContext(module, request, capability, context);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await context.audit('security', 'Trusted action context could not be resolved before Security review.', {
+          requestId: request.id,
+          moduleId: request.moduleId,
+          capabilityId: request.capabilityId,
+          error: message,
+        }, 'error');
+        return {
+          ok: false,
+          summary: `Action was not dispatched because its live Security target context is unavailable: ${message}`,
+          error: 'security-context-unavailable',
+          metadata: { permission, policy: policyDecision },
+        };
+      }
+      const secCheck = await this.runSecurityControllerCheck(
+        request,
+        context,
+        effectiveRisk,
+        runtimeFacts,
+        trustedActionContext,
+      );
       if (control.signal?.aborted) return cancelledExecutionResult(control.signal);
       policyDecision = this.policy.finalize(preflight, request, secCheck);
       if (policyDecision.securityOverride === true && policyDecision.outcome === 'allow') {
@@ -248,23 +268,59 @@ export class MonarchExecutionEngine {
         decision: policyDecision,
         final: true,
       });
-      if (policyDecision.outcome !== 'allow') {
-        const confirmationRequired = policyDecision.outcome === 'confirm';
-        return {
-          ok: false,
-          summary: policyDecision.reason,
-          error: confirmationRequired ? 'confirmation-required' : 'permission-denied',
-          metadata: {
-            permission,
-            policy: policyDecision,
-            securityCheck: true,
-            securityOverride: policyDecision.securityOverride === true,
-            passkey: secCheck.passkey,
-            report: secCheck.report,
-            status: secCheck.status,
-          },
-        };
-      }
+    }
+
+    if (policyDecision.outcome === 'deny') {
+      await context.audit('permission', 'Capability execution denied by the final policy verdict.', {
+        requestId: request.id,
+        moduleId: request.moduleId,
+        capabilityId: request.capabilityId,
+        permission,
+        policy: policyDecision,
+      }, 'warn');
+      return {
+        ok: false,
+        summary: `Permission denied: ${policyDecision.reason}`,
+        error: 'permission-denied',
+        metadata: { permission, policy: policyDecision },
+      };
+    }
+
+    if (policyDecision.outcome === 'confirm') {
+      await context.audit('permission', 'Capability execution requires one exact final-policy confirmation.', {
+        requestId: request.id,
+        moduleId: request.moduleId,
+        capabilityId: request.capabilityId,
+        permission,
+        policy: policyDecision,
+      }, 'info');
+      return {
+        ok: false,
+        summary: `Confirmation required: ${policyDecision.reason}`,
+        error: 'confirmation-required',
+        metadata: {
+          permission,
+          policy: policyDecision,
+          ...(policyDecision.securityOverride ? { securityOverride: true } : {}),
+        },
+      };
+    }
+
+    if (!this.policy.approvalBindingMatches(request, policyDecision)) {
+      await context.audit('permission', 'Durable approval policy binding changed before dispatch.', {
+        requestId: request.id,
+        capabilityId: request.capabilityId,
+        expectedPolicyDecisionHash: request.approvalPolicyDecisionHash,
+        actualPolicyDecisionHash: policyDecision.policyDecisionHash,
+        authorityTierAtApproval: request.authorityTierAtApproval,
+        currentAuthorityTier: policyDecision.authorityTier,
+      }, 'warn');
+      return {
+        ok: false,
+        summary: 'Policy or Owner authority changed after approval; a new exact action-card is required.',
+        error: 'confirmation-required',
+        metadata: { permission, policy: policyDecision, policyBindingChanged: true },
+      };
     }
 
     if (!module.executeCapability) {
@@ -279,6 +335,7 @@ export class MonarchExecutionEngine {
       phase: 'precondition',
       workspaceRoot: this.workspaceRoot,
       ...(request.actionScope?.roots ? { allowedRoots: request.actionScope.roots } : {}),
+      ownerUnrestricted: policyDecision.ownerUnrestrictedOverride === true,
     });
     if (control.signal?.aborted) return cancelledExecutionResult(control.signal);
     if (preconditionObservations.length > 0) {
@@ -329,6 +386,7 @@ export class MonarchExecutionEngine {
     const effectiveProfile = this.policy.getEffectivePermissionProfile(request);
     const journalCapture = await this.mutationJournal.capture(ledger.record.ledgerId, request, {
       allowOutsideWorkspace: effectiveProfile.sandboxMode === 'danger-full-access',
+      ownerUnrestricted: policyDecision.ownerUnrestrictedOverride === true,
     });
     if (journalCapture.supported && !journalCapture.ok) {
       const blocked: MonarchExecutionResult = {
@@ -365,7 +423,10 @@ export class MonarchExecutionEngine {
     let result: MonarchExecutionResult;
     const toolStartedAt = Date.now();
     try {
-      result = await module.executeCapability(request, context, control);
+      const dispatchRequest = policyDecision.ownerUnrestrictedOverride === true
+        ? { ...request, ownerUnrestrictedExecution: true as const }
+        : request;
+      result = await module.executeCapability(dispatchRequest, context, control);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       result = control.signal?.aborted
@@ -388,6 +449,7 @@ export class MonarchExecutionEngine {
       workspaceRoot: this.workspaceRoot,
       ...(request.actionScope?.roots ? { allowedRoots: request.actionScope.roots } : {}),
       result,
+      ownerUnrestricted: policyDecision.ownerUnrestrictedOverride === true,
     });
     const verificationLatencyMs = Math.max(0, Date.now() - verificationStartedAt);
     if (verificationObservations.length > 0) {
@@ -442,6 +504,25 @@ export class MonarchExecutionEngine {
       toolLatencyMs,
       verificationLatencyMs,
     });
+    if (policyDecision.dangerAssessment && policyDecision.dangerResponse) {
+      await context.emit('security.danger.receipt', 'execution-engine', {
+        requestId: request.id,
+        intentId: request.intentId,
+        moduleId: request.moduleId,
+        capabilityId: request.capabilityId,
+        dangerProbability: policyDecision.dangerAssessment.dangerProbability,
+        assessmentConfidence: policyDecision.dangerAssessment.assessmentConfidence,
+        band: policyDecision.dangerAssessment.band,
+        factors: policyDecision.dangerAssessment.factors,
+        response: policyDecision.dangerResponse,
+        receipt: {
+          ledgerId: ledger.record.ledgerId,
+          idempotencyKey: ledger.record.idempotencyKey,
+          ok: resultWithPolicy.ok,
+          verification: failedVerification.length === 0 ? 'verified' : 'failed',
+        },
+      });
+    }
 
     await context.audit('execution', 'Capability execution finished.', {
       requestId: request.id,
@@ -486,32 +567,52 @@ export class MonarchExecutionEngine {
     return capability.risk;
   }
 
+  private async resolveTrustedSecurityActionContext(
+    module: NonNullable<ReturnType<MonarchModuleRegistry['getModule']>>,
+    request: MonarchExecutionRequest,
+    capability: NonNullable<ReturnType<MonarchCapabilityRegistry['get']>>,
+    context: MonarchKernelContext,
+  ): Promise<MonarchTrustedActionContext | undefined> {
+    if (!module.resolveSecurityActionContext) return undefined;
+    const candidate = await module.resolveSecurityActionContext(request, capability, context);
+    if (candidate === undefined) return undefined;
+    if (
+      !candidate
+      || candidate.schemaVersion !== 1
+      || candidate.sourceModuleId !== request.moduleId
+      || !candidate.target
+      || typeof candidate.target !== 'object'
+      || Array.isArray(candidate.target)
+    ) {
+      throw new Error('Module returned an invalid or mismatched trusted target context.');
+    }
+    const serialized = JSON.stringify(candidate);
+    if (!serialized || Buffer.byteLength(serialized, 'utf8') > 16 * 1024) {
+      throw new Error('Module returned an oversized trusted target context.');
+    }
+    return JSON.parse(serialized) as MonarchTrustedActionContext;
+  }
+
   private async runSecurityControllerCheck(
     request: MonarchExecutionRequest,
     context: MonarchKernelContext,
-    actionRisk: MonarchRisk
-  ): Promise<MonarchSecurityPolicyFact & { passkey?: string }> {
+    actionRisk: MonarchRisk,
+    runtimeFacts: MonarchPolicyRuntimeFacts,
+    trustedActionContext?: MonarchTrustedActionContext,
+  ): Promise<MonarchSecurityPolicyFact> {
     if (isLowRiskConversationOrStatus(request, actionRisk)) {
       return {
         ok: true,
         status: 'fast_path_read',
         report: 'Read-only chat/status action allowed without LLM activity-controller roundtrip.',
+        disposition: 'informational',
       };
     }
 
-    if (isSecurityControllerDisabledByProfile(context)) {
-      return {
-        ok: true,
-        status: 'profile_off',
-        report: 'Security controller is disabled by the explicit user profile.',
-      };
-    }
-
-    const modules = context.listModules();
-    const hasSecurity = modules.some((m) => m.manifest.id === 'security' && m.status === 'active');
+    const hasSecurity = hasActiveSecurityModule(context);
     if (!hasSecurity) {
       if (request.requestedBy === 'system' || request.requestedBy === 'smoke' || process.env.MONARCH_SMOKE_TEST === '1' || (request.capabilityId === 'workspace.module.load' && (request.input as any)?.id === 'security')) {
-        return { ok: true, status: 'skipped', report: 'Security module not active. Allowing system/boot/smoke operations.' };
+        return { ok: true, status: 'skipped', report: 'Security module not active. Allowing system/boot/smoke operations.', disposition: 'informational' };
       }
       if (canProceedWithoutSecurityController(actionRisk)) {
         await context.audit('security', 'Security controller unavailable; low-risk action allowed in degraded mode.', {
@@ -524,12 +625,14 @@ export class MonarchExecutionEngine {
           ok: true,
           status: 'degraded_allow',
           report: 'Security module is not active; low-risk action allowed in degraded mode.',
+          disposition: 'informational',
         };
       }
       return { 
         ok: false, 
         status: 'blocked', 
-        report: 'КРИТИЧЕСКАЯ ОШИБКА: Модуль безопасности (Monarch Security) отключен или не отвечает. В целях безопасности выполнение любых действий заблокировано.' 
+        report: 'КРИТИЧЕСКАЯ ОШИБКА: Модуль безопасности (Monarch Security) отключен или не отвечает. В целях безопасности выполнение любых действий заблокировано.',
+        disposition: 'hard-deny',
       };
     }
 
@@ -542,7 +645,9 @@ export class MonarchExecutionEngine {
         || (intentEvent.payload as any).text
         || '';
     }
-    const modelProposed = Boolean(request.proposalId || (intentEvent && (intentEvent.payload as any).modelProposed === true));
+    const modelProposed = isModelOwnedExecutionProposal(request)
+      || Boolean(intentEvent && (intentEvent.payload as any).modelProposed === true);
+    const runtimeOwnedExactAction = isTrustedRuntimeOwnedProposal(request);
 
     try {
       const checkResult = await context.execute({
@@ -559,8 +664,13 @@ export class MonarchExecutionEngine {
           requestedBy: request.requestedBy,
           monarchConfirmed: request.confirmed === true,
           modelProposed,
-          passkey: (request.input as any)?.passkey || '',
+          runtimeOwnedExactAction,
+          actionGuardReaction: runtimeFacts.actionGuardReaction
+            || (runtimeFacts.modelConfirmationMode === 'always' ? 'confirm-all' : 'guard'),
+          ...(runtimeFacts.agentSecurityMode ? { agentSecurityMode: runtimeFacts.agentSecurityMode } : {}),
+          passkey: '',
           noLlm: !shouldUseSecurityLlmReview(request, actionRisk),
+          ...(trustedActionContext ? { trustedActionContext } : {}),
         },
         createdAt: nowIso(),
         requestedBy: 'system',
@@ -571,18 +681,15 @@ export class MonarchExecutionEngine {
         const payload = (checkResult.output as { payload?: unknown }).payload;
         if (isSecurityControllerPayload(payload)) {
           const evidenceCodes = payload.evidenceCodes || [];
-          const hard = evidenceCodes.some(isHardSecurityEvidenceCode);
-          const ret: MonarchSecurityPolicyFact & { passkey?: string } = {
+          const ret: MonarchSecurityPolicyFact = {
             ok: payload.ok,
             status: payload.status,
-            report: payload.report,
+            report: payload.status === 'approval_required'
+              ? 'Monarch Security requires an exact durable action-card for this request.'
+              : payload.report,
             evidenceCodes,
-            hard,
-            overrideable: payload.status === 'blocked' && !hard,
+            disposition: payload.disposition,
           };
-          if (payload.passkey) {
-            ret.passkey = payload.passkey;
-          }
           return ret;
         }
       }
@@ -620,6 +727,7 @@ export class MonarchExecutionEngine {
         ok: true,
         status: 'degraded_allow',
         report: `${report} Low-risk action allowed in degraded mode.`,
+        disposition: 'informational',
       };
     }
 
@@ -627,8 +735,13 @@ export class MonarchExecutionEngine {
       ok: false,
       status: 'security_check_failed',
       report: `${report} Action blocked.`,
+      disposition: 'hard-deny',
     };
   }
+}
+
+function hasActiveSecurityModule(context: MonarchKernelContext): boolean {
+  return context.listModules().some((module) => module.manifest.id === 'security' && module.status === 'active');
 }
 
 function cancelledExecutionResult(
@@ -655,6 +768,7 @@ interface SecurityControllerPayload {
   report: string;
   passkey?: string;
   evidenceCodes?: string[];
+  disposition: import('./policy-kernel').MonarchSecurityDisposition;
 }
 
 function isSecurityControllerPayload(value: unknown): value is SecurityControllerPayload {
@@ -672,6 +786,9 @@ function isSecurityControllerPayload(value: unknown): value is SecurityControlle
     return false;
   }
   if (payload.passkey !== undefined && typeof payload.passkey !== 'string') return false;
+  if (payload.disposition !== 'hard-deny'
+    && payload.disposition !== 'owner-confirmable'
+    && payload.disposition !== 'informational') return false;
   return payload.evidenceCodes === undefined
     || (Array.isArray(payload.evidenceCodes) && payload.evidenceCodes.every((entry) => typeof entry === 'string'));
 }
@@ -683,10 +800,6 @@ function shouldUseSecurityLlmReview(request: MonarchExecutionRequest, risk: Mona
     || risk === 'money'
     || request.riskVector?.externality === 'new-origin'
     || request.riskVector?.novelty === 'arbitrary-code';
-}
-
-function isHardSecurityEvidenceCode(code: string): boolean {
-  return /(?:catastrophic|red-zone|drive-root|workspace-root|secret|credential|security-tamper|root-escape|symlink)/i.test(code);
 }
 
 function actionInputForSecurityCheck(input: unknown): unknown {
@@ -752,61 +865,74 @@ function canProceedWithoutSecurityController(risk: MonarchRisk): boolean {
   return risk === 'none' || risk === 'read';
 }
 
-function isSecurityControllerDisabledByProfile(context: MonarchKernelContext): boolean {
-  const events = context.listEvents();
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (event?.source !== 'security'
-      || (event.type !== 'security.activated' && event.type !== 'security.profile.changed')) {
-      continue;
-    }
-    const payload = event.payload && typeof event.payload === 'object'
-      ? event.payload as Record<string, unknown>
-      : {};
-    const level = typeof payload.level === 'string'
-      ? payload.level
-      : typeof payload.securityLevel === 'string'
-        ? payload.securityLevel
-        : '';
-    if (level) {
-      return level === 'off';
-    }
-  }
-  return false;
-}
-
 function readPolicyRuntimeFacts(context: MonarchKernelContext): MonarchPolicyRuntimeFacts {
   const events = context.listEvents();
+  const facts: MonarchPolicyRuntimeFacts = {};
+  let modelPolicySeen = false;
+  let ownerOverrideSeen = false;
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
     if (event?.source !== 'security'
-      || (event.type !== 'security.activated' && event.type !== 'security.model_policy.changed')) {
+      || (event.type !== 'security.activated'
+        && event.type !== 'security.model_policy.changed'
+        && event.type !== 'security.owner_override.changed')) {
       continue;
     }
     const payload = event.payload && typeof event.payload === 'object'
       ? event.payload as Record<string, unknown>
       : {};
-    const facts: MonarchPolicyRuntimeFacts = {};
-    if (typeof payload.modelCommandsEnabled === 'boolean') facts.modelCommandsEnabled = payload.modelCommandsEnabled;
-    if (typeof payload.enabled === 'boolean') facts.modelCommandsEnabled = payload.enabled;
-    if (payload.modelConfirmationMode === 'adaptive' || payload.modelConfirmationMode === 'always') {
-      facts.modelConfirmationMode = payload.modelConfirmationMode;
+    if (!modelPolicySeen && event.type !== 'security.owner_override.changed') {
+      if (typeof payload.modelCommandsEnabled === 'boolean') facts.modelCommandsEnabled = payload.modelCommandsEnabled;
+      if (typeof payload.enabled === 'boolean') facts.modelCommandsEnabled = payload.enabled;
+      if (payload.agentSecurityMode === 'off'
+        || payload.agentSecurityMode === 'observe'
+        || payload.agentSecurityMode === 'guard'
+        || payload.agentSecurityMode === 'strict') {
+        facts.agentSecurityMode = payload.agentSecurityMode;
+      }
+      if (payload.actionGuardReaction === 'observe'
+        || payload.actionGuardReaction === 'guard'
+        || payload.actionGuardReaction === 'confirm-all') {
+        facts.actionGuardReaction = payload.actionGuardReaction;
+      }
+      if (payload.reaction === 'observe' || payload.reaction === 'guard' || payload.reaction === 'confirm-all') {
+        facts.actionGuardReaction = payload.reaction;
+      }
+      if (payload.modelConfirmationMode === 'adaptive' || payload.modelConfirmationMode === 'always') {
+        facts.modelConfirmationMode = payload.modelConfirmationMode;
+      }
+      if (payload.confirmationMode === 'adaptive' || payload.confirmationMode === 'always') {
+        facts.modelConfirmationMode = payload.confirmationMode;
+      }
+      modelPolicySeen = true;
     }
-    if (payload.confirmationMode === 'adaptive' || payload.confirmationMode === 'always') {
-      facts.modelConfirmationMode = payload.confirmationMode;
+    if (!ownerOverrideSeen && event.type === 'security.owner_override.changed') {
+      const ownerOverride = payload.ownerOverride && typeof payload.ownerOverride === 'object'
+        ? payload.ownerOverride as Record<string, unknown>
+        : payload;
+      if ((ownerOverride.lifetime === 'task' || ownerOverride.lifetime === 'session' || ownerOverride.lifetime === 'persistent')
+        && (ownerOverride.shellApprovalPolicy === 'always'
+          || ownerOverride.shellApprovalPolicy === 'risk-based'
+          || ownerOverride.shellApprovalPolicy === 'never')) {
+        facts.ownerOverride = {
+          enabled: ownerOverride.enabled === true,
+          lifetime: ownerOverride.lifetime,
+          shellApprovalPolicy: ownerOverride.shellApprovalPolicy,
+          ...(typeof ownerOverride.taskId === 'string' && ownerOverride.taskId ? { taskId: ownerOverride.taskId } : {}),
+          ...(typeof ownerOverride.activatedAt === 'string' ? { activatedAt: ownerOverride.activatedAt } : {}),
+        };
+      }
+      ownerOverrideSeen = true;
     }
-    return facts;
+    if (modelPolicySeen && ownerOverrideSeen) break;
   }
-  return {};
+  return facts;
 }
 
 function isLowRiskConversationOrStatus(
   request: MonarchExecutionRequest,
   risk: MonarchRisk
 ): boolean {
-  if (isTrustedDeterministicVoiceControl(request, risk)) {
-    return true;
-  }
   if (risk !== 'none' && risk !== 'read') {
     return false;
   }
@@ -818,33 +944,12 @@ function isLowRiskConversationOrStatus(
     return /^(oscar\.chat\.|oscar\.voice\.fast$|oscar\.status$|oscar\.memory\.search$)/.test(request.capabilityId);
   }
   if (request.moduleId === 'voice') {
-    return /^(voice\.status|voice\.transcribe\.(?:audio|stream\.(?:start|push|finish|cancel))|voice\.mode\.(?:classify|prepare|respond|execute-scripted|session\.(?:start|complete|close)))$/.test(request.capabilityId);
+    return /^(voice\.status|voice\.transcribe\.(?:prepare|audio|stream\.(?:start|push|finish|cancel)))$/.test(request.capabilityId);
   }
   if (request.moduleId === 'models') {
     return /status|list|catalog|runtime/i.test(request.capabilityId);
   }
   return false;
-}
-
-function isTrustedDeterministicVoiceControl(
-  request: MonarchExecutionRequest,
-  risk: MonarchRisk,
-): boolean {
-  if (risk !== 'execute'
-    || request.moduleId !== 'voice'
-    || request.capabilityId !== 'voice.mode.execute-scripted'
-    || request.requestedBy !== 'ui:voice-mode') {
-    return false;
-  }
-  const input = request.input && typeof request.input === 'object' && !Array.isArray(request.input)
-    ? request.input as Record<string, unknown>
-    : {};
-  const keys = Object.keys(input);
-  const text = typeof input.text === 'string' ? input.text.trim() : '';
-  return keys.length === 1
-    && keys[0] === 'text'
-    && text.length > 0
-    && text.length <= 1200;
 }
 
 function isMonarchRisk(value: unknown): value is MonarchRisk {

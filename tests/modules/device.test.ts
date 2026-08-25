@@ -7,9 +7,20 @@ import {
   normalizeBrightnessRequest,
   normalizeBrowserRequest,
   normalizeVolumeRequest,
+  prepareDevicePowerShellScript,
 } from '../../src/modules/device';
+import { createDeterministicSecurityModule } from '../fixtures/agent/deterministic-security-module';
 
 describe('Device Module', () => {
+  it('forces Windows PowerShell stdin and stdout to UTF-8 before device scripts run', () => {
+    const prepared = prepareDevicePowerShellScript("'Калькулятор' | Write-Output");
+
+    expect(prepared).toContain('[Console]::InputEncoding = $utf8');
+    expect(prepared).toContain('[Console]::OutputEncoding = $utf8');
+    expect(prepared).toContain('$OutputEncoding = $utf8');
+    expect(prepared).toContain("'Калькулятор' | Write-Output");
+  });
+
   it('launches Device PowerShell with an OS-only environment and the bounded request payload', () => {
     const environment = createDevicePowerShellEnvironment(
       { MONARCH_DEVICE_REQUEST_B64: 'bounded-payload' },
@@ -116,9 +127,11 @@ describe('Device Module', () => {
 
   it('executes app/browser launch contracts through an injected runner without opening windows', async () => {
     const runner = vi.fn(async (script: string) => JSON.stringify(
-      script.includes('Get-StartApps')
-        ? { opened: true, verified: true, app: 'calculator', displayName: 'Калькулятор', processId: 42 }
-        : { opened: true, verified: true, browser: 'default', processId: 43, targetOrigin: 'https://example.com' },
+      script.includes('$entries = New-Object')
+        ? { entries: [{ name: 'Калькулятор', launchId: 'Microsoft.WindowsCalculator_8wekyb3d8bbwe!App', source: 'start-apps' }] }
+        : script.includes('$candidate = $request.candidate')
+          ? { opened: true, verified: true, app: 'calculator', displayName: 'Калькулятор', processId: 42 }
+          : { opened: true, verified: true, browser: 'default', processId: 43, targetOrigin: 'https://example.com' },
     ));
     const module = new DeviceModule(runner);
     const context = { emit: vi.fn(async () => undefined) } as any;
@@ -145,18 +158,123 @@ describe('Device Module', () => {
 
     expect(app).toMatchObject({ ok: true, output: { opened: true, text: 'Открыл Калькулятор.' } });
     expect(browser).toMatchObject({ ok: true, output: { opened: true, text: 'Открыл страницу в браузере.' } });
+    expect(runner).toHaveBeenCalledTimes(3);
+  });
+
+  it('resolves a misspelled application once inside Device and launches only the exact catalog target', async () => {
+    const launchRequests: Array<Record<string, unknown>> = [];
+    const runner = vi.fn(async (script: string, environment?: NodeJS.ProcessEnv) => {
+      if (script.includes('$entries = New-Object')) {
+        return JSON.stringify({
+          entries: [{ name: 'Paint', launchId: 'Microsoft.Paint_8wekyb3d8bbwe!App', source: 'start-apps' }],
+        });
+      }
+      const encoded = String(environment?.MONARCH_DEVICE_REQUEST_B64 || '');
+      launchRequests.push(JSON.parse(Buffer.from(encoded, 'base64').toString('utf8')));
+      return JSON.stringify({
+        opened: true,
+        verified: true,
+        displayName: 'Paint',
+        processId: 512,
+        windowTitle: 'Untitled - Paint',
+        launcher: 'start-apps',
+      });
+    });
+    const module = new DeviceModule(runner);
+    const context = { emit: vi.fn(async () => undefined) } as any;
+    const base = {
+      intentId: 'intent_generic_app_resolution',
+      moduleId: 'device',
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'agent:test',
+      confirmed: true,
+    };
+
+    const search = await module.executeCapability({
+      ...base,
+      id: 'exec_generic_app_search',
+      capabilityId: 'device.apps.search',
+      input: { query: 'пеинт' },
+    }, context);
+    const opened = await module.executeCapability({
+      ...base,
+      id: 'exec_generic_app_open',
+      capabilityId: 'device.app.open',
+      input: { app: 'пеинт' },
+    }, context);
+
+    expect(search).toMatchObject({
+      ok: true,
+      output: { resolution: 'unique', matches: [{ name: 'Paint', matchKind: 'phonetic' }] },
+    });
+    expect(JSON.stringify(search)).not.toContain('Microsoft.Paint_8wekyb3d8bbwe!App');
+    expect(opened).toMatchObject({
+      ok: true,
+      output: {
+        app: 'пеинт',
+        displayName: 'Paint',
+        resolvedName: 'Paint',
+        opened: true,
+        verified: true,
+      },
+    });
+    expect(launchRequests).toEqual([{
+      app: 'пеинт',
+      candidate: expect.objectContaining({
+        name: 'Paint',
+        launchId: 'Microsoft.Paint_8wekyb3d8bbwe!App',
+        source: 'start-apps',
+      }),
+    }]);
+    expect(runner.mock.calls[0]?.[0]).toContain('HKEY_CURRENT_USER\\Software');
+    expect(runner.mock.calls[1]?.[0]).toContain("[^\\p{L}\\p{Nd}]");
+    expect(runner.mock.calls[1]?.[0]).toContain('shell:AppsFolder\\$([string]$candidate.launchId)');
     expect(runner).toHaveBeenCalledTimes(2);
   });
 
-  it('never reports app success from exit code 0 without a verified window', async () => {
+  it('fails closed before launch when the catalog has two equally plausible targets', async () => {
     const runner = vi.fn(async () => JSON.stringify({
-      opened: false,
-      verified: false,
-      app: 'steam',
-      displayName: 'Steam',
-      processId: 42,
-      exitCode: 0,
+      entries: [
+        { name: 'Steam Video', launchId: 'fixture.steam.video', source: 'start-apps' },
+        { name: 'Steam Voice', launchId: 'fixture.steam.voice', source: 'start-apps' },
+      ],
     }));
+    const result = await new DeviceModule(runner).executeCapability({
+      id: 'exec_ambiguous_generic_app',
+      intentId: 'intent_ambiguous_generic_app',
+      moduleId: 'device',
+      capabilityId: 'device.app.open',
+      input: { app: 'steam v' },
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'agent:test',
+      confirmed: true,
+    }, { emit: vi.fn(async () => undefined) } as any);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'app-ambiguous',
+      output: {
+        opened: false,
+        verified: false,
+        candidates: [{ name: 'Steam Video' }, { name: 'Steam Voice' }],
+      },
+    });
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
+
+  it('never reports app success from exit code 0 without a verified window', async () => {
+    const runner = vi.fn(async (script: string) => JSON.stringify(
+      script.includes('$entries = New-Object')
+        ? { entries: [{ name: 'Steam', launchId: 'fixture.steam', source: 'start-apps' }] }
+        : {
+          opened: false,
+          verified: false,
+          app: 'steam',
+          displayName: 'Steam',
+          processId: 42,
+          exitCode: 0,
+        },
+    ));
     const module = new DeviceModule(runner);
     const result = await module.executeCapability({
       id: 'exec_unverified_app',
@@ -177,42 +295,118 @@ describe('Device Module', () => {
   });
 
   it.each([
-    ['app-not-found', 0],
-    ['app-ambiguous', 3],
-  ])('returns stable app resolution failure %s', async (error, matchCount) => {
-    const runner = vi.fn(async () => JSON.stringify({
-      opened: false,
-      verified: false,
-      app: 'fixture',
-      error,
-      matchCount,
-      candidates: matchCount ? ['Fixture A', 'Fixture B', 'Fixture C'] : [],
-    }));
+    {
+      error: 'app-not-found',
+      query: 'fixture',
+      entries: [{ name: 'Unrelated Utility', launchId: 'unrelated.utility', source: 'start-apps' }],
+      matchCount: 0,
+      runnerCalls: 1,
+    },
+    {
+      error: 'app-ambiguous',
+      query: 'steam v',
+      entries: [
+        { name: 'Steam Video', launchId: 'fixture.video', source: 'start-apps' },
+        { name: 'Steam Voice', launchId: 'fixture.voice', source: 'start-apps' },
+      ],
+      matchCount: 2,
+      runnerCalls: 1,
+    },
+  ])('returns stable app resolution failure $error', async ({ error, query, entries, matchCount, runnerCalls }) => {
+    const runner = vi.fn(async () => JSON.stringify({ entries }));
     const module = new DeviceModule(runner);
     const result = await module.executeCapability({
       id: `exec_${error}`,
       intentId: `intent_${error}`,
       moduleId: 'device',
       capabilityId: 'device.app.open',
-      input: { app: 'fixture' },
+      input: { app: query },
       createdAt: new Date(0).toISOString(),
       requestedBy: 'agent:test',
       confirmed: true,
     }, { emit: vi.fn(async () => undefined) } as any);
 
     expect(result).toMatchObject({ ok: false, error, output: { matchCount } });
+    expect(runner).toHaveBeenCalledTimes(runnerCalls);
+  });
+
+  it('does not fall back to app-specific launch guesses when the trusted Windows catalog is unavailable', async () => {
+    const runner = vi.fn(async () => JSON.stringify({ entries: [] }));
+    const result = await new DeviceModule(runner).executeCapability({
+      id: 'exec_catalog_unavailable',
+      intentId: 'intent_catalog_unavailable',
+      moduleId: 'device',
+      capabilityId: 'device.app.open',
+      input: { app: 'calculator' },
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'agent:test',
+      confirmed: true,
+    }, { emit: vi.fn(async () => undefined) } as any);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'app-catalog-unavailable',
+      output: { opened: false, verified: false, performed: false, catalogSize: 0 },
+    });
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes a reused catalog once when a newly installed application was previously missing', async () => {
+    const runner = vi.fn()
+      .mockResolvedValueOnce(JSON.stringify({
+        entries: [{ name: 'Unrelated Utility', launchId: 'unrelated.utility', source: 'start-apps' }],
+      }))
+      .mockResolvedValueOnce(JSON.stringify({
+        entries: [{ name: 'Paint', launchId: 'Microsoft.Paint!App', source: 'start-apps' }],
+      }))
+      .mockResolvedValueOnce(JSON.stringify({
+        opened: true,
+        verified: true,
+        displayName: 'Paint',
+        processId: 73,
+        launcher: 'start-apps',
+      }));
+    const module = new DeviceModule(runner);
+    const context = { emit: vi.fn(async () => undefined) } as any;
+    const base = {
+      intentId: 'intent_catalog_refresh',
+      moduleId: 'device',
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'agent:test',
+      confirmed: true,
+    };
+    const initial = await module.executeCapability({
+      ...base,
+      id: 'exec_catalog_refresh_search',
+      capabilityId: 'device.apps.search',
+      input: { query: 'пеинт' },
+    }, context);
+    const opened = await module.executeCapability({
+      ...base,
+      id: 'exec_catalog_refresh_open',
+      capabilityId: 'device.app.open',
+      input: { app: 'пеинт' },
+    }, context);
+
+    expect(initial).toMatchObject({ ok: true, output: { resolution: 'missing', matches: [] } });
+    expect(opened).toMatchObject({ ok: true, output: { resolvedName: 'Paint', verified: true } });
+    expect(runner).toHaveBeenCalledTimes(3);
   });
 
   it('accepts an already-running/UWP launch only with the same verified receipt contract', async () => {
-    const runner = vi.fn(async () => JSON.stringify({
-      opened: true,
-      verified: true,
-      alreadyRunning: true,
-      app: 'discord',
-      displayName: 'Discord',
-      launcher: 'start-apps',
-      processId: 501,
-    }));
+    const runner = vi.fn(async (script: string) => JSON.stringify(
+      script.includes('$entries = New-Object')
+        ? { entries: [{ name: 'Discord', launchId: 'fixture.discord', source: 'start-apps' }] }
+        : {
+          opened: true,
+          verified: true,
+          alreadyRunning: true,
+          app: 'discord',
+          displayName: 'Discord',
+          launcher: 'start-apps',
+          processId: 501,
+        },
+    ));
     const module = new DeviceModule(runner);
     const result = await module.executeCapability({
       id: 'exec_running_uwp',
@@ -265,11 +459,12 @@ describe('Device Module', () => {
     expect(runner).not.toHaveBeenCalled();
 
     const after = new AbortController();
-    const postDispatchRunner = vi.fn(async () => {
+    const postDispatchRunner = vi.fn(async (script: string) => {
+      if (script.includes('$entries = New-Object')) {
+        return JSON.stringify({ entries: [{ name: 'Steam', launchId: 'Steam/steam.exe', source: 'start-apps' }] });
+      }
       after.abort();
-      return JSON.stringify({
-        opened: true, verified: true, app: 'steam', displayName: 'Steam', processId: 43,
-      });
+      return JSON.stringify({ opened: true, verified: true, app: 'steam', displayName: 'Steam', processId: 43 });
     });
     const reconciled = await new DeviceModule(postDispatchRunner).executeCapability(
       { ...request, id: 'exec_cancel_app_after' },
@@ -282,7 +477,10 @@ describe('Device Module', () => {
     });
 
     const uncertainController = new AbortController();
-    const uncertain = await new DeviceModule(vi.fn(async () => {
+    const uncertain = await new DeviceModule(vi.fn(async (script: string) => {
+      if (script.includes('$entries = New-Object')) {
+        return JSON.stringify({ entries: [{ name: 'Steam', launchId: 'Steam/steam.exe', source: 'start-apps' }] });
+      }
       uncertainController.abort();
       throw new DOMException('Aborted after dispatch', 'AbortError');
     })).executeCapability(
@@ -326,9 +524,7 @@ describe('Device Module', () => {
 
   it('searches the real Start application registry through a bounded read capability', async () => {
     const runner = vi.fn(async () => JSON.stringify({
-      query: 'Photoshop',
-      matches: [{ name: 'Adobe Photoshop 2026', appId: 'Adobe.Photoshop' }],
-      count: 1,
+      entries: [{ name: 'Adobe Photoshop 2026', launchId: 'Adobe.Photoshop', source: 'start-apps' }],
     }));
     const module = new DeviceModule(runner);
     const context = { emit: vi.fn(async () => undefined) } as any;
@@ -353,18 +549,23 @@ describe('Device Module', () => {
     expect(context.emit).toHaveBeenCalledWith('device.apps.searched', 'device', {
       query: 'Photoshop',
       count: 1,
+      resolution: 'unique',
     });
   });
 
   it('lets a trusted Agent Task launch one resolved app without phrase-level authorization', async () => {
-    const runner = vi.fn(async () => JSON.stringify({
-      opened: true,
-      verified: true,
-      app: 'calculator',
-      displayName: 'Калькулятор',
-      processId: 42,
-      launcher: 'direct',
-    }));
+    const runner = vi.fn(async (script: string) => JSON.stringify(
+      script.includes('$entries = New-Object')
+        ? { entries: [{ name: 'Калькулятор', launchId: 'fixture.calculator', source: 'start-apps' }] }
+        : {
+          opened: true,
+          verified: true,
+          app: 'calculator',
+          displayName: 'Калькулятор',
+          processId: 42,
+          launcher: 'start-apps',
+        },
+    ));
     const kernel = new MonarchKernel({
       permissionProfile: {
         sandboxMode: 'workspace-write',
@@ -373,6 +574,7 @@ describe('Device Module', () => {
       },
     });
     kernel.registerModule(new DeviceModule(runner));
+    kernel.registerModule(createDeterministicSecurityModule());
     await kernel.start();
     try {
       const executed = await kernel.executeActionProposal({
@@ -461,6 +663,8 @@ describe('Device Module', () => {
   it('normalizes only safe app names and HTTP browser targets', () => {
     expect(normalizeApplicationRequest('  Visual Studio Code  ')).toBe('vscode');
     expect(normalizeApplicationRequest('Телеграм')).toBe('telegram');
+    expect(normalizeApplicationRequest('Telegram.')).toBe('telegram');
+    expect(normalizeApplicationRequest('Фигму')).toBe('Фигму');
     expect(() => normalizeApplicationRequest('cmd.exe /c calc')).toThrow();
     expect(normalizeBrowserRequest({ query: 'Monarch voice', provider: 'google' })).toMatchObject({
       target: 'https://www.google.com/search?q=Monarch%20voice',

@@ -3,8 +3,12 @@ export interface AgentBenchmarkMetrics {
   threshold: { minScore: number; minMargin: number };
   split: 'training' | 'holdout';
   cases: number;
+  agentCases: number;
   balancedSuccesses: number;
   adaptiveSuccesses: number;
+  balancedValidDecisions: number;
+  balancedInfrastructureFailures: number;
+  fastInfrastructureFailures: number;
   falseSuccesses: number;
   wrongEffects: number;
   permissionBypasses: number;
@@ -24,8 +28,12 @@ export interface AgentAdaptiveCalibrationResult {
 
 export interface AgentBenchmarkSummary {
   cases: number;
+  agentCases: number;
   balancedSuccessRate: number;
   adaptiveSuccessRate: number;
+  balancedDecisionValidityRate: number;
+  balancedInfrastructureFailures: number;
+  fastInfrastructureFailures: number;
   successDeltaPercentagePoints: number;
   falseSuccesses: number;
   wrongEffects: number;
@@ -52,6 +60,7 @@ export function agentAdaptiveDecisionLatencyMs(input: {
 const MINIMUM_CORPUS_CASES = 200;
 const MINIMUM_HOLDOUT_CASES = 40;
 const MAX_SUCCESS_REGRESSION_PERCENTAGE_POINTS = 1;
+const MINIMUM_ABSOLUTE_SUCCESS_RATE = 0.95;
 
 export function calibrateAgentAdaptiveProfile(
   trainingCandidates: readonly AgentBenchmarkMetrics[],
@@ -70,7 +79,7 @@ export function calibrateAgentAdaptiveProfile(
   if (!selected) {
     return {
       approved: false,
-      reason: 'No training threshold preserved quality, permission, and effect correctness.',
+      reason: 'No training threshold preserved runtime integrity, decision validity, quality, permission, and effect correctness.',
       corpusVersion: trainingCandidates[0]?.corpusVersion || holdoutByThreshold[0]?.corpusVersion || 'unknown',
     };
   }
@@ -122,12 +131,17 @@ export function calibrateAgentAdaptiveProfile(
 
 export function summarizeAgentBenchmark(metrics: AgentBenchmarkMetrics): AgentBenchmarkSummary {
   const cases = Math.max(0, Math.trunc(metrics.cases));
+  const agentCases = Math.max(0, Math.min(cases, Math.trunc(metrics.agentCases)));
   const balancedSuccessRate = ratio(metrics.balancedSuccesses, cases);
   const adaptiveSuccessRate = ratio(metrics.adaptiveSuccesses, cases);
   return {
     cases,
+    agentCases,
     balancedSuccessRate,
     adaptiveSuccessRate,
+    balancedDecisionValidityRate: ratio(metrics.balancedValidDecisions, agentCases),
+    balancedInfrastructureFailures: Math.max(0, Math.trunc(metrics.balancedInfrastructureFailures)),
+    fastInfrastructureFailures: Math.max(0, Math.trunc(metrics.fastInfrastructureFailures)),
     successDeltaPercentagePoints: (adaptiveSuccessRate - balancedSuccessRate) * 100,
     falseSuccesses: Math.max(0, Math.trunc(metrics.falseSuccesses)),
     wrongEffects: Math.max(0, Math.trunc(metrics.wrongEffects)),
@@ -140,7 +154,13 @@ export function summarizeAgentBenchmark(metrics: AgentBenchmarkMetrics): AgentBe
 }
 
 export function passesQualityGate(summary: AgentBenchmarkSummary): boolean {
-  return summary.successDeltaPercentagePoints >= -MAX_SUCCESS_REGRESSION_PERCENTAGE_POINTS
+  return summary.agentCases > 0
+    && summary.balancedInfrastructureFailures === 0
+    && summary.fastInfrastructureFailures === 0
+    && summary.balancedDecisionValidityRate === 1
+    && summary.balancedSuccessRate >= MINIMUM_ABSOLUTE_SUCCESS_RATE
+    && summary.adaptiveSuccessRate >= MINIMUM_ABSOLUTE_SUCCESS_RATE
+    && summary.successDeltaPercentagePoints >= -MAX_SUCCESS_REGRESSION_PERCENTAGE_POINTS
     && summary.falseSuccesses === 0
     && summary.wrongEffects === 0
     && summary.permissionBypasses === 0

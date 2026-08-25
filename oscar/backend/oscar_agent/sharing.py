@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.concurrency import iterate_in_threadpool
 
-from .model_runtime import LocalModelRuntime
+from .model_runtime import LocalModelRuntime, normalize_generation_stop_reason
 from .inference_coordinator import InferenceLane, InferenceSlotLease
 from .router import select_model_tier
 from .schemas import ChatMessage, MAX_CHAT_MESSAGE_CHARS, MAX_CHAT_MESSAGES
@@ -34,8 +34,7 @@ from .sharing_tts import (
 PUBLIC_MODEL_TIERS: tuple[tuple[str, str], ...] = (
     ("monarch-fast", "gemma4-fast"),
     ("monarch-balanced", "gemma4-balanced"),
-    ("monarch-deep", "gemma4-deepthinking"),
-    ("monarch-extra", "gemma4-31b"),
+    ("monarch-pro", "qwen3.8-27b-pro"),
 )
 
 MODEL_ALIASES = {
@@ -45,15 +44,22 @@ MODEL_ALIASES = {
     "monarch-balanced": "gemma4-balanced",
     "gemma4-balanced": "gemma4-balanced",
     "medium": "gemma4-balanced",
-    "monarch-deep": "gemma4-deepthinking",
-    "gemma4-deepthinking": "gemma4-deepthinking",
-    "powerful": "gemma4-deepthinking",
-    "reasoning": "gemma4-deepthinking",
-    "monarch-extra": "gemma4-31b",
-    "gemma4-31b": "gemma4-31b",
+    "monarch-pro": "qwen3.8-27b-pro",
+    "qwen3.8-27b-pro": "qwen3.8-27b-pro",
+    "monarch-deep": "qwen3.8-27b-pro",
+    "gemma4-deepthinking": "qwen3.8-27b-pro",
+    "powerful": "qwen3.8-27b-pro",
+    "reasoning": "qwen3.8-27b-pro",
+    "pro": "qwen3.8-27b-pro",
+    "monarch-extra": "qwen3.8-27b-pro",
+    "gemma4-31b": "qwen3.8-27b-pro",
+    "extra": "qwen3.8-27b-pro",
 }
 
 AUTO_MODEL_ALIASES = {"auto", "monarch", "monarch-auto"}
+AGENT_RESIDENT_REUSE_MIN_FREE_RAM_GB = 1.0
+AGENT_SESSION_RESIDENT_REUSE_MIN_FREE_RAM_GB = 0.5
+AGENT_SESSION_RECYCLE_DELAY_SECONDS = 45.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,10 +69,9 @@ class SharingChatTarget:
     strict: bool
 
 TIER_FALLBACKS = {
-    "gemma4-fast": ("gemma4-fast", "gemma4-balanced", "gemma4-deepthinking"),
-    "gemma4-balanced": ("gemma4-balanced", "gemma4-fast", "gemma4-deepthinking"),
-    "gemma4-deepthinking": ("gemma4-deepthinking", "gemma4-balanced", "gemma4-fast"),
-    "gemma4-31b": ("gemma4-31b", "gemma4-deepthinking", "gemma4-balanced", "gemma4-fast"),
+    "gemma4-fast": ("gemma4-fast", "gemma4-balanced"),
+    "gemma4-balanced": ("gemma4-balanced", "gemma4-fast"),
+    "qwen3.8-27b-pro": ("qwen3.8-27b-pro", "gemma4-balanced", "gemma4-fast"),
 }
 
 
@@ -95,9 +100,17 @@ class SharingStreamOptions(BaseModel):
 
 
 class SharingResponseFormat(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     type: Literal["text", "json_object"]
+    schema_definition: dict | None = Field(default=None, alias="schema")
+
+    @field_validator("schema_definition")
+    @classmethod
+    def validate_schema_definition(cls, value: dict | None) -> dict | None:
+        if value is not None and len(json.dumps(value, separators=(",", ":"))) > 24_000:
+            raise ValueError("response schema exceeds size limit")
+        return value
 
 
 class SharingChatRequest(BaseModel):
@@ -113,6 +126,7 @@ class SharingChatRequest(BaseModel):
     max_completion_tokens: int | None = Field(default=None, ge=32, le=8192)
     response_format: SharingResponseFormat | None = None
     inference_lane: InferenceLane = "interactive"
+    agent_session_id: str | None = Field(default=None, min_length=1, max_length=160)
     reasoning_effort: Literal["low", "medium", "high"] = "low"
     n: int = Field(default=1, ge=1, le=1)
 
@@ -122,6 +136,16 @@ class SharingChatRequest(BaseModel):
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("model must not be blank")
+        return cleaned
+
+    @field_validator("agent_session_id")
+    @classmethod
+    def validate_agent_session_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned or any(not (char.isalnum() or char in "._:-") for char in cleaned):
+            raise ValueError("agent_session_id must be one bounded opaque identifier")
         return cleaned
 
     @model_validator(mode="after")
@@ -215,7 +239,7 @@ async def create_openai_chat_completion(
     *,
     runtime: LocalModelRuntime,
     acquire_inference_slot: Callable[[InferenceLane], Awaitable[InferenceSlotLease | None]],
-    unload_after_generation: Callable[[], None],
+    unload_after_generation: Callable[[float], None],
     qwen_runtime: QwenSharingRuntime | None = None,
 ):
     qwen_runtime = qwen_runtime or QwenSharingRuntime(runtime.settings)
@@ -263,7 +287,8 @@ async def create_openai_chat_completion(
             error_type="server_error",
             code="runtime_assessment_failed",
         )
-    if ram.get("ram_warning") == "critical":
+    resident_agent_reuse = can_reuse_resident_agent_model(request, target, runtime, ram)
+    if ram.get("ram_warning") == "critical" and not resident_agent_reuse:
         inference_slot.release()
         return openai_error_response(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -276,7 +301,11 @@ async def create_openai_chat_completion(
     created = int(time.time())
     messages = request.chat_messages()
     max_tokens = request.output_token_limit()
-    release_model = unload_after_generation
+    release_model = (
+        lambda: unload_after_generation(AGENT_SESSION_RECYCLE_DELAY_SECONDS)
+        if request.inference_lane == "agent" and request.agent_session_id
+        else lambda: unload_after_generation(5.0)
+    )
 
     if target.provider == "qwen":
         release_model = (
@@ -284,6 +313,8 @@ async def create_openai_chat_completion(
             if bool(getattr(runtime.settings, "auto_unload_after_generation", True))
             else (lambda: None)
         )
+
+    reset_target_generation_stop_reason(target, runtime, qwen_runtime)
 
     if request.stream:
         events = stream_openai_completion(
@@ -298,6 +329,8 @@ async def create_openai_chat_completion(
             created=created,
             inference_slot=inference_slot,
             unload_after_generation=release_model,
+            context_tokens=ram.get("effective_context_tokens"),
+            enable_thinking=request.reasoning_effort == "high",
         )
         return StreamingResponse(
             events,
@@ -321,6 +354,8 @@ async def create_openai_chat_completion(
             temperature=request.temperature,
             top_p=request.top_p,
             response_format=request.response_format,
+            context_tokens=ram.get("effective_context_tokens"),
+            enable_thinking=request.reasoning_effort == "high",
         )
         async for piece in iterate_in_threadpool(generator):
             pieces.append(piece)
@@ -334,6 +369,8 @@ async def create_openai_chat_completion(
             )
         active_model = active_public_model(target, runtime)
         usage = estimate_openai_usage(runtime, messages, answer, max_tokens)
+        generation_stop_reason = target_generation_stop_reason(target, runtime, qwen_runtime)
+        finish_reason = openai_finish_reason(generation_stop_reason)
         total_generation_latency_ms = (time.perf_counter() - generation_started_at) * 1000
         load_latency_ms = max(
             0.0,
@@ -349,15 +386,18 @@ async def create_openai_chat_completion(
                 {
                     "index": 0,
                     "message": {"role": "assistant", "content": answer},
-                    "finish_reason": "stop",
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": usage,
             "monarch_runtime": {
                 "inference_lane": inference_slot.lane,
+                "resident_model_reused_under_pressure": resident_agent_reuse,
                 "queue_latency_ms": round(inference_slot.queue_latency_ms, 2),
                 "load_latency_ms": round(load_latency_ms, 2),
                 "generation_latency_ms": round(generation_latency_ms, 2),
+                "generation_stop_reason": generation_stop_reason,
+                "likely_truncated": generation_stop_reason == "length",
             },
         }
     except Exception as exc:
@@ -373,6 +413,38 @@ async def create_openai_chat_completion(
         release_inference_resources(inference_slot, release_model)
 
 
+def can_reuse_resident_agent_model(
+    request: SharingChatRequest,
+    target: SharingChatTarget,
+    runtime: LocalModelRuntime,
+    ram: dict,
+) -> bool:
+    """Allow a bounded agent turn to reuse an exact already-resident model.
+
+    Loading a model while host RAM is critical remains blocked. A sequential
+    Agent Runtime turn, however, arrives before the scheduled process recycle
+    and does not allocate the model a second time. Rejecting that exact reuse
+    makes every multi-turn local agent fail immediately after planning. Keep an
+    emergency 1 GiB host reserve and require the exact tier plus the dedicated
+    agent inference lane; interactive and cross-tier requests remain blocked.
+    """
+    available = ram.get("ram_available_gb")
+    minimum_free_ram_gb = (
+        AGENT_SESSION_RESIDENT_REUSE_MIN_FREE_RAM_GB
+        if request.agent_session_id
+        else AGENT_RESIDENT_REUSE_MIN_FREE_RAM_GB
+    )
+    return (
+        request.inference_lane == "agent"
+        and target.provider == "gemma"
+        and bool(getattr(runtime, "loaded", False))
+        and getattr(runtime, "active_tier", None) == target.model_id
+        and isinstance(available, (int, float))
+        and not isinstance(available, bool)
+        and available >= minimum_free_ram_gb
+    )
+
+
 async def stream_openai_completion(
     *,
     request: SharingChatRequest,
@@ -386,6 +458,8 @@ async def stream_openai_completion(
     created: int,
     inference_slot: InferenceSlotLease,
     unload_after_generation: Callable[[], None],
+    context_tokens: int | None = None,
+    enable_thinking: bool | None = None,
 ):
     pieces: list[str] = []
     generator = None
@@ -402,6 +476,8 @@ async def stream_openai_completion(
             temperature=request.temperature,
             top_p=request.top_p,
             response_format=request.response_format,
+            context_tokens=context_tokens,
+            enable_thinking=enable_thinking,
         )
         async for piece in iterate_in_threadpool(generator):
             now = time.monotonic()
@@ -418,7 +494,15 @@ async def stream_openai_completion(
             yield sse_data(openai_chunk(completion_id, created, active_model, content=piece))
 
         active_model = active_public_model(target, runtime)
-        yield sse_data(openai_chunk(completion_id, created, active_model, finish_reason="stop"))
+        generation_stop_reason = target_generation_stop_reason(target, runtime, qwen_runtime)
+        finish_reason = openai_finish_reason(generation_stop_reason)
+        yield sse_data(openai_chunk(
+            completion_id,
+            created,
+            active_model,
+            finish_reason=finish_reason,
+            generation_stop_reason=generation_stop_reason,
+        ))
         if request.stream_options and request.stream_options.include_usage:
             usage = estimate_openai_usage(runtime, messages, "".join(pieces), max_tokens)
             yield sse_data({
@@ -459,7 +543,7 @@ def resolve_request_target(
             [message.model_dump() for message in request.messages],
             use_reasoning=request.reasoning_effort == "high",
         )
-        if selected == "gemma4-deepthinking" and request.reasoning_effort != "high":
+        if selected == "qwen3.8-27b-pro" and request.reasoning_effort != "high":
             selected = "gemma4-balanced"
         if mock:
             return SharingChatTarget("gemma", selected, False)
@@ -512,7 +596,14 @@ def stream_target_chat(
     temperature: float,
     top_p: float,
     response_format: SharingResponseFormat | None = None,
+    context_tokens: int | None = None,
+    enable_thinking: bool | None = None,
 ):
+    rendered_response_format = None
+    if response_format is not None and response_format.type == "json_object":
+        rendered_response_format = {"type": "json_object"}
+        if response_format.schema_definition is not None:
+            rendered_response_format["schema"] = response_format.schema_definition
     if target.provider == "qwen":
         return qwen_runtime.stream_raw_chat(
             target.model_id,
@@ -520,25 +611,62 @@ def stream_target_chat(
             max_tokens,
             temperature,
             top_p,
-            response_format=(
-                {"type": "json_object"}
-                if response_format is not None and response_format.type == "json_object"
-                else None
-            ),
+            response_format=rendered_response_format,
         )
+    runtime_kwargs = {
+        "strict_tier": target.strict,
+        "response_format": rendered_response_format,
+    }
+    if context_tokens is not None:
+        runtime_kwargs["context_tokens"] = int(context_tokens)
+    if enable_thinking is not None:
+        runtime_kwargs["enable_thinking"] = bool(enable_thinking)
     return runtime.stream_raw_chat(
         target.model_id,
         messages,
         max_tokens,
         temperature,
         top_p,
-        strict_tier=target.strict,
-        response_format=(
-            {"type": "json_object"}
-            if response_format is not None and response_format.type == "json_object"
-            else None
-        ),
+        **runtime_kwargs,
     )
+
+
+def target_generation_runtime(
+    target: SharingChatTarget,
+    runtime: LocalModelRuntime,
+    qwen_runtime: QwenSharingRuntime,
+):
+    return qwen_runtime if target.provider == "qwen" else runtime
+
+
+def reset_target_generation_stop_reason(
+    target: SharingChatTarget,
+    runtime: LocalModelRuntime,
+    qwen_runtime: QwenSharingRuntime,
+) -> None:
+    generation_runtime = target_generation_runtime(target, runtime, qwen_runtime)
+    try:
+        generation_runtime.last_generation_stop_reason = "unknown"
+    except Exception:
+        logging.exception("Failed to reset Monarch Sharing generation stop reason")
+
+
+def target_generation_stop_reason(
+    target: SharingChatTarget,
+    runtime: LocalModelRuntime,
+    qwen_runtime: QwenSharingRuntime,
+) -> str:
+    generation_runtime = target_generation_runtime(target, runtime, qwen_runtime)
+    return normalize_generation_stop_reason(
+        getattr(generation_runtime, "last_generation_stop_reason", "unknown")
+    )
+
+
+def openai_finish_reason(generation_stop_reason: str) -> str | None:
+    normalized = normalize_generation_stop_reason(generation_stop_reason)
+    if normalized in {"stop", "length", "content_filter", "tool_calls"}:
+        return normalized
+    return None
 
 
 def active_public_model(target: SharingChatTarget, runtime: LocalModelRuntime) -> str:
@@ -618,13 +746,14 @@ def openai_chunk(
     role: str | None = None,
     content: str | None = None,
     finish_reason: str | None = None,
+    generation_stop_reason: str | None = None,
 ) -> dict:
     delta = {}
     if role:
         delta["role"] = role
     if content is not None:
         delta["content"] = content
-    return {
+    chunk = {
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": created,
@@ -637,6 +766,12 @@ def openai_chunk(
             }
         ],
     }
+    if generation_stop_reason is not None:
+        chunk["monarch_runtime"] = {
+            "generation_stop_reason": generation_stop_reason,
+            "likely_truncated": generation_stop_reason == "length",
+        }
+    return chunk
 
 
 def estimate_openai_usage(

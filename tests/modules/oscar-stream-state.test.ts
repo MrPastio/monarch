@@ -3,16 +3,16 @@ import { appendStreamEvent, appendStreamToken, finalizeStreamMessage, recoverUnf
 import type { UiMessage } from '../../oscar/frontend/src/types';
 
 describe('Oscar stream message state', () => {
-  it('stops pending state and preserves partial content when a stream ends without done', () => {
+  it('preserves partial content but never marks a stream without done as successful', () => {
     const recovered = recoverUnfinishedStreamMessage(createMessage('partial answer '));
 
     expect(recovered.pending).toBe(false);
-    expect(recovered.streamStatus).toBe('готово');
-    expect(recovered.streamOk).toBe(true);
+    expect(recovered.streamStatus).toBe('не завершено');
+    expect(recovered.streamOk).toBe(false);
     expect(recovered.content).toBe('partial answer');
     expect(recovered.streamEvents?.at(-1)).toMatchObject({
-      kind: 'done',
-      label: 'ответ сохранен',
+      kind: 'error',
+      label: 'поток без финала',
     });
   });
 
@@ -58,16 +58,45 @@ describe('Oscar stream message state', () => {
     expect(second.streamEvents?.[0].label).toBe('пошел текст');
   });
 
-  it('marks fallback stream completion as degraded instead of ready', () => {
-    const finalized = finalizeStreamMessage(createMessage('fallback answer'), false);
+  it('marks a rejected stream as unfinished instead of calling it fallback', () => {
+    const finalized = finalizeStreamMessage(createMessage('partial answer'), false, {
+      generation_stop_reason: 'error',
+      partial: true,
+    });
 
     expect(finalized.pending).toBe(false);
     expect(finalized.streamOk).toBe(false);
-    expect(finalized.streamStatus).toBe('fallback');
+    expect(finalized.streamStatus).toBe('не завершено');
+    expect(finalized.content).toBe('partial answer');
     expect(finalized.streamEvents?.at(-1)).toMatchObject({
       kind: 'error',
-      label: 'fallback-ответ',
+      label: 'ответ не завершён',
+      detail: 'локальная генерация завершилась с ошибкой',
     });
+  });
+
+  it('rejects contradictory ok=true when usage says the output hit its token limit', () => {
+    const finalized = finalizeStreamMessage(createMessage('bounded answer'), true, {
+      generation_stop_reason: 'length',
+      likely_truncated: true,
+    });
+
+    expect(finalized.streamOk).toBe(false);
+    expect(finalized.streamStatus).toBe('не завершено');
+    expect(finalized.streamEvents?.at(-1)).toMatchObject({
+      kind: 'error',
+      detail: 'достигнут лимит генерации',
+    });
+  });
+
+  it('renders an empty cancelled terminal as stopped without inventing an answer', () => {
+    const finalized = finalizeStreamMessage(createMessage(''), false, {
+      generation_stop_reason: 'cancelled',
+    });
+
+    expect(finalized.streamOk).toBe(false);
+    expect(finalized.streamStatus).toBe('остановлено');
+    expect(finalized.content).toBe('Остановлено.');
   });
 
   it('marks normal stream completion as ready', () => {

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 import json
 import os
 import secrets
@@ -14,7 +13,7 @@ from .audit import AuditLog
 from .behavior import FileBurstDetector
 from .config import AppConfig
 from .deep_scan import AUTHENTICODE_EXTENSIONS, authenticode_facts
-from .events import SecurityEvent
+from .events import RuleAssessment, SecurityEvent, utc_now
 from .emergency import EmergencyError, EmergencyManager, EmergencyStore
 from .integrity import hmac_sha256
 from .incidents import IncidentCorrelator, IncidentStore
@@ -40,6 +39,8 @@ from .state import StateStore
 
 
 HEARTBEAT_INTERVAL_SECONDS = 10.0
+PENDING_SENSOR_BATCHES_KEY = "pending_sensor_batches_v1"
+SENSOR_CHECKPOINTS_KEY = "sensor_checkpoints_v1"
 
 WATCH_DEEP_EXTENSIONS = AUTHENTICODE_EXTENSIONS | {
     ".7z",
@@ -135,6 +136,9 @@ class SecuritySupervisor:
                 "sensors": [sensor.name for sensor in self.sensors],
             }
         )
+        backlog = self._sensor_backlog_health()
+        if backlog["queued"]:
+            self.audit.status({"status": "sensor_backlog_resumed", **backlog})
 
         try:
             while duration <= 0 or time.monotonic() - start < duration:
@@ -147,19 +151,17 @@ class SecuritySupervisor:
                     self._cleanup_runtime_markers()
                     return 0
 
-                emitted = 0
                 now = time.monotonic()
                 for scheduled in self.sensors:
                     if now < scheduled.next_run:
                         continue
-                    for event in self._poll(scheduled):
-                        self._handle_event(event)
-                        emitted += 1
-                        if emitted >= self.config.runtime.max_events_per_tick:
-                            break
+                    if not self._has_pending_sensor_batch(scheduled.name):
+                        self._stage_sensor_poll(scheduled)
                     scheduled.next_run = time.monotonic() + self._interval(scheduled)
-                    if emitted >= self.config.runtime.max_events_per_tick:
-                        break
+
+                self._drain_sensor_backlog(
+                    max(1, self.config.runtime.max_events_per_tick)
+                )
 
                 self.router.maintenance()
                 self.state.save_if_dirty()
@@ -305,32 +307,226 @@ class SecuritySupervisor:
             scheduled.interval = max(1.0, scheduled.interval * self.profile.interval_multiplier)
             if scheduled.next_run > now:
                 scheduled.next_run = now + max(1.0, (scheduled.next_run - now) * self.profile.interval_multiplier)
+        checkpoints = self._sensor_checkpoints()
+        for scheduled in sensors:
+            checkpoint = checkpoints.get(scheduled.name)
+            if isinstance(checkpoint, dict):
+                self._restore_sensor_checkpoint(scheduled.sensor, checkpoint)
         return sensors
 
-    def _poll(self, scheduled: _ScheduledSensor) -> Iterable[SecurityEvent]:
+    def _stage_sensor_poll(self, scheduled: _ScheduledSensor) -> int:
+        if self._has_pending_sensor_batch(scheduled.name):
+            return 0
         poll = getattr(scheduled.sensor, "poll")
         events = list(poll())
-        # Reload under the cross-process lock before persisting sensor state.
-        # Otherwise a long-lived protector can overwrite CLI trust/profile
-        # changes with the snapshot it loaded at startup.
+        checkpoint = self._capture_sensor_checkpoint(scheduled.name, scheduled.sensor)
+        # Refresh trust/profile state after a potentially slow sensor poll. This
+        # preserves cross-process CLI changes without holding the state lock
+        # while the sensor performs operating-system queries.
         with self.state.lock():
-            if scheduled.name == "device_sensor":
-                self.state.set_list("known_devices", scheduled.sensor.seen_ids)
-            elif scheduled.name == "install_sensor":
-                self.state.set_list("known_installs", scheduled.sensor.seen_ids)
-            elif scheduled.name == "file_watch_sensor":
-                self.state.set_dict("known_file_signatures", scheduled.sensor.signatures)
-            elif scheduled.name == "network_sensor":
-                self.state.set_dict("known_network_signatures", scheduled.sensor.signatures)
-            elif scheduled.name == "persistence_sensor":
-                self.state.set_dict("known_persistence_signatures", scheduled.sensor.signatures)
-            elif scheduled.name == "posture_sensor":
-                self.state.set_dict("known_posture_signatures", scheduled.sensor.signatures)
-            elif scheduled.name == "tamper_sensor":
-                self.state.set_dict("known_self_protection_signatures", scheduled.sensor.signatures)
-        return events
+            if self._has_pending_sensor_batch(scheduled.name):
+                raise RuntimeError(
+                    f"sensor backlog appeared during poll for {scheduled.name}"
+                )
+        assessments: list[RuleAssessment] = []
+        for event in events:
+            assessments.extend(self._prepare_assessments(event))
+        paged = bool(getattr(scheduled.sensor, "overflow", False))
 
-    def _handle_event(self, event: SecurityEvent) -> None:
+        if not assessments:
+            if paged:
+                self._audit_sensor_overflow(scheduled.name, scheduled.sensor)
+            with self.state.lock():
+                self._write_sensor_checkpoint_locked(scheduled.name, checkpoint)
+            return 0
+
+        batch = {
+            "schema": 1,
+            "sensor": scheduled.name,
+            "queued_at": utc_now(),
+            "next_index": 0,
+            "assessments": [assessment.to_dict() for assessment in assessments],
+            "checkpoint": checkpoint,
+        }
+        with self.state.lock():
+            batches = self._pending_sensor_batches()
+            if scheduled.name in batches:
+                raise RuntimeError(
+                    f"sensor backlog already exists for {scheduled.name}"
+                )
+            batches[scheduled.name] = batch
+            self.state.set_json(PENDING_SENSOR_BATCHES_KEY, batches)
+
+        if paged:
+            self._audit_sensor_overflow(scheduled.name, scheduled.sensor)
+        if len(assessments) > max(1, self.config.runtime.max_events_per_tick):
+            self.audit.status(
+                {
+                    "status": "sensor_backlog_queued",
+                    "sensor": scheduled.name,
+                    "queued": len(assessments),
+                    "per_tick_limit": max(1, self.config.runtime.max_events_per_tick),
+                    "overflow": True,
+                }
+            )
+        return len(assessments)
+
+    def _audit_sensor_overflow(self, sensor_name: str, sensor: object) -> None:
+        cursor = getattr(sensor, "checkpoint_cursor", None)
+        self.audit.status(
+            {
+                "status": (
+                    "sensor_snapshot_paged"
+                    if cursor is not None
+                    else "sensor_snapshot_overflow"
+                ),
+                "sensor": sensor_name,
+                "cursor": cursor,
+                "page_size": getattr(sensor, "max_entries_per_tick", None)
+                or getattr(getattr(sensor, "config", None), "max_entries", None),
+                "detail": getattr(sensor, "overflow_detail", None),
+                "overflow": True,
+            }
+        )
+
+    def _drain_sensor_backlog(self, limit: int) -> int:
+        processed = 0
+        batches = self._pending_sensor_batches()
+        progress: dict[str, dict[str, object]] = {}
+        processing_budget = max(
+            1.0,
+            float(self.config.runtime.max_sensor_processing_seconds_per_tick),
+        )
+        deadline = time.monotonic() + processing_budget
+        budget_exhausted = False
+        while processed < max(1, limit):
+            if processed > 0 and time.monotonic() >= deadline:
+                budget_exhausted = True
+                break
+            active = [
+                (name, batch)
+                for name, batch in batches.items()
+                if self._remaining_batch_items(batch) > 0
+            ]
+            if not active:
+                break
+            active.sort(
+                key=lambda item: (
+                    int(item[1].get("next_index", 0)),
+                    str(item[1].get("queued_at") or ""),
+                    item[0],
+                )
+            )
+            made_progress = False
+            for name, batch in active:
+                if processed >= max(1, limit):
+                    break
+                if processed > 0 and time.monotonic() >= deadline:
+                    budget_exhausted = True
+                    break
+                assessment_payload, event_id = self._next_batch_assessment(name, batch)
+                current_index = int(batch.get("next_index", 0))
+                assessment = RuleAssessment.from_dict(assessment_payload)
+                assessment = self._materialize_pending_assessment(
+                    name,
+                    batch,
+                    current_index,
+                    assessment,
+                )
+                self._handle_assessment(assessment)
+                sensor_progress = progress.setdefault(
+                    name,
+                    {"start_index": current_index, "event_ids": []},
+                )
+                event_ids = sensor_progress["event_ids"]
+                assert isinstance(event_ids, list)
+                event_ids.append(event_id)
+                batch["next_index"] = current_index + 1
+                processed += 1
+                made_progress = True
+            if budget_exhausted:
+                break
+            if not made_progress:
+                break
+        if progress:
+            self._acknowledge_sensor_progress(progress)
+        if budget_exhausted:
+            self.audit.status(
+                {
+                    "status": "sensor_processing_budget_exhausted",
+                    "processed": processed,
+                    "processing_budget_seconds": processing_budget,
+                    **self._sensor_backlog_health(),
+                }
+            )
+        return processed
+
+    def _acknowledge_sensor_progress(
+        self,
+        progress: dict[str, dict[str, object]],
+    ) -> None:
+        completed_checkpoints: dict[str, dict[str, object]] = {}
+        with self.state.lock():
+            batches = self._pending_sensor_batches()
+            for sensor_name, sensor_progress in progress.items():
+                batch = batches.get(sensor_name)
+                if not isinstance(batch, dict):
+                    raise RuntimeError(f"sensor backlog disappeared for {sensor_name}")
+                try:
+                    start_index = int(sensor_progress.get("start_index"))
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"sensor backlog acknowledgement cursor is invalid for {sensor_name}"
+                    ) from exc
+                event_ids = sensor_progress.get("event_ids")
+                if not isinstance(event_ids, list) or not event_ids:
+                    raise RuntimeError(
+                        f"sensor backlog acknowledgement is empty for {sensor_name}"
+                    )
+                if int(batch.get("next_index", 0)) != start_index:
+                    raise RuntimeError(
+                        f"sensor backlog acknowledgement moved for {sensor_name}"
+                    )
+                assessments = batch.get("assessments")
+                if not isinstance(assessments, list):
+                    raise RuntimeError(f"sensor backlog is malformed for {sensor_name}")
+                if start_index + len(event_ids) > len(assessments):
+                    raise RuntimeError(
+                        f"sensor backlog acknowledgement is out of range for {sensor_name}"
+                    )
+                for offset, expected_event_id in enumerate(event_ids):
+                    probe = dict(batch)
+                    probe["next_index"] = start_index + offset
+                    _, current_event_id = self._next_batch_assessment(sensor_name, probe)
+                    if current_event_id != expected_event_id:
+                        raise RuntimeError(
+                            f"sensor backlog acknowledgement mismatch for {sensor_name}"
+                        )
+                next_index = start_index + len(event_ids)
+                if next_index >= len(assessments):
+                    checkpoint = batch.get("checkpoint")
+                    if not isinstance(checkpoint, dict):
+                        raise RuntimeError(f"sensor checkpoint is malformed for {sensor_name}")
+                    completed_checkpoints[sensor_name] = checkpoint
+                    self._write_sensor_checkpoint_locked(sensor_name, checkpoint)
+                    del batches[sensor_name]
+                else:
+                    batch["next_index"] = next_index
+                    batches[sensor_name] = batch
+            if batches:
+                self.state.set_json(PENDING_SENSOR_BATCHES_KEY, batches)
+            else:
+                self.state.delete(PENDING_SENSOR_BATCHES_KEY)
+
+        for sensor_name, checkpoint in completed_checkpoints.items():
+            scheduled = next(
+                (item for item in self.sensors if item.name == sensor_name),
+                None,
+            )
+            if scheduled is not None:
+                self._restore_sensor_checkpoint(scheduled.sensor, checkpoint)
+
+    def _prepare_assessments(self, event: SecurityEvent) -> list[RuleAssessment]:
         event = _with_device_trust(event, set(self.state.get_list("trusted_device_ids")))
         event = with_network_profile_trust(
             event,
@@ -338,15 +534,115 @@ class SecuritySupervisor:
         )
         burst_event = self.file_burst_detector.observe(event)
         assessment = self.rules.assess(event)
-        if event.kind == "file.observed" and _should_deep_inspect_file_event(event, assessment.score):
-            path = event.facts.get("path")
-            if isinstance(path, str):
-                try:
-                    event = FileScanner(self.config.files).inspect(Path(path))
-                    event = _with_authenticode_facts_if_needed(event)
-                    assessment = self.rules.assess(event)
-                except OSError:
-                    pass
+        assessments = [assessment]
+        if burst_event is not None:
+            assessments.extend(self._prepare_assessments(burst_event))
+        return assessments
+
+    def _handle_event(self, event: SecurityEvent) -> None:
+        for assessment in self._prepare_assessments(event):
+            self._handle_assessment(self._materialize_file_assessment(assessment))
+
+    def _materialize_pending_assessment(
+        self,
+        sensor_name: str,
+        batch: dict[str, object],
+        index: int,
+        assessment: RuleAssessment,
+    ) -> RuleAssessment:
+        materialized = self._materialize_file_assessment(assessment)
+        if materialized is assessment:
+            return assessment
+        replacement = materialized.to_dict()
+        with self.state.lock():
+            batches = self._pending_sensor_batches()
+            persisted = batches.get(sensor_name)
+            if not isinstance(persisted, dict):
+                raise RuntimeError(
+                    f"sensor backlog disappeared while materializing {sensor_name}"
+                )
+            persisted_index = int(persisted.get("next_index", 0))
+            if persisted_index > index:
+                raise RuntimeError(
+                    f"sensor backlog moved while materializing {sensor_name}"
+                )
+            persisted_assessments = persisted.get("assessments")
+            if not isinstance(persisted_assessments, list) or index >= len(persisted_assessments):
+                raise RuntimeError(
+                    f"sensor assessment disappeared while materializing {sensor_name}"
+                )
+            current = persisted_assessments[index]
+            if not isinstance(current, dict):
+                raise RuntimeError(
+                    f"sensor assessment is malformed while materializing {sensor_name}"
+                )
+            current_event = current.get("event")
+            if (
+                not isinstance(current_event, dict)
+                or str(current_event.get("event_id") or "")
+                != assessment.event.event_id
+            ):
+                raise RuntimeError(
+                    f"sensor assessment changed while materializing {sensor_name}"
+                )
+            persisted_assessments[index] = replacement
+            persisted["assessments"] = persisted_assessments
+            batches[sensor_name] = persisted
+            self.state.set_json(PENDING_SENSOR_BATCHES_KEY, batches)
+
+        assessments = batch.get("assessments")
+        if not isinstance(assessments, list) or index >= len(assessments):
+            raise RuntimeError(f"local sensor assessment is malformed for {sensor_name}")
+        assessments[index] = replacement
+        return materialized
+
+    def _materialize_file_assessment(
+        self,
+        assessment: RuleAssessment,
+    ) -> RuleAssessment:
+        event = assessment.event
+        if (
+            event.kind != "file.observed"
+            or not _should_deep_inspect_file_event(event, assessment.score)
+        ):
+            return assessment
+        raw_path = event.facts.get("path")
+        if not isinstance(raw_path, str) or not raw_path:
+            return assessment
+        try:
+            scanned = FileScanner(self.config.files).inspect(Path(raw_path))
+            facts = dict(scanned.facts)
+            scanned = SecurityEvent(
+                kind=scanned.kind,
+                source=scanned.source,
+                subject=scanned.subject,
+                facts=facts,
+                event_id=event.event_id,
+                timestamp=event.timestamp,
+            )
+        except OSError as exc:
+            facts = dict(event.facts)
+            facts.update(
+                {
+                    "content_parser_isolated": True,
+                    "content_parser_status": "io_error",
+                    "content_error": f"{type(exc).__name__}: file unavailable during inspection",
+                }
+            )
+            scanned = SecurityEvent(
+                kind="file.scanned",
+                source="file_scanner",
+                subject=event.subject,
+                facts=facts,
+                event_id=event.event_id,
+                timestamp=event.timestamp,
+            )
+        if scanned.facts.get("content_parser_status") in {None, "ok"}:
+            scanned = _with_authenticode_facts_if_needed(scanned)
+        return self.rules.assess(scanned)
+
+    def _handle_assessment(self, assessment: RuleAssessment) -> None:
+        event = assessment.event
         if self.network_history is not None and event.kind.startswith("network."):
             self.network_history.append(NetworkObservation.from_assessment(assessment))
         decision = (
@@ -393,8 +689,165 @@ class SecuritySupervisor:
                     "severity": assessment.severity,
                 }
             )
-        if burst_event is not None:
-            self._handle_event(burst_event)
+
+    def _pending_sensor_batches(self) -> dict[str, dict[str, object]]:
+        payload = self.state.get_json(PENDING_SENSOR_BATCHES_KEY, {})
+        if not isinstance(payload, dict):
+            raise RuntimeError("sensor backlog state is not an object")
+        batches: dict[str, dict[str, object]] = {}
+        for name, batch in payload.items():
+            if not isinstance(name, str) or not isinstance(batch, dict):
+                raise RuntimeError("sensor backlog entry is malformed")
+            if batch.get("schema") != 1 or batch.get("sensor") != name:
+                raise RuntimeError(f"sensor backlog identity is invalid for {name}")
+            batches[name] = batch
+        return batches
+
+    def _sensor_checkpoints(self) -> dict[str, dict[str, object]]:
+        payload = self.state.get_json(SENSOR_CHECKPOINTS_KEY, {})
+        if not isinstance(payload, dict):
+            raise RuntimeError("sensor checkpoint state is not an object")
+        checkpoints: dict[str, dict[str, object]] = {}
+        for name, checkpoint in payload.items():
+            if not isinstance(name, str) or not isinstance(checkpoint, dict):
+                raise RuntimeError("sensor checkpoint entry is malformed")
+            if checkpoint.get("schema") != 1 or checkpoint.get("sensor") != name:
+                raise RuntimeError(f"sensor checkpoint identity is invalid for {name}")
+            checkpoints[name] = checkpoint
+        return checkpoints
+
+    def _has_pending_sensor_batch(self, sensor_name: str) -> bool:
+        return sensor_name in self._pending_sensor_batches()
+
+    @staticmethod
+    def _remaining_batch_items(batch: dict[str, object]) -> int:
+        assessments = batch.get("assessments")
+        if not isinstance(assessments, list):
+            raise RuntimeError("sensor backlog assessments are malformed")
+        try:
+            next_index = int(batch.get("next_index", 0))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("sensor backlog cursor is malformed") from exc
+        if not 0 <= next_index <= len(assessments):
+            raise RuntimeError("sensor backlog cursor is out of range")
+        return len(assessments) - next_index
+
+    @classmethod
+    def _next_batch_assessment(
+        cls,
+        sensor_name: str,
+        batch: dict[str, object],
+    ) -> tuple[dict[str, object], str]:
+        if cls._remaining_batch_items(batch) <= 0:
+            raise RuntimeError(f"sensor backlog is empty for {sensor_name}")
+        assessments = batch["assessments"]
+        assert isinstance(assessments, list)
+        next_index = int(batch.get("next_index", 0))
+        payload = assessments[next_index]
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"sensor assessment is malformed for {sensor_name}")
+        event = payload.get("event")
+        if not isinstance(event, dict):
+            raise RuntimeError(f"sensor assessment event is malformed for {sensor_name}")
+        event_id = str(event.get("event_id") or "")
+        if not event_id:
+            raise RuntimeError(f"sensor assessment event id is missing for {sensor_name}")
+        return payload, event_id
+
+    def _sensor_backlog_health(self) -> dict[str, object]:
+        batches = self._pending_sensor_batches()
+        by_sensor = {
+            name: self._remaining_batch_items(batch)
+            for name, batch in sorted(batches.items())
+        }
+        queued = sum(by_sensor.values())
+        oldest = min(
+            (str(batch.get("queued_at") or "") for batch in batches.values()),
+            default=None,
+        )
+        return {
+            "queued": queued,
+            "batches": len(batches),
+            "by_sensor": by_sensor,
+            "oldest_queued_at": oldest,
+            "overflow": queued > max(1, self.config.runtime.max_events_per_tick),
+        }
+
+    def _capture_sensor_checkpoint(self, sensor_name: str, sensor: object) -> dict[str, object]:
+        initialized = not bool(getattr(sensor, "_first_poll", False))
+        checkpoint: dict[str, object] = {
+            "schema": 1,
+            "sensor": sensor_name,
+            "initialized": initialized,
+        }
+        if sensor_name == "process_sensor":
+            checkpoint.update({"kind": "ephemeral", "values": []})
+        elif sensor_name in {"device_sensor", "install_sensor"}:
+            checkpoint.update({"kind": "seen-str", "values": sorted(getattr(sensor, "_seen", set()))})
+        else:
+            signatures = getattr(sensor, "signatures", None)
+            if not isinstance(signatures, dict):
+                raise RuntimeError(f"sensor {sensor_name} has no checkpoint contract")
+            checkpoint.update({"kind": "signatures", "values": signatures})
+        cursor = getattr(sensor, "checkpoint_cursor", None)
+        if cursor is not None:
+            checkpoint["cursor"] = cursor
+        metadata = getattr(sensor, "checkpoint_metadata", None)
+        if metadata is not None:
+            checkpoint["metadata"] = metadata
+        return checkpoint
+
+    @staticmethod
+    def _restore_sensor_checkpoint(sensor: object, checkpoint: dict[str, object]) -> None:
+        kind = checkpoint.get("kind")
+        values = checkpoint.get("values")
+        if kind == "ephemeral" and isinstance(values, list):
+            return
+        if kind == "seen-str" and isinstance(values, list):
+            setattr(sensor, "_seen", {str(value) for value in values})
+        elif kind == "signatures" and isinstance(values, dict):
+            setattr(sensor, "_signatures", {str(key): str(value) for key, value in values.items()})
+        else:
+            raise RuntimeError("sensor checkpoint is malformed")
+        if hasattr(sensor, "_first_poll"):
+            setattr(sensor, "_first_poll", not bool(checkpoint.get("initialized", False)))
+        if "cursor" in checkpoint and hasattr(sensor, "restore_checkpoint_cursor"):
+            getattr(sensor, "restore_checkpoint_cursor")(checkpoint["cursor"])
+        if "metadata" in checkpoint and hasattr(sensor, "restore_checkpoint_metadata"):
+            getattr(sensor, "restore_checkpoint_metadata")(checkpoint["metadata"])
+
+    def _write_sensor_checkpoint_locked(
+        self,
+        sensor_name: str,
+        checkpoint: dict[str, object],
+    ) -> None:
+        if checkpoint.get("kind") == "ephemeral":
+            return
+        checkpoints = self._sensor_checkpoints()
+        checkpoints[sensor_name] = checkpoint
+        self.state.set_json(SENSOR_CHECKPOINTS_KEY, checkpoints)
+        kind = checkpoint.get("kind")
+        values = checkpoint.get("values")
+        legacy_key = {
+            "device_sensor": "known_devices",
+            "install_sensor": "known_installs",
+            "file_watch_sensor": "known_file_signatures",
+            "network_sensor": "known_network_signatures",
+            "persistence_sensor": "known_persistence_signatures",
+            "posture_sensor": "known_posture_signatures",
+            "tamper_sensor": "known_self_protection_signatures",
+        }.get(sensor_name)
+        if legacy_key is None:
+            return
+        if kind == "seen-str" and isinstance(values, list):
+            self.state.set_list(legacy_key, {str(value) for value in values})
+        elif kind == "signatures" and isinstance(values, dict):
+            self.state.set_dict(
+                legacy_key,
+                {str(key): str(value) for key, value in values.items()},
+            )
+        else:
+            raise RuntimeError(f"sensor checkpoint cannot update {legacy_key}")
 
     def _interval(self, scheduled: _ScheduledSensor) -> float:
         if scheduled.name == "process_sensor":
@@ -484,6 +937,7 @@ class SecuritySupervisor:
             "incidents": self.incident_store.summary(),
             "network_history": self.network_history.summary() if self.network_history else None,
             "emergency": self.emergency.summary(),
+            "sensor_backlog": self._sensor_backlog_health(),
         }
         heartbeat_path = self.config.runtime.heartbeat_path
         temporary = heartbeat_path.with_name(

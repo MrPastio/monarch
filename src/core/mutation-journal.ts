@@ -7,7 +7,9 @@ import type {
   MonarchExecutionResult,
 } from './contracts';
 import { readDurableJson, writeDurableJson } from './durable-json';
-import { evaluateFilesystemAccess } from './filesystem-policy';
+import { writeFileAtomically } from './durable-json-file';
+import { evaluateFilesystemAccess, resolveKnownUserFolder } from './filesystem-policy';
+import { normalizeKnownFolderBasename } from './known-folder-target';
 import { nowIso } from './utils';
 
 const MAX_BACKUP_BYTES = 1_048_576;
@@ -16,6 +18,7 @@ const MAX_TREE_BYTES = 64 * 1_048_576;
 const MAX_ENTRIES = 200;
 const JOURNALED_CAPABILITIES = new Set([
   'workspace.files.write',
+  'workspace.known-folder.write',
   'workspace.files.append',
   'workspace.files.replace',
   'workspace.files.mkdir',
@@ -57,6 +60,7 @@ export interface MutationJournalCaptureResult {
 
 export interface MutationJournalCaptureOptions {
   allowOutsideWorkspace?: boolean;
+  ownerUnrestricted?: boolean;
 }
 
 export class MonarchMutationJournal {
@@ -93,7 +97,8 @@ export class MonarchMutationJournal {
         fallbackRoot: this.workspaceRoot,
         allowedRoots: [resolvedTarget.boundaryRoot || this.workspaceRoot],
         allowFullDiskAccess: options.allowOutsideWorkspace === true,
-        protectWorkspaceInternals: true,
+        protectWorkspaceInternals: options.ownerUnrestricted !== true,
+        ...(options.ownerUnrestricted === true ? { includeDefaultRedZones: false } : {}),
       });
       if (!filesystemBoundary.allowed) {
         throw new Error(`Filesystem journal boundary blocked mutation target: ${filesystemBoundary.reason}.`);
@@ -123,20 +128,37 @@ export class MonarchMutationJournal {
         ...(resolvedTarget.boundaryRoot ? { boundaryRoot: resolvedTarget.boundaryRoot } : {}),
         state,
       };
-      if (before.kind === 'file') {
+      const previousEntries = cloneEntryMap(this.entries);
+      const previousMemoryBackups = cloneBackupMap(this.memoryBackups);
+      let createdBackupPath = '';
+      const exclusiveKnownFolderCreate = request.capabilityId === 'workspace.known-folder.write'
+        && asRecord(request.input).overwrite !== true;
+      if (before.kind === 'file' && !exclusiveKnownFolderCreate) {
         const backup = await readFile(targetPath);
         if (this.backupDirectory) {
           await mkdir(this.backupDirectory, { recursive: true });
           const backupFile = `${safeLedgerName(ledgerId)}.bin`;
-          await writeFile(path.join(this.backupDirectory, backupFile), backup);
+          createdBackupPath = path.join(this.backupDirectory, backupFile);
+          if (await lstat(createdBackupPath).then(() => true).catch(() => false)) {
+            throw new Error('Rollback backup already exists for this ledger id.');
+          }
+          await writeFileAtomically(createdBackupPath, backup);
           entry.backupFile = backupFile;
         } else {
           this.memoryBackups.set(ledgerId, backup);
         }
       }
-      this.entries.set(ledgerId, entry);
-      this.prune();
-      this.persist();
+      try {
+        this.entries.set(ledgerId, entry);
+        const prunedEntries = this.prune();
+        this.persist();
+        await Promise.all(prunedEntries.map((pruned) => this.discardBackup(pruned)));
+      } catch (error) {
+        replaceEntryMap(this.entries, previousEntries);
+        replaceBackupMap(this.memoryBackups, previousMemoryBackups);
+        if (createdBackupPath) await rm(createdBackupPath, { force: true }).catch(() => undefined);
+        throw error;
+      }
       return { supported: true, ok: true, state: cloneState(state) };
     } catch (error) {
       return { supported: true, ok: false, error: errorMessage(error) };
@@ -149,6 +171,7 @@ export class MonarchMutationJournal {
   ): Promise<MonarchActionRollbackState | null> {
     const entry = this.entries.get(ledgerId);
     if (!entry) return null;
+    const original = cloneEntry(entry);
     try {
       const resultPath = readResultPath(result);
       if (resultPath && entry.before.kind === 'missing') {
@@ -156,22 +179,29 @@ export class MonarchMutationJournal {
       }
       const after = await snapshotPath(entry.targetPath);
       if (!result.ok) {
+        if (entry.capabilityId === 'workspace.known-folder.write' && result.error === 'file-exists') {
+          return this.updateUnavailableState(
+            entry,
+            'Exclusive create failed without changing a journal-owned target; the existing file is not owned by this action.',
+          );
+        }
         if (after.kind === entry.before.kind && after.digest === entry.before.digest) {
-          return this.updateState(entry, 'unavailable', 'Action failed without changing the journaled target.');
+          return this.updateUnavailableState(entry, 'Action failed without changing the journaled target.');
         }
         entry.after = after;
         return this.updateState(entry, 'available', 'Action failed after a partial mutation; rollback is hash-guarded.');
       }
       if (after.kind === 'missing') {
-        return this.updateState(entry, 'unavailable', 'Action reported success but the target does not exist.');
+        return this.updateUnavailableState(entry, 'Action reported success but the target does not exist.');
       }
       if (entry.before.kind === 'directory' && after.digest === entry.before.digest) {
-        return this.updateState(entry, 'unavailable', 'Directory already existed and was not changed.');
+        return this.updateUnavailableState(entry, 'Directory already existed and was not changed.');
       }
       entry.after = after;
       return this.updateState(entry, 'available', 'Rollback is guarded by the post-action content hash.');
     } catch (error) {
-      return this.updateState(entry, 'unavailable', `Rollback finalization failed: ${errorMessage(error)}`);
+      this.entries.set(ledgerId, original);
+      return this.updateUnavailableState(original, `Rollback finalization failed: ${errorMessage(error)}`);
     }
   }
 
@@ -181,6 +211,7 @@ export class MonarchMutationJournal {
   ): Promise<MonarchActionRollbackState | null> {
     const entry = this.entries.get(ledgerId);
     if (!entry) return null;
+    const original = cloneEntry(entry);
     if (expectedCapabilityId && entry.capabilityId !== expectedCapabilityId) {
       return this.updateState(
         entry,
@@ -212,7 +243,8 @@ export class MonarchMutationJournal {
       }
       return this.updateState(entry, 'rolled-back', 'Original workspace state was restored and verified.');
     } catch (error) {
-      return this.updateState(entry, 'blocked', `Rollback failed safely: ${errorMessage(error)}`);
+      this.entries.set(ledgerId, original);
+      return this.updateState(original, 'blocked', `Rollback failed safely: ${errorMessage(error)}`);
     }
   }
 
@@ -226,6 +258,29 @@ export class MonarchMutationJournal {
     allowOutsideWorkspace: boolean,
   ): Promise<{ targetPath: string; boundaryRoot?: string }> {
     const input = asRecord(request.input);
+    if (request.capabilityId === 'workspace.known-folder.write') {
+      const knownFolder = readString(input.knownFolder);
+      const basename = normalizeKnownFolderBasename(readString(input.basename));
+      if (knownFolder !== 'desktop' && knownFolder !== 'downloads') {
+        throw new Error('Known-folder mutation requires desktop or downloads.');
+      }
+      if (!basename) {
+        throw new Error('Known-folder mutation basename must be one safe leaf name.');
+      }
+      const configuredRoot = resolveKnownUserFolder(knownFolder);
+      const boundaryRoot = configuredRoot
+        ? await realpath(configuredRoot).catch(() => '')
+        : '';
+      const boundaryStats = boundaryRoot
+        ? await lstat(boundaryRoot).catch(() => null)
+        : null;
+      if (!boundaryRoot || !boundaryStats?.isDirectory()) {
+        throw new Error(`Known folder is unavailable: ${knownFolder}.`);
+      }
+      const targetPath = path.join(boundaryRoot, basename);
+      await this.assertInsideBoundary(targetPath, boundaryRoot);
+      return { targetPath, boundaryRoot };
+    }
     const raw = request.capabilityId === 'workspace.files.copy'
       ? readString(input.targetPath)
       : readString(input.path);
@@ -292,6 +347,7 @@ export class MonarchMutationJournal {
     status: MonarchActionRollbackState['status'],
     reason: string,
   ): MonarchActionRollbackState {
+    const previous = cloneEntry(entry);
     entry.state = {
       status,
       targetPath: entry.targetPath,
@@ -299,8 +355,28 @@ export class MonarchMutationJournal {
       updatedAt: nowIso(),
       reason,
     };
-    this.persist();
-    return cloneState(entry.state);
+    try {
+      this.persist();
+      return cloneState(entry.state);
+    } catch (error) {
+      this.entries.set(entry.ledgerId, previous);
+      throw error;
+    }
+  }
+
+  private async updateUnavailableState(
+    entry: MutationJournalEntryV1,
+    reason: string,
+  ): Promise<MonarchActionRollbackState> {
+    const state = this.updateState(entry, 'unavailable', reason);
+    await this.discardBackup(entry);
+    return state;
+  }
+
+  private async discardBackup(entry: MutationJournalEntryV1): Promise<void> {
+    this.memoryBackups.delete(entry.ledgerId);
+    if (!this.backupDirectory || !entry.backupFile) return;
+    await rm(path.join(this.backupDirectory, entry.backupFile), { force: true }).catch(() => undefined);
   }
 
   private restore(): void {
@@ -321,8 +397,9 @@ export class MonarchMutationJournal {
     }
   }
 
-  private prune(): void {
-    if (this.entries.size <= MAX_ENTRIES) return;
+  private prune(): MutationJournalEntryV1[] {
+    if (this.entries.size <= MAX_ENTRIES) return [];
+    const removed: MutationJournalEntryV1[] = [];
     const oldest = [...this.entries.values()]
       .sort((left, right) => Date.parse(left.state.updatedAt) - Date.parse(right.state.updatedAt));
     for (const entry of oldest) {
@@ -330,7 +407,9 @@ export class MonarchMutationJournal {
       if (entry.state.status === 'available') continue;
       this.entries.delete(entry.ledgerId);
       this.memoryBackups.delete(entry.ledgerId);
+      removed.push(entry);
     }
+    return removed;
   }
 
   private persist(): void {
@@ -430,6 +509,33 @@ function safeLedgerName(ledgerId: string): string {
 
 function cloneState(state: MonarchActionRollbackState): MonarchActionRollbackState {
   return { ...state };
+}
+
+function cloneEntry(entry: MutationJournalEntryV1): MutationJournalEntryV1 {
+  return JSON.parse(JSON.stringify(entry)) as MutationJournalEntryV1;
+}
+
+function cloneEntryMap(
+  entries: Map<string, MutationJournalEntryV1>,
+): Map<string, MutationJournalEntryV1> {
+  return new Map([...entries.entries()].map(([ledgerId, entry]) => [ledgerId, cloneEntry(entry)]));
+}
+
+function replaceEntryMap(
+  target: Map<string, MutationJournalEntryV1>,
+  source: Map<string, MutationJournalEntryV1>,
+): void {
+  target.clear();
+  for (const [ledgerId, entry] of source) target.set(ledgerId, cloneEntry(entry));
+}
+
+function cloneBackupMap(backups: Map<string, Buffer>): Map<string, Buffer> {
+  return new Map([...backups.entries()].map(([ledgerId, backup]) => [ledgerId, Buffer.from(backup)]));
+}
+
+function replaceBackupMap(target: Map<string, Buffer>, source: Map<string, Buffer>): void {
+  target.clear();
+  for (const [ledgerId, backup] of source) target.set(ledgerId, Buffer.from(backup));
 }
 
 function errorMessage(error: unknown): string {

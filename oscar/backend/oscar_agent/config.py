@@ -37,6 +37,7 @@ DEFAULT_GEMMA_MODELS_DIR = (
     if MONARCH_MODELS_ROOT or MONARCH_PAYLOAD_ROOT
     else PROJECT_ROOT.parent / "gemma_models"
 )
+DEFAULT_QWEN_MODELS_DIR = DEFAULT_MODELS_ROOT / "qwen_models"
 DEFAULT_CODER_MODELS_DIR = (
     DEFAULT_MODELS_ROOT / "coder"
     if MONARCH_MODELS_ROOT or MONARCH_PAYLOAD_ROOT
@@ -47,6 +48,7 @@ DEFAULT_VOICE_MODELS_DIR = (
     if MONARCH_MODELS_ROOT or MONARCH_PAYLOAD_ROOT
     else PROJECT_ROOT.parent / "runtime" / "voice" / "models"
 )
+DEFAULT_MEMORY_EMBEDDING_MODEL_DIR = DEFAULT_MODELS_ROOT / "memory" / "multilingual-e5-small"
 DEFAULT_GENERATED_DIR = (
     Path(MONARCH_GENERATED_ROOT)
     if MONARCH_GENERATED_ROOT
@@ -113,6 +115,10 @@ class Settings(BaseSettings):
     db_path: Path = Field(default=DEFAULT_DATA_DIR / "memory" / "oscar_memory.sqlite3")
     offload_dir: Path = Field(default=DEFAULT_DATA_DIR / "offload")
     gemma_models_dir: Path = Field(default=DEFAULT_GEMMA_MODELS_DIR)
+    qwen_models_dir: Path = Field(default=DEFAULT_QWEN_MODELS_DIR)
+    memory_embedding_model_dir: Path = Field(default=DEFAULT_MEMORY_EMBEDDING_MODEL_DIR)
+    memory_retrieval_deadline_ms: int = Field(default=120, ge=20, le=1000)
+    memory_prompt_budget_chars: int = Field(default=2400, ge=800, le=6000)
     coder_models_dir: Path = Field(default=DEFAULT_CODER_MODELS_DIR)
     # Monarch Sharing exposes the two small Qwen GGUFs as explicit Super Fast
     # chat models and the installed Qwen3-TTS checkpoints through its separate
@@ -143,6 +149,7 @@ class Settings(BaseSettings):
     gemma4_balanced_context_tokens: int = 4096
     gemma4_deep_context_tokens: int = 8192
     gemma4_31b_context_tokens: int = 8192
+    qwen38_pro_context_tokens: int = 32768
     qwen3_coder_context_tokens: int = 16384
     deepseek_coder_context_tokens: int = 16384
     gemma_gpu_layers: int = 20
@@ -150,13 +157,16 @@ class Settings(BaseSettings):
     gemma4_balanced_gpu_layers: int = 30
     gemma4_deep_gpu_layers: int = 18
     gemma4_31b_gpu_layers: int = 15
+    qwen38_pro_gpu_layers: int = 18
     # Four layers shave prompt/decode latency while keeping the small Fast
     # selector comfortably below the VRAM headroom left by Balanced Gemma.
     # The global inference slot still prevents concurrent generation.
     sharing_qwen_gpu_layers: int = 4
     qwen3_coder_gpu_layers: int = 12
     deepseek_coder_gpu_layers: int = 20
-    require_gpu_offload: bool = True
+    # CPU is a first-class installed fallback. A bundled CUDA library proves
+    # build capability, not that the current machine has a usable NVIDIA GPU.
+    require_gpu_offload: bool = False
     api_token: str | None = Field(default_factory=default_api_token)
     disable_api_token: bool = False
     trust_remote_code: bool = False
@@ -210,6 +220,7 @@ class Settings(BaseSettings):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.offload_dir.mkdir(parents=True, exist_ok=True)
         self.gemma_models_dir.mkdir(parents=True, exist_ok=True)
+        self.qwen_models_dir.mkdir(parents=True, exist_ok=True)
         self.coder_models_dir.mkdir(parents=True, exist_ok=True)
         self.workspace_generated_dir.mkdir(parents=True, exist_ok=True)
 

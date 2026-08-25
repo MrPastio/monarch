@@ -2,11 +2,14 @@ import type {
   MonarchActionPredicate,
   MonarchActionPredicateJsonValue,
   MonarchCapability,
+  MonarchJsonSchema,
 } from '../core/contracts';
 import { resolveAgentCapabilityMetadata } from '../core/capability-metadata';
 import { actionPredicateValueError } from '../core/action-predicate';
 import { validateAgentJsonSchema } from './strict-json-schema';
 import { findAgentContextSecretPath } from './context-compiler';
+
+export const AGENT_DECISION_SCHEMA_VERSION = 'monarch.agent-decision.v1' as const;
 
 export type AgentExecutableDecisionKind = 'inspect' | 'act';
 
@@ -39,6 +42,17 @@ export interface AgentRevisePlanDecision {
   reason: string;
 }
 
+export interface AgentDiscoverToolsDecision {
+  kind: 'discover-tools';
+  query: string;
+  reason: string;
+}
+
+export interface AgentRespondDecision {
+  kind: 'respond';
+  answer: string;
+}
+
 export interface AgentCompleteDecision {
   kind: 'complete';
   summary: string;
@@ -64,9 +78,55 @@ export type AgentDecision =
   | AgentExecutableDecision
   | AgentAskUserDecision
   | AgentWaitRuntimeDecision
+  | AgentDiscoverToolsDecision
+  | AgentRespondDecision
   | AgentRevisePlanDecision
   | AgentCompleteDecision
   | AgentFailDecision;
+
+/**
+ * Revalidate a runtime-compiled input and atomically rebuild every
+ * capability-owned postcondition from that input. Model preconditions are
+ * intentionally discarded because they may refer to the superseded target.
+ */
+export function rebindAgentExecutableDecisionInput(
+  decision: AgentExecutableDecision,
+  capability: MonarchCapability,
+  input: Record<string, unknown>,
+): AgentExecutableDecision {
+  assertNoSecretBearingInput(input);
+  const canonicalInput = omitSchemaInvalidOptionalNulls(input, capability.inputSchema);
+  const schemaResult = validateAgentJsonSchema(canonicalInput, capability.inputSchema, 'input');
+  if (!schemaResult.ok) {
+    throw new AgentDecisionValidationError(
+      'runtime-bound-input-schema-invalid',
+      'Runtime-compiled capability input does not match its schema.',
+      schemaResult.errors,
+    );
+  }
+  const contractOwned = requiredVerificationIsContractOwned(capability, canonicalInput);
+  const verification = contractOwned
+    ? deriveRequiredCapabilityVerification(capability, canonicalInput)
+    : canonicalizeRequiredCapabilityVerification(capability, canonicalInput, decision.verification || []);
+  assertRequiredCapabilityVerification(capability, canonicalInput, verification);
+  if (
+    resolveAgentCapabilityMetadata(capability).effectProfile.mutation !== 'none'
+    && verification.length === 0
+  ) {
+    throw new AgentDecisionValidationError(
+      'verification-required',
+      `Mutating capability ${capability.id} requires deterministic verification.`,
+    );
+  }
+  return {
+    kind: decision.kind,
+    capabilityId: decision.capabilityId,
+    input: cloneJson(canonicalInput),
+    reason: decision.reason,
+    expectedEffect: decision.expectedEffect,
+    ...(verification.length > 0 ? { verification } : {}),
+  };
+}
 
 export interface AgentDecisionValidationContext {
   candidates: readonly MonarchCapability[];
@@ -110,42 +170,67 @@ export function parseAgentDecision(
     );
   }
 
-  const kind = boundedString(parsed.kind, 'kind', 32);
+  // The runtime records the parser contract version on every model.completed
+  // event. Explicitly versioned envelopes are accepted, while unversioned
+  // envelopes remain readable for replay/repair compatibility.
+  if (parsed.schemaVersion !== undefined && parsed.schemaVersion !== AGENT_DECISION_SCHEMA_VERSION) {
+    throw new AgentDecisionValidationError(
+      'unsupported-decision-schema-version',
+      `Unsupported agent decision schemaVersion: ${String(parsed.schemaVersion)}.`,
+    );
+  }
+  const decision = { ...parsed };
+  delete decision.schemaVersion;
+
+  const kind = boundedString(decision.kind, 'kind', 32);
   switch (kind) {
   case 'inspect':
   case 'act':
-    return parseExecutable(kind, parsed, context);
+    return parseExecutable(kind, decision, context);
   case 'ask-user':
-    assertExactKeys(parsed, ['kind', 'question', 'reason']);
+    assertExactKeys(decision, ['kind', 'question', 'reason']);
     return {
       kind,
-      question: boundedString(parsed.question, 'question', 2_000),
-      reason: boundedString(parsed.reason, 'reason', 1_000),
+      question: boundedString(decision.question, 'question', 2_000),
+      reason: boundedString(decision.reason, 'reason', 1_000),
     };
   case 'wait-runtime':
-    assertExactKeys(parsed, ['kind', 'runtimeId', 'reason']);
+    assertExactKeys(decision, ['kind', 'runtimeId', 'reason']);
     return {
       kind,
-      runtimeId: boundedId(parsed.runtimeId, 'runtimeId'),
-      reason: boundedString(parsed.reason, 'reason', 1_000),
+      runtimeId: boundedId(decision.runtimeId, 'runtimeId'),
+      reason: boundedString(decision.reason, 'reason', 1_000),
+    };
+  case 'discover-tools':
+    assertExactKeys(decision, ['kind', 'query', 'reason']);
+    return {
+      kind,
+      query: boundedString(decision.query, 'query', 1_000),
+      reason: boundedString(decision.reason, 'reason', 1_000),
+    };
+  case 'respond':
+    assertExactKeys(decision, ['kind', 'answer']);
+    return {
+      kind,
+      answer: boundedString(decision.answer, 'answer', 16_000),
     };
   case 'revise-plan':
-    return parsePlanRevision(parsed);
+    return parsePlanRevision(decision);
   case 'complete':
-    assertExactKeys(parsed, ['kind', 'summary', 'evidenceObservationIds', 'artifactIds', 'evidenceBindings']);
+    assertExactKeys(decision, ['kind', 'summary', 'evidenceObservationIds', 'artifactIds', 'evidenceBindings']);
     return {
       kind,
-      summary: boundedString(parsed.summary, 'summary', 4_000),
-      evidenceObservationIds: boundedIdArray(parsed.evidenceObservationIds, 'evidenceObservationIds', 50),
-      artifactIds: boundedIdArray(parsed.artifactIds, 'artifactIds', 50),
-      evidenceBindings: parseCompletionBindings(parsed.evidenceBindings),
+      summary: boundedString(decision.summary, 'summary', 4_000),
+      evidenceObservationIds: boundedIdArray(decision.evidenceObservationIds, 'evidenceObservationIds', 50),
+      artifactIds: boundedIdArray(decision.artifactIds, 'artifactIds', 50),
+      evidenceBindings: parseCompletionBindings(decision.evidenceBindings),
     };
   case 'fail':
-    assertExactKeys(parsed, ['kind', 'code', 'reason']);
+    assertExactKeys(decision, ['kind', 'code', 'reason']);
     return {
       kind,
-      code: boundedId(parsed.code, 'code'),
-      reason: boundedString(parsed.reason, 'reason', 4_000),
+      code: boundedId(decision.code, 'code'),
+      reason: boundedString(decision.reason, 'reason', 4_000),
     };
   default:
     throw new AgentDecisionValidationError('unknown-decision-kind', `Unsupported decision kind: ${kind}.`);
@@ -173,38 +258,57 @@ function parseExecutable(
     throw new AgentDecisionValidationError('invalid-input', 'Executable decision input must be an object.');
   }
   assertNoSecretBearingInput(value.input);
-  const schemaResult = validateAgentJsonSchema(value.input, capability.inputSchema, 'input');
+  if (capability.id === 'models.agent.synthesize') {
+    const runtimeOwned = Object.keys(value.input).filter((key) => key !== 'observationIds');
+    if (runtimeOwned.length > 0) {
+      throw new AgentDecisionValidationError(
+        'runtime-owned-synthesis-input',
+        `models.agent.synthesize input contains runtime-owned fields: ${runtimeOwned.join(', ')}.`,
+      );
+    }
+  }
+  const canonicalInput = omitSchemaInvalidOptionalNulls(value.input, capability.inputSchema);
+  const schemaResult = validateAgentJsonSchema(canonicalInput, capability.inputSchema, 'input');
   if (!schemaResult.ok) {
     throw new AgentDecisionValidationError('input-schema-invalid', 'Capability input does not match its schema.', schemaResult.errors);
   }
 
   const metadata = resolveAgentCapabilityMetadata(capability);
-  const contractVerification = deriveRequiredCapabilityVerification(capability, value.input);
-  const contractOwnsVerification = requiredVerificationIsContractOwned(capability, value.input);
+  const contractVerification = deriveRequiredCapabilityVerification(capability, canonicalInput);
+  const contractOwnsVerification = requiredVerificationIsContractOwned(capability, canonicalInput);
   const proposedVerification = contractOwnsVerification || value.verification === undefined
     ? []
     : parsePredicates(value.verification, 'verification');
   const verification = contractOwnsVerification
     ? contractVerification
-    : canonicalizeRequiredCapabilityVerification(capability, value.input, proposedVerification);
+    : canonicalizeRequiredCapabilityVerification(capability, canonicalInput, proposedVerification);
   const mutating = metadata.effectProfile.mutation !== 'none';
+  if (kind === 'inspect' && mutating) {
+    throw new AgentDecisionValidationError(
+      'decision-kind-risk-mismatch',
+      `Capability ${capabilityId} mutates state and cannot execute under an inspect decision.`,
+    );
+  }
+  const canonicalKind: AgentExecutableDecisionKind = mutating ? 'act' : 'inspect';
   if (mutating && verification.length === 0) {
     throw new AgentDecisionValidationError(
       'verification-required',
       `Mutating capability ${capabilityId} requires deterministic verification.`,
     );
   }
-  assertRequiredCapabilityVerification(capability, value.input, verification || []);
+  assertRequiredCapabilityVerification(capability, canonicalInput, verification || []);
   const preconditions = value.preconditions === undefined
     ? undefined
     : parsePredicates(value.preconditions, 'preconditions');
 
   return {
-    kind,
+    kind: canonicalKind,
     capabilityId,
-    input: cloneJson(value.input),
-    reason: boundedString(value.reason, 'reason', 1_000),
-    expectedEffect: boundedString(value.expectedEffect, 'expectedEffect', 1_000),
+    input: cloneJson(canonicalInput),
+    reason: value.reason === undefined ? 'direct' : boundedString(value.reason, 'reason', 1_000),
+    expectedEffect: value.expectedEffect === undefined
+      ? 'verified'
+      : boundedString(value.expectedEffect, 'expectedEffect', 1_000),
     ...(preconditions ? { preconditions } : {}),
     ...(verification.length > 0 ? { verification } : {}),
   };
@@ -282,26 +386,26 @@ function assertRequiredCapabilityVerification(
     predicates.some((predicate) => samePredicate(predicate, contractPredicate))
   ));
   for (const descriptor of required) {
-    let satisfied = false;
-    switch (descriptor.kind) {
-    case 'predicate':
-      satisfied = descriptor.predicate
-        ? predicates.some((predicate) => samePredicate(predicate, descriptor.predicate as MonarchActionPredicate))
-        : targetPredicates.length > 0 || hasCapabilityOwnedPredicate;
-      break;
-    case 'read-after-write':
-      satisfied = targetPredicates.some((predicate) => predicate.kind === 'exists')
-        && targetPredicates.some((predicate) => predicate.kind === 'contains' || predicate.kind === 'equals');
-      break;
-    case 'schema':
-      satisfied = Boolean(capability.outputSchema);
-      break;
-    case 'runtime-status':
-    case 'external-receipt':
-      satisfied = descriptor.predicate
-        ? predicates.some((predicate) => samePredicate(predicate, descriptor.predicate as MonarchActionPredicate))
-        : predicates.some((predicate) => predicate.kind === 'status');
-      break;
+    let satisfied = descriptor.predicate
+      ? predicates.some((predicate) => samePredicate(predicate, descriptor.predicate as MonarchActionPredicate))
+      : false;
+    if (!descriptor.predicate) {
+      switch (descriptor.kind) {
+      case 'predicate':
+        satisfied = targetPredicates.length > 0 || hasCapabilityOwnedPredicate;
+        break;
+      case 'read-after-write':
+        satisfied = targetPredicates.some((predicate) => predicate.kind === 'exists')
+          && targetPredicates.some((predicate) => predicate.kind === 'contains' || predicate.kind === 'equals');
+        break;
+      case 'schema':
+        satisfied = Boolean(capability.outputSchema);
+        break;
+      case 'runtime-status':
+      case 'external-receipt':
+        satisfied = predicates.some((predicate) => predicate.kind === 'status');
+        break;
+      }
     }
     if (!satisfied) {
       throw new AgentDecisionValidationError(
@@ -406,23 +510,75 @@ function normalizeTarget(value: string): string {
 }
 
 function parsePlanRevision(value: Record<string, unknown>): AgentRevisePlanDecision {
+  if (value.plan !== undefined) {
+    // Some local models preserve the decision kind but wrap the non-executable
+    // plan payload once. Normalize only this exact benign planning envelope;
+    // executable decisions and ambiguous mixed shapes remain strict.
+    assertExactKeys(value, ['kind', 'plan', 'reason']);
+    if (!isRecord(value.plan)) {
+      throw new AgentDecisionValidationError('invalid-plan-wrapper', 'plan must be an object.');
+    }
+    assertExactKeys(value.plan, ['summary', 'steps'], 'plan');
+    return parsePlanRevision({
+      kind: 'revise-plan',
+      summary: value.plan.summary,
+      steps: value.plan.steps,
+      reason: value.reason,
+    });
+  }
   assertExactKeys(value, ['kind', 'summary', 'steps', 'reason']);
   if (!Array.isArray(value.steps) || value.steps.length < 1 || value.steps.length > 20) {
     throw new AgentDecisionValidationError('invalid-plan-steps', 'Plan revision must contain 1-20 steps.');
   }
   const steps = value.steps.map((step, index) => {
     if (!isRecord(step)) throw new AgentDecisionValidationError('invalid-plan-step', `steps[${index}] must be an object.`);
-    assertExactKeys(step, ['title', 'expectedEffect'], `steps[${index}]`);
+    // Plan steps are non-executable. Local structured-output models sometimes
+    // mirror action-shaped fields into a plan after inspecting live state.
+    // Accept only this closed inert set, then discard every mirrored field.
+    // Capability execution still requires a separate strict inspect/act
+    // decision, so none of these values can become authority or tool input.
+    assertExactKeys(step, [
+      'id',
+      'title',
+      'expectedEffect',
+      'capabilityId',
+      'input',
+      'preconditions',
+      'verification',
+      'status',
+      'dependsOn',
+      'reason',
+    ], `steps[${index}]`);
+    if (step.id !== undefined && !(
+      (typeof step.id === 'string' && step.id.length <= 160)
+      || (typeof step.id === 'number' && Number.isSafeInteger(step.id))
+    )) {
+      throw new AgentDecisionValidationError(
+        'invalid-plan-step-id',
+        `steps[${index}].id must be a bounded scalar when supplied.`,
+      );
+    }
+    if (step.reason !== undefined) {
+      boundedString(step.reason, `steps[${index}].reason`, 1_000);
+    }
     return {
       title: boundedString(step.title, `steps[${index}].title`, 500),
       expectedEffect: boundedString(step.expectedEffect, `steps[${index}].expectedEffect`, 1_000),
     };
   });
+  const summary = boundedString(value.summary, 'summary', 2_000);
   return {
     kind: 'revise-plan',
-    summary: boundedString(value.summary, 'summary', 2_000),
+    summary,
     steps,
-    reason: boundedString(value.reason, 'reason', 1_000),
+    // `reason` is audit-only metadata for a non-executable decision. Local
+    // structured-output models occasionally omit it while returning a complete
+    // schema-valid plan. Canonicalize only that single omission so the runtime
+    // does not spend another full model turn repairing text that grants no
+    // authority and changes no effect.
+    reason: value.reason === undefined
+      ? 'Model-authored plan revision.'
+      : boundedString(value.reason, 'reason', 1_000),
   };
 }
 
@@ -501,6 +657,51 @@ function boundedIdArray(value: unknown, field: string, maxLength: number): strin
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/**
+ * Weak local models often serialize absent optional arguments as `null`.
+ * A null that the declared schema rejects has no executable meaning, so an
+ * optional known property can be omitted without inventing a value. Required,
+ * nullable and unknown properties remain untouched and therefore fail closed
+ * under the ordinary schema validator when invalid.
+ */
+function omitSchemaInvalidOptionalNulls(
+  input: Record<string, unknown>,
+  schema: MonarchJsonSchema | undefined,
+): Record<string, unknown> {
+  const normalized = normalizeSchemaValue(input, schema);
+  return isRecord(normalized) ? normalized : cloneJson(input);
+}
+
+function normalizeSchemaValue(value: unknown, schema: MonarchJsonSchema | undefined): unknown {
+  if (!schema) return cloneJson(value);
+  if (Array.isArray(value)) {
+    const itemSchema = isRecord(schema.items) ? schema.items as MonarchJsonSchema : undefined;
+    return value.map((entry) => normalizeSchemaValue(entry, itemSchema));
+  }
+  if (!isRecord(value)) return cloneJson(value);
+
+  const properties = isRecord(schema.properties) ? schema.properties : {};
+  const required = new Set(Array.isArray(schema.required)
+    ? schema.required.filter((entry): entry is string => typeof entry === 'string')
+    : []);
+  const normalized: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const propertySchema = isRecord(properties[key])
+      ? properties[key] as MonarchJsonSchema
+      : undefined;
+    if (
+      entry === null
+      && propertySchema
+      && !required.has(key)
+      && !validateAgentJsonSchema(null, propertySchema, 'optional').ok
+    ) {
+      continue;
+    }
+    normalized[key] = normalizeSchemaValue(entry, propertySchema);
+  }
+  return normalized;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

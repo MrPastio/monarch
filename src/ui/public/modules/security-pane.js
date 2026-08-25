@@ -1,5 +1,6 @@
 import { state } from './state.js';
-import { executeConfirmedCapability, executeCapability } from './api.js';
+import { executeConfirmedCapability, executeCapability, readLocalSettings, writeLocalSettings } from './api.js';
+import { swapUiSurface } from './ui-motion.js';
 import {
   escapeHtml,
   renderError,
@@ -11,6 +12,13 @@ import {
 
 let benchmarkPollTimer = null;
 let benchmarkStatusInFlight = false;
+let ownerOverrideRevision = 0;
+
+const SECURITY_LEVELS = new Set(['off', 'minimal', 'balanced', 'strict', 'maximum']);
+
+function normalizeSecurityLevel(level) {
+  return SECURITY_LEVELS.has(level) ? level : 'balanced';
+}
 
 const elements = {
   securityProtectionTitle: document.querySelector('#security-protection-title'),
@@ -91,23 +99,36 @@ const elements = {
   securityEmergencyRelease: document.querySelector('#security-emergency-release'),
   securityEmergencyContinue: document.querySelector('#security-emergency-continue'),
   securityEmergencyFeedback: document.querySelector('#security-emergency-feedback'),
-  securityLevel: document.querySelector('#security-level'),
+  securityProtectionState: document.querySelector('#security-protection-state'),
   securityLevelChoices: typeof document.querySelectorAll === 'function'
     ? Array.from(document.querySelectorAll('[data-security-level-choice]'))
     : [],
-  securitySettingsStatus: document.querySelector('#security-settings-status'),
   securityModelCommandsEnabled: document.querySelector('#security-model-commands-enabled'),
   securityModelConfirmation: document.querySelector('#security-model-confirmation'),
   securityModelPolicySave: document.querySelector('#security-model-policy-save'),
   securityModelPolicyFeedback: document.querySelector('#security-model-policy-feedback'),
+  securityDangerLog: document.querySelector('#security-danger-log'),
+  securityOwnerOverrideEnabled: document.querySelector('#security-owner-override-enabled'),
+  securityOwnerOverrideLifetime: document.querySelector('#security-owner-override-lifetime'),
+  securityOwnerOverrideTaskId: document.querySelector('#security-owner-override-task-id'),
+  securityOwnerShellPolicy: document.querySelector('#security-owner-shell-policy'),
+  securityOwnerOverrideSave: document.querySelector('#security-owner-override-save'),
+  securityOwnerOverrideFeedback: document.querySelector('#security-owner-override-feedback'),
 };
 
 export function initSecurityPane(appRenderCallback) {
+  elements.securityOwnerOverrideSave?.addEventListener('click', () => void saveOwnerOverride(appRenderCallback));
+  elements.securityOwnerOverrideLifetime?.addEventListener('change', syncOwnerOverrideTaskField);
   for (const tab of elements.securityTabs) {
     tab.addEventListener('click', () => {
-      setSecurityTab(tab.dataset.securityTab || 'overview');
-      renderSecurity();
-      resetSecurityViewport(tab);
+      const nextTab = tab.dataset.securityTab || 'overview';
+      const order = ['overview', 'incidents', 'network', 'quarantine', 'settings'];
+      const direction = order.indexOf(nextTab) >= order.indexOf(state.security.activeTab || 'overview') ? 1 : -1;
+      void swapUiSurface(document.querySelector('.security-page-content'), () => {
+        setSecurityTab(nextTab);
+        renderSecurity();
+        resetSecurityViewport(tab);
+      }, { direction });
       if (tab.dataset.securityTab === 'quarantine') {
         void loadSecurityQuarantine(appRenderCallback);
         void loadSecurityPinStatus(appRenderCallback);
@@ -343,12 +364,10 @@ export function initSecurityPane(appRenderCallback) {
 
   if (elements.securityStop) {
     elements.securityStop.addEventListener('click', () => {
-      void runSecurityAction('security.protection.stop', { waitSeconds: 10 }, true, appRenderCallback);
-    });
-  }
-  if (elements.securityLevel) {
-    elements.securityLevel.addEventListener('change', () => {
-      void changeSecurityLevel(elements.securityLevel.value, appRenderCallback);
+      const pin = requestSecurityLifecyclePin('остановки защиты');
+      if (pin) {
+        void runSecurityAction('security.protection.stop', { waitSeconds: 10, pin }, true, appRenderCallback);
+      }
     });
   }
   for (const choice of elements.securityLevelChoices) {
@@ -361,22 +380,107 @@ export function initSecurityPane(appRenderCallback) {
       void saveModelCommandPolicy(appRenderCallback);
     });
   }
+  void loadOwnerOverride();
 }
 
 async function changeSecurityLevel(level, appRenderCallback) {
   if (!['off', 'minimal', 'balanced', 'strict', 'maximum'].includes(level) || state.security.busy) return;
-  await runSecurityAction('security.profile.set', { level }, true, appRenderCallback);
+  const pin = level === 'off' ? requestSecurityLifecyclePin('отключения Security') : '';
+  if (level === 'off' && !pin) return;
+  await runSecurityAction('security.profile.set', { level, ...(pin ? { pin } : {}) }, true, appRenderCallback);
+}
+
+async function loadOwnerOverride() {
+  if (!elements.securityOwnerOverrideSave || typeof window.monarchDesktop?.getMutationAttestation !== 'function') return;
+  try {
+    const context = await readLocalSettings('owner-override');
+    ownerOverrideRevision = Number(context?.revision) || 0;
+    const value = context?.value && typeof context.value === 'object' ? context.value : {};
+    elements.securityOwnerOverrideEnabled.checked = value.enabled === true;
+    elements.securityOwnerOverrideLifetime.value = ['task', 'session', 'persistent'].includes(value.lifetime) ? value.lifetime : 'session';
+    elements.securityOwnerOverrideTaskId.value = typeof value.taskId === 'string' ? value.taskId : '';
+    elements.securityOwnerShellPolicy.value = ['always', 'risk-based', 'never'].includes(value.shellApprovalPolicy)
+      ? value.shellApprovalPolicy : 'always';
+    syncOwnerOverrideTaskField();
+  } catch {
+    // Public/browser/API surfaces intentionally cannot discover this control.
+  }
+}
+
+async function saveOwnerOverride(appRenderCallback) {
+  const enabled = elements.securityOwnerOverrideEnabled?.checked === true;
+  const lifetime = elements.securityOwnerOverrideLifetime?.value || 'session';
+  const taskId = String(elements.securityOwnerOverrideTaskId?.value || '').trim();
+  const shellApprovalPolicy = elements.securityOwnerShellPolicy?.value || 'always';
+  if (enabled && lifetime === 'task' && !/^agent_task_[A-Za-z0-9_-]{4,200}$/.test(taskId)) {
+    if (elements.securityOwnerOverrideFeedback) elements.securityOwnerOverrideFeedback.textContent = 'Для task укажи точный Agent Task ID.';
+    return;
+  }
+  if (elements.securityOwnerOverrideFeedback) elements.securityOwnerOverrideFeedback.textContent = 'Применяю локальную Owner policy…';
+  try {
+    const saved = await writeLocalSettings('owner-override.update', {
+      enabled,
+      lifetime,
+      ...(enabled && lifetime === 'task' ? { taskId } : {}),
+      shellApprovalPolicy,
+    }, { expectedRevision: ownerOverrideRevision });
+    ownerOverrideRevision = Number(saved.context?.revision) || ownerOverrideRevision;
+    if (elements.securityOwnerOverrideFeedback) {
+      elements.securityOwnerOverrideFeedback.textContent = enabled
+        ? `Override включён: ${lifetime}; shell ${shellApprovalPolicy}.`
+        : 'Owner override отключён.';
+    }
+    await loadOwnerOverride();
+    appRenderCallback?.();
+  } catch (error) {
+    if (elements.securityOwnerOverrideFeedback) elements.securityOwnerOverrideFeedback.textContent = String(error?.message || error);
+  }
+}
+
+function syncOwnerOverrideTaskField() {
+  if (!elements.securityOwnerOverrideTaskId) return;
+  elements.securityOwnerOverrideTaskId.disabled = elements.securityOwnerOverrideLifetime?.value !== 'task';
+}
+
+function requestSecurityLifecyclePin(actionLabel) {
+  if (state.security.busy) return null;
+  const promptPin = globalThis.prompt;
+  if (typeof promptPin !== 'function') {
+    state.security.error = 'Security PIN недоступен в этом интерфейсе. Открой настройки Security.';
+    renderSecurity();
+    return null;
+  }
+  const value = promptPin(`Введи шестизначный Security PIN для ${actionLabel}:`);
+  if (value === null) {
+    state.security.error = 'Действие отменено: Security PIN не введён.';
+    renderSecurity();
+    return null;
+  }
+  const pin = String(value).trim();
+  if (!/^\d{6}$/.test(pin)) {
+    state.security.error = 'Security PIN должен состоять ровно из 6 цифр.';
+    renderSecurity();
+    return null;
+  }
+  return pin;
 }
 
 async function saveModelCommandPolicy(appRenderCallback) {
   if (state.security.busy) return;
   const enabled = elements.securityModelCommandsEnabled?.checked !== false;
-  const confirmationMode = elements.securityModelConfirmation?.value === 'always' ? 'always' : 'adaptive';
+  const selectedReaction = elements.securityModelConfirmation?.value;
+  const agentSecurityMode = ['off', 'observe', 'guard', 'strict'].includes(selectedReaction)
+    ? selectedReaction
+    : 'guard';
+  const actionGuardReaction = agentSecurityMode === 'strict'
+    ? 'confirm-all'
+    : agentSecurityMode === 'guard' ? 'guard' : 'observe';
   state.security.modelPolicyFeedback = 'Security сохраняет правила Oscar...';
   renderSecurity();
   await runSecurityAction('security.model_policy.set', {
     enabled,
-    confirmationMode,
+    agentSecurityMode,
+    actionGuardReaction,
   }, true, appRenderCallback);
   state.security.modelPolicyFeedback = state.security.error
     ? state.security.error
@@ -975,13 +1079,12 @@ function syncSecurityButtons() {
     elements.securityStop.disabled = isBusy || !running || emergencyActive;
     elements.securityStop.title = emergencyActive ? 'Сначала заверши аварийный режим' : '';
   }
-  if (elements.securityLevel) {
-    const payload = readSecurityPayload(state.security.status) || {};
-    const profile = payload.profile && typeof payload.profile === 'object' ? payload.profile : {};
-    elements.securityLevel.value = ['off', 'minimal', 'balanced', 'strict', 'maximum'].includes(profile.level)
-      ? profile.level
-      : 'balanced';
-    elements.securityLevel.disabled = isBusy;
+  if (elements.securityProtectionState) {
+    elements.securityProtectionState.textContent = emergencyActive
+      ? 'Требует внимания'
+      : running
+        ? 'Защита включена'
+        : 'Приостановлена';
   }
 }
 
@@ -1002,6 +1105,7 @@ export function renderSecurity() {
   renderBenchmarkStatus();
   renderEmergencyResponse();
   renderSecuritySettings();
+  renderDangerLog();
   renderSecurityPills();
   renderSecuritySummary();
   renderSecurityFindings();
@@ -1014,11 +1118,7 @@ function renderSecuritySettings() {
   const payload = readSecurityPayload(state.security.status) || {};
   const profile = payload.profile && typeof payload.profile === 'object' ? payload.profile : {};
   const policy = payload.model_policy && typeof payload.model_policy === 'object' ? payload.model_policy : {};
-  const level = ['off', 'minimal', 'balanced', 'strict', 'maximum'].includes(profile.level)
-    ? profile.level
-    : 'balanced';
-  const labels = { off: 'Защита отключена', minimal: 'Минимальный профиль', balanced: 'Средний профиль', strict: 'Строгий профиль', maximum: 'Максимальный профиль' };
-  if (elements.securitySettingsStatus) elements.securitySettingsStatus.textContent = labels[level];
+  const level = normalizeSecurityLevel(profile.level);
   for (const choice of elements.securityLevelChoices) {
     const selected = choice.dataset.securityLevelChoice === level;
     choice.classList.toggle('selected', selected);
@@ -1030,13 +1130,52 @@ function renderSecuritySettings() {
     elements.securityModelCommandsEnabled.disabled = state.security.busy;
   }
   if (elements.securityModelConfirmation) {
-    elements.securityModelConfirmation.value = policy.confirmation_mode === 'always' ? 'always' : 'adaptive';
+    const agentSecurityMode = ['off', 'observe', 'guard', 'strict'].includes(payload.agentSecurityMode)
+      ? payload.agentSecurityMode
+      : ['off', 'observe', 'guard', 'strict'].includes(policy.agent_security_mode)
+        ? policy.agent_security_mode
+        : policy.action_guard_reaction === 'observe'
+          ? 'observe'
+          : policy.action_guard_reaction === 'confirm-all' || policy.confirmation_mode === 'always'
+            ? 'strict'
+            : 'guard';
+    elements.securityModelConfirmation.value = agentSecurityMode;
     elements.securityModelConfirmation.disabled = state.security.busy || policy.enabled === false;
   }
   if (elements.securityModelPolicySave) elements.securityModelPolicySave.disabled = state.security.busy;
   if (elements.securityModelPolicyFeedback) {
     elements.securityModelPolicyFeedback.textContent = state.security.modelPolicyFeedback || '';
   }
+}
+
+function renderDangerLog() {
+  if (!elements.securityDangerLog) return;
+  const payload = readSecurityPayload(state.security.status) || {};
+  const records = Array.isArray(payload.dangerLog) ? payload.dangerLog : [];
+  const receiptsByRequest = new Map(records
+    .filter((entry) => entry?.type === 'security.danger.receipt' && entry.requestId)
+    .map((entry) => [entry.requestId, entry]));
+  const assessments = records.filter((entry) => entry?.type === 'security.danger.assessed').slice(-30).reverse();
+  if (!assessments.length) {
+    elements.securityDangerLog.innerHTML = '<span class="setting-note">Оценённых действий пока нет</span>';
+    return;
+  }
+  elements.securityDangerLog.innerHTML = assessments.map((entry) => {
+    const assessment = entry.assessment && typeof entry.assessment === 'object' ? entry.assessment : {};
+    const receipt = receiptsByRequest.get(entry.requestId)?.receipt;
+    const factors = assessment.factors && typeof assessment.factors === 'object'
+      ? Object.entries(assessment.factors)
+        .sort((left, right) => readNumber(right[1]?.score, 0) - readNumber(left[1]?.score, 0))
+        .slice(0, 3)
+        .map(([name, factor]) => `${name} ${readNumber(factor?.score, 0)}%`)
+        .join(' · ')
+      : 'нет факторов';
+    return `<article class="agency-control-item">
+      <div><strong>${escapeHtml(entry.capabilityId || 'unknown action')}</strong><span>${escapeHtml(factors)}</span></div>
+      <div><b>${escapeHtml(String(readNumber(assessment.dangerProbability, 0)))}%</b><span>${escapeHtml(entry.response || 'allow')}</span></div>
+      <small>${receipt ? `receipt ${escapeHtml(receipt.ledgerId || '')} · ${receipt.ok ? 'ok' : 'failed'}` : 'ожидает receipt'}</small>
+    </article>`;
+  }).join('');
 }
 
 export function renderSecurityPolicyControls() {
@@ -1048,7 +1187,7 @@ function renderReplayMetrics() {
   const payload = readSecurityPayload(state.security.replayMetrics);
   const metrics = payload?.metrics && typeof payload.metrics === 'object' ? payload.metrics : null;
   if (!metrics) {
-    elements.securityReplayMetrics.innerHTML = '<div class="security-list-empty">Replay lab ещё не запускался. Он использует только инертные локальные сценарии.</div>';
+    elements.securityReplayMetrics.innerHTML = '<div class="security-list-empty">Проверка распознавания ещё не запускалась. Она использует только безопасные тестовые сценарии.</div>';
     return;
   }
   const detection = Math.round(readNumber(metrics.detection_rate, 0) * 100);
@@ -1067,18 +1206,18 @@ function renderReplayMetrics() {
   });
   elements.securityReplayMetrics.innerHTML = `
     <section>
-      <span><strong>Replay quality gate</strong><small>${payload.passed ? 'Пройден' : 'Требует внимания'} · ${escapeHtml(payload.case_count || 0)} атак / ${escapeHtml(payload.benign_case_count || 0)} benign</small></span>
+      <span><strong>Качество распознавания</strong><small>${payload.passed ? 'Всё хорошо' : 'Требует внимания'} · ${escapeHtml(payload.case_count || 0)} опасных / ${escapeHtml(payload.benign_case_count || 0)} безопасных сценариев</small></span>
       <div>
-        <b>${escapeHtml(detection)}%<small>детекция</small></b>
-        <b>${escapeHtml(falsePositive)}%<small>false positive</small></b>
-        <b>${escapeHtml(readNumber(metrics.case_latency_ms_p95, 0).toFixed(2))} ms<small>p95 case</small></b>
-        <b>${protectorIdle.available === true ? `${escapeHtml(readNumber(protectorIdle.cpu_percent, 0).toFixed(2))}%` : '—'}<small>protector CPU p50</small></b>
-        <b>${protectorIdle.available === true ? `${escapeHtml(readNumber(protectorIdle.cpu_percent_p95, 0).toFixed(2))}%` : '—'}<small>protector CPU p95</small></b>
-        <b>${protectorIdle.available === true ? escapeHtml(formatSecurityBytes(protectorIdle.rss_bytes)) : '—'}<small>protector RSS</small></b>
-        <b>${replayBurst.available === true ? `${escapeHtml(readNumber(replayBurst.cpu_percent, 0).toFixed(2))}%` : '—'}<small>replay CPU</small></b>
-        <b>${replayBurst.available === true ? `${escapeHtml(readNumber(replayBurst.system_cpu_percent, 0).toFixed(2))}%` : '—'}<small>system CPU during replay</small></b>
-        <b>${replayBurst.available === true ? escapeHtml(formatSecurityBytes(replayBurst.rss_peak_observed_bytes)) : '—'}<small>replay peak RSS</small></b>
-        <b>${incidentLatency.available === true ? `${escapeHtml(readNumber(incidentLatency.latency_ms_p95, 0).toFixed(2))} ms` : '—'}<small>event → incident p95</small></b>
+        <b>${escapeHtml(detection)}%<small>угроз найдено</small></b>
+        <b>${escapeHtml(falsePositive)}%<small>ложных тревог</small></b>
+        <b>${escapeHtml(readNumber(metrics.case_latency_ms_p95, 0).toFixed(2))} ms<small>время проверки</small></b>
+        <b>${protectorIdle.available === true ? `${escapeHtml(readNumber(protectorIdle.cpu_percent, 0).toFixed(2))}%` : '—'}<small>обычная нагрузка</small></b>
+        <b>${protectorIdle.available === true ? `${escapeHtml(readNumber(protectorIdle.cpu_percent_p95, 0).toFixed(2))}%` : '—'}<small>пиковая нагрузка</small></b>
+        <b>${protectorIdle.available === true ? escapeHtml(formatSecurityBytes(protectorIdle.rss_bytes)) : '—'}<small>память защиты</small></b>
+        <b>${replayBurst.available === true ? `${escapeHtml(readNumber(replayBurst.cpu_percent, 0).toFixed(2))}%` : '—'}<small>нагрузка теста</small></b>
+        <b>${replayBurst.available === true ? `${escapeHtml(readNumber(replayBurst.system_cpu_percent, 0).toFixed(2))}%` : '—'}<small>общая нагрузка</small></b>
+        <b>${replayBurst.available === true ? escapeHtml(formatSecurityBytes(replayBurst.rss_peak_observed_bytes)) : '—'}<small>память теста</small></b>
+        <b>${incidentLatency.available === true ? `${escapeHtml(readNumber(incidentLatency.latency_ms_p95, 0).toFixed(2))} ms` : '—'}<small>скорость реакции</small></b>
       </div>
       ${(attackCoverage || benignCoverage) ? `<p class="security-replay-coverage">
         ${attackCoverage ? `<span><em>Атаки</em>${attackCoverage}</span>` : ''}
@@ -1153,7 +1292,7 @@ function renderBaselinePreview() {
   const labels = { added: 'Новая', changed: 'Изменена', removed: 'Удалена' };
   elements.securityBaselinePreview.innerHTML = `
     <section>
-      <header><span><strong>Изменения автозапуска</strong><small>Одобрение будет привязано к этому snapshot</small></span><code>${escapeHtml(String(preview.digest || '').slice(0, 12))}…</code></header>
+      <header><span><strong>Изменения автозапуска</strong><small>Подтверди только знакомые изменения</small></span><code>${escapeHtml(String(preview.digest || '').slice(0, 12))}…</code></header>
       <div class="security-baseline-counts">
         <b>${escapeHtml(readNumber(counts.added, 0))}<small>новых</small></b>
         <b>${escapeHtml(readNumber(counts.changed, 0))}<small>изменено</small></b>
@@ -1162,7 +1301,7 @@ function renderBaselinePreview() {
       </div>
       <div class="security-baseline-changes">
         ${changes.length ? changes.map((item) => `<div><span class="${escapeHtml(item.status || '')}">${escapeHtml(labels[item.status] || item.status || 'Изменение')}</span><code>${escapeHtml(item.key || '')}</code></div>`).join('') : '<small>Изменений нет. Можно безопасно подтвердить текущую норму.</small>'}
-        ${preview.changes_truncated ? `<small>Ещё ${escapeHtml(preview.changes_truncated)} изменений скрыто из bounded preview.</small>` : ''}
+        ${preview.changes_truncated ? `<small>Ещё ${escapeHtml(preview.changes_truncated)} изменений не показано.</small>` : ''}
       </div>
       <footer>
         <button type="button" class="claude-primary-btn" data-security-baseline-approve ${state.security.baselineBusy ? 'disabled' : ''}>Одобрить эту норму</button>
@@ -1218,14 +1357,14 @@ function renderEmergencyResponse() {
   if (!active) return;
   if (elements.securityEmergencyTitle) {
     elements.securityEmergencyTitle.textContent = emergency.state === 'contained'
-      ? 'Аварийное containment активно'
+      ? 'Опасность временно изолирована'
       : 'Обнаружена подтверждённая критическая опасность';
   }
   if (elements.securityEmergencyCopy) {
     const lockCopy = emergency.native_lock_succeeded === true
       ? 'Windows был заблокирован штатным механизмом.'
-      : 'Штатная блокировка не применена; восстановление остаётся fail-open.';
-    elements.securityEmergencyCopy.textContent = `${lockCopy} Риск ${readNumber(emergency.risk_score, 0)}/800 · TTL до ${formatSecurityTime(emergency.expires_at)}.`;
+      : 'Windows не удалось заблокировать автоматически.';
+    elements.securityEmergencyCopy.textContent = `${lockCopy} Оценка риска ${readNumber(emergency.risk_score, 0)}/800 · действует до ${formatSecurityTime(emergency.expires_at)}.`;
   }
   const service = readSecurityPayload(state.security.responseServiceStatus) || {};
   if (elements.securityEmergencyRelease) elements.securityEmergencyRelease.disabled = Boolean(state.security.busy);
@@ -1242,7 +1381,7 @@ function renderNetworkResult() {
   if (state.security.error && state.security.activeTab === 'network') {
     elements.securityNetworkResult.innerHTML = `
       <div class="security-scan-result failed">
-        <strong>Network Center требует внимания</strong>
+        <strong>Не удалось проверить сеть</strong>
         <span>${escapeHtml(state.security.error)}</span>
       </div>
     `;
@@ -1253,14 +1392,14 @@ function renderNetworkResult() {
     elements.securityNetworkResult.innerHTML = `
       <div class="security-scan-result pending">
         <strong>Проверяем сеть</strong>
-        <span>Собираем локальные подключения, порты, DNS и состояние firewall.</span>
+        <span>Собираем подключения, открытые порты, DNS и состояние брандмауэра.</span>
       </div>
     `;
     return;
   }
   const result = state.security.networkCenter;
   if (!result) {
-    elements.securityNetworkResult.innerHTML = '<div class="security-list-empty"><strong>Network Center готов</strong><span>Нажми «Обновить», чтобы собрать локальную сетевую картину.</span></div>';
+    elements.securityNetworkResult.innerHTML = '<div class="security-list-empty"><strong>Сеть готова к проверке</strong><span>Нажми «Обновить», чтобы увидеть текущие подключения.</span></div>';
     renderNetworkCollections({});
     return;
   }
@@ -1474,19 +1613,19 @@ function renderProtectionOverview() {
   const states = {
     protected: {
       title: 'Компьютер защищён',
-      copy: 'Monarch наблюдает за системой и сообщит, если потребуется ваше решение.',
+      copy: 'Monarch наблюдает за системой и сообщит, если понадобится твоё решение.',
     },
     starting: {
       title: 'Защита запускается',
-      copy: 'Подключаем локальные датчики и проверяем их готовность.',
+      copy: 'Запускаем наблюдение и проверяем, всё ли работает.',
     },
     degraded: {
       title: 'Защита работает частично',
-      copy: 'Один или несколько датчиков требуют внимания. Подробности доступны ниже.',
+      copy: 'Часть защиты требует внимания. Подробности доступны ниже.',
     },
     attention_required: {
       title: 'Требуется внимание',
-      copy: 'Monarch обнаружил проблему целостности или незавершённое решение.',
+      copy: 'Monarch нашёл проблему или незавершённое решение.',
     },
     stopped: {
       title: 'Защита приостановлена',
@@ -1494,7 +1633,7 @@ function renderProtectionOverview() {
     },
     loading: {
       title: 'Состояние защиты загружается',
-      copy: 'Проверяем фоновые датчики и локальные политики.',
+      copy: 'Проверяем, всё ли работает.',
     },
   };
   const current = states[protectionState] || states.loading;
@@ -1528,7 +1667,7 @@ function renderScanLab() {
     elements.securityRecentScans.innerHTML = `
       <div class="security-list-empty">
         <strong>Проверок пока нет</strong>
-        <span>Выберите файл — результат останется только в текущей сессии.</span>
+        <span>Выбери файл — результат останется только в текущей сессии.</span>
       </div>
     `;
     return;
@@ -1573,8 +1712,10 @@ function renderIncidentWorkspace() {
     elements.securityIncidentSummaryCopy.textContent = state.security.incidentsBusy
       ? 'Обновляем очередь решений'
       : decisions.length
-        ? `${decisions.length} ${decisions.length === 1 ? 'решение ожидает' : 'решения ожидают'} вашего выбора`
-        : 'Нет инцидентов, требующих вашего решения';
+        ? decisions.length === 1
+          ? '1 событие ждёт твоего решения'
+          : `${decisions.length} событий ждут твоего решения`
+        : 'Ничего не требует твоего решения';
   }
 
   if (elements.securityIncidentList) {
@@ -1583,8 +1724,8 @@ function renderIncidentWorkspace() {
     } else if (!incidents.length) {
       elements.securityIncidentList.innerHTML = `
         <div class="security-list-empty">
-          <strong>Инцидентов пока нет</strong>
-          <span>События появятся здесь после детерминированной проверки.</span>
+          <strong>Событий пока нет</strong>
+          <span>Если защита заметит что-то важное, оно появится здесь.</span>
         </div>
       `;
     } else if (!visibleIncidents.length) {
@@ -1620,8 +1761,8 @@ function renderIncidentWorkspace() {
   if (!selected) {
     elements.securityIncidentDetail.innerHTML = `
       <div class="security-list-empty">
-        <strong>Выберите инцидент</strong>
-        <span>Здесь появятся доказательства и безопасные следующие шаги.</span>
+        <strong>Выбери событие</strong>
+        <span>Здесь появятся причины и безопасные следующие шаги.</span>
       </div>
     `;
     return;
@@ -1651,7 +1792,7 @@ function renderIncidentWorkspace() {
       `).join('') || '<div class="security-list-empty">Доказательства ещё не загружены.</div>'}
     </div>
     <div class="security-recommendations">
-      <strong>Безопасные следующие шаги</strong>
+      <strong>Что можно сделать</strong>
       <div>${actions.map((action) => `<span>${escapeHtml(localizeRecommendation(action))}</span>`).join('') || '<span>Продолжить наблюдение</span>'}</div>
     </div>
     ${actions.includes('block_network') && networkScope ? `
@@ -1674,7 +1815,7 @@ function renderIncidentWorkspace() {
         <button type="button" class="claude-ghost-btn" data-security-incident-status="dismissed" data-security-incident-id="${escapeHtml(selected.incident_id || '')}">Событие безопасно</button>
       </div>
     ` : `
-      <div class="security-incident-resolution">Инцидент закрыт: ${escapeHtml(selected.resolution?.reason || selected.status || '')}</div>
+      <div class="security-incident-resolution">Событие закрыто: ${escapeHtml(selected.resolution?.reason || selected.status || '')}</div>
     `}
     <details class="security-technical-details">
       <summary>Технические детали</summary>
@@ -1697,10 +1838,10 @@ function renderAttackChain(incident) {
   if (connected.length < 2) return '';
   const relations = new Map(edges.map((edge) => [`${edge?.from}:${edge?.to}`, edge?.relation]));
   return `
-    <section class="security-attack-chain" aria-label="Цепочка атаки">
+    <section class="security-attack-chain" aria-label="Как связаны события">
       <header>
-        <span><strong>Цепочка атаки</strong><small>${graph.corroborated ? 'Связь подтверждена независимыми датчиками' : 'Связанные детерминированные наблюдения'}</small></span>
-        <em>не меняет риск</em>
+        <span><strong>Как связаны события</strong><small>${graph.corroborated ? 'Связь подтверждена несколькими проверками' : 'Похожие наблюдения объединены'}</small></span>
+        <em>только для пояснения</em>
       </header>
       <div class="security-attack-chain-flow">
         ${connected.map((node, index) => {
@@ -1802,7 +1943,7 @@ function renderSecuritySummary() {
   if (!result || !payload) {
     elements.securitySummary.innerHTML = `
       <div class="security-result-card">
-        <div class="empty-state">Security status ещё не загружен.</div>
+      <div class="empty-state">Состояние защиты ещё не загружено.</div>
       </div>
     `;
     return;
@@ -1823,9 +1964,9 @@ function renderSecuritySummary() {
       <p class="security-command-line">${escapeHtml(command)}</p>
       <div class="security-action-strip">
         <span>Последнее сканирование: ${escapeHtml(counts.events ? `${counts.events} событий` : 'не загружено')}</span>
-        <span>Известно-хорошее состояние: базовый уровень готов</span>
-        <span>Предпросмотр лога: ${escapeHtml(counts.records ? `${counts.records} записей` : 'ожидание')}</span>
-        <span>Agent Guard: ${escapeHtml(guard.checks ? `${guard.checks} действий проверено` : 'готов к первой проверке')}</span>
+        <span>Сравнение с обычным состоянием готово</span>
+        <span>Журнал: ${escapeHtml(counts.records ? `${counts.records} записей` : 'ожидание')}</span>
+        <span>Действия Oscar: ${escapeHtml(guard.checks ? `${guard.checks} проверено` : 'готовы к первой проверке')}</span>
       </div>
       <div class="metric-grid">
         ${metricCard(counts.events, 'событий')}
@@ -1933,7 +2074,7 @@ function renderSecurityRuntime() {
   if (state.security.statusBusy && !payload) {
     elements.securityRuntimeLabel.textContent = 'проверка';
     elements.securityRuntimeLabel.className = 'status-text pending';
-    elements.securityRuntime.innerHTML = '<div class="empty-state">Проверяю встроенный security runtime...</div>';
+    elements.securityRuntime.innerHTML = '<div class="empty-state">Проверяю работу защиты...</div>';
     return;
   }
 
@@ -1942,7 +2083,7 @@ function renderSecurityRuntime() {
     elements.securityRuntimeLabel.className = `status-text ${state.security.error ? 'failed' : 'pending'}`;
     elements.securityRuntime.innerHTML = state.security.error
       ? renderError(state.security.error)
-      : '<div class="empty-state">Runtime status пока пустой.</div>';
+      : '<div class="empty-state">Состояние защиты пока неизвестно.</div>';
     return;
   }
 
