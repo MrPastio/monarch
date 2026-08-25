@@ -2,11 +2,14 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { formatManualProviderPrompt } from '../../src/ui/public/modules/image-generation-pane.js';
 
-const appSource = readFileSync('src/ui/public/app.js', 'utf8');
-const indexSource = readFileSync('src/ui/public/index.html', 'utf8');
-const paneSource = readFileSync('src/ui/public/modules/image-generation-pane.js', 'utf8');
-const genesisSource = readFileSync('src/ui/public/modules/monarch-genesis-field.js', 'utf8');
-const oscarSource = readFileSync('src/ui/public/modules/oscar-pane.js', 'utf8');
+const readSource = (relativePath: string) =>
+  readFileSync(relativePath, 'utf8').replace(/\r\n?/g, '\n');
+
+const appSource = readSource('src/ui/public/app.js');
+const indexSource = readSource('src/ui/public/index.html');
+const paneSource = readSource('src/ui/public/modules/image-generation-pane.js');
+const genesisSource = readSource('src/ui/public/modules/monarch-genesis-field.js');
+const oscarSource = readSource('src/ui/public/modules/oscar-pane.js');
 
 describe('Images workspace', () => {
   it('keeps an empty Perchance draft empty instead of duplicating generated aspect-ratio lines', () => {

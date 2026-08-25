@@ -2,10 +2,6 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { buildMonarchLogo3D, exportToGLTF, exportToMTL, exportToOBJ, exportToSTL } from '../../scripts/export-logo-3d.mjs';
 
-const objPath = new URL('../../assets/brand/3d/monarch-logo.obj', import.meta.url);
-const mtlPath = new URL('../../assets/brand/3d/monarch-logo.mtl', import.meta.url);
-const stlPath = new URL('../../assets/brand/3d/monarch-logo.stl', import.meta.url);
-const gltfPath = new URL('../../assets/brand/3d/monarch-logo.gltf', import.meta.url);
 const studioHtmlPath = new URL('../../src/ui/public/logo-3d.html', import.meta.url);
 const studioJsPath = new URL('../../src/ui/public/startup/monarch-3d-studio.js', import.meta.url);
 
@@ -24,10 +20,9 @@ describe('Monarch 3D Logo Generation and Studio', () => {
   });
 
   it('exports valid Wavefront OBJ and MTL files', async () => {
-    const [obj, mtl] = await Promise.all([
-      readFile(objPath, 'utf8'),
-      readFile(mtlPath, 'utf8'),
-    ]);
+    const parts = buildMonarchLogo3D();
+    const obj = exportToOBJ(parts);
+    const mtl = exportToMTL(parts);
 
     expect(obj).toContain('mtllib monarch-logo.mtl');
     expect(obj).toContain('o Shield_Base');
@@ -50,7 +45,7 @@ describe('Monarch 3D Logo Generation and Studio', () => {
   });
 
   it('exports valid STL format for 3D printing', async () => {
-    const stl = await readFile(stlPath, 'utf8');
+    const stl = exportToSTL(buildMonarchLogo3D());
 
     expect(stl.startsWith('solid monarch_logo_3d')).toBe(true);
     expect(stl.trim().endsWith('endsolid monarch_logo_3d')).toBe(true);
@@ -60,7 +55,7 @@ describe('Monarch 3D Logo Generation and Studio', () => {
   });
 
   it('exports valid glTF 2.0 with embedded buffers and PBR materials', async () => {
-    const gltfRaw = await readFile(gltfPath, 'utf8');
+    const gltfRaw = exportToGLTF(buildMonarchLogo3D());
     const gltf = JSON.parse(gltfRaw);
 
     expect(gltf.asset?.version).toBe('2.0');

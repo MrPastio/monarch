@@ -117,7 +117,10 @@ describe('model catalog detection and readiness', () => {
       await fsPromises.mkdir(path.dirname(partial), { recursive: true });
       await fsPromises.writeFile(partial, '');
       await writeGguf(path.join(root, 'qwen_models', 'Qwen3.8_27B', 'Qwen3.8-27B-Q4_K_M.gguf'));
-      const report = createModelRuntimeReport(await readModelCatalog(root));
+      const report = createModelRuntimeReport(await readModelCatalog(root), {
+        ...process.env,
+        MONARCH_QWEN3_8_27B_PRO_MODEL_COMMAND: 'llama-server-test',
+      });
       expect(report.entries.find((entry) => entry.role === 'gemma4-fast')).toMatchObject({ runnerStatus: 'present', canInfer: true });
       expect(report.entries.find((entry) => entry.role === 'gemma4-balanced')).toMatchObject({ runnerStatus: 'loading', canInfer: false });
       expect(report.entries.find((entry) => entry.role === 'qwen3.8-27b-pro')).toMatchObject({ runnerStatus: 'ready', canInfer: true });

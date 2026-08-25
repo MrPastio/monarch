@@ -1,24 +1,27 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
-const oscarSource = readFileSync('src/ui/public/modules/oscar-pane.js', 'utf8');
-const utilsSource = readFileSync('src/ui/public/modules/utils.js', 'utf8');
-const apiSource = readFileSync('src/ui/public/modules/api.js', 'utf8');
-const styles = readFileSync('src/ui/public/styles-v2.css', 'utf8');
-const settingsStyles = readFileSync('src/ui/public/styles.css', 'utf8');
-const settingsSource = readFileSync('src/ui/public/modules/settings-pane.js', 'utf8');
-const appSource = readFileSync('src/ui/public/app.js', 'utf8');
-const indexSource = readFileSync('src/ui/public/index.html', 'utf8');
-const voiceModeSource = readFileSync('src/ui/public/modules/oscar-voice-mode.js', 'utf8');
-const chatSource = readFileSync('src/ui/public/modules/chat-pane.js', 'utf8');
-const coderSource = readFileSync('src/ui/public/modules/coder-pane.js', 'utf8');
-const coderStyles = readFileSync('src/ui/public/coder.css', 'utf8');
-const contextMeterSource = readFileSync('src/ui/public/modules/oscar-context-meter.js', 'utf8');
-const historyReconciliationSource = readFileSync('src/ui/public/modules/oscar-history-reconciliation.js', 'utf8');
-const modelManagerSource = readFileSync('src/ui/public/modules/model-manager.js', 'utf8');
-const computerUseControlSource = readFileSync('src/ui/public/modules/computer-use-control.js', 'utf8');
-const oscarFunctionsSource = readFileSync('src/ui/public/modules/oscar-functions.js', 'utf8');
-const uiRefreshStyles = readFileSync('src/ui/public/ui-refresh.css', 'utf8');
+const readSource = (relativePath: string) =>
+  readFileSync(relativePath, 'utf8').replace(/\r\n?/g, '\n');
+
+const oscarSource = readSource('src/ui/public/modules/oscar-pane.js');
+const utilsSource = readSource('src/ui/public/modules/utils.js');
+const apiSource = readSource('src/ui/public/modules/api.js');
+const styles = readSource('src/ui/public/styles-v2.css');
+const settingsStyles = readSource('src/ui/public/styles.css');
+const settingsSource = readSource('src/ui/public/modules/settings-pane.js');
+const appSource = readSource('src/ui/public/app.js');
+const indexSource = readSource('src/ui/public/index.html');
+const voiceModeSource = readSource('src/ui/public/modules/oscar-voice-mode.js');
+const chatSource = readSource('src/ui/public/modules/chat-pane.js');
+const coderSource = readSource('src/ui/public/modules/coder-pane.js');
+const coderStyles = readSource('src/ui/public/coder.css');
+const contextMeterSource = readSource('src/ui/public/modules/oscar-context-meter.js');
+const historyReconciliationSource = readSource('src/ui/public/modules/oscar-history-reconciliation.js');
+const modelManagerSource = readSource('src/ui/public/modules/model-manager.js');
+const computerUseControlSource = readSource('src/ui/public/modules/computer-use-control.js');
+const oscarFunctionsSource = readSource('src/ui/public/modules/oscar-functions.js');
+const uiRefreshStyles = readSource('src/ui/public/ui-refresh.css');
 
 describe('Oscar live shell regressions', () => {
   it('exposes Computer Use as an explicit + and @ function with three permission presets', () => {
