@@ -1,9 +1,25 @@
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const read = (relativePath: string) =>
   readFile(path.join(process.cwd(), relativePath), 'utf8');
+
+const sha256 = (content: Buffer | string) => createHash('sha256')
+  .update(content)
+  .digest('hex');
+
+const psLiteral = (value: string) => `'${value.replaceAll("'", "''")}'`;
 
 describe('Monarch distribution workflows', () => {
   it('keeps release and refresh publication serialized', async () => {
@@ -38,6 +54,95 @@ describe('Monarch distribution workflows', () => {
     expect(workflow).not.toContain('softprops/action-gh-release');
     expect(workflow).not.toContain('tags:');
   });
+
+  it('provisions only the exact pinned Windows runtime dependency bundle', () => {
+    const qaRoot = path.join(path.parse(process.cwd()).root, 'Monarch-Agent-QA');
+    mkdirSync(qaRoot, { recursive: true });
+    const fixture = mkdtempSync(path.join(qaRoot, 'runtime-dependencies-'));
+    const trusted = path.join(fixture, 'trusted');
+    const stage = path.join(fixture, 'stage');
+    const destination = path.join(fixture, 'verified');
+    const rejectedDestination = path.join(fixture, 'rejected');
+    const archive = path.join(fixture, 'runtime-dependencies.zip');
+    mkdirSync(trusted);
+    mkdirSync(stage);
+
+    try {
+      const wheelName = 'fixture-runtime.whl';
+      const nativeName = 'fixture-runtime.dll';
+      const wheel = Buffer.from('portable-wheel-fixture', 'utf8');
+      const native = Buffer.from('native-runtime-fixture', 'utf8');
+      const cpuManifest = `${JSON.stringify({
+        schemaVersion: 1,
+        artifact: { name: wheelName, size: wheel.length, sha256: sha256(wheel) },
+      }, null, 2)}\n`;
+      const nativeManifest = `${JSON.stringify({
+        schemaVersion: 1,
+        files: [{ name: nativeName, size: native.length, sha256: sha256(native) }],
+      }, null, 2)}\n`;
+      for (const [name, content] of [
+        ['llama-cpp-cpu-portable.json', cpuManifest],
+        ['manifest.json', nativeManifest],
+        [wheelName, wheel],
+        [nativeName, native],
+      ] as const) {
+        writeFileSync(path.join(stage, name), content);
+        if (name.endsWith('.json')) writeFileSync(path.join(trusted, name), content);
+      }
+      const compressed = spawnSync('powershell.exe', [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        `Compress-Archive -Path ${psLiteral(path.join(stage, '*'))} -DestinationPath ${psLiteral(archive)} -CompressionLevel Optimal`,
+      ], { encoding: 'utf8' });
+      expect(compressed.status, `${compressed.stdout}\n${compressed.stderr}`).toBe(0);
+      const archiveBytes = readFileSync(archive);
+      writeFileSync(path.join(trusted, 'bundle-source.json'), `${JSON.stringify({
+        schemaVersion: 1,
+        component: 'fixture-runtime-dependencies',
+        version: '1',
+        url: 'https://github.com/MrPastio/monarch-releases/releases/download/fixture/runtime-dependencies.zip',
+        size: archiveBytes.length,
+        sha256: sha256(archiveBytes),
+      }, null, 2)}\n`);
+
+      const provision = (archivePath: string, output: string) => spawnSync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          path.join(process.cwd(), 'installer', 'provision-runtime-dependencies.ps1'),
+          '-CandidateRoot',
+          trusted,
+          '-TrustedManifestDirectory',
+          trusted,
+          '-Destination',
+          output,
+          '-ArchivePath',
+          archivePath,
+        ],
+        { encoding: 'utf8' },
+      );
+      const accepted = provision(archive, destination);
+      expect(accepted.status, `${accepted.stdout}\n${accepted.stderr}`).toBe(0);
+      expect(readFileSync(path.join(destination, wheelName))).toEqual(wheel);
+      expect(readFileSync(path.join(destination, nativeName))).toEqual(native);
+
+      const alteredArchive = path.join(fixture, 'altered.zip');
+      writeFileSync(alteredArchive, Buffer.concat([archiveBytes, Buffer.from([0])]));
+      const rejected = provision(alteredArchive, rejectedDestination);
+      expect(rejected.status).not.toBe(0);
+      expect(`${rejected.stdout}\n${rejected.stderr}`).toContain(
+        'failed exact size or SHA-256 verification',
+      );
+      expect(existsSync(rejectedDestination)).toBe(false);
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it('propagates native Oscar and Security test failures to release callers', async () => {
     for (const scriptPath of [
@@ -76,6 +181,9 @@ describe('Monarch distribution workflows', () => {
     expect(desktopSmoke).toBeGreaterThan(smoke);
     expect(frontendBuild).toBeGreaterThan(desktopSmoke);
     expect(boundary).toBeGreaterThan(frontendBuild);
+    expect(workflow).toContain('Provision verified Windows runtime dependencies');
+    expect(workflow).toContain('provision-runtime-dependencies.ps1');
+    expect(workflow).toContain('-RuntimeDependenciesRoot $env:MONARCH_RUNTIME_DEPENDENCIES_ROOT');
     expect(workflow).toContain(
       'npm run test:raw -- --exclude tests/modules/coder.test.ts --exclude tests/app/coder-agent-controller.test.ts --maxWorkers=1',
     );

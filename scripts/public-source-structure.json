@@ -419,6 +419,14 @@
       "scope": "docs",
       "objectId": "d27c943fb0e225a041f1fe629d9425b2afb56e6f"
     },
+    "installer/provision-runtime-dependencies.ps1": {
+      "scope": "installer",
+      "objectId": "95ad3ad5302c193cc3f33ddfb7df55f3d568d141"
+    },
+    "installer/runtime-dependencies/windows-x64/bundle-source.json": {
+      "scope": "installer",
+      "objectId": "04521ea2ff80284b57be6d79f30cf47bcf84f41c"
+    },
     "installer/runtime-dependencies/windows-x64/llama-cpp-cpu-portable.json": {
       "scope": "installer",
       "objectId": "8607993e78f7381a120eedfd72ec2096ef4c0bdb"

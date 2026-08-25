@@ -130,6 +130,24 @@ try {
     throw "Invalid Monarch source root: $root"
   }
 
+  $runtimeDependencyDestination = Join-Path `
+    $projectRoot `
+    ("installer\.offline-build-cache\runtime-dependencies\windows-x64-" + [guid]::NewGuid().ToString("N"))
+  $runtimeDependencyArguments = @{
+    CandidateRoot = $runtimeDependencies
+    TrustedManifestDirectory = Join-Path $root "installer\runtime-dependencies\windows-x64"
+    Destination = $runtimeDependencyDestination
+  }
+  if ($RuntimeDependenciesRoot) {
+    $runtimeDependencyArguments.RequireCandidate = $true
+  }
+  $runtimeDependencies = @(
+    & (Join-Path $root "installer\provision-runtime-dependencies.ps1") @runtimeDependencyArguments
+  ) | Select-Object -Last 1
+  if (-not $runtimeDependencies) {
+    throw "Verified Windows runtime dependencies were not provisioned."
+  }
+
   $runtimeBuildRoot = if (
     Test-Path -LiteralPath (Join-Path $root "node_modules\esbuild") -PathType Container
   ) {

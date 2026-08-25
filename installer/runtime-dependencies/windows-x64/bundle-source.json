@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "component": "monarch-runtime-dependencies-windows-x64",
+  "version": "2026.08.25.1",
+  "url": "https://github.com/MrPastio/monarch-releases/releases/download/runtime-windows-x64-2026.08.25.1/monarch-runtime-dependencies-windows-x64-2026.08.25.1.zip",
+  "size": 12690182,
+  "sha256": "381e801a97c516607883b845ad35429c628cba95199c97c869c750fafae4370e"
+}

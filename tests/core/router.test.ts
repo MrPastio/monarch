@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createMonarchKernel } from '../../src/bootstrap';
 import { AssistantModule } from '../../src/modules/assistant';
+import { SecurityModule } from '../../src/modules/security';
 import {
   MonarchKernel,
   classifyIntentText,
@@ -603,7 +604,8 @@ describe('Router Mesh & Intent Classifier', () => {
   });
 
   it('routes a direct Russian Security status request without asking for clarification', async () => {
-    const kernel = createMonarchKernel({ enableLocalSystemRouter: false });
+    const kernel = new MonarchKernel();
+    kernel.registerModule(new SecurityModule(createUnavailableSecurityClient() as any));
 
     await kernel.start();
     const route = await kernel.routeIntent(createSmokeIntent(
@@ -648,3 +650,17 @@ describe('Router Mesh & Intent Classifier', () => {
     expect(snapshot.audit.some((entry) => entry.category === 'routing' && entry.message === 'Router v0.3 route trace.')).toBe(true);
   });
 });
+
+function createUnavailableSecurityClient() {
+  return {
+    config: {
+      projectRoot: 'security',
+      configPath: 'security/config/monarch_security.toml',
+      pythonPath: 'python',
+      timeoutMs: 30_000,
+    },
+    available: false,
+    backgroundBenchmarkStatus: () => null,
+    dispose: () => {},
+  };
+}
