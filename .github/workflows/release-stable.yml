@@ -131,9 +131,20 @@ jobs:
         run: npm run upload:dry-run
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
+      - name: Provision verified Windows runtime dependencies
+        shell: pwsh
+        run: |
+          $trusted = Join-Path $PWD 'installer\runtime-dependencies\windows-x64'
+          $destination = Join-Path $env:RUNNER_TEMP 'monarch-runtime-dependencies-windows-x64'
+          $resolved = @(.\installer\provision-runtime-dependencies.ps1 `
+            -CandidateRoot $trusted `
+            -TrustedManifestDirectory $trusted `
+            -Destination $destination) | Select-Object -Last 1
+          if (-not $resolved) { throw 'Verified runtime dependency provisioning returned no root.' }
+          "MONARCH_RUNTIME_DEPENDENCIES_ROOT=$resolved" >> $env:GITHUB_ENV
       - name: Build installer from clean public snapshot
         shell: pwsh
-        run: .\installer\build-installer.ps1
+        run: .\installer\build-installer.ps1 -RuntimeDependenciesRoot $env:MONARCH_RUNTIME_DEPENDENCIES_ROOT
       - name: Version installer artifact
         shell: pwsh
         run: |
