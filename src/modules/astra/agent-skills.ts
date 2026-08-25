@@ -81,6 +81,7 @@ export type AgentSkillScope = 'project' | 'user' | 'system';
 export type AgentSkillPlatform = typeof ALL_SKILL_PLATFORMS[number];
 export type AgentSkillSourceTier = 'builtin' | 'extension' | 'user' | 'workspace';
 export type AgentSkillTrust = 'trusted' | 'linked';
+export type AgentSkillCreationSource = 'manual' | 'auto' | 'external';
 
 export interface AgentSkillMetadata {
   id: string;
@@ -91,6 +92,7 @@ export interface AgentSkillMetadata {
   scope: AgentSkillScope;
   sourceTier: AgentSkillSourceTier;
   trust: AgentSkillTrust;
+  creationSource: AgentSkillCreationSource;
   location: string;
   fingerprint: string;
   allowImplicitInvocation: boolean;
@@ -337,6 +339,7 @@ async function discoverSkillFiles(workspaceRoot: string): Promise<DiscoveredSkil
     addSkillRoot(path.join(home, '.claude', 'skills'), 'claude', 'user', 6, 'user', 31),
     addSkillRoot(path.join(home, '.codex', 'skills'), 'codex', 'user', 6, 'user', 32),
     addSkillRoot(path.join(home, '.agents', 'skills'), 'codex', 'user', 6, 'user', 33),
+    addSkillRoot(path.join(home, '.monarch', 'skills'), 'monarch', 'user', 6, 'user', 34),
     addSkillRoot(path.join(root, '.gemini', 'skills'), 'gemini', 'project', 6, 'workspace', 40),
     addSkillRoot(path.join(root, '.claude', 'skills'), 'claude', 'project', 6, 'workspace', 41),
     addSkillRoot(path.join(root, '.monarch', 'skills'), 'monarch', 'project', 6, 'workspace', 42),
@@ -466,11 +469,13 @@ async function readSkillRecord(
       || `Workflow from ${name}.`
     ).slice(0, 1_536);
     const whenToUse = readString(parsed.frontmatter, 'when_to_use');
-    const openAiImplicit = await readOpenAiImplicitPolicy(path.dirname(resolvedPath));
+    const openAiMetadata = await readOpenAiSkillMetadata(path.dirname(resolvedPath));
     const disabledModelInvocation = readBoolean(parsed.frontmatter, 'disable-model-invocation', false);
     const userInvocable = readBoolean(parsed.frontmatter, 'user-invocable', true);
     const workspaceRelative = relativeLocation(resolvedPath, process.cwd());
-    const displayName = readString(parsed.frontmatter, 'display_name') || humanizeSkillName(name);
+    const displayName = readString(parsed.frontmatter, 'display_name')
+      || openAiMetadata.displayName
+      || humanizeSkillName(name);
     const inferredScope = inferSystemScope(resolvedPath, discovered.scope);
     const platforms = inferSkillPlatforms(resolvedPath, parsed.frontmatter);
     const id = createSkillId(discovered.provider, inferredScope, resolvedPath);
@@ -487,16 +492,20 @@ async function readSkillRecord(
         scope: inferredScope,
         sourceTier: discovered.sourceTier,
         trust,
+        creationSource: openAiMetadata.creationSource,
         location: workspaceRelative,
         fingerprint: createContentFingerprint(parsed.raw),
-        allowImplicitInvocation: trust === 'trusted' && !disabledModelInvocation && openAiImplicit,
+        allowImplicitInvocation: trust === 'trusted' && !disabledModelInvocation && openAiMetadata.allowImplicitInvocation,
         userInvocable,
         argumentHint: readString(parsed.frontmatter, 'argument-hint'),
         context: readString(parsed.frontmatter, 'context') || 'inline',
         agent: readString(parsed.frontmatter, 'agent'),
         allowedTools: readStringList(parsed.frontmatter, 'allowed-tools'),
         disallowedTools: readStringList(parsed.frontmatter, 'disallowed-tools'),
-        requiredCapabilities: readSkillCapabilityRequirements(parsed.frontmatter),
+        requiredCapabilities: readSkillCapabilityRequirements(
+          parsed.frontmatter,
+          openAiMetadata.requiredCapabilities,
+        ),
         paths: readStringList(parsed.frontmatter, 'paths'),
         legacyCommand: discovered.legacyCommand,
         platforms,
@@ -596,13 +605,60 @@ function unquote(value: string): string {
   return trimmed;
 }
 
-async function readOpenAiImplicitPolicy(skillDirectory: string): Promise<boolean> {
+interface OpenAiSkillMetadata {
+  allowImplicitInvocation: boolean;
+  displayName: string;
+  requiredCapabilities: string[];
+  creationSource: AgentSkillCreationSource;
+}
+
+async function readOpenAiSkillMetadata(skillDirectory: string): Promise<OpenAiSkillMetadata> {
   try {
     const content = await readFile(path.join(skillDirectory, 'agents', 'openai.yaml'), 'utf8');
-    return !/allow_implicit_invocation\s*:\s*false\b/i.test(content);
+    const source = content.match(/^\s*source\s*:\s*(auto|manual)\s*$/im)?.[1]?.toLowerCase();
+    const requiredCapabilities = readIndentedYamlList(content, 'required_capabilities')
+      .map((value) => value.trim().toLowerCase())
+      .filter((value) => /^[a-z0-9][a-z0-9._*-]{0,127}$/.test(value));
+    return {
+      allowImplicitInvocation: !/allow_implicit_invocation\s*:\s*false\b/i.test(content),
+      displayName: unquote(content.match(/^\s*display_name\s*:\s*(.+?)\s*$/im)?.[1] || '').slice(0, 160),
+      requiredCapabilities: Array.from(new Set(requiredCapabilities)).slice(0, 64),
+      creationSource: source === 'auto' || source === 'manual' ? source : 'external',
+    };
   } catch {
-    return true;
+    return {
+      allowImplicitInvocation: true,
+      displayName: '',
+      requiredCapabilities: [],
+      creationSource: 'external',
+    };
   }
+}
+
+function readIndentedYamlList(content: string, key: string): string[] {
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const header = new RegExp(`^(\\s*)${escaped}\\s*:\\s*(.*)$`, 'i');
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index]?.match(header);
+    if (!match) continue;
+    const indent = match[1]?.length || 0;
+    const inline = String(match[2] || '').trim();
+    if (inline.startsWith('[') && inline.endsWith(']')) {
+      return inline.slice(1, -1).split(',').map(unquote).filter(Boolean);
+    }
+    const values: string[] = [];
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor] || '';
+      if (!line.trim()) continue;
+      const lineIndent = line.match(/^\s*/)?.[0].length || 0;
+      if (lineIndent <= indent) break;
+      const item = line.match(/^\s*-\s*(.+?)\s*$/)?.[1];
+      if (item) values.push(unquote(item));
+    }
+    return values;
+  }
+  return [];
 }
 
 function scoreSkill(
@@ -745,12 +801,16 @@ function readStringList(record: Record<string, unknown>, key: string): string[] 
   return value.split(/\s*,\s*|\s+(?=[A-Za-z][A-Za-z(])/).map((item) => item.trim()).filter(Boolean);
 }
 
-function readSkillCapabilityRequirements(record: Record<string, unknown>): string[] {
+function readSkillCapabilityRequirements(
+  record: Record<string, unknown>,
+  openAiRequirements: string[] = [],
+): string[] {
   const declared = [
     ...readStringList(record, 'required-capabilities'),
     ...readStringList(record, 'required_capabilities'),
     ...readStringList(record, 'requires-toolsets'),
     ...readStringList(record, 'requires_toolsets'),
+    ...openAiRequirements,
   ];
   return Array.from(new Set(declared
     .map((value) => value.trim().toLowerCase())

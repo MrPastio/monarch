@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "component": "llama-cpp-python-cpu-portable-win-x64",
+  "version": "0.3.30",
+  "source": "https://files.pythonhosted.org/packages/source/l/llama-cpp-python/llama_cpp_python-0.3.30.tar.gz",
+  "build": {
+    "generator": "Visual Studio 18 2026",
+    "cmakeArgs": [
+      "-DGGML_NATIVE=OFF",
+      "-DGGML_AVX=ON",
+      "-DGGML_AVX2=ON",
+      "-DGGML_FMA=ON",
+      "-DGGML_AVX512=OFF",
+      "-DGGML_AVX512_VBMI=OFF",
+      "-DGGML_AVX512_VNNI=OFF",
+      "-DGGML_AVX512_BF16=OFF",
+      "-DGGML_BLAS=OFF"
+    ]
+  },
+  "artifact": {
+    "name": "llama_cpp_python-0.3.30-py3-none-win_amd64.whl",
+    "size": 11923402,
+    "sha256": "5f71b1b88882f031d94fed2495b1e36e663b73f09106d305319c2ee211903a24"
+  }
+}

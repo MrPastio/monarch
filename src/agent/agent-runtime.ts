@@ -1,21 +1,33 @@
 import { createHash } from 'node:crypto';
+import path from 'node:path';
 import { createMonarchId, nowIso } from '../core/utils';
 import type { MonarchCapability, MonarchPermissionProfile } from '../core/contracts';
+import { supportsWorkspaceTaskLease } from '../core/capability-leases';
 import { AgentLoop } from './agent-loop';
 import type { AgentDecisionProvider } from './model-decision-provider';
 import type { AgentKernelExecutionAdapter } from './kernel-execution-adapter';
 import { createAgentBudgetUsage, normalizeAgentBudget } from './budget-manager';
 import { normalizeAgentGoal, type NormalizeAgentGoalInput } from './goal-normalizer';
 import { createInitialAgentPlan } from './plan-manager';
+import { createAgentCognitiveProfile } from './cognitive-profile';
+import { createAgentWorkingState } from './working-state';
 import type { AgentRuntimeAvailabilitySnapshot } from './runtime-availability';
 import {
+  AGENT_OBSERVATION_SCHEMA_VERSION,
+  AGENT_EXECUTION_PROFILE_SCHEMA_VERSION,
   AGENT_TASK_SCHEMA_VERSION,
   type AgentApproval,
   type AgentBudgetLimits,
+  type AgentDecisionModelPolicy,
+  type AgentEvidenceReference,
+  type AgentJsonValue,
+  type AgentObservation,
   type AgentTask,
   type AgentTaskCheckpoint,
   type AgentTaskEvent,
+  type AgentTaskExecutionProfile,
   type AgentTaskSource,
+  type AgentTaskSurface,
   type AgentTaskStore,
   type AgentTaskStoreCommit,
   type AgentTaskStoreListener,
@@ -46,6 +58,21 @@ export interface CreateAgentTaskInput extends NormalizeAgentGoalInput {
   clientRequestId?: string;
   budgets?: Partial<AgentBudgetLimits>;
   autoStart?: boolean;
+  actionApprovalPolicy?: 'kernel' | 'all-effects';
+  planningMode?: 'adaptive' | 'model-first';
+  decisionModelPolicy?: AgentDecisionModelPolicy;
+  /** Internal-only trusted execution profile supplied by a local surface. */
+  executionProfile?: AgentTaskExecutionProfile;
+  /** Bounded, explicitly untrusted observations available before the first model turn. */
+  initialObservations?: AgentTaskInitialObservationInput[];
+}
+
+export interface AgentTaskInitialObservationInput {
+  capabilityId: string;
+  summary: string;
+  structuredData?: AgentJsonValue;
+  evidence: AgentEvidenceReference[];
+  warnings?: string[];
 }
 
 export interface AgentTaskMessageInput {
@@ -64,6 +91,15 @@ export interface AgentApprovalResolutionInput {
   grantScope?: 'once' | 'task';
   requestId?: string;
   reason?: string;
+  actorSurface: AgentTaskSurface;
+  requireArm?: boolean;
+}
+
+export interface AgentApprovalArmInput {
+  canonicalProposalHash: string;
+  capabilityId: string;
+  actorSurface: AgentTaskSurface;
+  requestId?: string;
 }
 
 export interface MonarchAgentRuntimeOptions {
@@ -77,6 +113,7 @@ export interface MonarchAgentRuntimeOptions {
   availableCredentialRefs?: () => ReadonlySet<string>;
   runnerId?: string;
   runnerClaimTtlMs?: number;
+  decisionCycleBudgetMs?: number;
   autoRun?: boolean;
 }
 
@@ -106,6 +143,9 @@ export class MonarchAgentRuntime {
       ...(options.availableCredentialRefs ? { availableCredentialRefs: options.availableCredentialRefs } : {}),
       runnerId: options.runnerId || `agent_runner_${process.pid}`,
       runnerClaimTtlMs: this.runnerClaimTtlMs,
+      ...(options.decisionCycleBudgetMs !== undefined
+        ? { decisionCycleBudgetMs: options.decisionCycleBudgetMs }
+        : {}),
     });
   }
 
@@ -149,7 +189,11 @@ export class MonarchAgentRuntime {
       }
     }
     const createdAt = nowIso();
+    const initialObservations = normalizeInitialObservations(input.initialObservations, taskId, createdAt);
     const plan = createInitialAgentPlan(goal.normalizedObjective, createdAt);
+    const decisionModelPolicy = input.decisionModelPolicy
+      ? normalizeDecisionModelPolicy(input.decisionModelPolicy)
+      : undefined;
     const task: AgentTask = {
       schemaVersion: AGENT_TASK_SCHEMA_VERSION,
       id: taskId,
@@ -160,15 +204,38 @@ export class MonarchAgentRuntime {
       source: normalizedSource,
       ...(input.conversationId ? { conversationId: boundedId(input.conversationId, 'conversation') } : {}),
       ...(input.parentTaskId ? { parentTaskId: boundedId(input.parentTaskId, 'parent task') } : {}),
+      ...(input.actionApprovalPolicy ? { actionApprovalPolicy: normalizeActionApprovalPolicy(input.actionApprovalPolicy) } : {}),
+      ...(input.planningMode && input.planningMode !== 'adaptive'
+        ? { planningMode: normalizePlanningMode(input.planningMode) }
+        : {}),
+      ...(decisionModelPolicy
+        ? { decisionModelPolicy }
+        : {}),
+      ...(input.executionProfile
+        ? { executionProfile: normalizeExecutionProfile(input.executionProfile, normalizedSource.surface) }
+        : {}),
       goal,
       status: shouldAutoStart ? 'preparing' : 'created',
       plan,
       currentStepId: plan.steps[0]!.id,
+      cognitiveProfile: createAgentCognitiveProfile(decisionModelPolicy, createdAt),
+      workingState: createAgentWorkingState(
+        goal,
+        plan,
+        initialObservations.map((observation) => observation.id),
+        createdAt,
+      ),
       messages: [{
         id: createMonarchId('agent_message'), role: 'user', kind: 'request', createdAt,
         content: goal.originalRequest,
       }],
-      observations: [],
+      observations: initialObservations.map((observation) => ({
+        id: observation.id,
+        taskId,
+        status: observation.status,
+        summary: observation.summary,
+        occurredAt: observation.occurredAt,
+      })),
       artifacts: [],
       approvals: [],
       budgets,
@@ -185,11 +252,22 @@ export class MonarchAgentRuntime {
         events: [
           { type: 'task.created', payload: jsonObject({ source: task.source.surface }) },
           { type: 'plan.created', payload: jsonObject({ planId: plan.id, revision: plan.revision }) },
+          ...initialObservations.map((observation) => ({
+            type: 'observation.created' as const,
+            payload: jsonObject({
+              observationId: observation.id,
+              capabilityId: observation.capabilityId,
+              status: observation.status,
+              evidenceClass: 'model-generated',
+              inputObservation: true,
+            }),
+          })),
           ...(shouldAutoStart ? [{
             type: 'task.status.changed' as const,
             payload: jsonObject({ from: 'created', to: 'preparing', reason: 'auto-start' }),
           }] : []),
         ],
+        observations: initialObservations,
       });
     } catch (error) {
       if (input.clientRequestId && error instanceof AgentTaskStoreIdempotencyConflictError) {
@@ -245,6 +323,12 @@ export class MonarchAgentRuntime {
           : {}),
       },
       parentTaskId: original.task.id,
+      ...(original.task.decisionModelPolicy
+        ? { decisionModelPolicy: { ...original.task.decisionModelPolicy } }
+        : {}),
+      ...(original.task.executionProfile
+        ? { executionProfile: structuredClone(original.task.executionProfile) }
+        : {}),
       ...(input.clientRequestId
         ? { clientRequestId: boundedId(input.clientRequestId, 'client request') }
         : {}),
@@ -427,6 +511,82 @@ export class MonarchAgentRuntime {
     return commit.checkpoint;
   }
 
+  async armApproval(
+    taskId: string,
+    approvalId: string,
+    input: AgentApprovalArmInput,
+  ): Promise<AgentTaskCheckpoint> {
+    await this.ensureStarted();
+    const normalizedApprovalId = boundedId(approvalId, 'approval');
+    const requestId = input.requestId ? boundedId(input.requestId, 'approval arm request') : undefined;
+    const canonicalProposalHash = String(input.canonicalProposalHash || '').trim();
+    const capabilityId = String(input.capabilityId || '').trim();
+    const idempotencyPayload = jsonObject({
+      operation: 'arm-approval',
+      approvalId: normalizedApprovalId,
+      canonicalProposalHash,
+      capabilityId,
+      actorSurface: input.actorSurface,
+    });
+    try {
+      const commit = await this.mutate(taskId, (checkpoint) => {
+        const expectedSurface = approvalDecisionSurface(checkpoint.task.source.surface);
+        if (input.actorSurface !== expectedSurface) {
+          throw new AgentRuntimeError(
+            403,
+            'approval-surface-mismatch',
+            `Approval for ${checkpoint.task.source.surface} must be armed from ${expectedSurface}.`,
+          );
+        }
+        const index = checkpoint.approvals.findIndex((entry) => entry.id === normalizedApprovalId);
+        if (index < 0) throw new AgentRuntimeError(404, 'approval-not-found', 'Agent approval was not found.');
+        const current = checkpoint.approvals[index]!;
+        if (
+          current.status !== 'pending'
+          || checkpoint.task.status !== 'waiting-for-approval'
+          || checkpoint.task.activeApprovalId !== normalizedApprovalId
+          || current.canonicalProposalHash !== canonicalProposalHash
+          || current.capabilityId !== capabilityId
+          || checkpoint.task.pendingAction?.canonicalProposalHash !== canonicalProposalHash
+        ) {
+          throw new AgentRuntimeError(409, 'approval-binding-mismatch', 'Approval arm no longer matches the active proposal.');
+        }
+        const armedAt = nowIso();
+        const expiresAt = new Date(Math.min(
+          Date.parse(current.expiresAt || new Date(Date.now() + 8_000).toISOString()),
+          Date.now() + 8_000,
+        )).toISOString();
+        const armed: AgentApproval = {
+          ...current,
+          arm: {
+            canonicalProposalHash,
+            capabilityId,
+            armedAt,
+            expiresAt,
+            armedBySurface: input.actorSurface,
+          },
+        };
+        const approvals = [...checkpoint.approvals];
+        approvals[index] = armed;
+        return {
+          task: checkpoint.task,
+          approvals,
+          events: [{
+            type: 'approval.armed',
+            payload: jsonObject({ approvalId: normalizedApprovalId, canonicalProposalHash, capabilityId, expiresAt }),
+          }],
+          ...(requestId ? { clientRequestId: requestId, idempotencyPayload } : {}),
+        };
+      });
+      return commit.checkpoint;
+    } catch (error) {
+      if (error instanceof AgentTaskStoreIdempotencyConflictError) {
+        throw new AgentRuntimeError(409, 'approval-arm-request-reused', 'Approval arm requestId is already bound to another action.');
+      }
+      throw error;
+    }
+  }
+
   async resolveApproval(
     taskId: string,
     approvalId: string,
@@ -443,22 +603,48 @@ export class MonarchAgentRuntime {
       decision: input.decision,
       grantScope,
       reason: reason || null,
+      actorSurface: input.actorSurface || null,
+      requireArm: input.requireArm === true,
     });
     let commit: AgentTaskStoreCommit;
     try {
       commit = await this.mutate(taskId, (checkpoint) => {
+      const expectedSurface = approvalDecisionSurface(checkpoint.task.source.surface);
+      if (input.actorSurface !== expectedSurface) {
+        throw new AgentRuntimeError(
+          403,
+          'approval-surface-mismatch',
+          `Approval for ${checkpoint.task.source.surface} must be decided from ${expectedSurface}.`,
+        );
+      }
       const index = checkpoint.approvals.findIndex((entry) => entry.id === normalizedApprovalId);
       if (index < 0) throw new AgentRuntimeError(404, 'approval-not-found', 'Agent approval was not found.');
       const current = checkpoint.approvals[index]!;
+      const requiresArm = input.requireArm === true || current.purpose === 'owner-security-override';
+      if (input.decision === 'approve' && requiresArm) {
+        const arm = current.arm;
+        if (
+          !arm
+          || !input.actorSurface
+          || arm.armedBySurface !== input.actorSurface
+          || arm.canonicalProposalHash !== current.canonicalProposalHash
+          || arm.capabilityId !== current.capabilityId
+          || Date.parse(arm.expiresAt) <= Date.now()
+        ) {
+          throw new AgentRuntimeError(409, 'approval-arm-required', 'Sensitive approval must be armed again from the same surface.');
+        }
+      }
       if (
         input.decision === 'approve'
         && grantScope === 'task'
-        && EXACT_ONCE_APPROVAL_CAPABILITIES.has(current.capabilityId)
+        && (!supportsWorkspaceTaskLease(current.capabilityId)
+          || EXACT_ONCE_APPROVAL_CAPABILITIES.has(current.capabilityId)
+          || current.purpose === 'owner-security-override')
       ) {
         throw new AgentRuntimeError(
           409,
           'approval-scope-must-be-once',
-          'This destructive action requires a one-time approval for its exact target.',
+          'This capability does not support task-wide approval. Approve its exact action once.',
         );
       }
       if (current.status !== 'pending') {
@@ -493,6 +679,9 @@ export class MonarchAgentRuntime {
         || reference.status !== 'pending'
         || reference.capabilityId !== current.capabilityId
         || reference.canonicalProposalHash !== current.canonicalProposalHash
+        || reference.purpose !== current.purpose
+        || reference.policyDecisionHash !== current.policyDecisionHash
+        || reference.authorityTierAtRequest !== current.authorityTierAtRequest
       ) {
         throw new AgentRuntimeError(409, 'approval-binding-mismatch', 'Approval no longer matches the checkpointed action proposal.');
       }
@@ -554,6 +743,36 @@ export class MonarchAgentRuntime {
     return this.store.getTaskState(taskId);
   }
 
+  async discardTask(taskIdInput: string): Promise<boolean> {
+    await this.ensureStarted();
+    const taskId = boundedId(taskIdInput, 'task');
+    const checkpoint = await this.store.getTask(taskId);
+    if (!checkpoint) return false;
+    if (!isTerminal(checkpoint.task)) {
+      await this.cancel(taskId);
+      await this.waitForIdle(taskId);
+    }
+    const discard = this.store.discardTask;
+    if (!discard) {
+      throw new AgentRuntimeError(409, 'task-store-not-volatile', 'Only a volatile Agent task store can discard task history.');
+    }
+    this.controllers.delete(taskId);
+    this.running.delete(taskId);
+    return discard.call(this.store, taskId);
+  }
+
+  async discardAllTasks(): Promise<number> {
+    await this.ensureStarted();
+    if (!this.store.discardTask) {
+      throw new AgentRuntimeError(409, 'task-store-not-volatile', 'Only a volatile Agent task store can discard task history.');
+    }
+    let discarded = 0;
+    for (const task of await this.store.listTasks()) {
+      if (await this.discardTask(task.id)) discarded += 1;
+    }
+    return discarded;
+  }
+
   private schedule(taskId: string): Promise<AgentTask | null> {
     const existing = this.running.get(taskId);
     if (existing) return existing;
@@ -581,6 +800,7 @@ export class MonarchAgentRuntime {
   }
 
   private async recoverAndSchedule(): Promise<void> {
+    await this.store.reconcileLegacyCompletedPlans();
     await this.store.recoverExpiredClaims();
     const tasks = await this.store.listTasks();
     if (this.autoRun && this.started) {
@@ -722,19 +942,154 @@ function sameAgentTaskRequest(
   goal: AgentTask['goal'],
   source: AgentTaskSource,
   budgets: AgentBudgetLimits,
-  input: Pick<CreateAgentTaskInput, 'conversationId' | 'parentTaskId'>,
+  input: Pick<CreateAgentTaskInput, 'conversationId' | 'parentTaskId' | 'actionApprovalPolicy' | 'planningMode' | 'decisionModelPolicy' | 'executionProfile' | 'initialObservations'>,
   shouldAutoStart: boolean,
 ): boolean {
   const task = checkpoint.task;
   const originallyAutoStarted = checkpoint.events.some((event) => (
     event.type === 'task.status.changed' && event.payload?.reason === 'auto-start'
   ));
+  const expectedInitialObservations = normalizeInitialObservations(
+    input.initialObservations,
+    task.id,
+    checkpoint.task.createdAt,
+  );
   return stableJson(task.goal) === stableJson(goal)
     && stableJson(task.source) === stableJson(source)
     && stableJson(task.budgets) === stableJson(budgets)
     && (task.conversationId || '') === (input.conversationId || '')
     && (task.parentTaskId || '') === (input.parentTaskId || '')
+    && (task.actionApprovalPolicy || 'kernel') === (input.actionApprovalPolicy || 'kernel')
+    && (task.planningMode || 'adaptive') === (input.planningMode || 'adaptive')
+    && stableJson(task.decisionModelPolicy || null) === stableJson(
+      input.decisionModelPolicy ? normalizeDecisionModelPolicy(input.decisionModelPolicy) : null,
+    )
+    && stableJson(task.executionProfile || null) === stableJson(
+      input.executionProfile ? normalizeExecutionProfile(input.executionProfile, source.surface) : null,
+    )
+    && expectedInitialObservations.every((expected) => checkpoint.observations.some((actual) => (
+      actual.id === expected.id && stableJson(actual) === stableJson(expected)
+    )))
     && originallyAutoStarted === shouldAutoStart;
+}
+
+function normalizeActionApprovalPolicy(value: string): 'kernel' | 'all-effects' {
+  if (value !== 'kernel' && value !== 'all-effects') {
+    throw new AgentRuntimeError(400, 'invalid-action-approval-policy', 'Agent action approval policy is unsupported.');
+  }
+  return value;
+}
+
+function normalizePlanningMode(value: string): 'adaptive' | 'model-first' {
+  if (value !== 'adaptive' && value !== 'model-first') {
+    throw new AgentRuntimeError(400, 'invalid-planning-mode', 'Agent planning mode is unsupported.');
+  }
+  return value;
+}
+
+function normalizeDecisionModelPolicy(value: AgentDecisionModelPolicy): AgentDecisionModelPolicy {
+  const requestedRoleInput = String(value?.requestedRole || '');
+  const requestedRole = requestedRoleInput === 'gemma4-deepthinking' || requestedRoleInput === 'gemma4-31b'
+    ? 'qwen3.8-27b-pro'
+    : requestedRoleInput;
+  if (![
+    'gemma4-fast',
+    'gemma4-balanced',
+    'gemma4-deepthinking',
+    'gemma4-31b',
+    'qwen3.8-27b-pro',
+    'qwen3-coder-30b-a3b-instruct',
+    'deepseek-coder-v2-lite-instruct',
+  ].includes(requestedRole)) {
+    throw new AgentRuntimeError(400, 'invalid-decision-model-role', 'Agent decision model role is unsupported.');
+  }
+  if (value.selectionSource !== 'user-explicit' || value.fallback !== 'exact') {
+    throw new AgentRuntimeError(400, 'invalid-decision-model-policy', 'Agent decision model policy is unsupported.');
+  }
+  return {
+    requestedRole: requestedRole as AgentDecisionModelPolicy['requestedRole'],
+    selectionSource: 'user-explicit',
+    fallback: 'exact',
+  };
+}
+
+function normalizeExecutionProfile(
+  value: AgentTaskExecutionProfile,
+  surface: AgentTaskSurface,
+): AgentTaskExecutionProfile {
+  if (surface !== 'coder' || value?.schemaVersion !== AGENT_EXECUTION_PROFILE_SCHEMA_VERSION || value.kind !== 'coder-project') {
+    throw new AgentRuntimeError(400, 'invalid-execution-profile', 'Coder execution profiles are only valid for the trusted Coder surface.');
+  }
+  const projectId = boundedId(value.projectId, 'Coder project');
+  const projectRootInput = String(value.projectRoot || '').trim();
+  if (!/^[A-Za-z]:[\\/]/u.test(projectRootInput) || projectRootInput.length > 2_048) {
+    throw new AgentRuntimeError(400, 'invalid-execution-profile-root', 'Coder execution profile requires one exact absolute Windows project root.');
+  }
+  const profile = value.permissionProfile;
+  if (!profile || !['read-only', 'workspace-write', 'danger-full-access'].includes(profile.sandboxMode)
+    || !['on-request', 'never'].includes(profile.approvalPolicy)
+    || (profile.autonomyMode !== undefined
+      && !['guided', 'workspace-autonomous', 'full-local'].includes(profile.autonomyMode))) {
+    throw new AgentRuntimeError(400, 'invalid-execution-permission-profile', 'Coder execution permission profile is unsupported.');
+  }
+  return {
+    schemaVersion: AGENT_EXECUTION_PROFILE_SCHEMA_VERSION,
+    kind: 'coder-project',
+    projectId,
+    projectRoot: path.resolve(projectRootInput),
+    permissionProfile: {
+      sandboxMode: profile.sandboxMode,
+      approvalPolicy: profile.approvalPolicy,
+      ...(profile.autonomyMode ? { autonomyMode: profile.autonomyMode } : {}),
+    },
+  };
+}
+
+function normalizeInitialObservations(
+  input: AgentTaskInitialObservationInput[] | undefined,
+  taskId: string,
+  occurredAt: string,
+): AgentObservation[] {
+  if (!input?.length) return [];
+  if (input.length > 4) {
+    throw new AgentRuntimeError(400, 'too-many-initial-observations', 'At most four initial observations are allowed.');
+  }
+  return input.map((candidate, index) => {
+    const capabilityId = String(candidate.capabilityId || '').trim().slice(0, 200);
+    const summary = String(candidate.summary || '').trim().slice(0, 8_000);
+    if (!capabilityId || !summary) {
+      throw new AgentRuntimeError(400, 'invalid-initial-observation', 'Initial observations require capabilityId and summary.');
+    }
+    const evidence = Array.isArray(candidate.evidence) ? candidate.evidence : [];
+    if (evidence.length === 0 || evidence.length > 8 || evidence.some((entry) => entry.evidenceClass !== 'model-generated')) {
+      throw new AgentRuntimeError(
+        400,
+        'invalid-initial-observation-evidence',
+        'Initial observations require one to eight model-generated evidence references.',
+      );
+    }
+    const normalized = {
+      capabilityId,
+      summary,
+      ...(candidate.structuredData === undefined ? {} : { structuredData: candidate.structuredData }),
+      evidence,
+      warnings: (candidate.warnings || []).map((warning) => String(warning).trim().slice(0, 500)).filter(Boolean).slice(0, 8),
+    };
+    return {
+      schemaVersion: AGENT_OBSERVATION_SCHEMA_VERSION,
+      id: `agent_observation_${digest(`initial:${taskId}:${index}:${stableJson(normalized)}`).slice(0, 32)}`,
+      taskId,
+      capabilityId,
+      status: 'success',
+      summary,
+      ...(candidate.structuredData === undefined ? {} : { structuredData: candidate.structuredData }),
+      evidence: evidence.map((entry) => ({ ...entry })),
+      artifacts: [],
+      warnings: normalized.warnings,
+      retryable: false,
+      occurredAt,
+    };
+  });
 }
 
 function sortJson(value: unknown): unknown {
@@ -753,6 +1108,11 @@ function normalizeSource(input: AgentTaskSource): AgentTaskSource {
     ...(input.conversationId ? { conversationId: boundedId(input.conversationId, 'source conversation') } : {}),
     ...(input.remote !== undefined ? { remote: input.remote } : {}),
   };
+}
+
+function approvalDecisionSurface(source: AgentTaskSurface): AgentTaskSurface {
+  if (source === 'voice' || source === 'coder') return 'desktop';
+  return source;
 }
 
 function boundedId(value: string, label: string): string {

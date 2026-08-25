@@ -8,6 +8,8 @@ import type {
   MonarchModulePackage,
   MonarchRisk,
   MonarchRouteDecision,
+  MonarchActionGuardReaction,
+  MonarchAgentSecurityMode,
 } from '../../core';
 import path from 'node:path';
 import {
@@ -25,7 +27,6 @@ import {
 
 type SensorId = 'network' | 'devices' | 'persistence' | 'posture';
 type SecurityLevel = 'off' | 'minimal' | 'balanced' | 'strict' | 'maximum';
-type ModelConfirmationMode = 'adaptive' | 'always';
 
 export class SecurityModule implements MonarchModule {
   readonly manifest = securityManifest;
@@ -33,7 +34,8 @@ export class SecurityModule implements MonarchModule {
   private readonly agentGuard: AgentActionGuard;
   private securityLevel: SecurityLevel = 'balanced';
   private modelCommandsEnabled = true;
-  private modelConfirmationMode: ModelConfirmationMode = 'adaptive';
+  private actionGuardReaction: MonarchActionGuardReaction = 'guard';
+  private agentSecurityMode: MonarchAgentSecurityMode = 'guard';
 
   constructor(
     client = new SecurityClient(),
@@ -44,6 +46,13 @@ export class SecurityModule implements MonarchModule {
   }
 
   async activate(context: MonarchKernelContext): Promise<void> {
+    const defaultAgentSecurityMode: MonarchAgentSecurityMode = context.getPermissionProfile().sandboxMode === 'danger-full-access'
+      ? 'observe'
+      : 'guard';
+    // The local mode default belongs to the effective execution profile, not
+    // to Python availability. A missing Security helper must not silently turn
+    // Full Access back into the old Guard wall.
+    this.agentSecurityMode = defaultAgentSecurityMode;
     if (this.client.available) {
       try {
         const profile = firstJson(await this.client.profile());
@@ -53,12 +62,14 @@ export class SecurityModule implements MonarchModule {
       }
       try {
         const policy = firstJson(await this.client.modelPolicy());
-        const parsed = readModelCommandPolicy(policy);
+        const parsed = readModelCommandPolicy(policy, defaultAgentSecurityMode);
         this.modelCommandsEnabled = parsed.enabled;
-        this.modelConfirmationMode = parsed.confirmationMode;
+        this.actionGuardReaction = parsed.actionGuardReaction;
+        this.agentSecurityMode = parsed.agentSecurityMode;
       } catch {
         this.modelCommandsEnabled = true;
-        this.modelConfirmationMode = 'adaptive';
+        this.actionGuardReaction = 'guard';
+        this.agentSecurityMode = defaultAgentSecurityMode;
       }
     }
     await context.emit('security.activated', this.manifest.id, {
@@ -68,7 +79,9 @@ export class SecurityModule implements MonarchModule {
       available: this.client.available,
       securityLevel: this.securityLevel,
       modelCommandsEnabled: this.modelCommandsEnabled,
-      modelConfirmationMode: this.modelConfirmationMode,
+      actionGuardReaction: this.actionGuardReaction,
+      agentSecurityMode: this.agentSecurityMode,
+      modelConfirmationMode: legacyConfirmationMode(this.actionGuardReaction),
     });
   }
 
@@ -128,7 +141,7 @@ export class SecurityModule implements MonarchModule {
     }
 
     if (/(oscar|llm|модел).*(command|команд)|(?:command|команд).*(oscar|llm|модел)/i.test(lower)) {
-      const requestsChange = /(set|change|enable|disable|always|adaptive|установ|измен|включ|отключ|всегда|адаптив)/i.test(lower);
+      const requestsChange = /(set|change|enable|disable|always|adaptive|observe|guard|установ|измен|включ|отключ|всегда|адаптив|наблюд|защищ)/i.test(lower);
       if (requestsChange) {
         return {
           intentId: intent.id,
@@ -139,7 +152,11 @@ export class SecurityModule implements MonarchModule {
           permissionMode: 'confirm',
           input: {
             enabled: !/(disable|off|отключ|выключ)/i.test(lower),
-            confirmationMode: /(always|всегда|кажд)/i.test(lower) ? 'always' : 'adaptive',
+            actionGuardReaction: /(always|всегда|кажд)/i.test(lower)
+              ? 'confirm-all'
+              : /(observe|наблюд)/i.test(lower)
+                ? 'observe'
+                : 'guard',
           },
         };
       }
@@ -570,7 +587,18 @@ export class SecurityModule implements MonarchModule {
 
   private async status(context: MonarchKernelContext): Promise<MonarchExecutionResult> {
     const result = await this.client.status();
-    const payload = withAgentGuard(firstJson(result), this.agentGuard.snapshot());
+    const payload = {
+      ...withAgentGuard(firstJson(result), this.agentGuard.snapshot()),
+      agentSecurityMode: this.agentSecurityMode,
+      dangerLog: context.listEvents()
+        .filter((event) => event.type === 'security.danger.assessed' || event.type === 'security.danger.receipt')
+        .slice(-100)
+        .map((event) => ({
+          createdAt: event.createdAt,
+          type: event.type,
+          ...(event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {}),
+        })),
+    };
     await context.emit('security.status.checked', this.manifest.id, {
       running: readNestedBoolean(payload, 'running'),
     });
@@ -590,7 +618,10 @@ export class SecurityModule implements MonarchModule {
     if (!['off', 'minimal', 'balanced', 'strict', 'maximum'].includes(level)) {
       return { ok: false, summary: 'Unsupported Security strictness level.', error: 'invalid-security-level' };
     }
-    const result = await this.client.setProfile(level);
+    const result = await this.client.setProfile(
+      level,
+      level === 'off' ? readStringInput(input, 'pin') : '',
+    );
     if (!result.ok) return commandResult(result, 'Security profile update failed.', firstJson(result), this.runtimeMetadata());
     this.securityLevel = level;
     const payload = firstJson(result);
@@ -603,26 +634,39 @@ export class SecurityModule implements MonarchModule {
   private async getModelCommandPolicy(context: MonarchKernelContext): Promise<MonarchExecutionResult> {
     const result = await this.client.modelPolicy();
     const payload = firstJson(result);
-    const policy = readModelCommandPolicy(payload);
+    const policy = readModelCommandPolicy(payload, this.agentSecurityMode);
     this.modelCommandsEnabled = policy.enabled;
-    this.modelConfirmationMode = policy.confirmationMode;
-    await context.emit('security.model_policy.changed', this.manifest.id, { ...policy, readOnly: true });
+    this.actionGuardReaction = policy.actionGuardReaction;
+    await context.emit('security.model_policy.changed', this.manifest.id, {
+      ...policy,
+      modelConfirmationMode: legacyConfirmationMode(policy.actionGuardReaction),
+      readOnly: true,
+    });
     return commandResult(result, 'Oscar command security policy loaded.', payload, this.runtimeMetadata());
   }
 
   private async setModelCommandPolicy(input: unknown, context: MonarchKernelContext): Promise<MonarchExecutionResult> {
     const enabled = readBooleanInput(input, 'enabled', true);
-    const confirmationMode = readStringInput(input, 'confirmationMode') as ModelConfirmationMode;
-    if (!['adaptive', 'always'].includes(confirmationMode)) {
-      return { ok: false, summary: 'Unsupported model command confirmation mode.', error: 'invalid-model-policy' };
+    const agentSecurityMode = readAgentSecurityMode(input)
+      || legacySecurityMode(readActionGuardReaction(input))
+      || null;
+    if (!agentSecurityMode) {
+      return { ok: false, summary: 'Unsupported Action Guard reaction.', error: 'invalid-model-policy' };
     }
-    const result = await this.client.setModelPolicy({ enabled, confirmationMode });
+    const actionGuardReaction = legacyReaction(agentSecurityMode);
+    const result = await this.client.setModelPolicy({ enabled, actionGuardReaction, agentSecurityMode });
     const payload = firstJson(result);
     if (!result.ok) return commandResult(result, 'Oscar command security policy update failed.', payload, this.runtimeMetadata());
     this.modelCommandsEnabled = enabled;
-    this.modelConfirmationMode = confirmationMode;
-    await context.emit('security.model_policy.changed', this.manifest.id, { enabled, confirmationMode });
-    await context.audit('security', 'Oscar command security policy changed by user.', { enabled, confirmationMode }, 'warn');
+    this.actionGuardReaction = actionGuardReaction;
+    this.agentSecurityMode = agentSecurityMode;
+    await context.emit('security.model_policy.changed', this.manifest.id, {
+      enabled,
+      actionGuardReaction,
+      agentSecurityMode,
+      modelConfirmationMode: legacyConfirmationMode(actionGuardReaction),
+    });
+    await context.audit('security', 'Oscar Action Guard policy changed by user.', { enabled, actionGuardReaction, agentSecurityMode }, 'warn');
     return commandResult(result, 'Oscar command security policy changed.', payload, this.runtimeMetadata());
   }
 
@@ -1066,7 +1110,10 @@ export class SecurityModule implements MonarchModule {
     input: unknown,
     context: MonarchKernelContext
   ): Promise<MonarchExecutionResult> {
-    const result = await this.client.stop(readNumberInput(input, 'waitSeconds', 10, 0, 60));
+    const result = await this.client.stop(
+      readNumberInput(input, 'waitSeconds', 10, 0, 60),
+      readStringInput(input, 'pin'),
+    );
     const payload = firstJson(result);
     await context.emit('security.protection.changed', this.manifest.id, {
       action: 'stop',
@@ -1231,52 +1278,61 @@ export class SecurityModule implements MonarchModule {
     const actionRisk = readRiskInput(input, 'actionRisk');
     const requestedBy = readStringInput(input, 'requestedBy') || 'unknown';
     const modelProposed = readBooleanInput(input, 'modelProposed', false);
-
-    if (this.securityLevel === 'off') {
-      return {
-        ok: true,
-        summary: 'Security controller is disabled by the user profile.',
-        output: { payload: { ok: true, status: 'allowed', risk: 'low', report: 'Security profile is off; command control is observe-only.', reasons: [], evidenceCodes: ['profile.off'], decision: { action: 'allow', binding: 'user-profile' } } },
-      };
-    }
-    if (modelProposed && !this.modelCommandsEnabled) {
-      return {
-        ok: true,
-        summary: 'Oscar command proposal was blocked by the user model policy.',
-        output: { payload: { ok: false, status: 'blocked', risk: 'blocked', report: 'Команды Oscar отключены в настройках Security.', reasons: ['Пользователь отключил LLM-команды.'], evidenceCodes: ['model-policy.disabled'], decision: { action: 'block', binding: 'user-model-policy' } } },
-      };
-    }
+    const runtimeOwnedExactAction = readBooleanInput(input, 'runtimeOwnedExactAction', false);
+    const requestedAgentSecurityMode = readAgentSecurityMode(input);
+    const trustedActionContext = readObjectInput(input, 'trustedActionContext') || undefined;
 
     const localDecision = this.agentGuard.assess({
       intentText,
       actionModule,
       actionCapability,
+      capabilityRegistered: context.listCapabilities(actionModule)
+        .some((capability) => capability.id === actionCapability && capability.moduleId === actionModule),
       actionInput,
       actionRisk,
       requestedBy,
+      ...(trustedActionContext ? { trustedActionContext } : {}),
+      filesystemAuthority: context.getPermissionProfile().sandboxMode === 'danger-full-access'
+        ? 'full-local'
+        : 'workspace',
     });
-    if ((this.securityLevel === 'maximum' || this.modelConfirmationMode === 'always')
-      && modelProposed && localDecision.status === 'allowed') {
-      localDecision.ok = false;
-      localDecision.status = 'approval_required';
-      localDecision.risk = 'elevated';
-      localDecision.report = 'Security требует подтверждение каждой команды, предложенной Oscar.';
-      localDecision.reasons.push(this.securityLevel === 'maximum' ? 'Максимальная строгость активна.' : 'Включён режим «Всегда спрашивать».');
-      localDecision.evidenceCodes.push(this.securityLevel === 'maximum' ? 'profile.maximum.model-command' : 'model-policy.always-confirm');
-      localDecision.decision.action = 'require_confirmation';
-    }
-    await context.audit('security-agent-guard', 'Agent capability action reviewed.', {
-      moduleId: actionModule,
-      capabilityId: actionCapability,
-      actionRisk,
-      requestedBy,
-      status: localDecision.status,
-      evidenceCodes: localDecision.evidenceCodes,
-      inputHash: localDecision.inputHash,
-    }, localDecision.status === 'blocked' ? 'error' : localDecision.status === 'approval_required' ? 'warn' : 'info');
 
-    if (localDecision.status === 'blocked' || !this.client.available) {
-      return localControllerResult(localDecision, this.agentGuard.snapshot(), this.client.available);
+    if (modelProposed && !this.modelCommandsEnabled) {
+      const disabled = applyModelCommandsDisabled(localDecision, this.actionGuardReaction);
+      await recordActionGuardDecision(context, {
+        actionModule, actionCapability, actionRisk, requestedBy, modelProposed,
+      }, disabled);
+      return localControllerResult(disabled, this.agentGuard.snapshot(), this.client.available);
+    }
+
+    const exactComputerContext = actionModule === 'computer'
+      && trustedActionContext?.schemaVersion === 1
+      && trustedActionContext.sourceModuleId === 'computer';
+    const ordinaryLocalDeviceControl = actionRisk === 'device-control'
+      && (actionModule === 'device' || actionModule === 'computer');
+    if ((exactComputerContext || runtimeOwnedExactAction || ordinaryLocalDeviceControl) && noLlm) {
+      // The legacy Python controller treats every device-control atom as a
+      // generic script execution. The target-aware local Guard owns ordinary
+      // registered Device/Computer atoms, while security-profile changes and
+      // arbitrary execute capabilities still use the deeper controller path.
+      // Hard boundaries and Observe/Guard/Confirm All remain enforced here.
+      const payload = requestedAgentSecurityMode
+        ? applyAgentSecurityModeReadback(localDecision, requestedAgentSecurityMode)
+        : applyActionGuardReaction(localDecision, this.actionGuardReaction, modelProposed);
+      await recordActionGuardDecision(context, {
+        actionModule, actionCapability, actionRisk, requestedBy, modelProposed,
+      }, payload);
+      return localControllerResult(payload, this.agentGuard.snapshot(), this.client.available);
+    }
+
+    if (localDecision.disposition === 'hard-deny' || !this.client.available) {
+      const payload = requestedAgentSecurityMode
+        ? applyAgentSecurityModeReadback(localDecision, requestedAgentSecurityMode)
+        : applyActionGuardReaction(localDecision, this.actionGuardReaction, modelProposed);
+      await recordActionGuardDecision(context, {
+        actionModule, actionCapability, actionRisk, requestedBy, modelProposed,
+      }, payload);
+      return localControllerResult(payload, this.agentGuard.snapshot(), this.client.available);
     }
 
     const result = await this.client.checkAction({
@@ -1284,6 +1340,7 @@ export class SecurityModule implements MonarchModule {
       actionModule,
       actionCapability,
       actionInput,
+      actionRisk,
       passkey,
       noLlm,
       // Do not trust confirmation facts embedded in controller input. The
@@ -1291,7 +1348,13 @@ export class SecurityModule implements MonarchModule {
       // the original confirmed Monarch request, not from this action payload.
       monarchConfirmed: false,
     });
-    const payload = mergeControllerDecisions(localDecision, firstJson(result));
+    const mergedDecision = mergeControllerDecisions(localDecision, firstJson(result));
+    const payload = requestedAgentSecurityMode
+      ? applyAgentSecurityModeReadback(mergedDecision, requestedAgentSecurityMode)
+      : applyActionGuardReaction(mergedDecision, this.actionGuardReaction, modelProposed);
+    await recordActionGuardDecision(context, {
+      actionModule, actionCapability, actionRisk, requestedBy, modelProposed,
+    }, payload);
     return commandResult(
       result,
       'Monarch Security Agent Guard action check complete.',
@@ -1333,7 +1396,7 @@ export class SecurityModule implements MonarchModule {
 }
 
 function localControllerResult(
-  decision: AgentGuardDecision,
+  decision: Record<string, unknown>,
   snapshot: AgentGuardSnapshot,
   pythonAvailable: boolean,
 ): MonarchExecutionResult {
@@ -1353,6 +1416,161 @@ function localControllerResult(
   };
 }
 
+function applyModelCommandsDisabled(
+  local: AgentGuardDecision,
+  reaction: MonarchActionGuardReaction,
+): Record<string, unknown> {
+  return {
+    ...local,
+    ok: false,
+    status: 'blocked',
+    risk: 'blocked',
+    report: 'Команды Oscar отключены в настройках Security.',
+    reasons: Array.from(new Set([...local.reasons, 'Пользователь отключил LLM-команды.'])),
+    evidenceCodes: Array.from(new Set([...local.evidenceCodes, 'model-policy.disabled'])),
+    disposition: 'hard-deny',
+    actionGuardReaction: reaction,
+    decision: { action: 'block', binding: 'user-model-policy' },
+  };
+}
+
+function applyActionGuardReaction(
+  source: AgentGuardDecision | Record<string, unknown>,
+  reaction: MonarchActionGuardReaction,
+  modelProposed: boolean,
+): Record<string, unknown> {
+  const payload = { ...source } as Record<string, unknown>;
+  const status = String(payload.status || 'blocked');
+  const disposition = payload.disposition === 'informational'
+    || payload.disposition === 'owner-confirmable'
+    || payload.disposition === 'hard-deny'
+    ? payload.disposition
+    : 'hard-deny';
+  const evidenceCodes = readStringList(payload.evidenceCodes);
+  const decision = payload.decision && typeof payload.decision === 'object'
+    ? payload.decision as Record<string, unknown>
+    : {};
+
+  if (disposition === 'hard-deny') {
+    return {
+      ...payload,
+      actionGuardReaction: reaction,
+      evidenceCodes: Array.from(new Set([...evidenceCodes, 'action-guard.hard-boundary'])),
+    };
+  }
+
+  if (reaction === 'observe') {
+    return {
+      ...payload,
+      ok: true,
+      status: 'allowed',
+      risk: status === 'allowed' ? payload.risk || 'low' : 'elevated',
+      report: status === 'allowed'
+        ? String(payload.report || 'Action Guard recorded the exact action.')
+        : 'Action Guard recorded a risk advisory; Observe mode did not veto this ordinary action.',
+      disposition: 'informational',
+      actionGuardReaction: reaction,
+      observedDecision: {
+        status,
+        disposition,
+        report: String(payload.report || ''),
+      },
+      evidenceCodes: Array.from(new Set([...evidenceCodes, 'action-guard.observe'])),
+      decision: { ...decision, action: 'allow' },
+    };
+  }
+
+  if (reaction === 'confirm-all' && modelProposed && status === 'allowed') {
+    return {
+      ...payload,
+      ok: false,
+      status: 'approval_required',
+      risk: 'elevated',
+      report: 'Security требует подтверждение каждого точного действия, предложенного Oscar.',
+      reasons: Array.from(new Set([...readStringList(payload.reasons), 'Включена реакция «Подтверждать всё».'])),
+      evidenceCodes: Array.from(new Set([...evidenceCodes, 'action-guard.confirm-all'])),
+      disposition: 'owner-confirmable',
+      actionGuardReaction: reaction,
+      decision: { ...decision, action: 'require_confirmation' },
+    };
+  }
+
+  return {
+    ...payload,
+    actionGuardReaction: reaction,
+    evidenceCodes: Array.from(new Set([...evidenceCodes, 'action-guard.guard'])),
+  };
+}
+
+function applyAgentSecurityModeReadback(
+  source: AgentGuardDecision | Record<string, unknown>,
+  mode: MonarchAgentSecurityMode,
+): Record<string, unknown> {
+  const payload = { ...source } as Record<string, unknown>;
+  const disposition = payload.disposition === 'informational'
+    || payload.disposition === 'owner-confirmable'
+    || payload.disposition === 'hard-deny'
+    ? payload.disposition
+    : 'hard-deny';
+  const evidenceCodes = readStringList(payload.evidenceCodes);
+  if (disposition === 'hard-deny') {
+    return {
+      ...payload,
+      agentSecurityMode: mode,
+      evidenceCodes: Array.from(new Set([...evidenceCodes, 'action-guard.hard-boundary'])),
+    };
+  }
+  return {
+    ...payload,
+    ok: true,
+    status: 'allowed',
+    risk: payload.risk || 'elevated',
+    report: 'Security completed enhanced deterministic readback without interrupting the action.',
+    disposition: 'informational',
+    agentSecurityMode: mode,
+    observedDecision: {
+      status: String(payload.status || 'unknown'),
+      disposition,
+      report: String(payload.report || ''),
+    },
+    evidenceCodes: Array.from(new Set([...evidenceCodes, 'danger-score.enhanced-readback'])),
+    decision: { action: 'allow', binding: 'danger-score-enhanced-readback' },
+  };
+}
+
+async function recordActionGuardDecision(
+  context: MonarchKernelContext,
+  action: {
+    actionModule: string;
+    actionCapability: string;
+    actionRisk: MonarchRisk;
+    requestedBy: string;
+    modelProposed: boolean;
+  },
+  decision: Record<string, unknown>,
+): Promise<void> {
+  const status = String(decision.status || 'blocked');
+  const payload = {
+    moduleId: action.actionModule,
+    capabilityId: action.actionCapability,
+    actionRisk: action.actionRisk,
+    requestedBy: action.requestedBy,
+    modelProposed: action.modelProposed,
+    actionGuardReaction: decision.actionGuardReaction,
+    status,
+    disposition: decision.disposition,
+    evidenceCodes: readStringList(decision.evidenceCodes),
+    inputHash: typeof decision.inputHash === 'string' ? decision.inputHash : '',
+  };
+  await context.emit('security.action.reviewed', 'security', payload);
+  await context.audit(
+    'security-agent-guard',
+    'Agent capability action reviewed.',
+    payload,
+    status === 'blocked' ? 'error' : status === 'approval_required' ? 'warn' : 'info',
+  );
+}
+
 function mergeControllerDecisions(local: AgentGuardDecision, remote: unknown): Record<string, unknown> {
   if (!remote || typeof remote !== 'object') {
     return {
@@ -1362,6 +1580,7 @@ function mergeControllerDecisions(local: AgentGuardDecision, remote: unknown): R
       report: 'Python controller returned an invalid response; the action is blocked.',
       reasons: ['Invalid Python controller response.'],
       evidenceCodes: local.evidenceCodes,
+      disposition: 'hard-deny',
       inputHash: local.inputHash,
       decision: { action: 'block', binding: local.decision.binding },
       controller: 'hybrid',
@@ -1373,6 +1592,11 @@ function mergeControllerDecisions(local: AgentGuardDecision, remote: unknown): R
     : remoteStatus === 'approval_required' ? 2
       : /allowed/i.test(remoteStatus) ? 1 : 3;
   const localRank = local.status === 'blocked' ? 3 : local.status === 'approval_required' ? 2 : 1;
+  const remoteDisposition = remoteRank === 3 ? 'hard-deny'
+    : remoteRank === 2 ? 'owner-confirmable'
+      : payload.disposition === 'hard-deny' ? 'hard-deny'
+        : payload.disposition === 'owner-confirmable' ? 'owner-confirmable'
+          : 'informational';
   if (localRank >= remoteRank && local.status !== 'allowed') {
     return {
       ...payload,
@@ -1381,18 +1605,20 @@ function mergeControllerDecisions(local: AgentGuardDecision, remote: unknown): R
         ...local.reasons,
         ...readStringList(payload.reasons),
       ])),
+      disposition: stricterDisposition(local.disposition, remoteDisposition),
       controller: 'hybrid',
     };
   }
   return {
     ...payload,
-    evidenceCodes: local.evidenceCodes,
+    evidenceCodes: Array.from(new Set([...local.evidenceCodes, ...readStringList(payload.evidenceCodes)])),
+    disposition: stricterDisposition(local.disposition, remoteDisposition),
     inputHash: local.inputHash,
     controller: 'hybrid',
   };
 }
 
-function withAgentGuard(payload: unknown, snapshot: AgentGuardSnapshot): unknown {
+function withAgentGuard(payload: unknown, snapshot: AgentGuardSnapshot): Record<string, unknown> {
   return payload && typeof payload === 'object' && !Array.isArray(payload)
     ? { ...(payload as Record<string, unknown>), agentGuard: snapshot }
     : { runtime: payload, agentGuard: snapshot };
@@ -1473,6 +1699,14 @@ function mentionsSecurity(text: string): boolean {
   const weakSecurityCue = /\b(?:security|protect|virus|threat|incident|emergency|audit|integrity|scan)\b|безопас|защит|вирус|угроз|инцидент|экстрен|скан|аудит|целост/i;
   const technicalTarget = /\b(?:monarch|oscar|windows|computer|host|system|file|process|network|port|device|code|repo(?:sitory)?)\b|монарх|оскар|windows|компьютер|хост|систем|файл|процесс|сеть|порт|устройств|код|репозитор/i;
   return weakSecurityCue.test(text) && technicalTarget.test(text);
+}
+
+function stricterDisposition(
+  left: AgentGuardDecision['disposition'],
+  right: AgentGuardDecision['disposition'],
+): AgentGuardDecision['disposition'] {
+  const rank = { informational: 0, 'owner-confirmable': 1, 'hard-deny': 2 } as const;
+  return rank[right] > rank[left] ? right : left;
 }
 
 function extractSensor(text: string): SensorId | '' {
@@ -1622,16 +1856,65 @@ function readSecurityLevel(payload: unknown): SecurityLevel | null {
     : null;
 }
 
-function readModelCommandPolicy(payload: unknown): { enabled: boolean; confirmationMode: ModelConfirmationMode } {
-  if (!payload || typeof payload !== 'object') return { enabled: true, confirmationMode: 'adaptive' };
+function readModelCommandPolicy(
+  payload: unknown,
+  fallbackMode: MonarchAgentSecurityMode = 'guard',
+): {
+  enabled: boolean;
+  actionGuardReaction: MonarchActionGuardReaction;
+  agentSecurityMode: MonarchAgentSecurityMode;
+} {
+  if (!payload || typeof payload !== 'object') return {
+    enabled: true,
+    actionGuardReaction: legacyReaction(fallbackMode),
+    agentSecurityMode: fallbackMode,
+  };
   const record = payload as Record<string, unknown>;
   const policy = record.model_policy && typeof record.model_policy === 'object'
     ? record.model_policy as Record<string, unknown>
     : record;
+  const agentSecurityMode = policy.agent_security_mode === 'off'
+    || policy.agent_security_mode === 'observe'
+    || policy.agent_security_mode === 'guard'
+    || policy.agent_security_mode === 'strict'
+    ? policy.agent_security_mode
+    : fallbackMode;
   return {
     enabled: policy.enabled !== false,
-    confirmationMode: policy.confirmation_mode === 'always' ? 'always' : 'adaptive',
+    actionGuardReaction: legacyReaction(agentSecurityMode),
+    agentSecurityMode,
   };
+}
+
+function readAgentSecurityMode(input: unknown): MonarchAgentSecurityMode | null {
+  const mode = readStringInput(input, 'agentSecurityMode');
+  return mode === 'off' || mode === 'observe' || mode === 'guard' || mode === 'strict' ? mode : null;
+}
+
+function legacyReaction(mode: MonarchAgentSecurityMode): MonarchActionGuardReaction {
+  if (mode === 'strict') return 'confirm-all';
+  if (mode === 'off' || mode === 'observe') return 'observe';
+  return 'guard';
+}
+
+function legacySecurityMode(reaction: MonarchActionGuardReaction | null): MonarchAgentSecurityMode | null {
+  if (reaction === 'observe') return 'observe';
+  if (reaction === 'guard') return 'guard';
+  if (reaction === 'confirm-all') return 'strict';
+  return null;
+}
+
+function readActionGuardReaction(input: unknown): MonarchActionGuardReaction | null {
+  const reaction = readStringInput(input, 'actionGuardReaction');
+  if (reaction === 'observe' || reaction === 'guard' || reaction === 'confirm-all') return reaction;
+  const legacy = readStringInput(input, 'confirmationMode');
+  if (legacy === 'always') return 'confirm-all';
+  if (legacy === 'adaptive') return 'guard';
+  return null;
+}
+
+function legacyConfirmationMode(reaction: MonarchActionGuardReaction): 'adaptive' | 'always' {
+  return reaction === 'confirm-all' ? 'always' : 'adaptive';
 }
 
 function extractSecurityLevel(text: string): SecurityLevel | null {

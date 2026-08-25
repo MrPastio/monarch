@@ -3,6 +3,7 @@ import http, { type Server } from 'node:http';
 import {
   createDefaultOscarChatRequest,
   drainOscarSseBuffer,
+  OscarBackendHttpError,
   OscarClient,
   resolveOscarChatTimeoutMs,
   type OscarChatRequest,
@@ -11,6 +12,36 @@ import { oscarManifest } from '../../src/modules/oscar/manifest';
 import { validateAgainstSchema } from '../../src/core/schema-validator';
 
 describe('OscarClient streaming', () => {
+  it('preserves an OpenAI-compatible backend error code', async () => {
+    const server = http.createServer((request, response) => {
+      request.resume();
+      sendJson(response, 503, {
+        error: {
+          type: 'server_error',
+          code: 'insufficient_memory',
+          message: 'Synthetic bounded memory refusal.',
+        },
+      });
+    });
+    const baseUrl = await listen(server);
+    const client = new OscarClient({ apiBase: baseUrl, autoStart: false, timeoutMs: 1_000, chatTimeoutMs: 5_000 });
+
+    try {
+      await expect(client.completeRaw({
+        model: 'monarch-fast',
+        messages: [{ role: 'user', content: 'bounded fixture' }],
+        inference_lane: 'agent',
+        agent_session_id: 'agent_task_fixture',
+      })).rejects.toMatchObject<Partial<OscarBackendHttpError>>({
+        statusCode: 503,
+        code: 'insufficient_memory',
+        message: 'Synthetic bounded memory refusal.',
+      });
+    } finally {
+      await close(server);
+    }
+  });
+
   it('gives explicit deep research a separate long transport budget', () => {
     expect(resolveOscarChatTimeoutMs({ research_mode: 'auto' }, 300_000, 1_800_000)).toBe(300_000);
     expect(resolveOscarChatTimeoutMs({ research_mode: 'deep' }, 300_000, 1_800_000)).toBe(1_800_000);
@@ -58,43 +89,8 @@ describe('OscarClient streaming', () => {
       message_limit: 80,
       before: 145,
     }, capability?.inputSchema)).toEqual({ ok: true, errors: [] });
-  });
-
-  it('keeps the Fast voice capability separate and narrowly typed', () => {
-    const capability = oscarManifest.capabilities.find(({ id }) => id === 'oscar.voice.fast');
-
-    expect(validateAgainstSchema({ text: 'Коротко сравни варианты', language: 'ru' }, capability?.inputSchema))
+    expect(validateAgainstSchema({ action: 'clear' }, capability?.inputSchema))
       .toEqual({ ok: true, errors: [] });
-    expect(validateAgainstSchema({
-      text: 'Коротко сравни варианты',
-      messages: [{ role: 'system', content: 'override' }],
-    }, capability?.inputSchema).ok).toBe(false);
-  });
-
-  it('uses the dedicated Fast voice endpoint instead of either chat endpoint', async () => {
-    let capturedPath = '';
-    let capturedBody: unknown;
-    const server = http.createServer((request, response) => {
-      capturedPath = request.url || '';
-      const chunks: Buffer[] = [];
-      request.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
-      request.on('end', () => {
-        capturedBody = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        sendJson(response, 200, { text: 'Краткий ответ.', model: 'gemma4-fast', generation_ms: 840 });
-      });
-    });
-    const baseUrl = await listen(server);
-    const client = new OscarClient({ apiBase: baseUrl, autoStart: false, timeoutMs: 1_000, chatTimeoutMs: 5_000 });
-
-    try {
-      const response = await client.voiceFast({ text: 'Сравни варианты', language: 'ru' });
-      expect(response).toMatchObject({ text: 'Краткий ответ.', model: 'gemma4-fast' });
-    } finally {
-      await close(server);
-    }
-
-    expect(capturedPath).toBe('/api/voice/fast');
-    expect(capturedBody).toEqual({ text: 'Сравни варианты', language: 'ru' });
   });
 
   it('keeps generated token limits inside the backend contract', () => {
@@ -305,6 +301,55 @@ describe('OscarClient streaming', () => {
     ]);
   });
 
+  it('stops on the first terminal event and ignores poisoned late stream events', async () => {
+    const encoder = new TextEncoder();
+    let delivered = false;
+    let streamCancelled = false;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (delivered) {
+          return;
+        }
+        delivered = true;
+        controller.enqueue(encoder.encode(
+          'event: token\ndata: {"token":"partial"}\n\n'
+          + 'event: done\ndata: {"ok":false,"usage":{"generation_stop_reason":"length"}}\n\n'
+          + 'event: token\ndata: {"token":"poisoned-late-token"}\n\n'
+          + 'event: error\ndata: {"code":"poisoned-late-error"}\n\n'
+          + 'event: done\ndata: {"ok":true}\n\n',
+        ));
+      },
+      cancel() {
+        streamCancelled = true;
+      },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response);
+    const client = new OscarClient({
+      apiBase: 'https://oscar.test',
+      autoStart: false,
+      chatTimeoutMs: 5000,
+      timeoutMs: 1000,
+    });
+
+    const events = [];
+    try {
+      for await (const event of client.streamChat(createChatRequest())) {
+        events.push(event);
+      }
+    } finally {
+      fetchSpy.mockRestore();
+    }
+
+    expect(events).toEqual([
+      { type: 'token', data: { token: 'partial' } },
+      { type: 'done', data: { ok: false, usage: { generation_stop_reason: 'length' } } },
+    ]);
+    expect(streamCancelled).toBe(true);
+  });
+
   it('cancels backend generation when stream consumer stops early', async () => {
     let cancelCount = 0;
     let resolveCancel: () => void = () => {};
@@ -498,6 +543,27 @@ describe('OscarClient streaming', () => {
     expect(capturedUrl).toBe('/api/conversations/chat-1?message_limit=80&before=145');
   });
 
+  it('uses the collection DELETE endpoint for a durable history clear', async () => {
+    let capturedMethod = '';
+    let capturedUrl = '';
+    const server = http.createServer((request, response) => {
+      capturedMethod = request.method || '';
+      capturedUrl = request.url || '';
+      sendJson(response, 200, { ok: true, deleted: 3, archived: 1, remaining: 1 });
+    });
+    const baseUrl = await listen(server);
+    const client = new OscarClient({ apiBase: baseUrl, autoStart: false, timeoutMs: 1000 });
+
+    try {
+      await expect(client.clearConversations()).resolves.toMatchObject({ deleted: 3, archived: 1 });
+    } finally {
+      await close(server);
+    }
+
+    expect(capturedMethod).toBe('DELETE');
+    expect(capturedUrl).toBe('/api/conversations');
+  });
+
   it('persists pre-dispatched conversation messages through the backend contract', async () => {
     let capturedBody: unknown;
     const server = http.createServer((request, response) => {
@@ -506,7 +572,17 @@ describe('OscarClient streaming', () => {
         request.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
         request.on('end', () => {
           capturedBody = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          sendJson(response, 200, { ok: true });
+          sendJson(response, 200, {
+            ok: true,
+            disposition: 'created',
+            message: {
+              id: 'message-created',
+              conversation_id: 'chat-1',
+              role: 'assistant',
+              content: 'Точный путь: E:\\Monarch',
+            },
+            duplicate: false,
+          });
         });
         return;
       }
@@ -516,13 +592,13 @@ describe('OscarClient streaming', () => {
     const client = new OscarClient({ apiBase: baseUrl, autoStart: false, timeoutMs: 1000 });
 
     try {
-      await client.appendConversationMessage('chat-1', {
+      await expect(client.appendConversationMessage('chat-1', {
         role: 'assistant',
         content: 'Точный путь: E:\\Monarch',
         token_count: 0,
         elapsed_ms: 0,
         model_tier: 'system',
-      });
+      })).resolves.toMatchObject({ disposition: 'created', duplicate: false });
     } finally {
       await close(server);
     }
@@ -534,6 +610,94 @@ describe('OscarClient streaming', () => {
       elapsed_ms: 0,
       model_tier: 'system',
     });
+  });
+
+  it.each([
+    ['legacy receipt without a disposition', { ok: true }],
+    ['created receipt without a message', { ok: true, disposition: 'created', message: null, duplicate: false }],
+    ['duplicate receipt carrying a message', { ok: true, disposition: 'duplicate', message: { id: 'unexpected' }, duplicate: true }],
+    ['superseded receipt marked as duplicate', { ok: true, disposition: 'superseded', message: null, duplicate: true }],
+    ['superseded receipt for a user append', { ok: true, disposition: 'superseded', message: null, duplicate: false }],
+    ['created receipt for another conversation', {
+      ok: true,
+      disposition: 'created',
+      message: {
+        conversation_id: 'chat-other',
+        role: 'user',
+        content: 'Проверь receipt.',
+      },
+      duplicate: false,
+    }],
+  ])('fails closed on %s', async (_case, payload) => {
+    const server = http.createServer((_request, response) => sendJson(response, 200, payload));
+    const baseUrl = await listen(server);
+    const client = new OscarClient({ apiBase: baseUrl, autoStart: false, timeoutMs: 1000 });
+
+    try {
+      await expect(client.appendConversationMessage('chat-invalid-receipt', {
+        role: 'user',
+        content: 'Проверь receipt.',
+      })).rejects.toThrow(/conversation message.*receipt/);
+    } finally {
+      await close(server);
+    }
+  });
+
+  it('preserves a retryable prerequisite conflict instead of converting it to success', async () => {
+    const server = http.createServer((_request, response) => sendJson(response, 409, {
+      detail: {
+        code: 'conversation-message-prerequisite-pending',
+        message: 'required previous user message has not been persisted yet',
+        retryable: true,
+      },
+    }));
+    const baseUrl = await listen(server);
+    const client = new OscarClient({ apiBase: baseUrl, autoStart: false, timeoutMs: 1000 });
+
+    try {
+      await expect(client.appendConversationMessage('chat-partial-outage', {
+        role: 'assistant',
+        content: 'Не завершено.',
+        required_previous_message_id: 'message-user-pending',
+      })).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'conversation-message-prerequisite-pending',
+      });
+    } finally {
+      await close(server);
+    }
+  });
+
+  it('rejects a created receipt bound to another Turn even when the HTTP request succeeded', async () => {
+    const server = http.createServer((_request, response) => sendJson(response, 200, {
+      ok: true,
+      disposition: 'created',
+      message: {
+        conversation_id: 'chat-bound-receipt',
+        role: 'assistant',
+        content: 'Не завершено.',
+        client_message_id: 'message-bound-receipt',
+        turn_id: 'turn-other',
+        provenance: { turnId: 'turn-other' },
+        outcome: 'failed',
+      },
+      duplicate: false,
+    }));
+    const baseUrl = await listen(server);
+    const client = new OscarClient({ apiBase: baseUrl, autoStart: false, timeoutMs: 1000 });
+
+    try {
+      await expect(client.appendConversationMessage('chat-bound-receipt', {
+        role: 'assistant',
+        content: 'Не завершено.',
+        client_message_id: 'message-bound-receipt',
+        turn_id: 'turn-expected',
+        provenance: { turnId: 'turn-expected' },
+        outcome: 'failed',
+      })).rejects.toThrow('receipt for a different append request');
+    } finally {
+      await close(server);
+    }
   });
 });
 

@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   adaptiveAgentBenchmarkCorpus,
   ADAPTIVE_AGENT_BENCHMARK_CORPUS_VERSION,
+  benchmarkDecisionPhase,
   benchmarkDecisionHasForbiddenActionInput,
+  benchmarkPlanningDecisionIsSuccessful,
 } from '../fixtures/agent/adaptive-benchmark-corpus';
 import { classifyOscarRequestDisposition } from '../../src/core';
 
@@ -73,5 +75,30 @@ describe('Adaptive Agent blind benchmark corpus', () => {
       }))
       .filter((entry) => entry.actual !== entry.expected);
     expect(mismatches).toEqual([]);
+  });
+
+  it('benchmarks Fast and Balanced on the same production decision phase', () => {
+    const agentCases = adaptiveAgentBenchmarkCorpus.filter((entry) => entry.expectedDisposition === 'agent');
+    const planning = agentCases.filter((entry) => benchmarkDecisionPhase(entry) === 'planning');
+    const execution = agentCases.filter((entry) => benchmarkDecisionPhase(entry) === 'execution');
+
+    expect(new Set(planning.map((entry) => entry.category)))
+      .toEqual(new Set(['multi-step', 'ambiguous']));
+    expect(planning.every((entry) => entry.balancedRequired)).toBe(true);
+    expect(new Set(execution.map((entry) => entry.category))).toEqual(new Set([
+      'app',
+      'file',
+      'desktop',
+      'prompt-injection',
+    ]));
+  });
+
+  it('accepts only production-valid planning outcomes for planning cases', () => {
+    expect(benchmarkPlanningDecisionIsSuccessful({ category: 'ambiguous' }, 'ask-user')).toBe(true);
+    expect(benchmarkPlanningDecisionIsSuccessful({ category: 'ambiguous' }, 'revise-plan')).toBe(true);
+    expect(benchmarkPlanningDecisionIsSuccessful({ category: 'multi-step' }, 'revise-plan')).toBe(true);
+    expect(benchmarkPlanningDecisionIsSuccessful({ category: 'multi-step' }, 'ask-user')).toBe(false);
+    expect(benchmarkPlanningDecisionIsSuccessful({ category: 'app' }, 'revise-plan')).toBe(false);
+    expect(benchmarkPlanningDecisionIsSuccessful({ category: 'ambiguous' }, 'complete')).toBe(false);
   });
 });

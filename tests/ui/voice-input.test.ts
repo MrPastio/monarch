@@ -27,6 +27,7 @@ class FakeElement {
   private attributes = new Map<string, string>();
   private listeners = new Map<string, Array<(event: Event) => void>>();
   private classes = new Set<string>();
+  requestSubmit = vi.fn(() => this.dispatchEvent(new Event('submit')));
 
   classList = {
     add: (...names: string[]) => {
@@ -467,6 +468,88 @@ describe('voice input helpers', () => {
     expect(harness.cancelButton.disabled).toBe(true);
     expect(harness.cancelButton.getAttribute('aria-hidden')).toBe('true');
     expect(harness.controller?.isListening()).toBe(false);
+  });
+
+  it('keeps dictation auto-send off by default after a manual microphone stop', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const harness = createCompletingHarness(vi.fn(async () => 'готовый черновик'), {
+      getInputPreferences: () => ({ schemaVersion: 1, autoSendAfterDictation: false }),
+    });
+
+    harness.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+    vi.setSystemTime(1_700);
+    harness.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+
+    expect(harness.input.value).toBe('Готовый черновик.');
+    expect(harness.form.requestSubmit).not.toHaveBeenCalled();
+  });
+
+  it('auto-sends the exact merged draft once after a successful manual stop', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const harness = createCompletingHarness(vi.fn(async () => 'добавь тесты'), {
+      getInputPreferences: () => ({ schemaVersion: 1, autoSendAfterDictation: true }),
+    });
+    harness.input.value = 'Пожалуйста,';
+
+    harness.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+    vi.setSystemTime(1_700);
+    harness.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+
+    expect(harness.input.value).toBe('Пожалуйста, добавь тесты.');
+    expect(harness.form.requestSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it('never auto-sends a programmatic, timed-out, busy, or voice-mode transcript', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const enabled = () => ({ schemaVersion: 1, autoSendAfterDictation: true });
+
+    const programmatic = createCompletingHarness(vi.fn(async () => 'не отправляй'), { getInputPreferences: enabled });
+    programmatic.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+    vi.setSystemTime(1_700);
+    programmatic.controller?.stop();
+    await flushPromises();
+    expect(programmatic.form.requestSubmit).not.toHaveBeenCalled();
+
+    vi.setSystemTime(10_000);
+    const busy = createCompletingHarness(vi.fn(async () => 'оставь черновиком'), {
+      getInputPreferences: enabled,
+      onTranscript: () => busy.form.setAttribute('aria-busy', 'true'),
+    });
+    busy.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+    vi.setSystemTime(10_700);
+    busy.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+    expect(busy.form.requestSubmit).not.toHaveBeenCalled();
+
+    vi.setSystemTime(20_000);
+    const voiceMode = createCompletingHarness(vi.fn(async () => 'голосовой режим'), {
+      getInputPreferences: enabled,
+      insertTranscript: false,
+    });
+    voiceMode.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+    vi.setSystemTime(20_700);
+    voiceMode.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+    expect(voiceMode.form.requestSubmit).not.toHaveBeenCalled();
+
+    vi.setSystemTime(30_000);
+    const timedOut = createCompletingHarness(vi.fn(async () => 'таймаут'), { getInputPreferences: enabled });
+    timedOut.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(VOICE_RECORDING_LIMITS.maxMs);
+    await flushPromises();
+    expect(timedOut.input.value).toBe('Таймаут.');
+    expect(timedOut.form.requestSubmit).not.toHaveBeenCalled();
   });
 
   it('uses direct PCM final text and keeps MediaRecorder only as a parallel failsafe', async () => {

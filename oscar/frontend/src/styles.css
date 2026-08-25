@@ -1464,9 +1464,9 @@ button:disabled {
 
 .ram-pressure-warning {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-columns: max-content minmax(0, 1fr) auto;
   gap: 4px 10px;
-  align-items: baseline;
+  align-items: center;
   border: 1px solid rgba(202, 153, 74, 0.48);
   border-radius: var(--radius-md);
   background: rgba(202, 153, 74, 0.09);
@@ -1486,6 +1486,36 @@ button:disabled {
   line-height: 1.45;
 }
 
+.ram-pressure-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.ram-pressure-actions button {
+  min-height: 28px;
+  border: 1px solid rgba(202, 153, 74, 0.44);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text);
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ram-pressure-actions button:hover:not(:disabled),
+.ram-pressure-actions button:focus-visible {
+  border-color: rgba(238, 168, 66, 0.82);
+  background: rgba(202, 153, 74, 0.12);
+}
+
+.ram-pressure-actions button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
 .ram-pressure-warning.critical {
   border-color: rgba(190, 70, 62, 0.58);
   background: rgba(190, 70, 62, 0.09);
@@ -1494,6 +1524,12 @@ button:disabled {
 
 .ram-pressure-warning.critical strong {
   color: #be463e;
+}
+
+@media (max-width: 760px) {
+  .ram-pressure-warning {
+    grid-template-columns: 1fr;
+  }
 }
 
 .composer.is-dragging-image .composer-panel {

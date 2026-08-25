@@ -482,8 +482,23 @@ class RuleEngine:
                 f"File has Mark-of-the-Web internet zone metadata: ZoneId={zone_id}"
             )
 
+        parser_status = facts.get("content_parser_status")
+        if isinstance(parser_status, str) and parser_status not in {"", "ok"}:
+            score += 35
+            reasons.append(
+                "File inspection did not complete within the isolated parser budget"
+            )
+
+        if facts.get("pe_metadata_budget_exceeded"):
+            score += 20
+            reasons.append("PE metadata exceeds the safe parser budget")
+
+        if facts.get("archive_metadata_budget_exceeded"):
+            score += 35
+            reasons.append("Archive metadata exceeds the safe parser budget")
+
         if magic_type == "pe" and extension not in PE_ONLY_EXTENSIONS:
-            score += 30
+            score += 35
             reasons.append("PE executable content is hidden behind a non-PE extension")
 
         if extension in PE_ONLY_EXTENSIONS and magic_type not in {"pe", ""}:

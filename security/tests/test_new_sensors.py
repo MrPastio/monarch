@@ -75,6 +75,36 @@ class NewSensorSignatureTests(unittest.TestCase):
         run.assert_called_once()
         self.assertEqual(run.call_args.kwargs["timeout"], 60)
         self.assertIn("Get-NetTCPConnection", run.call_args.args[0])
+        self.assertNotIn("Select-Object -First", run.call_args.args[0])
+
+    @mock.patch("monarch_security.sensors.network._native_tcp_items")
+    @mock.patch("monarch_security.sensors.network._run_powershell_json", return_value=([], None))
+    def test_network_threshold_reports_overflow_without_dropping_tail(self, _run, native_tcp):
+        native_tcp.return_value = [
+            {
+                "kind": "connection",
+                "subject": f"8.8.8.{index}:443",
+                "local_address": "192.168.1.10",
+                "local_port": 51000 + index,
+                "remote_address": f"8.8.8.{index}",
+                "remote_port": 443,
+                "owning_process": index,
+            }
+            for index in range(1, 4)
+        ]
+        sensor = NetworkSensor(
+            NetworkConfig(max_connections=2),
+            include_existing=True,
+        )
+
+        events = sensor.poll()
+
+        self.assertEqual(len(events), 3)
+        self.assertTrue(sensor.overflow)
+        self.assertEqual(
+            sensor.overflow_detail,
+            {"connection": {"observed": 3, "configured_threshold": 2}},
+        )
 
     def test_persistence_run_key_signature_tracks_value(self):
         item = persistence_signature(
@@ -99,7 +129,7 @@ class NewSensorSignatureTests(unittest.TestCase):
             include_existing=True,
             approved_signatures={approved["key"]: approved["signature"]},
         )
-        exact_sensor.snapshot = lambda: [approved]  # type: ignore[method-assign]
+        exact_sensor._snapshot_page = lambda: [approved]  # type: ignore[method-assign]
         exact_event = exact_sensor.poll()[0]
         self.assertTrue(exact_event.facts["approved_baseline_exact_match"])
         self.assertFalse(exact_event.facts["approved_baseline_entry_changed"])
@@ -114,10 +144,72 @@ class NewSensorSignatureTests(unittest.TestCase):
             include_existing=True,
             approved_signatures={approved["key"]: approved["signature"]},
         )
-        changed_sensor.snapshot = lambda: [changed]  # type: ignore[method-assign]
+        changed_sensor._snapshot_page = lambda: [changed]  # type: ignore[method-assign]
         changed_event = changed_sensor.poll()[0]
         self.assertFalse(changed_event.facts["approved_baseline_exact_match"])
         self.assertTrue(changed_event.facts["approved_baseline_entry_changed"])
+
+    @mock.patch("monarch_security.sensors.persistence._run_powershell_json")
+    def test_persistence_pages_scheduled_tasks_and_reaches_a_changed_tail(self, run):
+        def task(index, action):
+            return {
+                "kind": "scheduled_task",
+                "subject": rf"\QA\Task-{index}",
+                "task_name": f"Task-{index}",
+                "task_path": r"\QA",
+                "state": "Ready",
+                "author": "QA",
+                "actions": [action],
+            }
+
+        run.side_effect = [
+            ([task(0, "safe-0"), task(1, "safe-1"), task(2, "safe-2")], None),
+            ([task(2, "safe-2")], None),
+            ([task(0, "safe-0"), task(1, "safe-1"), task(2, "changed-tail")], None),
+            ([task(2, "changed-tail")], None),
+        ]
+        sensor = PersistenceSensor(
+            PersistenceConfig(max_entries=2),
+            include_existing=False,
+        )
+        sensor._startup_folder_items = lambda: []  # type: ignore[method-assign]
+        sensor._run_key_items = lambda: []  # type: ignore[method-assign]
+
+        self.assertEqual(sensor.poll(), [])
+        self.assertTrue(sensor.overflow)
+        self.assertEqual(sensor.checkpoint_cursor, 2)
+        self.assertEqual(sensor.poll(), [])
+        self.assertFalse(sensor.overflow)
+        self.assertEqual(sensor.checkpoint_cursor, 0)
+        self.assertEqual(sensor.poll(), [])
+        events = sensor.poll()
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].subject, r"\QA\Task-2")
+        self.assertIn("changed-tail", str(events[0].facts["actions"]))
+        self.assertIn("Sort-Object TaskPath,TaskName", run.call_args_list[0].args[0])
+        self.assertIn("Select-Object -Skip 2 -First 3", run.call_args_list[1].args[0])
+
+    @mock.patch("monarch_security.sensors.persistence._run_powershell_json")
+    def test_persistence_error_does_not_advance_cursor_or_checkpoint(self, run):
+        run.return_value = (None, "scheduled task query failed")
+        sensor = PersistenceSensor(PersistenceConfig(max_entries=2))
+        sensor._startup_folder_items = lambda: []  # type: ignore[method-assign]
+        sensor._run_key_items = lambda: []  # type: ignore[method-assign]
+        sensor.restore_checkpoint_cursor(4)
+
+        self.assertEqual(sensor.poll(), [])
+        self.assertEqual(sensor.checkpoint_cursor, 4)
+        self.assertFalse(sensor.overflow)
+        self.assertEqual(sensor.last_error, "scheduled task query failed")
+
+    def test_persistence_cursor_rejects_invalid_values(self):
+        sensor = PersistenceSensor(PersistenceConfig(max_entries=2))
+
+        with self.assertRaisesRegex(ValueError, "negative"):
+            sensor.restore_checkpoint_cursor(-1)
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            sensor.restore_checkpoint_cursor("broken")
 
     def test_posture_signature_tracks_disabled_defender(self):
         item = posture_signature(

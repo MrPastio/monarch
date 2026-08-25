@@ -1,4 +1,37 @@
-import type { MonarchModuleManifest } from '../../core';
+import type { MonarchCapability, MonarchModuleManifest } from '../../core';
+
+function withCoderAgentMetadata(capabilities: MonarchCapability[]): MonarchCapability[] {
+  return capabilities.map((capability) => ({
+    ...capability,
+    agent: {
+      ...(capability.agent || {}),
+      tags: [
+        'coder',
+        'project',
+        ...capability.id.split('.').slice(1),
+        ...coderRoutingTags(capability.id),
+      ],
+      supportedSources: ['coder'],
+      cancellation: 'supported',
+      estimatedLatency: capability.risk === 'network' || capability.risk === 'execute' ? 'long' : 'short',
+      computeClass: capability.risk === 'network' || capability.risk === 'execute' ? 'heavy' : 'light',
+    },
+  }));
+}
+
+function coderRoutingTags(capabilityId: string): string[] {
+  if (capabilityId === 'coder.files.list') return ['файлы', 'список', 'дерево', 'проект'];
+  if (capabilityId === 'coder.files.read') return ['файл', 'читать', 'прочитать', 'код'];
+  if (capabilityId === 'coder.files.write') return ['файл', 'создать', 'записать', 'изменить', 'код'];
+  if (capabilityId === 'coder.files.patch') return ['файл', 'изменить', 'исправить', 'патч', 'код'];
+  if (capabilityId === 'coder.files.delete') return ['файл', 'удалить'];
+  if (capabilityId === 'coder.command.run') return ['команда', 'терминал', 'тест', 'сборка', 'запустить'];
+  if (capabilityId.startsWith('coder.git.')) return ['git', 'репозиторий', 'ветка', 'коммит'];
+  if (capabilityId.startsWith('coder.network.')) return ['сеть', 'url', 'api', 'запрос'];
+  if (capabilityId.startsWith('coder.github.')) return ['github', 'pull request', 'pr'];
+  if (capabilityId.startsWith('coder.huggingface.')) return ['hugging face', 'модель', 'dataset'];
+  return [];
+}
 
 export const coderManifest: MonarchModuleManifest = {
   id: 'coder',
@@ -18,7 +51,7 @@ export const coderManifest: MonarchModuleManifest = {
     'coder.command.completed',
     'coder.skill.validated',
   ],
-  capabilities: [
+  capabilities: withCoderAgentMetadata([
     {
       id: 'coder.projects.list',
       moduleId: 'coder',
@@ -424,5 +457,5 @@ export const coderManifest: MonarchModuleManifest = {
       risk: 'read',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
-  ],
+  ]),
 };

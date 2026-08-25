@@ -1,9 +1,9 @@
 param(
   [Parameter(Mandatory = $true)][string]$StagingRoot,
   [Parameter(Mandatory = $true)][string]$InstallRoot,
-  [string]$AppVersion = "0.2.4.1",
+  [string]$AppVersion = "0.2.5.0",
   [string]$RuntimeVersion = "2026.07.7",
-  [string]$BackendEnvironment = "backend-0.1.5-offline5",
+  [string]$BackendEnvironment = "backend-0.1.5-offline8",
   [int]$DataSchemaVersion = 1,
   [int]$MinimumReadableDataSchema = 1,
   [int]$MaximumReadableDataSchema = 1,
@@ -22,6 +22,45 @@ $stagedApp = Join-Path $staging "app"
 $stagedRuntime = Join-Path $staging "runtime"
 $stagedEnvironment = Join-Path $staging "environment"
 $transcriptStarted = $false
+$stage = "bootstrap"
+$logPath = ""
+
+function Write-InstallerFailureReceipt {
+  param(
+    [Parameter(Mandatory = $true)][string]$Directory,
+    [Parameter(Mandatory = $true)][string]$FailureStage,
+    [Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord]$Failure
+  )
+  [System.IO.Directory]::CreateDirectory($Directory) | Out-Null
+  $stamp = [DateTimeOffset]::UtcNow.ToString("yyyyMMdd-HHmmssfff")
+  $receiptPath = Join-Path $Directory "failure-$stamp-$([guid]::NewGuid().ToString('N')).json"
+  $receipt = [ordered]@{
+    schemaVersion = 1
+    status = "failed"
+    appVersion = $AppVersion
+    stage = $FailureStage
+    errorType = $Failure.Exception.GetType().FullName
+    message = $Failure.Exception.Message
+    logPath = $script:logPath
+    receiptPath = $receiptPath
+    failedAt = [DateTimeOffset]::UtcNow.ToString("o")
+  }
+  $temporary = "$receiptPath.$([guid]::NewGuid().ToString('N')).tmp"
+  [System.IO.File]::WriteAllText(
+    $temporary,
+    ($receipt | ConvertTo-Json -Depth 6),
+    (New-Object System.Text.UTF8Encoding($false))
+  )
+  [System.IO.File]::Move($temporary, $receiptPath)
+
+  $latestPath = Join-Path $Directory "latest-failure.json"
+  try {
+    Copy-Item -LiteralPath $receiptPath -Destination $latestPath -Force
+  } catch {
+    Write-Warning "Unable to update latest installer failure receipt: $($_.Exception.Message)"
+  }
+  return $receiptPath
+}
 
 function Assert-NativeSuccess {
   param([Parameter(Mandatory = $true)][string]$Operation)
@@ -206,37 +245,7 @@ function Publish-ImmutableComponent {
   Write-ComponentMarker -Path $Destination -Name $Name -Record $Expected
 }
 
-if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-  throw "Offline payload manifest is missing: $manifestPath"
-}
-$payloadManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-if ([int]$payloadManifest.schemaVersion -ne 1 -or
-    [string]$payloadManifest.kind -ne "offline") {
-  throw "Unsupported Monarch offline payload manifest."
-}
-foreach ($contract in @(
-  @("appVersion", $AppVersion),
-  @("runtimeVersion", $RuntimeVersion),
-  @("backendEnvironment", $BackendEnvironment)
-)) {
-  $name = [string]$contract[0]
-  $expected = [string]$contract[1]
-  if ([string]$payloadManifest.$name -ne $expected) {
-    throw "Offline payload $name does not match the installer contract."
-  }
-}
-
-$layoutScript = if (Test-Path -LiteralPath (Join-Path $stagedApp "installer\layout.ps1") -PathType Leaf) {
-  Join-Path $stagedApp "installer\layout.ps1"
-} else {
-  Join-Path $appRoot "versions\$AppVersion\installer\layout.ps1"
-}
-if (-not (Test-Path -LiteralPath $layoutScript -PathType Leaf)) {
-  throw "Monarch layout helper is missing from the offline app payload."
-}
-. $layoutScript
-
-$logRoot = Join-Path $appRoot "installer-logs"
+$logRoot = Join-Path $env:LOCALAPPDATA "Monarch\installer-logs"
 New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 $logPath = Join-Path $logRoot (
   "offline-$AppVersion-$([DateTimeOffset]::UtcNow.ToString('yyyyMMdd-HHmmss')).log"
@@ -250,6 +259,39 @@ try {
 }
 
 try {
+  $stage = "payload-manifest"
+  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "Offline payload manifest is missing: $manifestPath"
+  }
+  $payloadManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+  if ([int]$payloadManifest.schemaVersion -ne 1 -or
+      [string]$payloadManifest.kind -ne "offline") {
+    throw "Unsupported Monarch offline payload manifest."
+  }
+  foreach ($contract in @(
+    @("appVersion", $AppVersion),
+    @("runtimeVersion", $RuntimeVersion),
+    @("backendEnvironment", $BackendEnvironment)
+  )) {
+    $name = [string]$contract[0]
+    $expected = [string]$contract[1]
+    if ([string]$payloadManifest.$name -ne $expected) {
+      throw "Offline payload $name does not match the installer contract."
+    }
+  }
+
+  $stage = "layout-bootstrap"
+  $layoutScript = if (Test-Path -LiteralPath (Join-Path $stagedApp "installer\layout.ps1") -PathType Leaf) {
+    Join-Path $stagedApp "installer\layout.ps1"
+  } else {
+    Join-Path $appRoot "versions\$AppVersion\installer\layout.ps1"
+  }
+  if (-not (Test-Path -LiteralPath $layoutScript -PathType Leaf)) {
+    throw "Monarch layout helper is missing from the offline app payload."
+  }
+  . $layoutScript
+
+  $stage = "payload-verification"
   Write-Host "[offline] Verifying signed payload contents"
   $payloadRoot = Resolve-MonarchPayloadRoot -InstallRoot $appRoot
   $versionRoot = Join-Path $appRoot "versions\$AppVersion"
@@ -273,6 +315,20 @@ try {
     "secrets"
   )
 
+  $stage = "running-version-shutdown"
+  $existingCurrentPointer = Join-Path $appRoot "current.json"
+  if (Test-Path -LiteralPath $existingCurrentPointer -PathType Leaf) {
+    $existingCurrent = Get-Content -LiteralPath $existingCurrentPointer -Raw | ConvertFrom-Json
+    $runningVersion = [string]$existingCurrent.currentVersion
+    if ($runningVersion) {
+      $shutdown = Stop-MonarchRunningVersion `
+        -InstallRoot $appRoot `
+        -Version $runningVersion
+      Write-Host "[offline] Upgrade shutdown: requested=$($shutdown.requested), stopped=$($shutdown.stopped), forced=$($shutdown.forced)"
+    }
+  }
+
+  $stage = "payload-activation"
   Write-Host "[offline] Activating immutable versioned payload"
   Publish-ImmutableComponent `
     -Name "app" `
@@ -348,6 +404,7 @@ try {
       -Destination $oscarConfigPath
   }
 
+  $stage = "runtime-validation"
   Write-Host "[offline] Validating installed runtimes without network access"
   $node = $packagedNode
   $electron = Join-Path $runtimeRoot "electron\electron.exe"
@@ -358,6 +415,14 @@ try {
     }
   }
   $cudaRoot = Join-Path $environmentRoot "oscar\profiles\cuda"
+  $windowsNativeRuntime = Join-Path $environmentRoot "native\windows-x64"
+  foreach ($requiredRuntimeDll in @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "vcomp140.dll")) {
+    $runtimeDll = Join-Path $windowsNativeRuntime $requiredRuntimeDll
+    if (-not (Test-Path -LiteralPath $runtimeDll -PathType Leaf) -or
+        (Get-Item -LiteralPath $runtimeDll).Length -le 0) {
+      throw "Installed Windows native runtime is incomplete: $runtimeDll"
+    }
+  }
   Assert-CudaPayloadComplete -CudaRoot $cudaRoot
   & $node --version
   Assert-NativeSuccess "Offline Node runtime validation"
@@ -368,11 +433,12 @@ try {
   $previousDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
   try {
     $env:PYTHONDONTWRITEBYTECODE = "1"
+    $env:PATH = "$windowsNativeRuntime;$($environmentRoot)\oscar\profiles\cpu\bin;$previousPath"
     $env:PYTHONPATH = "$($environmentRoot)\oscar\common;$($environmentRoot)\oscar\profiles\cpu;$versionRoot\oscar\backend"
     & $python -B -c "import fastapi, uvicorn, llama_cpp, oscar_agent; print('installed-oscar-ok')"
     Assert-NativeSuccess "Installed Oscar runtime validation"
     $env:PYTHONPATH = "$($environmentRoot)\oscar\common;$($environmentRoot)\oscar\profiles\cuda;$versionRoot\oscar\backend"
-    $env:PATH = "$($environmentRoot)\oscar\profiles\cuda\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\cublas\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\cuda_runtime\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\nvjitlink\bin;$previousPath"
+    $env:PATH = "$windowsNativeRuntime;$($environmentRoot)\oscar\profiles\cuda\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\cublas\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\cuda_runtime\bin;$($environmentRoot)\oscar\profiles\cuda\nvidia\nvjitlink\bin;$previousPath"
     if (Test-NvidiaRuntimeAvailable) {
       & $python -B -c "import llama_cpp; print('installed-oscar-cuda-ok')"
       Assert-NativeSuccess "Installed Oscar CUDA runtime validation"
@@ -383,17 +449,6 @@ try {
     & $python -B -c "import psutil, monarch_security; print('installed-security-ok')"
     Assert-NativeSuccess "Installed Monarch Security runtime validation"
 
-    $runtimeBundle = Join-Path $versionRoot "dist\monarch-server.mjs"
-    if (-not (Test-Path -LiteralPath $runtimeBundle -PathType Leaf)) {
-      throw "Installed Monarch runtime bundle is missing: $runtimeBundle"
-    }
-    Push-Location $versionRoot
-    try {
-      & $node $runtimeBundle system
-      Assert-NativeSuccess "Installed Monarch full module activation"
-    } finally {
-      Pop-Location
-    }
   } finally {
     $env:PYTHONPATH = $previousPythonPath
     $env:PATH = $previousPath
@@ -444,17 +499,33 @@ try {
     -Path (Join-Path $appRoot "install-manifest.json") `
     -Value $installManifest
 
+  $stage = "activation-contract"
   $previousVersion = ""
+  $candidatePreviousVersion = ""
+  $repairReason = ""
   $currentPointer = Join-Path $appRoot "current.json"
   if (Test-Path -LiteralPath $currentPointer -PathType Leaf) {
     try {
       $existingPointer = Get-Content -LiteralPath $currentPointer -Raw | ConvertFrom-Json
-      if ($existingPointer.currentVersion -and
-          $existingPointer.currentVersion -ne $AppVersion) {
-        $previousVersion = [string]$existingPointer.currentVersion
+      if ($existingPointer.currentVersion) {
+        $candidatePreviousVersion = [string]$existingPointer.currentVersion
+        if ($candidatePreviousVersion -ne $AppVersion -and
+            (Test-MonarchInstalledVersionHealthy `
+              -InstallRoot $appRoot `
+              -Layout $layout `
+              -Version $candidatePreviousVersion)) {
+          $previousVersion = $candidatePreviousVersion
+        } elseif ($candidatePreviousVersion -ne $AppVersion) {
+          $repairReason = "active-version-incomplete"
+        } elseif (-not (Test-MonarchInstalledVersionHealthy `
+          -InstallRoot $appRoot `
+          -Layout $layout `
+          -Version $candidatePreviousVersion)) {
+          $repairReason = "same-version-incomplete"
+        }
       }
     } catch {
-      throw "Existing current.json is invalid; refusing to replace the active version."
+      $repairReason = "current-pointer-invalid"
     }
   }
   if ($previousVersion) {
@@ -483,12 +554,31 @@ try {
     Set-MonarchCurrentVersion `
       -InstallRoot $appRoot `
       -CurrentVersion $AppVersion
+    if ($repairReason) {
+      Write-MonarchRepairReceipt `
+        -InstallRoot $appRoot `
+        -PreviousVersion $candidatePreviousVersion `
+        -CandidateVersion $AppVersion `
+        -Reason $repairReason
+    }
   }
 
+  $stage = "completed"
   Write-Host ""
   Write-Host "Monarch offline installation completed." -ForegroundColor Green
   Write-Host "Launcher: $(Join-Path $appRoot 'Monarch.exe')"
   Write-Host "No npm, pip, winget or package registry was used on this computer."
+} catch {
+  $failure = $_
+  try {
+    Write-InstallerFailureReceipt `
+      -Directory $logRoot `
+      -FailureStage $stage `
+      -Failure $failure | Out-Null
+  } catch {
+    Write-Warning "Unable to write installer failure receipt: $($_.Exception.Message)"
+  }
+  throw $failure
 } finally {
   if ($transcriptStarted) {
     try { Stop-Transcript | Out-Null } catch { }

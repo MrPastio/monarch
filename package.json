@@ -1,6 +1,6 @@
 {
   "name": "monarch",
-  "version": "0.2.4.1",
+  "version": "0.2.5.0",
   "private": true,
   "type": "module",
   "description": "Local-first AI ecosystem architecture kernel.",
@@ -13,6 +13,8 @@
     "desktop": "electron desktop/electron/main.mjs",
     "desktop:update-demo": "electron desktop/electron/main.mjs --update-demo",
     "desktop:smoke": "electron desktop/electron/main.mjs --smoke",
+    "desktop:acceptance": "electron desktop/electron/main.mjs --desktop-acceptance",
+    "owner:device-request": "electron desktop/electron/owner-authority-provision.mjs",
     "safe:entry:qa": "electron desktop/electron/main.mjs --safe-entry-qa",
     "safe:qa": "electron desktop/safe/qa.mjs",
     "ui": "npm run node:exec -- tsx src/main.ts serve",
@@ -34,7 +36,7 @@
     "security:setup:dev": "powershell -ExecutionPolicy Bypass -File security/scripts/setup_runtime.ps1 -WithDev",
     "security:status": "powershell -ExecutionPolicy Bypass -File security/monarch_sec.ps1 status",
     "security:start": "powershell -ExecutionPolicy Bypass -File security/monarch_sec.ps1 start --no-llm",
-    "security:stop": "powershell -ExecutionPolicy Bypass -File security/monarch_sec.ps1 stop",
+    "security:stop": "powershell -ExecutionPolicy Bypass -File security/monarch_sec.ps1 stop --confirm",
     "security:scan-system": "powershell -ExecutionPolicy Bypass -File security/monarch_sec.ps1 scan-system --summary-only --no-llm",
     "security:verify-integrity": "powershell -ExecutionPolicy Bypass -File security/monarch_sec.ps1 verify-integrity",
     "security:test": "powershell -ExecutionPolicy Bypass -File security/scripts/test.ps1",
@@ -47,6 +49,7 @@
     "release:test": "vitest run tests/release/channel-manifest.test.ts tests/release/release-workflows.test.ts tests/release/voice-reference-release-gate.test.ts",
     "release:probe": "node scripts/probe-release-origin.mjs",
     "agent:benchmark": "npm run node:exec -- tsx scripts/agent-adaptive-benchmark.ts",
+    "agent:benchmark:full-task": "npm run node:exec -- tsx scripts/agent-full-task-benchmark.ts",
     "export:public": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/export-public.ps1",
     "upload:dry-run": "powershell -ExecutionPolicy Bypass -File scripts/upload-dry-run.ps1",
     "audit:root": "npm audit --omit=optional --audit-level=moderate",
@@ -79,9 +82,12 @@
   "dependencies": {
     "fabric": "7.4.0",
     "mediabunny": "1.50.9",
-    "undici": "^7.28.0"
+    "undici": "^7.29.0"
   },
   "optionalDependencies": {
     "sherpa-onnx-node": "1.13.4"
+  },
+  "overrides": {
+    "nanoid": "3.3.18"
   }
 }

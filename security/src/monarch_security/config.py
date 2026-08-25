@@ -35,6 +35,8 @@ class ResourceConfig:
 class FileConfig:
     max_full_hash_bytes: int = 268_435_456
     entropy_sample_bytes: int = 1_048_576
+    parser_timeout_seconds: float = 5.0
+    parser_memory_limit_bytes: int = 268_435_456
 
 
 @dataclass(frozen=True)
@@ -124,11 +126,13 @@ class RuntimeConfig:
     emergency_auto_lock_enabled: bool = True
     emergency_recovery_seconds: int = 600
     max_events_per_tick: int = 25
+    max_sensor_processing_seconds_per_tick: float = 10.0
 
 
 @dataclass(frozen=True)
 class AppConfig:
     root: Path
+    data_root: Path
     model: ModelConfig
     router: RouterConfig
     resources: ResourceConfig
@@ -232,6 +236,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     return AppConfig(
         root=root,
+        data_root=_resolve_path(root, "data"),
         model=ModelConfig(
             path=model_path,
             n_ctx=int(model_data.get("n_ctx", 2048)),
@@ -311,6 +316,13 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             emergency_auto_lock_enabled=bool(runtime_data.get("emergency_auto_lock_enabled", True)),
             emergency_recovery_seconds=max(120, min(1800, int(runtime_data.get("emergency_recovery_seconds", 600)))),
             max_events_per_tick=int(runtime_data.get("max_events_per_tick", 25)),
+            max_sensor_processing_seconds_per_tick=max(
+                1.0,
+                min(
+                    30.0,
+                    float(runtime_data.get("max_sensor_processing_seconds_per_tick", 10.0)),
+                ),
+            ),
         ),
     )
 

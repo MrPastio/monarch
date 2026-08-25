@@ -1,4 +1,5 @@
 import { state } from './state.js';
+import { parseSkillInvocation, skillUserFacingName } from './skill-ux.js';
 
 export function escapeHtml(value) {
   return String(value ?? '')
@@ -10,7 +11,14 @@ export function escapeHtml(value) {
 }
 
 export function readErrorMessage(error) {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  if (/local context settings require a valid desktop attestation|invalid-desktop-attestation/i.test(message)) {
+    return 'Перезапусти Monarch, чтобы настройки снова стали доступны.';
+  }
+  if (/backend.+(?:unavailable|not reachable|did not respond)|runtime.+(?:unavailable|disconnected)/i.test(message)) {
+    return 'Сервис Oscar сейчас недоступен. Попробуй ещё раз через несколько секунд.';
+  }
+  return message;
 }
 
 export function readUserFacingFailure(result, fallback = 'Не удалось выполнить действие.') {
@@ -127,9 +135,9 @@ function formatOscarTierLabel(tier) {
   case 'gemma4-deepthinking':
   case 'powerful':
   case 'reasoning':
-    return 'Pro';
   case 'gemma4-31b':
-    return 'Extra';
+  case 'qwen3.8-27b-pro':
+    return 'Pro';
   default:
     return tier || 'локальный runtime';
   }
@@ -243,7 +251,10 @@ export function formatOscarContent(content) {
       <div class="oscar-code-block${match[3] ? '' : ' is-streaming'}">
         <div class="oscar-code-header">
           <span>${escapeHtml(lang)}${match[3] ? '' : ' · пишется'}</span>
-          <button type="button" class="oscar-copy-btn" aria-label="Скопировать весь код">Скопировать</button>
+          <button type="button" class="oscar-copy-btn" data-copy-state="idle" aria-label="Скопировать весь код">
+            <svg class="oscar-copy-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="2.5" width="7" height="8" rx="1.5"></rect><path d="M3.5 5.5v6.25c0 .97.78 1.75 1.75 1.75h5.25"></path></svg>
+            <span class="oscar-copy-label">Копировать</span>
+          </button>
         </div>
         <pre><code>${escapeHtml(code)}</code></pre>
       </div>
@@ -926,7 +937,7 @@ export function routeSummaryState(lastIntent) {
     return { label: 'Без маршрута', tone: 'blocked' };
   }
   if (lastIntent.execution?.error === 'confirmation-required') {
-    return { label: 'Нужно подтверждение', tone: 'amber' };
+    return { label: 'Нужна action-card', tone: 'amber' };
   }
   if (lastIntent.execution?.ok) {
     return { label: 'Выполнено', tone: 'green' };
@@ -938,7 +949,6 @@ export function routeSummaryState(lastIntent) {
 }
 
 export function confirmationBanner(text, confirmation, plan = null) {
-  const token = confirmation?.token || '';
   const writeStep = plan?.steps?.find((step) => step.capabilityId === 'workspace.files.write');
 
   if (writeStep) {
@@ -960,8 +970,7 @@ export function confirmationBanner(text, confirmation, plan = null) {
         </div>
 
         <div class="button-row">
-          <button class="primary-button" type="button" data-testid="confirm-intent" data-intent="${escapeHtml(text)}" data-confirm="true" data-confirmation-token="${escapeHtml(token)}">Подтвердить запись</button>
-          <button class="secondary-button" type="button" data-testid="cancel-intent">Отмена</button>
+          <span>Разрешение выдаётся только точной Agent action-card, связанной с durable task.</span>
         </div>
       </div>
     `;
@@ -971,12 +980,8 @@ export function confirmationBanner(text, confirmation, plan = null) {
   return `
     <div class="permission-banner">
       <div>
-        <strong>Нужно подтверждение</strong>
-        <p>${escapeHtml(reason)}</p>
-      </div>
-      <div class="button-row">
-        <button class="primary-button" type="button" data-testid="confirm-intent" data-intent="${escapeHtml(text)}" data-confirm="true" data-confirmation-token="${escapeHtml(token)}">Подтвердить</button>
-        <button class="secondary-button" type="button" data-testid="cancel-intent">Отмена</button>
+        <strong>Нужна точная action-card</strong>
+        <p>${escapeHtml(reason)} Текст и старый confirmation token не являются разрешением.</p>
       </div>
     </div>
   `;
@@ -1042,7 +1047,8 @@ export function computeInlineDiff(oldText, newText) {
 
 export function createOscarMessage(role, content, label, meta = {}) {
   return {
-    id: Math.random().toString(36).slice(2),
+    id: typeof meta.id === 'string' && meta.id ? meta.id : Math.random().toString(36).slice(2),
+    clientMessageId: typeof meta.clientMessageId === 'string' ? meta.clientMessageId : '',
     role,
     content,
     label,
@@ -1059,16 +1065,24 @@ export function createOscarMessage(role, content, label, meta = {}) {
     sendActive: meta.sendActive === true,
     action: meta.action || null,
     attachments: Array.isArray(meta.attachments) ? meta.attachments : [],
+    turnId: typeof meta.turnId === 'string' ? meta.turnId : '',
+    taskId: typeof meta.taskId === 'string' ? meta.taskId : '',
+    provenance: meta.provenance && typeof meta.provenance === 'object' ? { ...meta.provenance } : null,
+    outcome: typeof meta.outcome === 'string' ? meta.outcome : '',
+    integrityWarning: typeof meta.integrityWarning === 'string' ? meta.integrityWarning : '',
     createdAt: typeof meta.createdAt === 'string' && meta.createdAt ? meta.createdAt : new Date().toISOString()
   };
 }
 
-export function replacePendingOscarMessage(newMessage) {
+export function replacePendingOscarMessage(newMessage, pendingMessageId = '') {
   if (!state.oscar) {
     state.oscar = { messages: [] };
   }
   const messages = state.oscar.messages || [];
-  const pendingIndex = messages.findIndex(m => m.pending);
+  const targetId = String(pendingMessageId || '').trim();
+  const pendingIndex = targetId
+    ? messages.findIndex((message) => message.pending && message.id === targetId)
+    : messages.findIndex((message) => message.pending);
   if (pendingIndex !== -1) {
     const pendingMessage = messages[pendingIndex];
     const pendingId = pendingMessage?.id;
@@ -1076,9 +1090,11 @@ export function replacePendingOscarMessage(newMessage) {
       ? { ...newMessage, id: pendingId, createdAt: pendingMessage.createdAt || newMessage.createdAt }
       : newMessage;
   } else {
+    if (targetId) return false;
     messages.push(newMessage);
   }
   state.oscar.messages = messages;
+  return true;
 }
 
 export function syncThreadDOM(container, newHtml) {
@@ -1157,14 +1173,25 @@ export function renderOscarMessage(message) {
   const researchFlowClass = message.pending && message.researchFlow ? ' research-flow' : '';
 
   if (isUser) {
+    const skillInvocation = parseSkillInvocation(message.content);
+    const visibleMessageContent = skillInvocation.visibleContent || (skillInvocation.skillName ? 'Задача для навыка не указана.' : '');
+    const skillInvocationHtml = skillInvocation.skillName
+      ? `<div class="message-skill-invocation">${escapeHtml(skillUserFacingName({ name: skillInvocation.skillName }))}</div>`
+      : '';
     const sendActiveAttr = message.sendActive ? ' data-send-active="true"' : '';
     const sendSyncHtml = message.sendActive
       ? `<span class="message-send-sync" aria-hidden="true">${Array.from({ length: 8 }).map(() => '<span></span>').join('')}</span>`
       : '';
     const attachmentsHtml = Array.isArray(message.attachments) && message.attachments.length
-      ? `<div class="message-attachments">${message.attachments.map((attachment) => {
-          const source = attachment.preview_url || `data:${attachment.mime_type};base64,${attachment.data_base64}`;
-          return `<img src="${escapeHtml(source)}" alt="${escapeHtml(attachment.name || 'Изображение')}">`;
+      ? `<div class="message-attachments">${message.attachments.map((attachment, index) => {
+          const source = attachment.preview_url || (attachment.data_base64
+            ? `data:${attachment.mime_type};base64,${attachment.data_base64}`
+            : '');
+          const name = attachment.name || 'Изображение';
+          const content = source
+            ? `<img src="${escapeHtml(source)}" alt="${escapeHtml(name)}">`
+            : `<span class="message-attachment-ref"><strong>${escapeHtml(name)}</strong><small>Открыть сохранённое изображение</small></span>`;
+          return `<button type="button" class="message-attachment" data-message-attachment="${escapeHtml(message.id)}:${index}" aria-label="Открыть изображение ${escapeHtml(name)}" title="Открыть изображение">${content}<span class="message-attachment-open" aria-hidden="true">Открыть</span></button>`;
         }).join('')}</div>`
       : '';
     return `
@@ -1178,7 +1205,8 @@ export function renderOscarMessage(message) {
             </div>
           </div>
           ${attachmentsHtml}
-          <div class="message-text">${escapeHtml(message.content)}</div>
+          ${skillInvocationHtml}
+          <div class="message-text">${escapeHtml(visibleMessageContent)}</div>
         </div>
       </div>
     `;
@@ -1195,11 +1223,11 @@ export function renderOscarMessage(message) {
       && !message.routeConsent
       && !showDetailedThinking;
     if (isThinkingOnly) {
-      const thinkingLabel = formatOscarStreamPhase(streamPhase);
+      const liveStatus = resolveOscarLiveStatus(message, streamPhase);
       return `
         <div class="oscar-message assistant pending thinking-only" data-message-id="${escapeHtml(message.id)}"${streamPhaseAttr}>
-          <div class="oscar-thinking-only" role="status" aria-label="${escapeHtml(thinkingLabel)}">
-            ${renderMonarchThinkingOrb(streamPhase)}
+          <div class="oscar-thinking-only" role="status" aria-label="${escapeHtml(liveStatus.label)}">
+            ${renderOscarLiveStage(message, streamPhase)}
           </div>
         </div>
       `;
@@ -1207,11 +1235,7 @@ export function renderOscarMessage(message) {
 
     const sourcesHtml = Array.isArray(message.sources) && message.sources.length > 0
       ? `<div class="source-list">
-           ${message.sources.map(s => `
-             <span class="source-chip" title="${escapeHtml(typeof s === 'string' ? s : s.url || s.snippet || '')}">
-               ${escapeHtml(typeof s === 'string' ? s : s.title || s.url || 'source')}
-             </span>
-           `).join('')}
+           ${message.sources.map(renderOscarMessageSource).join('')}
          </div>`
       : '';
 
@@ -1245,22 +1269,40 @@ export function renderOscarMessage(message) {
       : '';
 
     const grantOptions = Array.isArray(message.action?.grantOptions) ? message.action.grantOptions : ['once'];
-    const agentApprovalAttrs = message.action?.agentTaskId && message.action?.agentApprovalId
+    const exactAgentApproval = message.action?.agentTaskId
+      && message.action?.agentApprovalId
+      && message.action?.agentApprovalHash
+      && message.action?.agentCapabilityId
+      && message.action?.oscarTurnId;
+    const agentApprovalAttrs = exactAgentApproval
       ? ` data-agent-task-id="${escapeHtml(message.action.agentTaskId)}" data-agent-approval-id="${escapeHtml(message.action.agentApprovalId)}" data-agent-proposal-hash="${escapeHtml(message.action.agentApprovalHash || '')}" data-agent-capability-id="${escapeHtml(message.action.agentCapabilityId || '')}"`
       : '';
-    const actionButtons = grantOptions.map((scope) => `<button type="button" class="claude-primary-btn" data-oscar-confirm-action data-message-id="${escapeHtml(message.id)}" data-action-text="${escapeHtml(message.action?.text || '')}" data-confirmation-token="${escapeHtml(message.action?.confirmationToken || '')}" data-grant-scope="${scope === 'task' ? 'task' : 'once'}"${agentApprovalAttrs}${agentApprovalAttrs ? ' data-agent-decision="approve"' : ''}>${scope === 'task' ? 'Разрешить для задачи' : escapeHtml(message.action?.label || 'Разрешить один раз')}</button>`).join('');
-    const denyAgentButton = agentApprovalAttrs
+    const actionArmed = Number(message.action?.armedUntil || 0) > Date.now();
+    const actionButtons = message.action?.settling
+      ? ''
+      : message.action?.requiresArm && !actionArmed
+      ? `<button type="button" class="claude-primary-btn" data-oscar-arm-action data-message-id="${escapeHtml(message.id)}">Arm</button>`
+      : exactAgentApproval
+        ? grantOptions.map((scope) => `<button type="button" class="claude-primary-btn" data-oscar-confirm-action data-message-id="${escapeHtml(message.id)}" data-grant-scope="${scope === 'task' ? 'task' : 'once'}"${agentApprovalAttrs} data-agent-decision="approve">${scope === 'task' ? 'Разрешить для задачи' : escapeHtml(message.action?.label || 'Разрешить один раз')}</button>`).join('')
+        : '';
+    const denyAgentButton = agentApprovalAttrs && !message.action?.settling
       ? `<button type="button" class="claude-secondary-btn" data-oscar-confirm-action data-message-id="${escapeHtml(message.id)}"${agentApprovalAttrs} data-agent-decision="deny">Отклонить</button>`
       : '';
-    const actionHtml = message.action?.confirmationToken || message.action?.agentTaskId
+    const actionHtml = exactAgentApproval
       ? `<div class="oscar-action-card">
            <div>
              <strong>Monarch Access</strong>
-             <span>${escapeHtml(message.action.risk || 'действие')} · точная область, бюджет и срок контролируются Policy Kernel</span>
+             <span>${escapeHtml(message.action.text || 'действие')} · ${escapeHtml(message.action.risk || 'действие')}</span>
+             ${message.action.target ? `<span>Цель: ${escapeHtml(message.action.target)}</span>` : ''}
+             ${message.action.expiresAt ? `<span>Срок: ${escapeHtml(message.action.expiresAt)}</span>` : ''}
+             ${message.action.proposalHash ? `<span title="${escapeHtml(message.action.proposalHash)}">Hash: ${escapeHtml(String(message.action.proposalHash).slice(0, 18))}…</span>` : ''}
+             ${message.action.requiresArm ? `<span>${actionArmed ? 'Armed: нажми финальную кнопку в коротком окне.' : 'Чувствительное действие: сначала Arm, затем отдельное разрешение.'}</span>` : ''}
            </div>
            <div class="oscar-action-buttons">${actionButtons}${denyAgentButton}</div>
          </div>`
       : '';
+
+    const provenanceHtml = renderOscarProvenance(message);
 
     const usageHtml = !message.pending && !message.error ? renderOscarUsage(message.usage) : '';
     const modelNoteHtml = renderOscarModelNote(message, streamPhase);
@@ -1283,7 +1325,7 @@ export function renderOscarMessage(message) {
         <div class="avatar oscar-avatar">O</div>
         <div class="oscar-message-card">
           <div class="message-meta-row">
-            <div class="message-meta">Oscar</div>
+            <div class="message-meta">Oscar${provenanceHtml}</div>
             <div class="oscar-message-actions">
               <button type="button" data-message-copy="${escapeHtml(message.id)}" aria-label="Копировать ответ Oscar" title="Копировать ответ Oscar">${copyIcon()}</button>
             </div>
@@ -1305,31 +1347,58 @@ export function renderOscarMessage(message) {
 }
 
 function renderOscarLiveStage(message, phase) {
-  const label = formatOscarStreamPhase(phase);
+  const status = resolveOscarLiveStatus(message, phase);
   const showDetails = Boolean(message.researchFlow || isOscarResearchOrSearchPhase(phase));
-  if (!showDetails) {
-    return `
-      <div class="oscar-orb-only-status" role="status" aria-label="${escapeHtml(label)}">
-        ${renderMonarchThinkingOrb(phase)}
-      </div>
-    `;
-  }
   const researchTimeline = message.researchFlow ? renderOscarResearchTimeline(phase) : '';
-  return `
-    <div class="oscar-research-activity">
-      <div class="oscar-live-stage" data-phase="${escapeHtml(phase || 'route')}" aria-label="${escapeHtml(label)}" aria-live="polite">
+  const liveStage = `
+      <div class="oscar-live-stage" data-phase="${escapeHtml(status.visualPhase)}" data-motion="${escapeHtml(status.motion)}" aria-label="${escapeHtml(status.label)}" aria-live="polite">
         <span class="oscar-live-rail" aria-hidden="true">
-          ${renderMonarchThinkingOrb(phase)}
+          ${renderMonarchThinkingOrb(status.visualPhase, status.motion)}
         </span>
         <span class="oscar-live-copy">
-          <strong>${escapeHtml(label)}</strong>
-          <small>${escapeHtml(formatOscarStreamHint(phase))}</small>
+          <strong>${escapeHtml(status.label)}</strong>
+          ${status.detail ? `<small title="${escapeHtml(status.detail)}">${escapeHtml(status.detail)}</small>` : ''}
         </span>
         ${message.researchFlow ? '<span class="oscar-research-live-badge">в процессе</span>' : ''}
-      </div>
+      </div>`;
+  if (!showDetails) return liveStage;
+  return `
+    <div class="oscar-research-activity">
+      ${liveStage}
       ${researchTimeline}
     </div>
   `;
+}
+
+export function resolveOscarLiveStatus(message, phase) {
+  const events = Array.isArray(message?.streamEvents) ? message.streamEvents : [];
+  const latest = [...events].reverse().find((event) => event && (event.activity || event.label || event.detail));
+  const activity = latest?.activity && typeof latest.activity === 'object' ? latest.activity : {};
+  const operation = String(activity.operation || '').trim().toLowerCase();
+  const domain = String(activity.domain || '').trim().toLowerCase();
+  const fallbackLabel = formatOscarStreamPhase(phase);
+  const label = String(activity.label || latest?.label || fallbackLabel).replace(/\s+/g, ' ').trim().slice(0, 80)
+    || fallbackLabel;
+  const subject = String(activity.subject || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const target = String(activity.target || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const activityDetail = String(activity.detail || '').trim();
+  const eventDetail = String(latest?.detail || '').trim();
+  const derivedDetail = operation === 'move' || operation === 'copy'
+    ? [subject, target ? `→ ${target}` : ''].filter(Boolean).join(' ')
+    : operation === 'search' && target
+      ? [subject, `в ${target}`].filter(Boolean).join(' · ')
+      : subject || target;
+  const detailCandidate = activityDetail
+    || derivedDetail
+    || (eventDetail && eventDetail !== label ? eventDetail : '')
+    || formatOscarStreamHint(phase);
+  const detail = detailCandidate.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 180);
+  const mutation = ['move', 'copy', 'trash', 'delete', 'create', 'write', 'open', 'verify', 'control', 'click', 'type', 'key', 'scroll'].includes(operation);
+  const motion = activity.motion === 'heartbeat' || mutation ? 'heartbeat' : 'breathing';
+  const visualPhase = operation === 'search' || domain === 'internet'
+    ? 'search'
+    : mutation ? 'write' : OSCAR_THINKING_ORB_PHASES.has(String(phase || '')) ? String(phase) : 'route';
+  return { label, detail, motion, visualPhase };
 }
 
 const OSCAR_RESEARCH_STEPS = [
@@ -1344,6 +1413,48 @@ const OSCAR_RESEARCH_STEPS = [
 function isOscarResearchOrSearchPhase(phase) {
   const normalizedPhase = String(phase || '').toLowerCase();
   return normalizedPhase === 'search' || normalizedPhase.startsWith('research-');
+}
+
+function renderOscarMessageSource(source) {
+  if (typeof source === 'string') {
+    return `<span class="source-chip" title="${escapeHtml(source)}">${escapeHtml(source)}</span>`;
+  }
+  const url = String(source?.url || '');
+  const memory = source?.kind === 'memory' || url.startsWith('memory://');
+  const title = memory ? 'Из памяти' : source?.title || url || 'Источник';
+  const detail = source?.detail || source?.title || url || source?.snippet || '';
+  return `<span class="source-chip ${memory ? 'is-memory' : ''}" title="${escapeHtml(detail)}">${escapeHtml(title)}</span>`;
+}
+
+function renderOscarProvenance(message) {
+  const verification = String(message.provenance?.verification || '');
+  const outcome = String(message.outcome || '');
+  let label = '';
+  let tone = 'model';
+  if (verification === 'kernel-verified') {
+    label = 'Kernel verified';
+    tone = 'verified';
+  } else if (verification === 'kernel-partial' || outcome === 'partial') {
+    label = 'Частично · Kernel';
+    tone = 'partial';
+  } else if (verification === 'source-grounded') {
+    label = 'Ответ с источниками';
+    tone = 'sources';
+  } else if (outcome === 'blocked') {
+    label = 'Не выполнено';
+    tone = 'blocked';
+  } else if (verification === 'system-state') {
+    label = outcome === 'cancelled' ? 'Остановлено' : outcome === 'failed' ? 'Не завершено' : 'Системный статус';
+    tone = 'blocked';
+  } else if (verification === 'legacy-unknown') {
+    label = 'Действие не подтверждено';
+    tone = 'legacy';
+  } else if (verification === 'unverified-model' || outcome === 'answered') {
+    label = 'Ответ модели';
+  }
+  if (!label) return '';
+  const warning = message.integrityWarning ? ` title="${escapeHtml(message.integrityWarning)}"` : '';
+  return ` <span class="oscar-provenance-badge is-${tone}"${warning}>${escapeHtml(label)}</span>`;
 }
 
 function renderOscarResearchTimeline(phase, options = {}) {
@@ -1387,6 +1498,14 @@ function renderOscarRouteConsent(consent) {
     webSearch ? 'Несколько проходов' : pro ? 'Глубокий анализ' : 'Обычный ответ',
     'Только один ответ',
   ];
+  const bindingDetails = state === 'waiting' && webSearch ? `
+    <dl class="oscar-consent-binding">
+      <div><dt>Цель</dt><dd>${escapeHtml(consent.target || 'Публичные интернет-источники')}</dd></div>
+      <div><dt>Данные</dt><dd>${escapeHtml((consent.dataClasses || []).join(', ') || 'текст запроса')}</dd></div>
+      <div><dt>Истекает</dt><dd>${escapeHtml(consent.expiresAt || 'короткое окно')}</dd></div>
+      <div><dt>Binding</dt><dd><code>${escapeHtml(consent.canonicalBindingHash || 'не выдан')}</code></dd></div>
+    </dl>
+  ` : '';
   return `
     <section class="oscar-inline-consent" data-consent-state="${state}" aria-label="${escapeHtml(webSearch ? 'Подтверждение исследования' : 'Выбор модели')}">
       <div class="oscar-inline-consent-heading">
@@ -1400,6 +1519,7 @@ function renderOscarRouteConsent(consent) {
       <div class="oscar-consent-chips" aria-label="Параметры маршрута">
         ${chips.map((chip) => `<span>${escapeHtml(chip)}</span>`).join('')}
       </div>
+      ${bindingDetails}
       ${webSearch ? renderOscarResearchTimeline('route', { waiting: state === 'waiting' }) : ''}
       ${state === 'waiting' ? `
         <div class="oscar-route-consent-actions">
@@ -1430,17 +1550,19 @@ const OSCAR_THINKING_ORB_PHASES = new Set([
   'research-finalize',
 ]);
 
-function renderMonarchThinkingOrb(phase) {
+function renderMonarchThinkingOrb(phase, motion = 'breathing') {
   const normalizedPhase = OSCAR_THINKING_ORB_PHASES.has(String(phase || ''))
     ? String(phase)
     : 'route';
-  return `<span class="monarch-thinking-orb" data-orb-phase="${normalizedPhase}" aria-hidden="true"><span class="monarch-thinking-orb__core"></span></span>`;
+  const normalizedMotion = motion === 'heartbeat' ? 'heartbeat' : 'breathing';
+  return `<span class="monarch-thinking-orb" data-orb-phase="${normalizedPhase}" data-orb-motion="${normalizedMotion}" aria-hidden="true"><span class="monarch-thinking-orb__core"></span></span>`;
 }
 
 function renderOscarModelNote(message, phase) {
   if (message.error) return '';
   if (message.pending) return '';
   const label = String(message.label || '').trim();
+  if (/^Oscar$/iu.test(label)) return '';
   const usageModelLabel = !message.pending && message.usage
     ? formatUsageModel(message.usage.model_tier || message.usage.model || '')
     : '';
@@ -1565,8 +1687,7 @@ function formatUsageModel(value) {
   switch (String(value || '').toLowerCase()) {
   case 'gemma4-fast': case 'weak': case 'gemma_low': return 'Fast';
   case 'gemma4-balanced': case 'medium': case 'gemma': case 'gemma_high': case 'vision': return 'Medium';
-  case 'gemma4-deepthinking': case 'powerful': case 'reasoning': return 'Pro';
-  case 'gemma4-31b': return 'Extra';
+  case 'gemma4-deepthinking': case 'powerful': case 'reasoning': case 'gemma4-31b': case 'qwen3.8-27b-pro': return 'Pro';
   case 'system': return 'Monarch';
   default: return '';
   }

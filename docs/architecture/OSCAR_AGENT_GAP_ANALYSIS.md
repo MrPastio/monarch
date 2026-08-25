@@ -55,7 +55,7 @@
 | One Oscar identity | conflict | assistant, Oscar Python/UI and Coder controller act as separate agents | Agent Runtime | migrate surfaces gradually; Python becomes inference/ML provider | one task visible across source adapters |
 | Desktop integration | missing for V2 | main chat and Oscar pane use legacy job/UI loops | Desktop adapter later | first expose V2 API/events/state; viewer next | render progress/approval/artifact/failure |
 | Telegram integration | missing for V2 | dispatcher submits one intent; native commands bypass shared task | Telegram adapter later | create/continue task and return verified result | remote restrictions, Desktop approval, response routing |
-| Voice integration | missing for V2 | hardcoded UI classifier and direct execute | Voice adapter later | action requests create task; fast conversation stays isolated | spoken ack + only verified completion |
+| Voice integration | supported | local STT submits one `source=voice` Turn/AgentTask; no private classifier or model lane remains | common Turn/Agent Runtime | transport-only UI; approvals stay Desktop-owned | ordinary answer, verified action, clarification, cancellation, no Voice approval |
 | Coder integration | conflict | strongest loop but own policy/status/terminal heuristics | Coder adapter later | preserve UI/project/sandbox; use common task owner | unrelated project context never leaks |
 | Direct capability API task semantics | missing | `/api/execute` intentionally has no goal/task/plan | compatibility route + V2 task API | keep route; do not claim it is agent execution | policy still applies; V2 action always has task |
 | Versioned task API | missing | existing `/api/agent/*` covers proposals/jobs/ledger | Agent HTTP adapter | add `/api/agent/tasks`; version payload, not path | route bodies, guards, not-found/conflict |
@@ -73,7 +73,7 @@
 | Desktop Chat | Application RAM job | Router once | none | no | no | lost |
 | Oscar pane | renderer + Python conversation | Python model + renderer | conversation only, pending plan lost | final wording only | no | partial conversation only |
 | Telegram | call stack + bot progress | Router once / native command | none | no | no | task lost |
-| Voice | renderer + VoiceSessionStore | regex/hard map | none | no | clarification only | lost |
+| Voice | common Oscar Turn + AgentTask | model + capability resolver | durable task/checkpoint | yes, Kernel observations | yes | common task recovery |
 | Coder | durable CoderRun journal | model/controller | journal | yes | yes | running -> failed |
 | Direct API | HTTP caller | caller | none | n/a | no | lost |
 
@@ -108,7 +108,7 @@ The shared backend foundation now closes the following baseline gaps behind the 
 | end-to-end cancellation foundation | implemented/partial by module | signal crosses Application/Kernel/Execution Engine; `workspace.files.write` consumes it, pure read/model stages bounded-detach, and only cooperative workers attest an actual stop |
 | versioned task API and typed durable SSE | implemented | route guards, bounded bodies, replay/live dedupe, `Last-Event-ID`, terminal runner-release close |
 | workspace report scenario and evaluation | operational | real temp-workspace integration plus deterministic replay/metrics fixture |
-| Desktop/Telegram/Voice/Coder ownership migration | pending | current product call paths remain unchanged |
+| Desktop/Telegram/Voice/Coder ownership migration | implemented for task ownership | all four surfaces submit the common Turn/AgentTask contract; surface transports and execution profiles remain scoped |
 | model runtime manager and unified memory/connector registries | pending | existing providers/stores remain adapters; no destructive migration |
 
 This delta does not convert legacy surface rows to supported: no surface owns V2 task UX until the compatibility adapters land.

@@ -1,5 +1,5 @@
-import { notifyStateChange, state, updateState } from './state.js';
-import { cancelIntentJob, executeCapability, fetchIntentJob, streamIntentJob, submitIntentJob } from './api.js';
+import { notifyStateChange, state } from './state.js';
+import { cancelOscarTurn, createOscarTurn, executeCapability, fetchOscarTurn, streamOscarTurn } from './api.js';
 import {
   escapeHtml,
   summarizeOutput,
@@ -13,6 +13,7 @@ import {
   formatOscarContent,
   syncThreadDOM
 } from './utils.js';
+import { resolveModelReasoningEffort } from './oscar-composer-policy.js';
 
 const elements = {
   topStatus: document.querySelector('#top-status'),
@@ -42,29 +43,28 @@ export async function submitIntentAction(text, confirmed, confirmationToken = ''
   if (!normalizedText || state.busy) {
     return;
   }
+  if (confirmed === true || String(confirmationToken || '').trim()) {
+    throw new Error('Текстовое подтверждение отключено. Используй точную Agent action-card.');
+  }
 
   state.pendingIntentText = normalizedText;
   state.currentIntentJob = null;
   setBusy(true);
   try {
-    const payload = await submitIntentJob(
-      normalizedText,
-      confirmed,
-      confirmationToken,
-      90000,
-      readChatModelContext()
-    );
-    if (!confirmed && elements.intentInput) {
+    const payload = await createOscarTurn({
+      conversationId: dashboardConversationId(),
+      text: normalizedText,
+      privacyMode: 'persistent',
+      modifiers: readChatTurnModifiers(),
+    });
+    if (elements.intentInput) {
       elements.intentInput.value = '';
     }
-    state.currentIntentJob = payload.job || null;
-    if (payload.state) {
-      updateState(payload.state);
-    }
-    void startIntentJobStream(payload.job?.id);
-    void pollIntentJob(payload.job?.id);
+    applyDashboardTurn(payload, normalizedText);
+    void startIntentJobStream(payload.turn?.id);
+    void pollIntentJob(payload.turn?.id);
   } catch (error) {
-    if (!confirmed && elements.intentInput) {
+    if (elements.intentInput) {
       elements.intentInput.value = normalizedText;
     }
     const errText = error instanceof Error ? error.message : String(error);
@@ -86,13 +86,8 @@ export async function cancelIntentJobAction() {
     return;
   }
   try {
-    const payload = await cancelIntentJob(jobId);
-    state.currentIntentJob = payload.job || state.currentIntentJob;
-    if (payload.state) {
-      updateState(payload.state);
-    } else {
-      renderThread();
-    }
+    const payload = await cancelOscarTurn(jobId);
+    applyDashboardTurn(payload, state.currentIntentJob?.text || state.pendingIntentText);
     if (jobId) {
       intentJobStreamDrafts.delete(jobId);
     }
@@ -121,13 +116,8 @@ async function pollIntentJob(jobId) {
   try {
     while (true) {
       await sleep(700);
-      const payload = await fetchIntentJob(jobId);
-      state.currentIntentJob = payload.job || state.currentIntentJob;
-      if (payload.state) {
-        updateState(payload.state);
-      } else {
-        renderThread();
-      }
+      const payload = await fetchOscarTurn(jobId);
+      applyDashboardTurn(payload, state.currentIntentJob?.text || state.pendingIntentText);
       if (terminalStatuses.has(state.currentIntentJob?.status)) {
         setBusy(false);
         intentJobStreamDrafts.delete(jobId);
@@ -157,12 +147,17 @@ async function startIntentJobStream(jobId) {
   let draft = '';
   let lastRenderAt = 0;
   try {
-    const stream = await streamIntentJob(jobId);
+    const stream = await streamOscarTurn(jobId);
     for await (const event of stream) {
-      if (event.type !== 'token') {
+      if (event.type === 'answer.replace' && typeof event.data?.event?.payload?.content === 'string') {
+        draft = event.data.event.payload.content;
+        intentJobStreamDrafts.set(jobId, draft);
+        renderThread();
         continue;
       }
-      const token = typeof event.data?.token === 'string' ? event.data.token : '';
+      const token = event.type === 'answer.delta' && typeof event.data?.event?.payload?.content === 'string'
+        ? event.data.event.payload.content
+        : '';
       if (!token) {
         continue;
       }
@@ -197,18 +192,87 @@ function setBusy(isBusy) {
   notifyStateChange();
 }
 
-function readChatModelContext() {
-  const deepThinking = state.chat?.deepThinking || 'none';
+function readChatTurnModifiers() {
   const modelSelection = state.chat?.modelSelection || 'auto';
-  const modelOverride = deepThinking !== 'none'
-    ? deepThinking
-    : modelSelection !== 'auto'
-      ? modelSelection
-      : '';
-  return modelOverride ? {
-    model_override: modelOverride,
-    ...(deepThinking !== 'none' ? { deep_thinking_consent: 'allow' } : {}),
-  } : {};
+  const modelOverride = modelSelection !== 'auto' ? modelSelection : '';
+  return {
+    ...(modelOverride ? { requestedModel: modelOverride } : {}),
+    reasoningEffort: resolveModelReasoningEffort(modelOverride),
+    webSearch: false,
+    researchMode: 'off',
+  };
+}
+
+function dashboardConversationId() {
+  try {
+    const key = 'monarch.dashboardTurnConversationId';
+    const existing = window.sessionStorage.getItem(key);
+    if (existing) return existing;
+    const id = typeof globalThis.crypto?.randomUUID === 'function'
+      ? `dashboard:${globalThis.crypto.randomUUID()}`
+      : `dashboard:${Date.now().toString(36)}`;
+    window.sessionStorage.setItem(key, id);
+    return id;
+  } catch {
+    return `dashboard:${Date.now().toString(36)}`;
+  }
+}
+
+function applyDashboardTurn(checkpoint, text) {
+  const turn = checkpoint?.turn;
+  if (!turn) return;
+  const outcome = String(turn.outcome?.kind || '');
+  const waitingApproval = turn.status === 'waiting-for-approval';
+  const waitingUser = turn.status === 'waiting-for-user';
+  const terminal = ['succeeded', 'blocked', 'failed', 'cancelled'].includes(turn.status) || waitingApproval || waitingUser;
+  const jobStatus = turn.status === 'cancelled'
+    ? 'cancelled'
+    : turn.status === 'failed' || turn.status === 'blocked'
+      ? 'failed'
+      : terminal ? 'completed' : 'running';
+  const summary = String(turn.outcome?.summary || (
+    waitingApproval ? 'Действие ждёт точную Agent action-card.'
+      : waitingUser ? 'Нужно уточнение для продолжения Turn.'
+        : 'Turn выполняется.'
+  ));
+  const approvalPresentation = [...(checkpoint.events || [])].reverse()
+    .find((event) => event.type === 'approval.required')?.payload;
+  const ok = turn.status === 'succeeded' && ['answered', 'answered:source-grounded', 'verified', 'partial'].includes(outcome);
+  const error = waitingApproval ? 'confirmation-required'
+    : waitingUser ? 'clarification-required'
+      : ok ? '' : turn.status === 'blocked' ? 'turn-blocked' : turn.status === 'failed' ? 'turn-failed' : turn.status === 'cancelled' ? 'turn-cancelled' : '';
+  state.currentIntentJob = {
+    id: turn.id,
+    text,
+    status: jobStatus,
+    createdAt: turn.createdAt,
+    updatedAt: turn.updatedAt,
+  };
+  if (state.data) {
+    state.data.lastIntent = {
+      intent: { id: turn.id, source: turn.source, text, createdAt: turn.createdAt, context: { turnId: turn.id } },
+      route: { kind: turn.mode, confidence: 1, reason: 'OscarTurnCoordinator' },
+      plan: null,
+      execution: {
+        ok,
+        ...(error ? { error } : {}),
+        summary,
+        output: {
+          reply: summary,
+          turnId: turn.id,
+          taskId: turn.taskId || '',
+          status: turn.status,
+          outcome,
+          verified: outcome === 'verified',
+          partial: outcome === 'partial',
+        },
+        ...(approvalPresentation ? { metadata: { approvalPresentation } } : {}),
+      },
+      summary,
+    };
+  }
+  notifyStateChange();
+  renderThread();
 }
 
 export function renderChatPane() {

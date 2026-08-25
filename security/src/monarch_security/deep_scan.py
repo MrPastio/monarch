@@ -169,7 +169,7 @@ $cert = $sig.SignerCertificate
   authenticode_not_after = if ($cert) { $cert.NotAfter.ToString('o') } else { $null }
 } | ConvertTo-Json -Depth 4 -Compress
 """
-    result = _run_powershell_json(command, path, timeout=30)
+    result = _run_powershell_json(command, path, timeout=5)
     if isinstance(result, dict):
         return result
     return {

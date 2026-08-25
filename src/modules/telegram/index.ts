@@ -49,9 +49,6 @@ const MAX_COMMAND_CHARS = 16_000;
 const RATE_WINDOW_MS = 60_000;
 const RATE_LIMIT = 20;
 const PAIRING_COOLDOWN_MS = 30 * 60 * 1000;
-const PENDING_CONFIRMATION_TTL_MS = 10 * 60 * 1000;
-const MAX_PENDING_CONFIRMATIONS_PER_CHAT_USER = 8;
-const MAX_PENDING_CONFIRMATIONS_TOTAL = 256;
 const OFFICIAL_TELEGRAM_API_HOST = 'api.telegram.org';
 const MAX_TABLE_COLUMNS = 8;
 const MAX_TABLE_ROWS = 24;
@@ -109,38 +106,22 @@ interface TelegramUpdate {
   callback_query?: TelegramCallbackQuery;
 }
 
-interface PendingIntentConfirmation {
-  kind: 'intent';
-  id: string;
-  chatId: number;
-  userId: number;
-  text: string;
-  token: string;
-  expiresAt: number;
-}
-
-interface PendingApiConfirmation {
-  kind: 'api';
-  id: string;
-  chatId: number;
-  userId: number;
-  method: string;
-  parameters: Record<string, unknown>;
-  expiresAt: number;
-}
-
-type PendingConfirmation = PendingIntentConfirmation | PendingApiConfirmation;
-
 export interface TelegramIntentDispatchRequest {
   text: string;
-  confirmed?: boolean;
-  confirmationToken?: string;
+  approval?: {
+    action: 'arm' | 'approve' | 'deny';
+    approvalId: string;
+  };
   context: Record<string, unknown>;
 }
 
 export type TelegramIntentDispatcher = (
   request: TelegramIntentDispatchRequest
 ) => Promise<MonarchIntentResult>;
+
+interface TelegramOwnerDevPolicy {
+  zeroRetentionEnabled?: boolean;
+}
 
 export interface TelegramModuleOptions {
   projectRoot?: string;
@@ -180,10 +161,10 @@ export class TelegramModule implements MonarchModule {
   private pairingExpiresAt = 0;
   private botIdentity: Record<string, unknown> | null = null;
   private lastError = '';
-  private readonly pendingConfirmations = new Map<string, PendingConfirmation>();
   private readonly rateWindows = new Map<number, number[]>();
   private readonly rateLimitNotices = new Map<number, number>();
   private lastStateReadError = '';
+  private ownerDevSettingsProvider: () => TelegramOwnerDevPolicy = () => ({});
 
   constructor(options: TelegramModuleOptions = {}) {
     this.projectRoot = path.resolve(options.projectRoot || process.cwd());
@@ -203,6 +184,18 @@ export class TelegramModule implements MonarchModule {
 
   setIntentDispatcher(dispatcher: TelegramIntentDispatcher): void {
     this.dispatcher = dispatcher;
+  }
+
+  setOwnerDevSettingsProvider(provider: () => TelegramOwnerDevPolicy): void {
+    this.ownerDevSettingsProvider = provider;
+  }
+
+  private isZeroRetentionEnabled(): boolean {
+    try {
+      return this.ownerDevSettingsProvider().zeroRetentionEnabled === true;
+    } catch {
+      return true;
+    }
   }
 
   async activate(context: MonarchKernelContext): Promise<void> {
@@ -378,7 +371,6 @@ export class TelegramModule implements MonarchModule {
     await this.mutateState((state) => {
       state.remotePaused = paused;
     });
-    if (paused) this.pendingConfirmations.clear();
     await this.context?.emit(paused ? 'telegram.remote.paused' : 'telegram.remote.resumed', this.manifest.id, {
       pairedChats: this.state.pairings.length,
     });
@@ -403,9 +395,6 @@ export class TelegramModule implements MonarchModule {
       state.reminders = state.reminders.filter((entry) => pairedChats.has(entry.chatId));
     });
     this.scheduleReminderDelivery();
-    for (const [id, pending] of this.pendingConfirmations) {
-      if (requestedChatId === undefined || pending.chatId === requestedChatId) this.pendingConfirmations.delete(id);
-    }
     const revoked = before - this.state.pairings.length;
     if (revoked > 0) {
       await this.context?.emit('telegram.pairing.revoked', this.manifest.id, {
@@ -561,7 +550,7 @@ export class TelegramModule implements MonarchModule {
     const command = text.match(/^\/([a-z_]+)(?:@\w+)?(?:\s+([\s\S]*))?$/i);
     const name = command?.[1]?.toLowerCase() || '';
     const args = command?.[2]?.trim() || '';
-    const pendingCount = this.countPendingConfirmations(message.chat.id, message.from!.id);
+    const pendingCount = 0;
     const pausedControlCommands = new Set(['start', 'help', 'status', 'whoami', 'unlink', 'lockdown', 'pending', 'plugins']);
     const plainControlQuestion = !name && (
       isTelegramStatusQuestion(text)
@@ -591,28 +580,33 @@ export class TelegramModule implements MonarchModule {
       return;
     }
     if (name === 'unlink') {
-      await this.sendText(message.chat.id, 'Привязка этого чата удалена. Для повторного доступа понадобится новый локальный код.');
-      await this.revokePairingCapability({ chatId: message.chat.id });
+      await this.dispatchTask(
+        message.chat.id,
+        message.from!.id,
+        `Выполни точную capability telegram.pairing.revoke с chatId=${message.chat.id}. Не изменяй другие привязки.`,
+        message.message_id,
+      );
       return;
     }
     if (name === 'lockdown') {
-      await this.setRemotePaused(true);
-      await this.sendText(message.chat.id, 'Удалённые задачи и новые привязки остановлены. Возобновление доступно только локально в Monarch Control.');
+      await this.dispatchTask(
+        message.chat.id,
+        message.from!.id,
+        'Выполни точную capability telegram.remote.pause. Это локальный защитный kill switch; не выполняй другие действия.',
+        message.message_id,
+      );
       return;
     }
     if (name === 'pending') {
-      const pending = this.activePendingConfirmations(message.chat.id, message.from!.id);
-      await this.sendText(message.chat.id, pending.length
-        ? `Ожидают решения: ${pending.length}. Используй кнопки под исходными сообщениями.`
-        : 'Ожидающих подтверждений нет.');
+      await this.sendText(message.chat.id, 'Активные действия привязаны к durable AgentTask. Используй кнопки под точной карточкой действия.');
       return;
     }
     if (name === 'security') {
-      await this.dispatchTask(message.chat.id, message.from!.id, 'покажи краткий статус Monarch Security и только реальные активные предупреждения');
+      await this.dispatchTask(message.chat.id, message.from!.id, 'покажи краткий статус Monarch Security и только реальные активные предупреждения', message.message_id);
       return;
     }
     if (name === 'skills') {
-      await this.dispatchTask(message.chat.id, message.from!.id, 'покажи кратко локальные Agent Skills Monarch, подходящие для Telegram');
+      await this.dispatchTask(message.chat.id, message.from!.id, 'покажи кратко локальные Agent Skills Monarch, подходящие для Telegram', message.message_id);
       return;
     }
     if (name === 'plugins') {
@@ -621,23 +615,32 @@ export class TelegramModule implements MonarchModule {
       return;
     }
     if (name === 'remind') {
-      await this.createReminderFromCommand(message.chat.id, args);
+      if (this.isZeroRetentionEnabled()) {
+        await this.sendText(message.chat.id, 'Напоминания отключены: Owner DEV «Полная незапись» запрещает сохранять их текст на диск.');
+        return;
+      }
+      await this.dispatchReminderCreation(message.chat.id, message.from!.id, args, message.message_id);
       return;
     }
     if (name === 'reminders') {
-      await this.sendText(message.chat.id, formatReminders(this.state.reminders.filter((item) => item.chatId === message.chat.id)));
+      await this.dispatchTask(
+        message.chat.id,
+        message.from!.id,
+        `Выполни точную read-only capability telegram.reminder.list с chatId=${message.chat.id} и верни только фактически наблюдённые напоминания.`,
+        message.message_id,
+      );
       return;
     }
     if (name === 'cancel') {
-      await this.cancelReminderFromCommand(message.chat.id, args);
+      await this.dispatchReminderCancellation(message.chat.id, message.from!.id, args, message.message_id);
       return;
     }
     if (name === 'poll') {
-      await this.sendPollFromCommand(message.chat.id, args);
+      await this.dispatchPollFromCommand(message.chat.id, message.from!.id, args, message.message_id);
       return;
     }
     if (name === 'table') {
-      await this.sendTableFromCommand(message.chat.id, args);
+      await this.dispatchTableFromCommand(message.chat.id, message.from!.id, args, message.message_id);
       return;
     }
     if (name === 'api') {
@@ -650,19 +653,27 @@ export class TelegramModule implements MonarchModule {
     }
     const naturalReminder = parseNaturalReminder(text);
     if (naturalReminder) {
+      if (this.isZeroRetentionEnabled()) {
+        await this.sendText(message.chat.id, 'Напоминания отключены: Owner DEV «Полная незапись» запрещает сохранять их текст на диск.');
+        return;
+      }
       const reminderInput = parseReminderPayload(naturalReminder.text, naturalReminder.dueAt);
       if (!reminderInput.ok) {
         await this.sendText(message.chat.id, reminderCommandErrorMessage(reminderInput.summary));
         return;
       }
-      const reminder = await this.createReminder(message.chat.id, reminderInput.text, reminderInput.dueAt);
-      await this.sendText(message.chat.id, `Хорошо, напомню ${formatDate(reminder.dueAt)}.`);
+      await this.dispatchTask(
+        message.chat.id,
+        message.from!.id,
+        `Выполни точную capability telegram.reminder.create с chatId=${message.chat.id}, text=${JSON.stringify(reminderInput.text)} и dueAt=${JSON.stringify(reminderInput.dueAt)}.`,
+        message.message_id,
+      );
       return;
     }
-    await this.dispatchTask(message.chat.id, message.from!.id, name === 'task' ? args : text);
+    await this.dispatchTask(message.chat.id, message.from!.id, name === 'task' ? args : text, message.message_id);
   }
 
-  private async dispatchTask(chatId: number, userId: number, text: string): Promise<void> {
+  private async dispatchTask(chatId: number, userId: number, text: string, messageId?: number): Promise<void> {
     if (!text || !this.dispatcher) {
       await this.sendText(chatId, this.dispatcher ? 'Напиши задачу после /task.' : 'Monarch ещё не подключил внутренний dispatcher.');
       return;
@@ -677,32 +688,20 @@ export class TelegramModule implements MonarchModule {
     try {
       const result = await this.dispatcher({
         text,
-        context: telegramIntentContext(chatId, userId),
+        context: telegramIntentContext(chatId, userId, messageId),
       });
-      const confirmation = result.confirmation;
-      if (result.execution?.error === 'confirmation-required' && confirmation?.token) {
-        const id = randomUUID().replace(/-/g, '').slice(0, 16);
-        const pending: PendingIntentConfirmation = {
-          kind: 'intent',
-          id,
-          chatId,
-          userId,
-          text,
-          token: confirmation.token,
-          expiresAt: Date.now() + PENDING_CONFIRMATION_TTL_MS,
-        };
-        if (!this.registerPendingConfirmation(pending)) {
-          await this.completeTaskMessage(chatId, progress.message_id, pendingConfirmationLimitMessage());
-          return;
-        }
+      const presentation = readTelegramApprovalPresentation(result);
+      if (result.execution?.error === 'confirmation-required' && presentation) {
+        const action = presentation.requiresArm ? 'arm' : 'approve';
+        const actionLabel = presentation.requiresArm ? 'Arm' : 'Разрешить один раз';
         await this.callApi('editMessageText', {
           chat_id: chatId,
           message_id: progress.message_id,
-          text: `${result.execution.summary}\n\nРазрешить это действие один раз?`,
+          text: formatTelegramApprovalCard(result.execution.summary, presentation),
           reply_markup: {
             inline_keyboard: [[
-              { text: 'Разрешить один раз', callback_data: `confirm:${id}` },
-              { text: 'Отмена', callback_data: `deny:${id}` },
+              { text: actionLabel, callback_data: `${action}:${presentation.approvalId}` },
+              { text: 'Отклонить', callback_data: `deny:${presentation.approvalId}` },
             ]],
           },
         });
@@ -719,7 +718,8 @@ export class TelegramModule implements MonarchModule {
   private async handleCallback(callback: TelegramCallbackQuery): Promise<void> {
     const chatId = callback.message?.chat.id;
     if (!chatId || !this.isPaired(chatId, callback.from.id)) return;
-    const [action, id] = String(callback.data || '').split(':', 2);
+    const [actionValue, id] = String(callback.data || '').split(':', 2);
+    const action = actionValue || '';
     if (action === 'quick') {
       await this.callApi('answerCallbackQuery', { callback_query_id: callback.id }).catch(() => undefined);
       await this.sendText(chatId, id === 'status'
@@ -728,7 +728,6 @@ export class TelegramModule implements MonarchModule {
       return;
     }
     if (this.state.remotePaused) {
-      if (id) this.pendingConfirmations.delete(id);
       await this.callApi('answerCallbackQuery', {
         callback_query_id: callback.id,
         text: 'Удалённые задачи остановлены локальным защитным режимом.',
@@ -742,68 +741,49 @@ export class TelegramModule implements MonarchModule {
       }
       return;
     }
-    this.purgeExpiredPendingConfirmations();
-    const pending = id ? this.pendingConfirmations.get(id) : undefined;
-    if (!pending || pending.chatId !== chatId || pending.userId !== callback.from.id || pending.expiresAt < Date.now()) {
-      if (id) this.pendingConfirmations.delete(id);
-      await this.callApi('answerCallbackQuery', { callback_query_id: callback.id, text: 'Подтверждение истекло.' }).catch(() => undefined);
-      return;
-    }
-    if (action !== 'confirm' && action !== 'deny') {
+    if (!id || !/^[A-Za-z0-9._-]{1,56}$/u.test(id) || !['arm', 'approve', 'deny'].includes(action)) {
       await this.callApi('answerCallbackQuery', { callback_query_id: callback.id, text: 'Неизвестное действие.' }).catch(() => undefined);
-      return;
-    }
-    this.pendingConfirmations.delete(pending.id);
-    if (action === 'deny') {
-      await this.callApi('answerCallbackQuery', { callback_query_id: callback.id, text: 'Действие отменено.' });
-      await this.callApi('editMessageText', {
-        chat_id: chatId,
-        message_id: callback.message?.message_id,
-        text: 'Действие отменено.',
-      }).catch(() => undefined);
-      return;
-    }
-    await this.callApi('answerCallbackQuery', { callback_query_id: callback.id, text: 'Разрешение принято.' });
-    if (callback.message?.message_id) {
-      await this.callApi('editMessageText', {
-        chat_id: chatId,
-        message_id: callback.message.message_id,
-        text: 'Разрешение принято. Выполняю…',
-      }).catch(() => undefined);
-    }
-    if (pending.kind === 'api') {
-      try {
-        const result = await this.callApi(pending.method, pending.parameters);
-        const text = `Bot API ${pending.method}: ${safeJson(result, 2800)}`;
-        if (callback.message?.message_id) {
-          await this.completeTaskMessage(chatId, callback.message.message_id, text);
-        } else {
-          await this.sendText(chatId, text);
-        }
-      } catch (error) {
-        await this.sendText(chatId, `Bot API ${pending.method} не выполнен: ${safeError(error)}`);
-      }
       return;
     }
     if (!this.dispatcher) return;
     try {
+      await this.callApi('answerCallbackQuery', {
+        callback_query_id: callback.id,
+        text: action === 'arm' ? 'Действие взведено на короткое время.' : action === 'deny' ? 'Отклоняю.' : 'Разрешение принято.',
+      });
       const result = await this.dispatcher({
-        text: pending.text,
-        confirmed: true,
-        confirmationToken: pending.token,
+        text: '',
+        approval: { action: action as 'arm' | 'approve' | 'deny', approvalId: id },
         context: telegramIntentContext(chatId, callback.from.id),
       });
+      if (action === 'arm') {
+        const presentation = readTelegramApprovalPresentation(result);
+        if (!presentation) throw new Error('Карточка approval больше не актуальна.');
+        await this.callApi('editMessageText', {
+          chat_id: chatId,
+          message_id: callback.message?.message_id,
+          text: `${formatTelegramApprovalCard(result.execution?.summary || result.summary, presentation)}\n\nArm активен 8 секунд.`,
+          reply_markup: {
+            inline_keyboard: [[
+              { text: 'Разрешить сейчас', callback_data: `approve:${id}` },
+              { text: 'Отклонить', callback_data: `deny:${id}` },
+            ]],
+          },
+        });
+        return;
+      }
       if (callback.message?.message_id) {
         await this.completeTaskMessage(chatId, callback.message.message_id, formatIntentResult(result));
       } else {
         await this.sendText(chatId, formatIntentResult(result));
       }
     } catch (error) {
-      await this.sendText(chatId, `Подтверждённое действие не завершилось: ${safeError(error)}`);
+      await this.callApi('answerCallbackQuery', { callback_query_id: callback.id, text: 'Карточка устарела или не принадлежит этому чату.' }).catch(() => undefined);
+      await this.sendText(chatId, `Действие не выполнено: ${safeError(error)}`);
     }
   }
 
-  private async createReminderFromCommand(chatId: number, args: string): Promise<void> {
+  private async dispatchReminderCreation(chatId: number, userId: number, args: string, messageId?: number): Promise<void> {
     const parsed = parseReminderCommand(args);
     if (!parsed) {
       await this.sendText(chatId, 'Формат: /remind 10m текст или /remind 2026-06-30T18:00:00+03:00 текст');
@@ -814,11 +794,18 @@ export class TelegramModule implements MonarchModule {
       await this.sendText(chatId, reminderCommandErrorMessage(reminderInput.summary));
       return;
     }
-    const reminder = await this.createReminder(chatId, reminderInput.text, reminderInput.dueAt);
-    await this.sendText(chatId, `Напоминание ${reminder.id} поставлено на ${formatDate(reminder.dueAt)}.`);
+    await this.dispatchTask(
+      chatId,
+      userId,
+      `Выполни точную capability telegram.reminder.create с chatId=${chatId}, text=${JSON.stringify(reminderInput.text)} и dueAt=${JSON.stringify(reminderInput.dueAt)}.`,
+      messageId,
+    );
   }
 
   private async createReminder(chatId: number, text: string, dueAt: string): Promise<TelegramReminder> {
+    if (this.isZeroRetentionEnabled()) {
+      throw new Error('Telegram reminder persistence is disabled by zero-retention DEV policy.');
+    }
     const reminderInput = parseReminderPayload(text, dueAt);
     if (!reminderInput.ok) throw new Error(reminderInput.summary);
     const reminder: TelegramReminder = {
@@ -835,13 +822,18 @@ export class TelegramModule implements MonarchModule {
     return reminder;
   }
 
-  private async cancelReminderFromCommand(chatId: number, id: string): Promise<void> {
-    const result = await this.cancelReminder(id, chatId);
-    await this.sendText(chatId, result.status === 'cancelled'
-      ? `Напоминание ${id} отменено.`
-      : result.status === 'ambiguous'
-        ? `Найдено несколько напоминаний ${id}. Уточни список через /reminders.`
-        : `Напоминание ${id} не найдено.`);
+  private async dispatchReminderCancellation(chatId: number, userId: number, id: string, messageId?: number): Promise<void> {
+    const normalizedId = id.trim();
+    if (!normalizedId || normalizedId.length > 128) {
+      await this.sendText(chatId, 'Формат: /cancel ID из списка /reminders.');
+      return;
+    }
+    await this.dispatchTask(
+      chatId,
+      userId,
+      `Выполни точную capability telegram.reminder.cancel с id=${JSON.stringify(normalizedId)} и chatId=${chatId}. Не отменяй напоминания другого чата.`,
+      messageId,
+    );
   }
 
   private async deliverDueReminders(): Promise<void> {
@@ -917,32 +909,32 @@ export class TelegramModule implements MonarchModule {
     }, delay);
   }
 
-  private async sendPollFromCommand(chatId: number, args: string): Promise<void> {
+  private async dispatchPollFromCommand(chatId: number, userId: number, args: string, messageId?: number): Promise<void> {
     const parsed = parsePollCommand(args);
     if (!parsed.ok) {
       await this.sendText(chatId, parsed.message);
       return;
     }
-    await this.callApi('sendPoll', {
-      chat_id: chatId,
-      question: parsed.question,
-      options: parsed.options,
-      is_anonymous: false,
-      allows_revoting: true,
-    });
+    await this.dispatchTask(
+      chatId,
+      userId,
+      `Выполни точную capability telegram.poll.send с chatId=${chatId}, question=${JSON.stringify(parsed.question)}, options=${JSON.stringify(parsed.options)} и multiple=false.`,
+      messageId,
+    );
   }
 
-  private async sendTableFromCommand(chatId: number, args: string): Promise<void> {
+  private async dispatchTableFromCommand(chatId: number, userId: number, args: string, messageId?: number): Promise<void> {
     const parsed = parseTableCommand(args);
     if (!parsed.ok) {
       await this.sendText(chatId, parsed.message);
       return;
     }
-    try {
-      await this.callApi('sendRichMessage', { chat_id: chatId, rich_message: { markdown: parsed.markdown } });
-    } catch {
-      await this.sendText(chatId, parsed.markdown);
-    }
+    await this.dispatchTask(
+      chatId,
+      userId,
+      `Выполни точную capability telegram.api.call с method=sendRichMessage и parameters=${JSON.stringify({ chat_id: chatId, rich_message: { markdown: parsed.markdown } })}. Не меняй target chat_id.`,
+      messageId,
+    );
   }
 
   private async callApiFromCommand(chatId: number, userId: number, args: string): Promise<void> {
@@ -970,35 +962,11 @@ export class TelegramModule implements MonarchModule {
     if (telegramApiMethodDefaultsToChatId(method) && !('chat_id' in parameters)) {
       parameters.chat_id = chatId;
     }
-    if (!/^get/i.test(method)) {
-      const id = randomUUID().replace(/-/g, '').slice(0, 16);
-      const pending: PendingApiConfirmation = {
-        kind: 'api',
-        id,
-        chatId,
-        userId,
-        method,
-        parameters,
-        expiresAt: Date.now() + PENDING_CONFIRMATION_TTL_MS,
-      };
-      if (!this.registerPendingConfirmation(pending)) {
-        await this.sendText(chatId, pendingConfirmationLimitMessage());
-        return;
-      }
-      await this.callApi('sendMessage', {
-        chat_id: chatId,
-        text: `Bot API ${method} изменит состояние Telegram. Разрешить этот вызов один раз?`,
-        reply_markup: {
-          inline_keyboard: [[
-            { text: 'Разрешить один раз', callback_data: `confirm:${id}` },
-            { text: 'Отмена', callback_data: `deny:${id}` },
-          ]],
-        },
-      });
-      return;
-    }
-    const result = await this.callApi(method, parameters);
-    await this.sendText(chatId, `Bot API ${method}: ${safeJson(result, 2800)}`);
+    await this.dispatchTask(
+      chatId,
+      userId,
+      `Выполни точную capability telegram.api.call с method=${method} и parameters=${JSON.stringify(parameters)}. Не меняй target chat_id.`,
+    );
   }
 
   private async sendCapability(input: unknown): Promise<MonarchExecutionResult> {
@@ -1030,6 +998,13 @@ export class TelegramModule implements MonarchModule {
   }
 
   private async createReminderCapability(input: unknown): Promise<MonarchExecutionResult> {
+    if (this.isZeroRetentionEnabled()) {
+      return {
+        ok: false,
+        summary: 'Telegram reminder persistence is disabled by Owner DEV zero-retention policy.',
+        error: 'telegram-reminder-disabled-by-zero-retention',
+      };
+    }
     const chatId = this.resolvePairedChat(readNumber(input, 'chatId'));
     const text = readString(input, 'text');
     const dueAt = readString(input, 'dueAt');
@@ -1117,7 +1092,7 @@ export class TelegramModule implements MonarchModule {
 
   private describeCapabilitiesCapability(input: unknown): MonarchExecutionResult {
     const topic = readString(input, 'topic');
-    const pending = this.activePendingConfirmations().length;
+    const pending = 0;
     const status = this.statusPayload(false);
     const reply = topic === 'plugins'
       ? telegramPluginHelp()
@@ -1232,34 +1207,6 @@ export class TelegramModule implements MonarchModule {
     }
   }
 
-  private registerPendingConfirmation(pending: PendingConfirmation): boolean {
-    this.purgeExpiredPendingConfirmations();
-    if (this.activePendingConfirmations(pending.chatId, pending.userId).length >= MAX_PENDING_CONFIRMATIONS_PER_CHAT_USER) {
-      return false;
-    }
-    if (this.pendingConfirmations.size >= MAX_PENDING_CONFIRMATIONS_TOTAL) {
-      return false;
-    }
-    this.pendingConfirmations.set(pending.id, pending);
-    return true;
-  }
-
-  private activePendingConfirmations(chatId?: number, userId?: number): PendingConfirmation[] {
-    this.purgeExpiredPendingConfirmations();
-    return Array.from(this.pendingConfirmations.values())
-      .filter((item) => (chatId === undefined || item.chatId === chatId)
-        && (userId === undefined || item.userId === userId));
-  }
-
-  private purgeExpiredPendingConfirmations(now = Date.now()): void {
-    for (const [id, pending] of this.pendingConfirmations) {
-      if (pending.expiresAt <= now) this.pendingConfirmations.delete(id);
-    }
-  }
-
-  private countPendingConfirmations(chatId: number, userId: number): number {
-    return this.activePendingConfirmations(chatId, userId).length;
-  }
 
   private async canAttemptPairing(chatId: number, userId: number): Promise<boolean> {
     const key = pairingAttemptKey(chatId, userId);
@@ -1327,7 +1274,7 @@ export class TelegramModule implements MonarchModule {
       pairedChats: this.state.pairings.map(({ chatId, userId, username, pairedAt }) => ({ chatId, userId, username, pairedAt })),
       reminders: this.state.reminders.length,
       remotePaused: this.state.remotePaused,
-      pendingConfirmations: this.activePendingConfirmations().length,
+      pendingConfirmations: 0,
       dispatcherReady: Boolean(this.dispatcher),
       remoteMode: this.state.remotePaused ? 'lockdown' : this.running || this.standby ? 'agent' : 'stopped',
       securityMode: 'paired-chat + confirmation-gated',
@@ -1530,6 +1477,49 @@ function isoFromTimestamp(timestamp: number): string | null {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
+interface TelegramApprovalPresentation {
+  turnId: string;
+  taskId: string;
+  approvalId: string;
+  capabilityId: string;
+  canonicalProposalHash: string;
+  target: string;
+  risk: string;
+  expiresAt: string;
+  requiresArm: boolean;
+}
+
+function readTelegramApprovalPresentation(result: MonarchIntentResult): TelegramApprovalPresentation | null {
+  const value = result.execution?.metadata?.approvalPresentation;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const required = ['turnId', 'taskId', 'approvalId', 'capabilityId', 'canonicalProposalHash', 'expiresAt'] as const;
+  if (required.some((key) => typeof record[key] !== 'string' || !String(record[key]).trim())) return null;
+  return {
+    turnId: String(record.turnId),
+    taskId: String(record.taskId),
+    approvalId: String(record.approvalId),
+    capabilityId: String(record.capabilityId),
+    canonicalProposalHash: String(record.canonicalProposalHash),
+    target: String(record.target || 'точная цель указана в proposal'),
+    risk: String(record.risk || 'action'),
+    expiresAt: String(record.expiresAt),
+    requiresArm: record.requiresArm === true,
+  };
+}
+
+function formatTelegramApprovalCard(summary: string, presentation: TelegramApprovalPresentation): string {
+  return [
+    summary,
+    '',
+    `Capability: ${presentation.capabilityId}`,
+    `Target: ${presentation.target}`,
+    `Risk: ${presentation.risk}`,
+    `Expires: ${presentation.expiresAt}`,
+    `Hash: ${presentation.canonicalProposalHash}`,
+  ].join('\n');
+}
+
 function formatIntentResult(result: MonarchIntentResult): string {
   const execution = result.execution;
   if (!execution) return result.summary || 'Monarch не нашёл исполняемый маршрут.';
@@ -1571,10 +1561,6 @@ function telegramHelp(): string {
     'Контроль: /pending, /whoami, /unlink, /lockdown.',
     'Для опасных действий бот отдельно попросит подтверждение.',
   ].join('\n');
-}
-
-function pendingConfirmationLimitMessage(): string {
-  return 'Слишком много ожидающих подтверждений для этого чата. Заверши или отмени старые кнопки и повтори.';
 }
 
 function telegramStatusMessage(status: Record<string, unknown>, pending: number): string {
@@ -1724,20 +1710,17 @@ function telegramApiMethodDefaultsToChatId(method: string): boolean {
   return /^(?:send|copyMessages?|forwardMessages?|editMessage|deleteMessages?|deleteChat(?:Photo|StickerSet)|pinChatMessage|unpinChatMessage|unpinAllChatMessages|banChat|unbanChat|restrictChatMember|promoteChatMember|setChat|setMessageReaction|stopPoll|leaveChat|approveChatJoinRequest|declineChatJoinRequest|exportChatInviteLink|createChatInviteLink|editChatInviteLink|revokeChatInviteLink|createForumTopic|editForumTopic|closeForumTopic|reopenForumTopic|deleteForumTopic|unpinAllForumTopicMessages|editGeneralForumTopic|closeGeneralForumTopic|reopenGeneralForumTopic|hideGeneralForumTopic|unhideGeneralForumTopic|getChat(?:Administrators|Member(?:Count)?|Boosts)?|getUserChatBoosts)/i.test(method.trim());
 }
 
-function telegramIntentContext(chatId: number, userId: number): Record<string, unknown> {
+function telegramIntentContext(chatId: number, userId: number, messageId?: number): Record<string, unknown> {
   return {
     telegramChatId: chatId,
     telegramUserId: userId,
-    clientConversationId: `telegram:${chatId}`,
+    clientConversationId: `telegram:${chatId}:${userId}`,
     clientSessionId: `telegram:${chatId}:${userId}`,
+    ...(messageId !== undefined ? {
+      clientRequestId: `telegram:${chatId}:${messageId}`,
+      clientMessageId: `telegram:${chatId}:${messageId}`,
+    } : {}),
   };
-}
-
-function formatReminders(reminders: TelegramReminder[]): string {
-  if (!reminders.length) return 'Активных напоминаний нет.';
-  return reminders.sort((a, b) => Date.parse(a.dueAt) - Date.parse(b.dueAt))
-    .map((item) => `• ${item.id} · ${formatDate(item.dueAt)} · ${item.text}`)
-    .join('\n');
 }
 
 type PollOptionPayload = { text: string };
@@ -1820,10 +1803,6 @@ function isSameReminder(left: TelegramReminder, right: TelegramReminder): boolea
     && left.createdAt === right.createdAt;
 }
 
-function formatDate(value: string): string {
-  return new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
-}
-
 function splitMessage(value: string): string[] {
   const parts: string[] = [];
   let rest = value.trim();
@@ -1869,11 +1848,6 @@ function readStringArray(input: unknown, key: string): string[] {
 function sanitizeTelegramResult(value: unknown): unknown {
   if (!value || typeof value !== 'object') return value;
   return JSON.parse(JSON.stringify(value)) as unknown;
-}
-
-function safeJson(value: unknown, maxChars: number): string {
-  const text = JSON.stringify(value, null, 2) || '';
-  return text.length <= maxChars ? text : `${text.slice(0, maxChars - 3)}...`;
 }
 
 function redactApiBase(value: string): string {

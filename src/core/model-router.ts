@@ -37,10 +37,10 @@ function selectRole(
   hasImageAttachments: boolean
 ): MonarchModelRouteRole {
   if (hasImageAttachments || classification.modelRolePreference === 'vision') {
-    return 'gemma4-balanced';
+    return 'qwen3.8-27b-pro';
   }
   if (classification.modelRolePreference === 'powerful') {
-    return 'gemma4-deepthinking';
+    return 'qwen3.8-27b-pro';
   }
   if (classification.modelRolePreference === 'medium') {
     return 'gemma4-balanced';
@@ -51,15 +51,17 @@ function selectRole(
 function fallbackRolesFor(role: MonarchModelRouteRole): MonarchModelRouteRole[] {
   switch (role) {
   case 'gemma4-fast':
-    return ['gemma4-balanced', 'gemma4-deepthinking'];
+    return ['gemma4-balanced'];
   case 'gemma4-balanced':
-    return ['gemma4-fast', 'gemma4-deepthinking'];
+    return ['gemma4-fast'];
   case 'gemma4-deepthinking':
     return ['gemma4-balanced', 'gemma4-fast'];
-  case 'vision':
+  case 'qwen3.8-27b-pro':
     return ['gemma4-balanced', 'gemma4-fast'];
+  case 'vision':
+    return ['qwen3.8-27b-pro', 'gemma4-balanced'];
   case 'powerful':
-    return ['gemma4-deepthinking', 'gemma4-balanced'];
+    return ['qwen3.8-27b-pro', 'gemma4-balanced'];
   case 'medium':
     return ['gemma4-balanced', 'gemma4-fast'];
   case 'weak':
@@ -87,7 +89,12 @@ function modelRouteReason(
     return `The adaptive complexity profile selected the balanced Gemma 4 tier for ${classification.kind}.`;
   }
   if (role === 'gemma4-deepthinking') {
-    return `Intent kind ${classification.kind} needs stronger reasoning; Pro (26B) is the highest autonomous tier.`;
+    return 'A retired Pro identifier was migrated to Qwen 3.8 27B Pro.';
+  }
+  if (role === 'qwen3.8-27b-pro') {
+    return hasImageAttachments
+      ? 'Qwen 3.8 27B Pro selected for native multimodal agent work.'
+      : `Intent kind ${classification.kind} needs the full Qwen 3.8 Pro agent tier.`;
   }
   if (role === 'vision') {
     return hasImageAttachments

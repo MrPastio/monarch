@@ -68,7 +68,8 @@ describe('model runtime Oscar fallback bridge', () => {
   it('keeps the selector prompt compact, data-oriented, and closed to Extra', () => {
     expect(MODEL_SELECTOR_SYSTEM_PROMPT.length).toBeLessThan(900);
     expect(MODEL_SELECTOR_SYSTEM_PROMPT).toContain('request as data');
-    expect(MODEL_SELECTOR_SYSTEM_PROMPT).toContain('Never choose gemma4-31b');
+    expect(MODEL_SELECTOR_SYSTEM_PROMPT).toContain('There is no Extra tier');
+    expect(MODEL_SELECTOR_SYSTEM_PROMPT).toContain('qwen3.8-27b-pro');
     expect(MODEL_SELECTOR_SYSTEM_PROMPT).toContain('Return exactly one JSON object');
   });
 
@@ -134,6 +135,68 @@ describe('model runtime Oscar fallback bridge', () => {
     }
   });
 
+  it.each([
+    {
+      name: 'explicit backend rejection',
+      response: {
+        ok: false,
+        answer: 'Недостаточно свободной RAM для выбранной модели.',
+        usage: { generation_stop_reason: 'stop', likely_truncated: false },
+      },
+      error: 'oscar-runtime-rejected',
+      finishReason: 'stop',
+      truncated: false,
+    },
+    {
+      name: 'token-limit completion despite backend ok',
+      response: {
+        ok: true,
+        answer: 'Оборванный нестриминговый ответ',
+        usage: { generation_stop_reason: 'length', likely_truncated: true },
+      },
+      error: 'model-output-truncated',
+      finishReason: 'length',
+      truncated: true,
+    },
+  ])('fails a managed nonstream response on $name', async (scenario) => {
+    const server = http.createServer((request, response) => {
+      if (request.method === 'POST' && request.url === '/api/chat') {
+        request.resume();
+        sendJson(response, 200, scenario.response);
+        return;
+      }
+      sendJson(response, 404, { error: 'not-found' });
+    });
+    const baseUrl = await listen(server);
+    const previousOscarBase = process.env.OSCAR_API_BASE;
+    const previousChatEndpoint = process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+    process.env.OSCAR_API_BASE = baseUrl;
+    delete process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+
+    try {
+      const result = await completeWithModelRole(createCatalog(), {
+        role: 'weak',
+        fallbackRoles: [],
+        messages: [{ role: 'user', content: 'managed nonstream terminal contract' }],
+        maxTokens: 32,
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        adapter: 'oscar-managed-backend',
+        error: scenario.error,
+        rawText: scenario.response.answer,
+        finishReason: scenario.finishReason,
+        degraded: true,
+      });
+      expect(Boolean(result.truncated)).toBe(scenario.truncated);
+    } finally {
+      await close(server);
+      restoreEnv('OSCAR_API_BASE', previousOscarBase);
+      restoreEnv('MONARCH_CHAT_MODEL_ENDPOINT', previousChatEndpoint);
+    }
+  });
+
   it('uses Oscar raw local inference for agent decisions instead of the conversational chat route', async () => {
     let rawRequest: any = null;
     let conversationalRouteCalled = false;
@@ -168,6 +231,7 @@ describe('model runtime Oscar fallback bridge', () => {
         role: 'gemma4-balanced',
         fallbackRoles: ['gemma4-fast'],
         purpose: 'agent-decision',
+        agentSessionId: 'agent_task_fixture_session',
         responseFormat: 'json',
         messages: [
           { role: 'system', content: 'Return JSON.' },
@@ -190,11 +254,67 @@ describe('model runtime Oscar fallback bridge', () => {
         max_tokens: 512,
         reasoning_effort: 'low',
         response_format: { type: 'json_object' },
+        agent_session_id: 'agent_task_fixture_session',
       });
       expect(conversationalRouteCalled).toBe(false);
     } finally {
       await close(server);
       restoreEnv('OSCAR_API_BASE', previousOscarBase);
+    }
+  });
+
+  it('uses the same raw Agent lane for a capability response instead of nested conversational routing', async () => {
+    let rawRequest: any = null;
+    let conversationalRouteCalled = false;
+    const server = http.createServer((request, response) => {
+      if (request.method === 'POST' && request.url === '/v1/chat/completions') {
+        let body = '';
+        request.on('data', chunk => { body += chunk; });
+        request.on('end', () => {
+          rawRequest = JSON.parse(body);
+          sendJson(response, 200, {
+            model: 'monarch-fast',
+            choices: [{ message: { content: 'Привет' }, finish_reason: 'stop' }],
+          });
+        });
+        return;
+      }
+      if (request.url === '/api/chat') conversationalRouteCalled = true;
+      sendJson(response, 404, { error: 'not-found' });
+    });
+    const baseUrl = await listen(server);
+    const previousOscarBase = process.env.OSCAR_API_BASE;
+    const previousChatEndpoint = process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+    process.env.OSCAR_API_BASE = baseUrl;
+    delete process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+    try {
+      const result = await completeWithModelRole(createCatalog(), {
+        role: 'gemma4-fast',
+        fallbackRoles: [],
+        purpose: 'agent-response',
+        agentSessionId: 'agent_task_response_fixture',
+        messages: [{ role: 'user', content: 'Привет' }],
+        maxTokens: 64,
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        adapter: 'oscar-agent-raw',
+        model: 'monarch-fast',
+        rawText: 'Привет',
+      });
+      expect(rawRequest).toMatchObject({
+        model: 'monarch-fast',
+        max_tokens: 64,
+        inference_lane: 'agent',
+        agent_session_id: 'agent_task_response_fixture',
+      });
+      expect(rawRequest).not.toHaveProperty('response_format');
+      expect(conversationalRouteCalled).toBe(false);
+    } finally {
+      await close(server);
+      restoreEnv('OSCAR_API_BASE', previousOscarBase);
+      restoreEnv('MONARCH_CHAT_MODEL_ENDPOINT', previousChatEndpoint);
     }
   });
 
@@ -479,6 +599,290 @@ describe('model runtime Oscar fallback bridge', () => {
     }
   });
 
+  it('preserves partial Oscar text and fails closed when the managed stream disconnects before done', async () => {
+    const server = http.createServer((request, response) => {
+      if (request.method === 'POST' && request.url === '/api/chat/stream') {
+        request.resume();
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        response.end('event: token\ndata: {"token":"partial managed answer"}\n\n');
+        return;
+      }
+      if (request.method === 'POST' && request.url === '/api/chat/cancel') {
+        request.resume();
+        sendJson(response, 200, { ok: true });
+        return;
+      }
+      sendJson(response, 404, { error: 'not-found' });
+    });
+
+    const baseUrl = await listen(server);
+    const previousOscarBase = process.env.OSCAR_API_BASE;
+    const previousChatEndpoint = process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+    process.env.OSCAR_API_BASE = baseUrl;
+    delete process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+    const tokens: string[] = [];
+
+    try {
+      const result = await completeWithModelRole(createCatalog(), {
+        role: 'weak',
+        messages: [{ role: 'user', content: 'disconnect after one token' }],
+        maxTokens: 32,
+        onToken: (token) => tokens.push(token),
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        adapter: 'oscar-managed-backend',
+        error: 'runtime-disconnected',
+        rawText: 'partial managed answer',
+        degraded: true,
+        streamCompleted: false,
+      });
+      expect(result.trace).toMatchObject({
+        status: 'degraded',
+        reason: 'runtime-disconnected',
+        streamCompleted: false,
+      });
+      expect(tokens).toEqual(['partial managed answer']);
+    } finally {
+      await close(server);
+      restoreEnv('OSCAR_API_BASE', previousOscarBase);
+      restoreEnv('MONARCH_CHAT_MODEL_ENDPOINT', previousChatEndpoint);
+    }
+  });
+
+  it('rejects a managed Oscar done event that reports a token-limit stop', async () => {
+    const server = http.createServer((request, response) => {
+      if (request.method === 'POST' && request.url === '/api/chat/stream') {
+        request.resume();
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        response.end([
+          'event: token',
+          'data: {"token":"bounded but incomplete"}',
+          '',
+          'event: done',
+          'data: {"ok":true,"usage":{"generation_stop_reason":"length","likely_truncated":true}}',
+          '',
+          '',
+        ].join('\n'));
+        return;
+      }
+      sendJson(response, 404, { error: 'not-found' });
+    });
+
+    const baseUrl = await listen(server);
+    const previousOscarBase = process.env.OSCAR_API_BASE;
+    const previousChatEndpoint = process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+    process.env.OSCAR_API_BASE = baseUrl;
+    delete process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+
+    try {
+      const result = await completeWithModelRole(createCatalog(), {
+        role: 'weak',
+        messages: [{ role: 'user', content: 'hit the generation boundary' }],
+        maxTokens: 32,
+        onToken: () => undefined,
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: 'model-output-truncated',
+        rawText: 'bounded but incomplete',
+        finishReason: 'length',
+        truncated: true,
+        streamCompleted: true,
+      });
+      expect(result.trace).toMatchObject({
+        reason: 'model-output-truncated',
+        finishReason: 'length',
+        truncated: true,
+        streamCompleted: true,
+      });
+    } finally {
+      await close(server);
+      restoreEnv('OSCAR_API_BASE', previousOscarBase);
+      restoreEnv('MONARCH_CHAT_MODEL_ENDPOINT', previousChatEndpoint);
+    }
+  });
+
+  it('accepts a direct OpenAI stream only after a terminal marker and preserves stop telemetry', async () => {
+    const { result, tokens } = await runDirectStreamingCompletion([
+      'data:{"choices":[{"delta":{"content":"direct "},"finish_reason":null}]}\r\n\r\n',
+      'data: {"choices":[{"delta":{"content":"complete"},"finish_reason":"stop"}]}\r\n\r\ndata: [DONE]',
+    ]);
+
+    expect(result).toMatchObject({
+      ok: true,
+      rawText: 'direct complete',
+      finishReason: 'stop',
+      streamCompleted: true,
+    });
+    expect(tokens).toEqual(['direct ', 'complete']);
+  });
+
+  it.each([
+    {
+      name: 'clean EOF before [DONE]',
+      chunks: ['data: {"choices":[{"delta":{"content":"partial eof"},"finish_reason":"stop"}]}\n\n'],
+      error: 'model-stream-incomplete',
+      streamCompleted: false,
+      finishReason: 'stop',
+      truncated: false,
+    },
+    {
+      name: 'malformed JSON before [DONE]',
+      chunks: [
+        'data: {"choices":[{"delta":{"content":"partial malformed"}}]}\n\n',
+        'data: {not-json}\n\ndata: [DONE]\n\n',
+      ],
+      error: 'model-stream-invalid-event',
+      streamCompleted: true,
+      finishReason: undefined,
+      truncated: false,
+    },
+    {
+      name: 'provider error payload before [DONE]',
+      chunks: [
+        'data: {"choices":[{"delta":{"content":"partial provider"}}]}\n\n',
+        'data: {"error":{"code":"local_generation_failed","message":"internal detail"}}\n\ndata: [DONE]\n\n',
+      ],
+      error: 'model-stream-error:local_generation_failed',
+      streamCompleted: true,
+      finishReason: undefined,
+      truncated: false,
+    },
+    {
+      name: 'explicit length finish',
+      chunks: [
+        'data: {"choices":[{"delta":{"content":"partial length"},"finish_reason":"length"}]}\n\n',
+        'data: [DONE]\n\n',
+      ],
+      error: 'model-output-truncated',
+      streamCompleted: true,
+      finishReason: 'length',
+      truncated: true,
+    },
+    {
+      name: 'contradictory stop plus runtime error telemetry',
+      chunks: [
+        'data: {"choices":[{"delta":{"content":"partial contradiction"},"finish_reason":"stop"}],"monarch_runtime":{"generation_stop_reason":"error"}}\n\n',
+        'data: [DONE]\n\n',
+      ],
+      error: 'model-generation-failed',
+      streamCompleted: true,
+      finishReason: 'error',
+      truncated: false,
+    },
+  ])('fails a direct stream on $name without mixing in a fallback answer', async (scenario) => {
+    const { result, tokens } = await runDirectStreamingCompletion(scenario.chunks);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe(scenario.error);
+    expect(result.streamCompleted).toBe(scenario.streamCompleted);
+    expect(result.finishReason).toBe(scenario.finishReason);
+    expect(Boolean(result.truncated)).toBe(scenario.truncated);
+    expect(result.rawText).toContain('partial');
+    expect(result.trace).toMatchObject({
+      source: 'openai-compatible-endpoint',
+      status: 'failed',
+      reason: scenario.error,
+      streamCompleted: scenario.streamCompleted,
+    });
+    expect(tokens.join('')).toBe(result.rawText);
+  });
+
+  it('propagates a raw Agent length finish instead of accepting parseable-looking JSON', async () => {
+    let rawCalls = 0;
+    const server = http.createServer((request, response) => {
+      if (request.method === 'POST' && request.url === '/v1/chat/completions') {
+        rawCalls += 1;
+        request.resume();
+        sendJson(response, 200, {
+          model: 'monarch-balanced',
+          choices: [{
+            message: { content: '{"kind":"answer","message":"looks complete"}' },
+            finish_reason: 'length',
+          }],
+        });
+        return;
+      }
+      sendJson(response, 404, { error: 'not-found' });
+    });
+
+    const baseUrl = await listen(server);
+    const previousOscarBase = process.env.OSCAR_API_BASE;
+    const previousChatEndpoint = process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+    process.env.OSCAR_API_BASE = baseUrl;
+    delete process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+
+    try {
+      const result = await completeWithModelRole(createCatalog(), {
+        role: 'gemma4-balanced',
+        fallbackRoles: [],
+        purpose: 'agent-decision',
+        responseFormat: 'json',
+        messages: [{ role: 'user', content: '{"goal":"answer"}' }],
+        maxTokens: 64,
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        adapter: 'oscar-agent-raw',
+        error: 'agent-decision-output-truncated',
+        rawText: '{"kind":"answer","message":"looks complete"}',
+        finishReason: 'length',
+        truncated: true,
+      });
+      expect(rawCalls).toBe(1);
+    } finally {
+      await close(server);
+      restoreEnv('OSCAR_API_BASE', previousOscarBase);
+      restoreEnv('MONARCH_CHAT_MODEL_ENDPOINT', previousChatEndpoint);
+    }
+  });
+
+  it('rejects a direct nonstream payload that mixes provider error metadata with plausible text', async () => {
+    const server = http.createServer((request, response) => {
+      if (request.method === 'POST' && request.url === '/v1/chat/completions') {
+        request.resume();
+        sendJson(response, 200, {
+          error: { code: 'local_generation_failed', message: 'sensitive provider detail' },
+          choices: [{ message: { content: 'Plausible but invalid answer' }, finish_reason: 'stop' }],
+        });
+        return;
+      }
+      sendJson(response, 503, { error: 'managed fallback unavailable' });
+    });
+    const baseUrl = await listen(server);
+    const previousOscarBase = process.env.OSCAR_API_BASE;
+    const previousChatEndpoint = process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+    process.env.OSCAR_API_BASE = baseUrl;
+    process.env.MONARCH_CHAT_MODEL_ENDPOINT = baseUrl;
+
+    try {
+      const result = await completeWithModelRole(createCatalog(), {
+        role: 'weak',
+        fallbackRoles: [],
+        messages: [{ role: 'user', content: 'adversarial mixed payload' }],
+        maxTokens: 32,
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: 'model-stream-error:local_generation_failed',
+        rawText: 'Plausible but invalid answer',
+        finishReason: 'stop',
+        degraded: true,
+      });
+      expect(result.adapter).toMatch(/compatible$/u);
+      expect(JSON.stringify(result)).not.toContain('sensitive provider detail');
+    } finally {
+      await close(server);
+      restoreEnv('OSCAR_API_BASE', previousOscarBase);
+      restoreEnv('MONARCH_CHAT_MODEL_ENDPOINT', previousChatEndpoint);
+    }
+  });
+
   it('routes to a local loopback endpoint without MONARCH_ALLOW_EXTERNAL_MODEL_ENDPOINTS when model weights are missing', async () => {
     let calledLocalEndpoint = false;
     const server = http.createServer((request, response) => {
@@ -608,6 +1012,45 @@ function close(server: Server): Promise<void> {
       resolve();
     });
   });
+}
+
+async function runDirectStreamingCompletion(chunks: string[]): Promise<{
+  result: Awaited<ReturnType<typeof completeWithModelRole>>;
+  tokens: string[];
+}> {
+  const server = http.createServer((request, response) => {
+    if (request.method === 'POST' && request.url === '/v1/chat/completions') {
+      request.resume();
+      request.on('end', () => {
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        chunks.forEach((chunk) => response.write(chunk));
+        response.end();
+      });
+      return;
+    }
+    sendJson(response, 404, { error: 'not-found' });
+  });
+  const baseUrl = await listen(server);
+  const previousChatEndpoint = process.env.MONARCH_CHAT_MODEL_ENDPOINT;
+  const previousAllowExternal = process.env.MONARCH_ALLOW_EXTERNAL_MODEL_ENDPOINTS;
+  process.env.MONARCH_CHAT_MODEL_ENDPOINT = baseUrl;
+  delete process.env.MONARCH_ALLOW_EXTERNAL_MODEL_ENDPOINTS;
+  const tokens: string[] = [];
+
+  try {
+    const result = await completeWithModelRole(createCatalog(), {
+      role: 'weak',
+      fallbackRoles: [],
+      messages: [{ role: 'user', content: 'direct streaming contract probe' }],
+      maxTokens: 32,
+      onToken: (token) => tokens.push(token),
+    });
+    return { result, tokens };
+  } finally {
+    await close(server);
+    restoreEnv('MONARCH_CHAT_MODEL_ENDPOINT', previousChatEndpoint);
+    restoreEnv('MONARCH_ALLOW_EXTERNAL_MODEL_ENDPOINTS', previousAllowExternal);
+  }
 }
 
 function restoreEnv(key: string, previousValue: string | undefined): void {

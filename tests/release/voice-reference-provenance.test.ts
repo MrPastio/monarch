@@ -654,10 +654,12 @@ describe('synthetic voice reference provenance', () => {
       });
       return;
     }
-    expect(result.ok).toBe(true);
-    expect(result.target?.replaceAll('\\', '/')).toMatch(
-      /\/assets\/voice\/oscar-reference\.wav$/,
-    );
+    expect(result, result.error || 'Sharing reference verification failed without an error').toMatchObject({
+      ok: true,
+      target: expect.stringMatching(
+        /[\\/]assets[\\/]voice[\\/]oscar-reference\.wav$/,
+      ),
+    });
   });
 
   it('makes the Sharing WAV writer preserve an occupied target', () => {

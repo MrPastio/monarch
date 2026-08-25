@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 import os
 import subprocess
 import sys
@@ -6,7 +7,14 @@ import sys
 import pytest
 
 from oscar_agent.config import Settings
-from oscar_agent.memory import MemoryStore, detect_memory_note, should_use_memory
+from oscar_agent.memory import (
+    ActionLinkedConversationError,
+    ClientMessageConflictError,
+    ImmutableConversationMessageError,
+    MemoryStore,
+    detect_memory_note,
+    should_use_memory,
+)
 from oscar_agent.workspace import (
     WorkspaceService,
     detect_incomplete_workspace_command,
@@ -720,15 +728,164 @@ def test_conversation_history_persists_messages_and_supports_management(tmp_path
     assert loaded["messages"][1]["elapsed_ms"] == 2360
     assert store.list_conversations()[0]["message_count"] == 2
 
-    edited = store.edit_user_message(conversation["id"], user_message["id"], "Объясни квадратное уравнение проще")
-    assert [message["role"] for message in edited["messages"]] == ["user"]
-    assert edited["messages"][0]["content"] == "Объясни квадратное уравнение проще"
-    assert edited["title"] == "Объясни квадратное уравнение проще"
+    with pytest.raises(ImmutableConversationMessageError, match="immutable"):
+        store.edit_user_message(conversation["id"], user_message["id"], "Объясни квадратное уравнение проще")
+    unchanged = store.get_conversation(conversation["id"])
+    assert [message["role"] for message in unchanged["messages"]] == ["user", "assistant"]
+    assert unchanged["messages"][0]["content"] == "Как решить квадратное уравнение?"
 
     renamed = store.update_conversation(conversation["id"], title="Квадратные уравнения")
     assert renamed["title"] == "Квадратные уравнения"
     assert store.delete_conversation(conversation["id"]) is True
     assert store.list_conversations() == []
+
+
+def test_conversation_message_idempotency_uses_exact_binding(tmp_path: Path) -> None:
+    store = MemoryStore(make_settings(tmp_path))
+    conversation = store.create_conversation()
+    provenance = {
+        "schemaVersion": "monarch.message-provenance.v1",
+        "origin": "model",
+        "verification": "unverified-model",
+        "turnId": "turn-1",
+    }
+    attachment = {
+        "id": "attachment-1",
+        "digest": "sha256:" + "a" * 64,
+        "mime_type": "image/png",
+        "name": "screen.png",
+        "size_bytes": 16,
+        "data_base64": "MUST_NOT_BE_PERSISTED",
+    }
+    created = store.append_conversation_message(
+        conversation["id"],
+        "assistant",
+        "Ответ",
+        client_message_id="message-1",
+        turn_id="turn-1",
+        provenance=provenance,
+        outcome="answered",
+        attachments=[attachment],
+    )
+    assert created is not None
+    assert created["attachments"] == [{
+        "id": "attachment-1",
+        "digest": "sha256:" + "a" * 64,
+        "mime_type": "image/png",
+        "name": "screen.png",
+        "size_bytes": 16,
+    }]
+    assert store.append_conversation_message(
+        conversation["id"],
+        "assistant",
+        "Ответ",
+        client_message_id="message-1",
+        turn_id="turn-1",
+        provenance=provenance,
+        outcome="answered",
+        attachments=[attachment],
+    ) is None
+    with pytest.raises(ClientMessageConflictError, match="different message"):
+        store.append_conversation_message(
+            conversation["id"],
+            "assistant",
+            "Другой ответ",
+            client_message_id="message-1",
+            turn_id="turn-1",
+            provenance=provenance,
+            outcome="answered",
+            attachments=[attachment],
+        )
+
+
+def test_legacy_conversation_migration_preserves_text_and_marks_unknown_action(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    original = "Готово! Я просканировал диск D: и нашёл 42 каталога."
+    with sqlite3.connect(settings.db_path) as con:
+        con.executescript(
+            """
+            CREATE TABLE conversations (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                archived INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE conversation_messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        con.execute(
+            "INSERT INTO conversations VALUES(?, ?, 0, ?, ?)",
+            ("legacy-chat", "Legacy", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        con.execute(
+            "INSERT INTO conversation_messages VALUES(?, ?, ?, ?, ?)",
+            ("legacy-message", "legacy-chat", "assistant", original, "2026-01-01T00:00:00+00:00"),
+        )
+
+    migrated = MemoryStore(settings).get_conversation("legacy-chat")["messages"][0]
+    assert migrated["content"] == original
+    assert migrated["provenance"]["verification"] == "legacy-unknown"
+    assert migrated["provenance"]["legacy"] is True
+    assert "не подтверждено" in migrated["integrity_warning"].lower()
+
+
+def test_action_linked_conversation_can_only_be_archived(tmp_path: Path) -> None:
+    store = MemoryStore(make_settings(tmp_path))
+    conversation = store.create_conversation()
+    store.append_conversation_message(
+        conversation["id"],
+        "assistant",
+        "Kernel result",
+        client_message_id="verified-message",
+        turn_id="turn-verified",
+        task_id="task-verified",
+        provenance={
+            "schemaVersion": "monarch.message-provenance.v1",
+            "origin": "kernel",
+            "verification": "kernel-verified",
+            "turnId": "turn-verified",
+            "taskId": "task-verified",
+        },
+        outcome="verified",
+    )
+    with pytest.raises(ActionLinkedConversationError, match="archived"):
+        store.delete_conversation(conversation["id"])
+    archived = store.update_conversation(conversation["id"], archived=True)
+    assert archived["archived"] is True
+    assert store.list_conversations() == []
+    assert store.list_conversations(include_archived=True)[0]["id"] == conversation["id"]
+
+
+def test_bulk_conversation_clear_deletes_unlinked_and_archives_action_linked(tmp_path: Path) -> None:
+    store = MemoryStore(make_settings(tmp_path))
+    ordinary = store.create_conversation(title="ordinary")
+    store.append_conversation_message(ordinary["id"], "user", "remove me")
+    linked = store.create_conversation(title="linked")
+    store.append_conversation_message(
+        linked["id"],
+        "assistant",
+        "Kernel result",
+        turn_id="turn-clear-test",
+        task_id="task-clear-test",
+        provenance={"turnId": "turn-clear-test", "taskId": "task-clear-test", "verification": "kernel-verified"},
+        outcome="verified",
+    )
+
+    result = store.clear_conversations()
+
+    assert result == {"ok": True, "deleted": 1, "archived": 1, "remaining": 1}
+    assert store.list_conversations() == []
+    archived = store.list_conversations(include_archived=True)
+    assert [conversation["id"] for conversation in archived] == [linked["id"]]
+    assert archived[0]["archived"] is True
 
 
 def test_conversation_delete_scrubs_plaintext_from_sqlite_and_wal(tmp_path: Path) -> None:

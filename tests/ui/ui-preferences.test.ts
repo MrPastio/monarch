@@ -10,6 +10,7 @@ describe('Monarch UI preferences', () => {
     expect(normalizeUiPreferences({ inspector: 'closed', mascotVisible: false })).toEqual({
       density: 'comfortable',
       inspector: 'open',
+      contextMeterVisible: true,
     });
   });
 
@@ -18,7 +19,7 @@ describe('Monarch UI preferences', () => {
       mascotPreferenceVersion: MASCOT_PREFERENCE_VERSION,
       mascotVisible: false,
       density: 'compact',
-    })).toEqual({ density: 'compact', inspector: 'closed' });
+    })).toEqual({ density: 'compact', inspector: 'closed', contextMeterVisible: true });
   });
 
   it('persists the migration marker with the current user choice', () => {
@@ -27,6 +28,15 @@ describe('Monarch UI preferences', () => {
       inspector: 'open',
       mascotVisible: true,
       mascotPreferenceVersion: MASCOT_PREFERENCE_VERSION,
+      contextMeterVisible: true,
     });
+  });
+
+  it('keeps an explicit context meter visibility choice', () => {
+    expect(normalizeUiPreferences({ contextMeterVisible: false })).toMatchObject({
+      contextMeterVisible: false,
+    });
+    expect(serializeUiPreferences({ density: 'comfortable', inspector: 'open', contextMeterVisible: false }))
+      .toMatchObject({ contextMeterVisible: false });
   });
 });

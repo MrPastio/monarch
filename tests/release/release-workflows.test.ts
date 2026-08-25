@@ -122,7 +122,7 @@ describe('Monarch distribution workflows', () => {
     expect(releaseSpec.asset.fileName).toBe(`Monarch-Setup-${version}.exe`);
     expect(releaseSpec.compatibility).toMatchObject({
       runtimeVersion: '2026.07.7',
-      backendEnvironment: 'backend-0.1.5-offline5',
+      backendEnvironment: 'backend-0.1.5-offline8',
     });
     expect(JSON.stringify(releaseSpec)).not.toContain('bootstrap-pending');
   });

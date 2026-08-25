@@ -3,15 +3,12 @@ import type { MonarchModuleManifest } from '../../core';
 const OSCAR_MODEL_IDS = [
   'weak',
   'medium',
-  'powerful',
-  'reasoning',
   'gemma',
   'gemma_low',
   'gemma_high',
   'gemma4-fast',
   'gemma4-balanced',
-  'gemma4-deepthinking',
-  'gemma4-31b',
+  'qwen3.8-27b-pro',
   'qwen3-coder-30b-a3b-instruct',
   'deepseek-coder-v2-lite-instruct',
 ];
@@ -31,6 +28,10 @@ const OSCAR_CHAT_INPUT_PROPERTIES = {
   max_new_tokens: { type: 'number' },
   temperature: { type: 'number' },
   top_p: { type: 'number' },
+  execution_authority: { type: 'string', enum: ['none', 'agent-controller'] },
+  persistence_owner: { type: 'string', enum: ['backend', 'coordinator'] },
+  turn_id: { type: 'string' },
+  client_message_id: { type: 'string' },
 };
 
 function createOscarChatInputSchema({ webSearch = false } = {}) {
@@ -72,8 +73,6 @@ export const oscarManifest: MonarchModuleManifest = {
     'oscar.generation.cancelled',
     'oscar.model.unloaded',
     'oscar.chat.completed',
-    'oscar.voice.fast.completed',
-    'oscar.voice.realtime.completed',
     'oscar.conversations.changed',
     'oscar.memory.changed',
     'oscar.search.completed',
@@ -192,78 +191,6 @@ export const oscarManifest: MonarchModuleManifest = {
       inputSchema: createOscarChatInputSchema(),
     },
     {
-      id: 'oscar.voice.fast',
-      moduleId: 'oscar',
-      title: 'Run the isolated Fast voice lane',
-      description: 'Generate one bounded spoken response through the dedicated Fast voice endpoint with ephemeral Voice-session context but without standard chat memory, tools, search, or prompt assembly.',
-      risk: 'read',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          text: { type: 'string', minLength: 1, maxLength: 1200 },
-          language: { type: 'string', enum: ['ru', 'uk', 'bg', 'en'] },
-          history: {
-            type: 'array',
-            maxItems: 8,
-            items: {
-              type: 'object',
-              properties: {
-                role: { type: 'string', enum: ['user', 'assistant'] },
-                content: { type: 'string', minLength: 1, maxLength: 800 },
-              },
-              required: ['role', 'content'],
-              additionalProperties: false,
-            },
-          },
-        },
-        required: ['text'],
-        additionalProperties: false,
-      },
-      routing: {
-        aliases: ['fast voice response', 'сложный голосовой ответ'],
-        keywords: ['voice', 'fast', 'spoken', 'голос', 'сложный'],
-        examples: ['answer this complex voice turn through Fast'],
-        intentKinds: ['voice.read'],
-      },
-    },
-    {
-      id: 'oscar.voice.realtime',
-      moduleId: 'oscar',
-      title: 'Run isolated realtime voice search',
-      description: 'Search public web excerpts through the safe bounded voice path and generate one short spoken answer with ephemeral Voice-session context.',
-      risk: 'network',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          text: { type: 'string', minLength: 1, maxLength: 600 },
-          kind: { type: 'string', enum: ['weather', 'web-search'] },
-          language: { type: 'string', enum: ['ru', 'uk', 'bg', 'en'] },
-          location: { type: 'string', minLength: 1, maxLength: 120 },
-          history: {
-            type: 'array',
-            maxItems: 8,
-            items: {
-              type: 'object',
-              properties: {
-                role: { type: 'string', enum: ['user', 'assistant'] },
-                content: { type: 'string', minLength: 1, maxLength: 800 },
-              },
-              required: ['role', 'content'],
-              additionalProperties: false,
-            },
-          },
-        },
-        required: ['text', 'kind'],
-        additionalProperties: false,
-      },
-      routing: {
-        aliases: ['realtime voice search', 'актуальный голосовой поиск'],
-        keywords: ['voice', 'realtime', 'weather', 'search', 'погода', 'поиск'],
-        examples: ['tell me the current weather through voice search'],
-        intentKinds: ['web.search'],
-      },
-    },
-    {
       id: 'oscar.chat.stream',
       moduleId: 'oscar',
       title: 'Run Oscar chat stream',
@@ -294,12 +221,12 @@ export const oscarManifest: MonarchModuleManifest = {
       id: 'oscar.conversations.manage',
       moduleId: 'oscar',
       title: 'Manage Oscar conversations',
-      description: 'List, create, open, append messages, rename, archive, or delete persistent Oscar conversations.',
+      description: 'List, create, open, append messages, rename, archive, clear, or delete persistent Oscar conversations.',
       risk: 'none',
       inputSchema: {
         type: 'object',
         properties: {
-          action: { type: 'string', enum: ['list', 'create', 'get', 'update', 'edit_message', 'append_message', 'delete'] },
+          action: { type: 'string', enum: ['list', 'create', 'get', 'update', 'edit_message', 'append_message', 'clear', 'delete'] },
           id: { type: 'string' },
           message_id: { type: 'string' },
           content: { type: 'string' },
@@ -307,6 +234,12 @@ export const oscarManifest: MonarchModuleManifest = {
           token_count: { type: 'number' },
           elapsed_ms: { type: 'number' },
           model_tier: { type: 'string' },
+          client_message_id: { type: 'string' },
+          turn_id: { type: 'string' },
+          task_id: { type: 'string' },
+          provenance: { type: 'object' },
+          outcome: { type: 'string' },
+          integrity_warning: { type: 'string' },
           message_limit: { type: 'number', minimum: 1, maximum: 200 },
           before: { type: 'number', minimum: 1 },
           title: { type: 'string' },

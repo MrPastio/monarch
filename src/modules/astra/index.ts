@@ -2,6 +2,7 @@ import path from 'node:path';
 import type {
   MonarchCapability,
   MonarchExecutionRequest,
+  MonarchExecutionControl,
   MonarchExecutionResult,
   MonarchIntent,
   MonarchKernelContext,
@@ -18,6 +19,10 @@ import {
   AgentSkillRegistry,
   getAgentSkillRegistry,
 } from './agent-skills';
+import {
+  AgentSkillAuthoringService,
+  getAgentSkillAuthoringService,
+} from './skill-authoring';
 
 interface AstraAgentCard {
   id: string;
@@ -66,7 +71,13 @@ interface AstraSlotPreview {
 export class AstraModule implements MonarchModule {
   readonly manifest = astraManifest;
 
-  constructor(private readonly agentSkills: AgentSkillRegistry = getAgentSkillRegistry()) {}
+  constructor(
+    private readonly agentSkills: AgentSkillRegistry = getAgentSkillRegistry(),
+    private readonly skillAuthoring: AgentSkillAuthoringService = getAgentSkillAuthoringService(
+      agentSkills.workspaceRoot,
+      agentSkills,
+    ),
+  ) {}
 
   async activate(context: MonarchKernelContext): Promise<void> {
     await context.emit('astra.activated', this.manifest.id, {
@@ -188,7 +199,8 @@ export class AstraModule implements MonarchModule {
 
   async executeCapability(
     request: MonarchExecutionRequest,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    control?: MonarchExecutionControl,
   ): Promise<MonarchExecutionResult> {
     switch (request.capabilityId) {
     case 'astra.skills.index':
@@ -205,6 +217,12 @@ export class AstraModule implements MonarchModule {
       return this.matchAgentSkills(request.input);
     case 'astra.agent-skills.activate':
       return this.activateAgentSkill(request.input);
+    case 'astra.agent-skills.draft':
+      return this.draftAgentSkill(request.input, context);
+    case 'astra.agent-skills.validate':
+      return this.validateAgentSkill(request.input, context);
+    case 'astra.agent-skills.create':
+      return this.createAgentSkill(request.input, context, control?.signal);
     default:
       return {
         ok: false,
@@ -422,6 +440,79 @@ export class AstraModule implements MonarchModule {
       metadata: {
         permissionsPreserved: true,
         allowedToolsAreAdvisory: true,
+      },
+    };
+  }
+
+  private async draftAgentSkill(
+    input: unknown,
+    context: MonarchKernelContext,
+  ): Promise<MonarchExecutionResult> {
+    const purpose = readStringInput(input, 'purpose');
+    const scope = readStringInput(input, 'scope') || 'project';
+    const draft = this.skillAuthoring.createAutoDraft(purpose, scope);
+    const validation = await this.skillAuthoring.validate(draft, {
+      availableCapabilities: context.listCapabilities().map((capability) => capability.id),
+    });
+    return {
+      ok: true,
+      summary: `Astra prepared review-required draft ${draft.name}; no files were written.`,
+      output: validation,
+      metadata: {
+        filesWritten: false,
+        implicitInvocationEnabled: draft.allowImplicitInvocation,
+      },
+    };
+  }
+
+  private async validateAgentSkill(
+    input: unknown,
+    context: MonarchKernelContext,
+  ): Promise<MonarchExecutionResult> {
+    const draft = readObjectInput(input, 'draft');
+    const validation = await this.skillAuthoring.validate(draft, {
+      availableCapabilities: context.listCapabilities().map((capability) => capability.id),
+    });
+    return {
+      ok: true,
+      summary: validation.valid
+        ? `Skill draft ${validation.draft.name} passed deterministic validation.`
+        : `Skill draft has ${validation.diagnostics.filter((entry) => entry.level === 'error').length} blocking diagnostics.`,
+      output: validation,
+      metadata: { filesWritten: false },
+    };
+  }
+
+  private async createAgentSkill(
+    input: unknown,
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
+  ): Promise<MonarchExecutionResult> {
+    const draft = readObjectInput(input, 'draft');
+    const expectedDraftHash = readStringInput(input, 'expectedDraftHash');
+    const result = await this.skillAuthoring.publish(draft, expectedDraftHash, {
+      availableCapabilities: context.listCapabilities().map((capability) => capability.id),
+      ...(signal ? { signal } : {}),
+    });
+    await context.emit('astra.agent_skill.created', this.manifest.id, {
+      skillId: result.skill.id,
+      name: result.skill.name,
+      scope: result.skill.scope,
+      source: result.receipt.source,
+      packageHash: result.receipt.packageHash,
+    });
+    return {
+      ok: true,
+      summary: `Created and verified local Agent Skill ${result.skill.name}.`,
+      output: {
+        created: true,
+        verified: true,
+        receipt: result.receipt,
+        skill: result.skill,
+      },
+      metadata: {
+        permissionsPreserved: true,
+        overwrite: false,
       },
     };
   }
@@ -646,6 +737,14 @@ function readStringInput(input: unknown, key: string): string {
 
   const value = (input as Record<string, unknown>)[key];
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function readObjectInput(input: unknown, key: string): Record<string, unknown> | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const value = (input as Record<string, unknown>)[key];
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function readBooleanInput(input: unknown, key: string, fallback: boolean): boolean {

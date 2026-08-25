@@ -10,17 +10,28 @@ import {
 import path from 'node:path';
 import type {
   MonarchApplication,
+  MonarchApplicationState,
   MonarchActionProposalSubmission,
   MonarchCapabilityExecution,
   MonarchIntentJobSubmission,
   MonarchIntentSubmission,
 } from './application';
-import { classifyOscarRequestDisposition } from '../core';
+import { classifyOscarRequestDisposition, MONARCH_PUBLIC_AUTHORITY_CONTEXT } from '../core';
+import { classifyOscarServerDisposition } from '../oscar-turn/disposition';
 import { getAgentSkillRegistry } from '../modules/astra/agent-skills';
-import type { MonarchApprovalPolicy, MonarchAutonomyMode, MonarchSandboxMode } from '../core';
+import { getAgentSkillAuthoringService } from '../modules/astra/skill-authoring';
+import type { MonarchApprovalPolicy, MonarchAutonomyMode, MonarchIntentResult, MonarchSandboxMode } from '../core';
 import { CoderAgentController } from './coder-agent-controller';
 import type { CoderModelId } from '../modules/coder/types';
+import type { MonarchInstallableModelRole } from '../modules/models/model-provisioning-manager';
 import { handleAgentTaskHttpRequest } from './agent-task-http';
+import { handleOscarTurnHttpRequest } from './oscar-turn-http';
+import type { OscarTurnCheckpoint, OscarTurnV1 } from '../oscar-turn';
+import type {
+  MonarchSettingsCommandRequestV1,
+  MonarchSettingsReadRequestV1,
+} from '../settings';
+import { IMAGE_PROVIDER_AGREEMENT } from '../image-generation';
 
 export interface MonarchHttpServerOptions {
   app: MonarchApplication;
@@ -55,8 +66,20 @@ interface MonarchHttpSession {
   allowNonLoopbackMutations: boolean;
 }
 
+export type MonarchHttpOriginState = 'absent' | 'same-origin' | 'mismatch';
+export type MonarchHttpCredentialState = 'disabled' | 'absent' | 'valid' | 'invalid';
+
+export interface MonarchHttpPrincipal {
+  source: 'desktop' | 'api';
+  loopback: boolean;
+  mutationPeerAllowed: boolean;
+  origin: MonarchHttpOriginState;
+  apiToken: MonarchHttpCredentialState;
+  desktopAttestation: Exclude<MonarchHttpCredentialState, 'disabled'>;
+}
+
 const MAX_JSON_BODY_BYTES = 50 * 1024 * 1024; // 50MB
-const MAX_OSCAR_DISPOSITION_BODY_BYTES = 32 * 1024;
+const MAX_OSCAR_DISPOSITION_BODY_BYTES = 128 * 1024;
 const INTERNAL_ERROR_MESSAGE = 'Monarch столкнулся с внутренней ошибкой. Детали остались в локальных логах.';
 const STREAM_ERROR_MESSAGE = 'Поток ответа прервался. Попробуй повторить запрос.';
 const coderControllers = new WeakMap<MonarchApplication, CoderAgentController>();
@@ -82,7 +105,12 @@ function isAgentTaskApiRequest(rawUrl: string | undefined): boolean {
   if (!rawUrl) return false;
   try {
     const pathname = new URL(rawUrl, 'http://127.0.0.1').pathname;
-    return pathname === '/api/agent/tasks' || pathname.startsWith('/api/agent/tasks/');
+    return pathname === '/api/agent/tasks'
+      || pathname.startsWith('/api/agent/tasks/')
+      || pathname === '/api/oscar/attachments'
+      || pathname.startsWith('/api/oscar/attachments/')
+      || pathname === '/api/oscar/turns'
+      || pathname.startsWith('/api/oscar/turns/');
   } catch {
     return false;
   }
@@ -130,22 +158,230 @@ async function handleRequest(
   response: ServerResponse
 ): Promise<void> {
   const url = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`);
+  const principal = deriveMonarchHttpPrincipal(request, session);
 
   if (request.method === 'GET' && url.pathname === '/api/ready') {
     sendJson(response, 200, { ok: true, ready: true });
     return;
   }
 
+  if (await handleOscarTurnHttpRequest({
+    app,
+    url,
+    request,
+    response,
+    enforceMutation: () => enforceMutationGuards(principal),
+    enforceRead: () => enforceReadApiToken(principal),
+    principal,
+  })) {
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/settings/read') {
+    enforceDesktopSettingsPrincipal(principal, false);
+    const body = await readJsonBody<MonarchSettingsReadRequestV1>(request, 128 * 1024);
+    const result = await app.settingsCommandBus.read(body, principal.source);
+    sendJson(response, 200, { ok: true, context: result });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/settings/commands') {
+    enforceDesktopSettingsPrincipal(principal, true);
+    const body = await readJsonBody<MonarchSettingsCommandRequestV1>(request, 512 * 1024);
+    const receipt = await app.settingsCommandBus.execute(body, principal.source);
+    sendJson(response, 200, { ok: true, receipt });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/settings/personality/preview') {
+    enforceDesktopSettingsPrincipal(principal, false);
+    const body = await readJsonBody<{ scope?: MonarchSettingsReadRequestV1['scope'] }>(request, 64 * 1024);
+    if (!body.scope) throw badRequest('personality-scope-required', 'Personality preview requires an explicit scope.');
+    const preview = await app.previewPersonality(body.scope);
+    sendJson(response, 200, { ok: true, preview });
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/images/context') {
+    enforceReadApiToken(principal);
+    sendJson(response, 200, { ok: true, context: await app.imageGeneration.readContext() });
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/images/provider-agreement') {
+    enforceReadApiToken(principal);
+    sendJson(response, 200, { ok: true, agreement: IMAGE_PROVIDER_AGREEMENT });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/images/prompt/translate') {
+    enforceMutationGuards(principal);
+    const body = await readJsonBody<{ text?: string }>(request, 16 * 1024);
+    const translation = await app.translateImagePrompt(body.text || '');
+    sendJson(response, 200, { ok: true, translation });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/images/policy') {
+    enforceDesktopSettingsPrincipal(principal, true);
+    const body = await readJsonBody<{
+      action?: 'provider-consent' | 'perchance-access' | 'perchance-intro' | 'mature-mode' | 'incognito-persistence';
+      enabled?: boolean;
+      agreementVersion?: string;
+      cloudProcessingAccepted?: boolean;
+      thirdPartyTermsAccepted?: boolean;
+      mode?: 'off' | 'one-hour' | 'persistent';
+      adultAttested?: boolean;
+      value?: 'never' | 'ask' | 'always';
+    }>(request, 64 * 1024);
+    if (!body.action) throw badRequest('image-policy-action-required', 'Image policy action is required.');
+    const policy = await app.imageGeneration.updatePolicy({
+      action: body.action,
+      ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+      ...(body.agreementVersion ? { agreementVersion: body.agreementVersion } : {}),
+      ...(body.cloudProcessingAccepted !== undefined ? { cloudProcessingAccepted: body.cloudProcessingAccepted } : {}),
+      ...(body.thirdPartyTermsAccepted !== undefined ? { thirdPartyTermsAccepted: body.thirdPartyTermsAccepted } : {}),
+      ...(body.mode ? { mode: body.mode } : {}),
+      ...(body.adultAttested !== undefined ? { adultAttested: body.adultAttested } : {}),
+      ...(body.value ? { value: body.value } : {}),
+    });
+    sendJson(response, 200, { ok: true, policy });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/images/intents/evaluate') {
+    enforceReadApiToken(principal);
+    const body = await readJsonBody<{ text?: string }>(request, 64 * 1024);
+    const intent = await app.imageGeneration.evaluateIntent(body.text || '');
+    sendJson(response, 200, { ok: true, intent });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/images/generations') {
+    enforceMutationGuards(principal);
+    const body = await readJsonBody<{
+      prompt?: string;
+      providerId?: 'aihorde-anonymous' | 'perchance-interactive';
+      negativePrompt?: string;
+      style?: string;
+      aspectRatio?: string;
+      count?: number;
+      seed?: string;
+      privacyMode?: 'persistent' | 'incognito';
+      confirmationId?: string;
+    }>(request, 64 * 1024);
+    const preparation = await app.imageGeneration.startGeneration({
+      prompt: body.prompt || '',
+      ...(body.providerId ? { providerId: body.providerId } : {}),
+      ...(body.negativePrompt ? { negativePrompt: body.negativePrompt } : {}),
+      ...(body.style ? { style: body.style } : {}),
+      ...(body.aspectRatio ? { aspectRatio: body.aspectRatio } : {}),
+      ...(body.count !== undefined ? { count: body.count } : {}),
+      ...(body.seed ? { seed: body.seed } : {}),
+      ...(body.privacyMode ? { privacyMode: body.privacyMode } : {}),
+      ...(body.confirmationId ? { confirmationId: body.confirmationId } : {}),
+    });
+    const accepted = preparation.status !== 'blocked' && preparation.status !== 'confirmation-required';
+    sendJson(response, accepted ? 202 : 409, { ok: accepted, preparation });
+    return;
+  }
+
+  const generationResultMatch = url.pathname.match(/^\/api\/images\/generations\/(image_job_[a-f0-9]{32})\/results\/([0-3])$/u);
+  if (request.method === 'GET' && generationResultMatch?.[1] && generationResultMatch[2] !== undefined) {
+    enforceReadApiToken(principal);
+    const asset = await app.imageGeneration.readGenerationResult(generationResultMatch[1], Number(generationResultMatch[2]));
+    response.writeHead(200, {
+      'Content-Type': asset.mimeType,
+      'Content-Length': String(asset.bytes.byteLength),
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    response.end(asset.bytes);
+    return;
+  }
+
+  const generationSaveMatch = url.pathname.match(/^\/api\/images\/generations\/(image_job_[a-f0-9]{32})\/save$/u);
+  if (request.method === 'POST' && generationSaveMatch?.[1]) {
+    enforceMutationGuards(principal);
+    const job = await app.imageGeneration.saveGenerationResults(generationSaveMatch[1]);
+    sendJson(response, 200, { ok: true, job });
+    return;
+  }
+
+  const generationMatch = url.pathname.match(/^\/api\/images\/generations\/(image_job_[a-f0-9]{32})$/u);
+  if (request.method === 'GET' && generationMatch?.[1]) {
+    enforceReadApiToken(principal);
+    const job = await app.imageGeneration.readGenerationJob(generationMatch[1]);
+    sendJson(response, 200, { ok: true, job });
+    return;
+  }
+
+  if (request.method === 'DELETE' && generationMatch?.[1]) {
+    enforceMutationGuards(principal);
+    const job = await app.imageGeneration.cancelGeneration(generationMatch[1]);
+    sendJson(response, 200, { ok: true, job });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/images/library/import') {
+    enforceMutationGuards(principal);
+    const body = await readJsonBody<{
+      name?: string;
+      mimeType?: string;
+      dataBase64?: string;
+      contentRating?: 'safe' | 'nsfw' | 'unknown';
+      prompt?: string;
+      privacyMode?: 'persistent' | 'incognito';
+      explicitSave?: boolean;
+    }>(request, 34 * 1024 * 1024);
+    const record = await app.imageGeneration.importImage(body);
+    sendJson(response, 201, { ok: true, record });
+    return;
+  }
+
+  const imageContentMatch = url.pathname.match(/^\/api\/images\/library\/(image_[a-f0-9]{32})\/content$/u);
+  if (request.method === 'GET' && imageContentMatch?.[1]) {
+    enforceReadApiToken(principal);
+    const asset = await app.imageGeneration.readImage(imageContentMatch[1]);
+    const details = await stat(asset.filePath);
+    response.writeHead(200, {
+      'Content-Type': asset.record.mimeType,
+      'Content-Length': String(details.size),
+      'Cache-Control': 'private, max-age=300',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    createReadStream(asset.filePath).pipe(response);
+    return;
+  }
+
+  const imageRecordMatch = url.pathname.match(/^\/api\/images\/library\/(image_[a-f0-9]{32})$/u);
+  if (request.method === 'DELETE' && imageRecordMatch?.[1]) {
+    enforceMutationGuards(principal);
+    await app.imageGeneration.deleteImage(imageRecordMatch[1]);
+    sendJson(response, 200, { ok: true });
+    return;
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/oscar/request-disposition') {
-    enforceReadApiToken(request, session);
-    const body = await readJsonBody<{ text?: unknown }>(request, MAX_OSCAR_DISPOSITION_BODY_BYTES);
+    enforceReadApiToken(principal);
+    const body = await readJsonBody<{ text?: unknown; history?: unknown }>(request, MAX_OSCAR_DISPOSITION_BODY_BYTES);
     const text = typeof body.text === 'string' ? body.text.trim() : '';
     if (!text) throw badRequest('empty-oscar-request', 'Oscar request text is required.');
     if (text.length > 16_000) throw badRequest('oscar-request-too-long', 'Oscar request text is too long.');
+    const history = readOscarDispositionHistory(body.history);
+    const deterministic = classifyOscarRequestDisposition(text);
+    const contextual = await classifyOscarServerDisposition(text, undefined, { history });
     response.setHeader('Cache-Control', 'no-store');
     sendJson(response, 200, {
       ok: true,
-      disposition: classifyOscarRequestDisposition(text),
+      disposition: {
+        ...deterministic,
+        mode: contextual.lane === 'agent' ? 'agent' : 'chat',
+        kind: contextual.kind === 'material_review' ? contextual.kind : deterministic.kind,
+        confidence: contextual.confidence,
+        reason: contextual.reason,
+        requiresExternalResearch: contextual.requiresExternalResearch === true,
+      },
     });
     return;
   }
@@ -163,15 +399,15 @@ async function handleRequest(
     url,
     request,
     response,
-    enforceMutation: () => enforceMutationGuards(request, session),
-    enforceRead: () => enforceReadApiToken(request, session),
-    httpSource: executionSourceForHttpRequest(request, session),
+    enforceMutation: () => enforceMutationGuards(principal),
+    enforceRead: () => enforceReadApiToken(principal),
+    principal,
   })) {
     return;
   }
 
   if (request.method === 'GET' && url.pathname === '/api/coder') {
-    enforceReadApiToken(request, session);
+    enforceReadApiToken(principal);
     const coder = getCoderController(app);
     const projects = coder.listProjects();
     const active = projects.activeProjectId
@@ -182,7 +418,7 @@ async function handleRequest(
   }
 
   if (request.method === 'POST' && url.pathname === '/api/coder/projects') {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const body = await readJsonBody<{ action?: string; name?: string; path?: string; projectId?: string }>(request);
     const coder = getCoderController(app);
     let project;
@@ -196,40 +432,47 @@ async function handleRequest(
 
   const coderProjectMatch = url.pathname.match(/^\/api\/coder\/projects\/([^/]+)$/);
   if (request.method === 'GET' && coderProjectMatch?.[1]) {
-    enforceReadApiToken(request, session);
+    enforceReadApiToken(principal);
     const projectId = decodeURIComponent(coderProjectMatch[1]);
     sendJson(response, 200, { ok: true, project: await getCoderController(app).projectSnapshot(projectId) });
     return;
   }
 
   if (request.method === 'POST' && url.pathname === '/api/coder/runs') {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const body = await readJsonBody<{ prompt?: string; projectId?: string; model?: string }>(request);
     const projectId = String(body.projectId || '').trim();
     if (!projectId) throw badRequest('missing-coder-project', 'Select an explicit Coder project before starting a run.');
+    if (app.getOwnerDevSettings().zeroRetentionEnabled) {
+      throw {
+        statusCode: 409,
+        code: 'coder-durable-run-disabled-by-zero-retention',
+        message: 'Coder хранит журнал выполнения, поэтому новые Coder-сессии отключены при полной незаписи.',
+      } satisfies JsonError;
+    }
     const model: CoderModelId = body.model === 'deepseek-coder-v2-lite-instruct'
       ? 'deepseek-coder-v2-lite-instruct'
       : 'qwen3-coder-30b-a3b-instruct';
-    const run = getCoderController(app).start(String(body.prompt || ''), projectId, model);
+    const run = await getCoderController(app).start(String(body.prompt || ''), projectId, model);
     sendJson(response, 202, { ok: true, run });
     return;
   }
 
   if (request.method === 'GET' && url.pathname === '/api/coder/runs') {
-    enforceReadApiToken(request, session);
+    enforceReadApiToken(principal);
     sendJson(response, 200, { ok: true, runs: getCoderController(app).runs.list(url.searchParams.get('projectId') || undefined) });
     return;
   }
 
   const coderRunMatch = url.pathname.match(/^\/api\/coder\/runs\/([^/]+)$/);
   if (request.method === 'DELETE' && coderRunMatch?.[1]) {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const run = getCoderController(app).runs.delete(decodeURIComponent(coderRunMatch[1]));
     sendJson(response, 200, { ok: true, deleted: run.id });
     return;
   }
   if (request.method === 'GET' && coderRunMatch?.[1]) {
-    enforceReadApiToken(request, session);
+    enforceReadApiToken(principal);
     const run = getCoderController(app).runs.get(decodeURIComponent(coderRunMatch[1]));
     if (!run) { sendJson(response, 404, { ok: false, error: 'coder-run-not-found' }); return; }
     sendJson(response, 200, { ok: true, run });
@@ -238,20 +481,27 @@ async function handleRequest(
 
   const coderCancelMatch = url.pathname.match(/^\/api\/coder\/runs\/([^/]+)\/cancel$/);
   if (request.method === 'POST' && coderCancelMatch?.[1]) {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     sendJson(response, 200, { ok: true, run: await getCoderController(app).cancel(decodeURIComponent(coderCancelMatch[1])) });
     return;
   }
 
   const coderResumeMatch = url.pathname.match(/^\/api\/coder\/runs\/([^/]+)\/resume$/);
   if (request.method === 'POST' && coderResumeMatch?.[1]) {
-    enforceMutationGuards(request, session);
-    sendJson(response, 202, { ok: true, run: getCoderController(app).resume(decodeURIComponent(coderResumeMatch[1])) });
+    enforceMutationGuards(principal);
+    if (app.getOwnerDevSettings().zeroRetentionEnabled) {
+      throw {
+        statusCode: 409,
+        code: 'coder-durable-run-disabled-by-zero-retention',
+        message: 'Coder хранит журнал выполнения, поэтому возобновление Coder-сессий отключено при полной незаписи.',
+      } satisfies JsonError;
+    }
+    sendJson(response, 202, { ok: true, run: await getCoderController(app).resume(decodeURIComponent(coderResumeMatch[1])) });
     return;
   }
 
   if (request.method === 'POST' && url.pathname === '/api/coder/fast-chat') {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const body = await readJsonBody<{ message?: string; history?: Array<{ role: string; content: string }> }>(request);
     const message = String(body.message || '').trim();
     if (!message) throw badRequest('empty-fast-chat-message', 'Fast chat message is required.');
@@ -270,6 +520,8 @@ async function handleRequest(
         reasoning_effort: 'low',
         requested_model: 'gemma4-fast',
         model_selection_source: 'user-explicit',
+        execution_authority: 'none',
+        persistence_owner: 'coordinator',
         max_new_tokens: 1_024,
         temperature: 0.35,
         top_p: 0.9,
@@ -280,8 +532,63 @@ async function handleRequest(
   }
 
   if (request.method === 'GET' && url.pathname === '/api/state') {
-    enforceReadApiToken(request, session);
-    sendJson(response, 200, await app.getState(url.searchParams.get('input') || ''));
+    enforceReadApiToken(principal);
+    const state = await app.getState(url.searchParams.get('input') || '');
+    sendJson(response, 200, projectMonarchStateForPrincipal(state, principal));
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/components') {
+    enforceReadApiToken(principal);
+    sendJson(response, 200, app.getComponentManagerSnapshot());
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/components/ensure') {
+    enforceMutationGuards(principal);
+    const snapshot = app.startRequiredComponents();
+    sendJson(response, snapshot.ready ? 200 : 202, snapshot);
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/models/install') {
+    enforceMutationGuards(principal);
+    const body = await readJsonBody<{ roles?: unknown; source?: unknown }>(request, 16 * 1024);
+    if (!Array.isArray(body.roles) || body.roles.length < 1 || body.roles.length > 3) {
+      throw {
+        statusCode: 400,
+        code: 'model-selection-invalid',
+        message: 'Выбери хотя бы одну модель.',
+      } satisfies JsonError;
+    }
+    const allowed = new Set<MonarchInstallableModelRole>([
+      'gemma4-fast',
+      'gemma4-balanced',
+      'qwen3.8-27b-pro',
+    ]);
+    const roles = [...new Set(body.roles.map((value) => String(value).trim()))];
+    if (!roles.every((role): role is MonarchInstallableModelRole => allowed.has(role as MonarchInstallableModelRole))) {
+      throw {
+        statusCode: 400,
+        code: 'model-selection-invalid',
+        message: 'Неизвестная модель.',
+      } satisfies JsonError;
+    }
+    const source = body.source === 'settings' ? 'settings' : 'onboarding';
+    const snapshot = app.startModelInstall(roles, source);
+    sendJson(response, snapshot.ready && !('activeInstall' in snapshot && snapshot.activeInstall) ? 200 : 202, snapshot);
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/models/onboarding/skip') {
+    enforceMutationGuards(principal);
+    sendJson(response, 200, await app.skipModelOnboarding());
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/models/onboarding/welcome') {
+    enforceMutationGuards(principal);
+    sendJson(response, 200, await app.acknowledgeModelOnboardingWelcome());
     return;
   }
 
@@ -297,7 +604,7 @@ async function handleRequest(
   }
 
   if (request.method === 'GET' && url.pathname === '/api/system') {
-    enforceReadApiToken(request, session);
+    enforceReadApiToken(principal);
     sendJson(response, 200, app.getSystemProfile());
     return;
   }
@@ -321,7 +628,7 @@ async function handleRequest(
   }
 
   if (request.method === 'GET' && url.pathname === '/api/events') {
-    enforceReadApiToken(request, session);
+    enforceReadApiToken(principal);
     const limit = normalizeLimit(url.searchParams.get('limit'));
     const state = await app.getState();
     sendJson(response, 200, {
@@ -331,26 +638,16 @@ async function handleRequest(
   }
 
   if (request.method === 'POST' && url.pathname === '/api/intent') {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const body = await readJsonBody<Partial<MonarchIntentSubmission>>(request);
     const text = typeof body.text === 'string' ? body.text.trim() : '';
     if (!text) {
       throw badRequest('empty-intent', 'Intent text is required.');
     }
 
-    const submission: MonarchIntentSubmission = {
-      text,
-      source: executionSourceForHttpRequest(request, session),
-      confirmed: Boolean(body.confirmed),
-      context: readContext(body.context),
-    };
-    if (submission.confirmed && typeof body.confirmationToken !== 'string') {
-      throw badRequest('missing-confirmation-token', 'Confirmed intent execution requires a confirmation token.');
-    }
-    if (typeof body.confirmationToken === 'string') {
-      submission.confirmationToken = body.confirmationToken;
-    }
-    const result = await app.submitIntent(submission);
+    rejectLegacyTextConfirmation(body);
+    markLegacyAdapter(response, '/api/intent');
+    const result = await submitLegacyTurn(app, request, principal, '/api/intent', text, readContext(body.context));
     sendJson(response, 200, {
       ok: true,
       result,
@@ -360,29 +657,17 @@ async function handleRequest(
   }
 
   if (request.method === 'POST' && url.pathname === '/api/intent-jobs') {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const body = await readJsonBody<Partial<MonarchIntentJobSubmission>>(request);
     const text = typeof body.text === 'string' ? body.text.trim() : '';
     if (!text) {
       throw badRequest('empty-intent', 'Intent text is required.');
     }
 
-    const submission: MonarchIntentJobSubmission = {
-      text,
-      source: executionSourceForHttpRequest(request, session),
-      confirmed: Boolean(body.confirmed),
-      context: readContext(body.context),
-    };
-    if (typeof body.timeoutMs === 'number') {
-      submission.timeoutMs = body.timeoutMs;
-    }
-    if (submission.confirmed && typeof body.confirmationToken !== 'string') {
-      throw badRequest('missing-confirmation-token', 'Confirmed intent execution requires a confirmation token.');
-    }
-    if (typeof body.confirmationToken === 'string') {
-      submission.confirmationToken = body.confirmationToken;
-    }
-    const job = await app.submitIntentJob(submission);
+    rejectLegacyTextConfirmation(body);
+    markLegacyAdapter(response, '/api/intent-jobs');
+    const result = await submitLegacyTurn(app, request, principal, '/api/intent-jobs', text, readContext(body.context));
+    const job = legacyTurnJob(result, text, typeof body.timeoutMs === 'number' ? body.timeoutMs : 180_000);
     sendJson(response, 202, {
       ok: true,
       job,
@@ -392,19 +677,21 @@ async function handleRequest(
   }
 
   if (request.method === 'GET' && url.pathname === '/api/intent-jobs') {
-    enforceReadApiToken(request, session);
+    enforceReadApiToken(principal);
+    markLegacyAdapter(response, '/api/intent-jobs');
     sendJson(response, 200, {
       ok: true,
-      jobs: app.listIntentJobs(normalizeLimit(url.searchParams.get('limit'))),
+      jobs: await listLegacyTurnJobs(app, normalizeLimit(url.searchParams.get('limit'))),
     });
     return;
   }
 
   const intentJobMatch = url.pathname.match(/^\/api\/intent-jobs\/([^/]+)$/);
   if (request.method === 'GET' && intentJobMatch?.[1]) {
-    enforceReadApiToken(request, session);
-    const job = app.getIntentJob(decodeURIComponent(intentJobMatch[1]));
-    if (!job) {
+    enforceReadApiToken(principal);
+    markLegacyAdapter(response, '/api/intent-jobs/:id');
+    const checkpoint = await app.oscarTurnCoordinator.getTurn(decodeURIComponent(intentJobMatch[1]));
+    if (!checkpoint || !checkpoint.turn.conversationId.startsWith('legacy:')) {
       sendJson(response, 404, {
         ok: false,
         error: 'job-not-found',
@@ -412,6 +699,7 @@ async function handleRequest(
       });
       return;
     }
+    const job = legacyCheckpointJob(checkpoint);
     sendJson(response, 200, {
       ok: true,
       job,
@@ -422,10 +710,11 @@ async function handleRequest(
 
   const streamIntentJobMatch = url.pathname.match(/^\/api\/intent-jobs\/([^/]+)\/stream$/);
   if (request.method === 'GET' && streamIntentJobMatch?.[1]) {
-    enforceReadApiToken(request, session);
+    enforceReadApiToken(principal);
     const jobId = decodeURIComponent(streamIntentJobMatch[1]);
-    const job = app.getIntentJob(jobId);
-    if (!job) {
+    markLegacyAdapter(response, '/api/intent-jobs/:id/stream');
+    const initial = await app.oscarTurnCoordinator.getTurn(jobId);
+    if (!initial || !initial.turn.conversationId.startsWith('legacy:')) {
       sendJson(response, 404, { ok: false, error: 'job-not-found' });
       return;
     }
@@ -436,96 +725,42 @@ async function handleRequest(
       'Connection': 'keep-alive',
     });
 
-    response.write(`event: started\ndata: {}\n\n`);
-
-    let isClientClosed = false;
-    let checkInterval: ReturnType<typeof setInterval> | null = null;
-    const unsubscribers: Array<() => void> = [];
-    const cleanup = () => {
-      if (checkInterval) {
-        clearInterval(checkInterval);
-        checkInterval = null;
-      }
-      for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
+    let closed = false;
+    let latest = initial;
+    const emit = (name: string, data: unknown) => {
+      if (!closed) response.write(`event: ${name}\ndata: ${formatSseData(data)}\n\n`);
     };
-    const emitJobEvent = (eventName: string, data: unknown) => {
-      if (!isClientClosed) {
-        response.write(`event: ${eventName}\ndata: ${formatSseData(data)}\n\n`);
+    const emitTurnEvents = (events: OscarTurnCheckpoint['events']) => {
+      for (const event of events) {
+        emit(event.type === 'answer.delta' ? 'token' : 'turn-event', event.type === 'answer.delta'
+          ? { token: event.payload.content || '' }
+          : { sequence: event.sequence, type: event.type, payload: event.payload });
       }
     };
-    unsubscribers.push(app.runtime.kernel.subscribeEvent('assistant.token', (event) => {
-      const payload: any = event.payload || {};
-      if (payload.intentId === jobId && payload.token) {
-        response.write(`event: token\ndata: ${formatSseData({ token: payload.token })}\n\n`);
-      }
-    }));
-    unsubscribers.push(app.runtime.kernel.subscribeEvent('intent.routed', (event) => {
-      const payload: any = event.payload || {};
-      if (payload.intentId !== jobId) return;
-      const route = payload.route || {};
-      emitJobEvent('route', {
-        moduleId: route.targetModuleId,
-        capabilityId: route.capabilityId,
-        message: `Oscar выбрал ${route.targetModuleId || 'модуль'} · ${route.capabilityId || 'действие'}`,
-      });
-    }));
-    unsubscribers.push(app.runtime.kernel.subscribeEvent('plan.execution.started', (event) => {
-      const payload: any = event.payload || {};
-      if (payload.intentId === jobId) emitJobEvent('status', { phase: 'plan', message: 'План готов, начинаю выполнение' });
-    }));
-    unsubscribers.push(app.runtime.kernel.subscribeEvent('capability.execution.started', (event) => {
-      const payload: any = event.payload || {};
-      if (payload.intentId !== jobId) return;
-      if (isInternalAgentProgressCapability(payload.moduleId, payload.capabilityId)) return;
-      emitJobEvent('capability-started', {
-        moduleId: payload.moduleId,
-        capabilityId: payload.capabilityId,
-        message: `${payload.moduleId} выполняет ${payload.capabilityId}`,
-      });
-    }));
-    unsubscribers.push(app.runtime.kernel.subscribeEvent('permission.evaluated', (event) => {
-      const payload: any = event.payload || {};
-      if (payload.intentId !== jobId && !String(payload.requestId || '').includes(jobId)) return;
-      if (isInternalAgentProgressCapability(payload.moduleId, payload.capabilityId)) return;
-      emitJobEvent('permission', {
-        moduleId: payload.moduleId,
-        capabilityId: payload.capabilityId,
-        mode: payload.permission?.mode,
-        message: payload.permission?.mode === 'confirm' ? 'Требуется твоё подтверждение' : 'Проверка доступа пройдена',
-      });
-    }));
-    unsubscribers.push(app.runtime.kernel.subscribeEvent('capability.execution.finished', (event) => {
-      const payload: any = event.payload || {};
-      if (payload.intentId !== jobId) return;
-      if (isInternalAgentProgressCapability(payload.moduleId, payload.capabilityId)) return;
-      emitJobEvent('capability-finished', {
-        moduleId: payload.moduleId,
-        capabilityId: payload.capabilityId,
-        ok: payload.ok,
-        message: payload.ok ? 'Операция завершена, Oscar анализирует результат' : 'Операция завершилась с ошибкой',
-      });
-    }));
-
-    response.on('close', () => {
-      isClientClosed = true;
-      cleanup();
+    const finish = (checkpoint: OscarTurnCheckpoint) => {
+      latest = checkpoint;
+      if (!isLegacyTurnSettled(checkpoint.turn.status)) return false;
+      emit('outcome', legacyCheckpointJob(checkpoint));
+      emit('done', { turnId: checkpoint.turn.id, status: checkpoint.turn.status });
+      response.end();
+      closed = true;
+      return true;
+    };
+    emit('started', { turnId: jobId });
+    emitTurnEvents(initial.events);
+    if (finish(initial)) return;
+    const unsubscribe = app.oscarTurnCoordinator.subscribe(jobId, (commit) => {
+      emitTurnEvents(commit.appendedEvents);
+      finish({ turn: commit.turn, events: [...latest.events, ...commit.appendedEvents] });
     });
-
-    const finishIfTerminal = () => {
-      const currentJob = app.getIntentJob(jobId);
-      if (isClientClosed || !currentJob || ['completed', 'failed', 'cancelled', 'timeout'].includes(currentJob.status)) {
-        cleanup();
-        if (!isClientClosed) {
-          response.write(`event: done\ndata: {}\n\n`);
-          response.end();
-        }
-        return true;
-      }
-      return false;
-    };
-
-    if (!finishIfTerminal()) {
-      checkInterval = setInterval(finishIfTerminal, 1000);
+    response.on('close', () => {
+      closed = true;
+      unsubscribe();
+    });
+    const current = await app.oscarTurnCoordinator.getTurn(jobId);
+    if (current && !closed && current.turn.revision !== initial.turn.revision) {
+      emitTurnEvents(current.events.filter((event) => event.sequence > (initial.events.at(-1)?.sequence || 0)));
+      if (finish(current)) unsubscribe();
     }
 
     return;
@@ -553,7 +788,7 @@ async function handleRequest(
   }
 
   if (request.method === 'GET' && url.pathname === '/api/skills') {
-    enforceReadApiToken(request, session);
+    enforceReadApiToken(principal);
     const registry = getAgentSkillRegistry(app.sourceRoot || app.workspaceRoot);
     const query = (url.searchParams.get('query') || '').trim();
     if (query) {
@@ -575,9 +810,84 @@ async function handleRequest(
     return;
   }
 
+  if (request.method === 'POST' && url.pathname === '/api/skills/draft') {
+    enforceDesktopSettingsPrincipal(principal, false);
+    const body = await readJsonBody<Record<string, unknown>>(request, 64 * 1024);
+    const unknownFields = Object.keys(body).filter((field) => !['purpose', 'scope'].includes(field));
+    if (unknownFields.length) {
+      throw badRequest('skill-draft-fields', `Unsupported skill draft fields: ${unknownFields.join(', ')}.`);
+    }
+    const workspaceRoot = app.sourceRoot || app.workspaceRoot;
+    const registry = getAgentSkillRegistry(workspaceRoot);
+    const authoring = getAgentSkillAuthoringService(workspaceRoot, registry);
+    const draft = authoring.createAutoDraft(body.purpose, body.scope);
+    const validation = await authoring.validate(draft, {
+      availableCapabilities: app.runtime.kernel.listCapabilities().map((capability) => capability.id),
+    });
+    sendJson(response, 200, { ok: true, ...validation });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/skills/validate') {
+    enforceDesktopSettingsPrincipal(principal, false);
+    const body = await readJsonBody<Record<string, unknown>>(request, 256 * 1024);
+    const unknownFields = Object.keys(body).filter((field) => field !== 'draft');
+    if (unknownFields.length) {
+      throw badRequest('skill-validation-fields', `Unsupported skill validation fields: ${unknownFields.join(', ')}.`);
+    }
+    const workspaceRoot = app.sourceRoot || app.workspaceRoot;
+    const registry = getAgentSkillRegistry(workspaceRoot);
+    const validation = await getAgentSkillAuthoringService(workspaceRoot, registry).validate(body.draft, {
+      availableCapabilities: app.runtime.kernel.listCapabilities().map((capability) => capability.id),
+    });
+    sendJson(response, 200, { ok: true, ...validation });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/skills') {
+    enforceDesktopSettingsPrincipal(principal, true);
+    const body = await readJsonBody<Record<string, unknown>>(request, 256 * 1024);
+    const unknownFields = Object.keys(body).filter((field) => !['draft', 'expectedDraftHash'].includes(field));
+    if (unknownFields.length) {
+      throw badRequest('skill-create-fields', `Unsupported skill creation fields: ${unknownFields.join(', ')}.`);
+    }
+    const policy = app.runtime.kernel.evaluateLocalSettingsCommand({
+      source: principal.source,
+      command: 'skill.create',
+      scope: { type: 'chat' },
+      payload: body,
+    });
+    if (policy.outcome !== 'allow') {
+      throw {
+        statusCode: 403,
+        code: 'skill-create-policy-denied',
+        message: policy.reason,
+      } satisfies JsonError;
+    }
+    const workspaceRoot = app.sourceRoot || app.workspaceRoot;
+    const registry = getAgentSkillRegistry(workspaceRoot);
+    const controller = new AbortController();
+    request.once('aborted', () => controller.abort());
+    const result = await getAgentSkillAuthoringService(workspaceRoot, registry).publish(
+      body.draft,
+      body.expectedDraftHash,
+      {
+        availableCapabilities: app.runtime.kernel.listCapabilities().map((capability) => capability.id),
+        signal: controller.signal,
+      },
+    );
+    sendJson(response, 201, {
+      ok: true,
+      receipt: result.receipt,
+      skill: result.skill,
+      policyDecisionHash: policy.policyDecisionHash,
+    });
+    return;
+  }
+
   const activateSkillMatch = url.pathname.match(/^\/api\/skills\/([^/]+)\/activate$/);
   if (request.method === 'GET' && activateSkillMatch?.[1]) {
-    enforceReadApiToken(request, session);
+    enforceReadApiToken(principal);
     const skillId = decodeURIComponent(activateSkillMatch[1]);
     const prompt = url.searchParams.get('prompt') || '';
     const skill = await getAgentSkillRegistry(app.sourceRoot || app.workspaceRoot)
@@ -591,14 +901,33 @@ async function handleRequest(
   }
 
   if (request.method === 'GET' && url.pathname === '/api/permissions') {
-    enforceReadApiToken(request, session);
-    sendJson(response, 200, { ok: true, profile: app.getPermissionProfile() });
+    enforceReadApiToken(principal);
+    sendJson(response, 200, {
+      ok: true,
+      profile: app.getPermissionProfile(),
+      authority: app.getAuthorityContext(),
+    });
     return;
   }
 
   if (request.method === 'POST' && url.pathname === '/api/permissions') {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const body = await readJsonBody<Record<string, unknown>>(request);
+    const allowedFields = new Set(['autonomyMode', 'sandboxMode', 'approvalPolicy']);
+    const unknownFields = Object.keys(body).filter((field) => !allowedFields.has(field));
+    if (unknownFields.length > 0) {
+      const authorityFields = new Set([
+        'authority', 'authorityContext', 'authorityTier', 'tier', 'source', 'entitlement',
+        'entitlementId', 'keyId', 'owner', 'ownerMode',
+      ]);
+      if (unknownFields.some((field) => authorityFields.has(field))) {
+        throw badRequest(
+          'authority-read-only',
+          'Authority is verified from a signed device entitlement and cannot be changed through the API.',
+        );
+      }
+      throw badRequest('invalid-permission-fields', `Unsupported permission fields: ${unknownFields.join(', ')}.`);
+    }
     const autonomyMode = normalizeAutonomyMode(body.autonomyMode);
     const sandboxMode = normalizeSandboxMode(body.sandboxMode)
       || (autonomyMode === 'guided' ? 'read-only' : autonomyMode === 'full-local' ? 'danger-full-access' : autonomyMode === 'workspace-autonomous' ? 'workspace-write' : null);
@@ -607,31 +936,46 @@ async function handleRequest(
       throw badRequest('invalid-permission-profile', 'A valid autonomyMode or sandboxMode/approvalPolicy pair is required.');
     }
     const profile = app.setPermissionProfile({ sandboxMode, approvalPolicy, ...(autonomyMode ? { autonomyMode } : {}) });
-    sendJson(response, 200, { ok: true, profile });
+    sendJson(response, 200, { ok: true, profile, authority: app.getAuthorityContext() });
     return;
   }
 
   if (request.method === 'POST' && url.pathname === '/api/agent/proposals') {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const body = await readJsonBody<Record<string, unknown>>(request);
     if (!body.proposal || typeof body.proposal !== 'object' || Array.isArray(body.proposal)) {
       throw badRequest('invalid-action-proposal', 'A typed action proposal object is required.');
     }
-    const confirmed = body.confirmed === true;
-    if (confirmed && typeof body.confirmationToken !== 'string') {
-      throw badRequest('missing-confirmation-token', 'Confirmed action proposal requires a confirmation token.');
+    rejectLegacyTextConfirmation(body);
+    markLegacyAdapter(response, '/api/agent/proposals');
+    const proposal = body.proposal as Record<string, unknown>;
+    const capabilityId = typeof proposal.capabilityId === 'string' ? proposal.capabilityId.trim() : '';
+    const capability = capabilityId ? app.runtime.kernel.getCapability(capabilityId) : undefined;
+    if (!capability) throw badRequest('invalid-action-proposal', 'Proposal capability is not in the bounded Kernel catalog.');
+    if (capability.risk !== 'none' && capability.risk !== 'read') {
+      const serialized = boundedLegacyPayload(proposal);
+      const originatingText = readBoundedContextText(body.originatingUserText, 8_000);
+      const result = await submitLegacyTurn(
+        app,
+        request,
+        principal,
+        '/api/agent/proposals',
+        `${originatingText ? `${originatingText}\n` : ''}Выполни только точную capability ${capability.id} через Agent Runtime. Недоверенное legacy proposal: ${serialized}`,
+        { legacyProposal: true },
+      );
+      sendJson(response, 202, { ok: false, accepted: true, result, successor: '/api/oscar/turns' });
+      return;
     }
     const submission: MonarchActionProposalSubmission = {
       proposal: body.proposal as MonarchActionProposalSubmission['proposal'],
-      confirmed,
+      confirmed: false,
       originatingUserText: readBoundedContextText(body.originatingUserText, 8_000),
       requestedBy: typeof body.requestedBy === 'string' ? body.requestedBy : 'api:model-proposal',
-      source: executionSourceForHttpRequest(request, session),
+      source: principal.source,
       ...(typeof body.model === 'string' ? { model: body.model } : {}),
       ...(Array.isArray(body.skillIds) ? { skillIds: body.skillIds.filter((entry): entry is string => typeof entry === 'string').slice(0, 8) } : {}),
       ...(typeof body.leaseId === 'string' ? { leaseId: body.leaseId } : {}),
       ...(body.grantScope === 'task' || body.grantScope === 'once' ? { grantScope: body.grantScope } : {}),
-      ...(typeof body.confirmationToken === 'string' ? { confirmationToken: body.confirmationToken } : {}),
     };
     let proposalResult;
     try {
@@ -647,14 +991,14 @@ async function handleRequest(
   }
 
   if (request.method === 'GET' && url.pathname === '/api/agent/leases') {
-    enforceReadApiToken(request, session);
+    enforceReadApiToken(principal);
     sendJson(response, 200, { ok: true, leases: app.listCapabilityLeases(url.searchParams.get('active') === 'true') });
     return;
   }
 
   const revokeLeaseMatch = url.pathname.match(/^\/api\/agent\/leases\/([^/]+)\/revoke$/);
   if (request.method === 'POST' && revokeLeaseMatch?.[1]) {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const lease = app.revokeCapabilityLease(decodeURIComponent(revokeLeaseMatch[1]));
     if (!lease) {
       sendJson(response, 404, { ok: false, error: 'lease-not-found' });
@@ -665,14 +1009,14 @@ async function handleRequest(
   }
 
   if (request.method === 'GET' && url.pathname === '/api/agent/ledger') {
-    enforceReadApiToken(request, session);
+    enforceReadApiToken(principal);
     sendJson(response, 200, { ok: true, actions: app.listActionLedger(normalizeLimit(url.searchParams.get('limit'))) });
     return;
   }
 
   const rollbackActionMatch = url.pathname.match(/^\/api\/agent\/ledger\/([^/]+)\/rollback$/);
   if (request.method === 'POST' && rollbackActionMatch?.[1]) {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const rollback = await app.rollbackAction(decodeURIComponent(rollbackActionMatch[1]));
     if (!rollback) {
       sendJson(response, 404, { ok: false, error: 'rollback-not-found' });
@@ -686,32 +1030,21 @@ async function handleRequest(
   }
 
   if (request.method === 'POST' && url.pathname === '/api/agent/dispatch') {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const body = await readJsonBody<Record<string, unknown>>(request);
     const text = typeof body.text === 'string' ? body.text.trim() : '';
     if (!text) {
       throw badRequest('empty-agent-action', 'Agent action text is required.');
     }
-    const confirmed = body.confirmed === true;
-    const submission: MonarchIntentSubmission = {
-      text,
-      source: 'api',
-      confirmed,
-      context: {
-        agentDispatch: true,
-        excludedModuleIds: ['assistant', 'oscar'],
-      },
-    };
-    if (confirmed) {
-      if (typeof body.confirmationToken !== 'string') {
-        throw badRequest('missing-confirmation-token', 'Confirmed agent action requires a confirmation token.');
-      }
-      submission.confirmationToken = body.confirmationToken;
-    }
-    const result = await app.submitIntent(submission);
+    rejectLegacyTextConfirmation(body);
+    markLegacyAdapter(response, '/api/agent/dispatch');
+    const result = await submitLegacyTurn(app, request, principal, '/api/agent/dispatch', text, {
+      ...readContext(body.context),
+      legacyAgentDispatch: true,
+    });
     sendJson(response, 200, {
       ok: true,
-      handled: Boolean(result.route),
+      handled: Boolean(result.execution),
       result,
       profile: app.getPermissionProfile(),
     });
@@ -719,44 +1052,34 @@ async function handleRequest(
   }
 
   if (request.method === 'POST' && url.pathname === '/api/agent/jobs') {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const body = await readJsonBody<Record<string, unknown>>(request);
     const text = typeof body.text === 'string' ? body.text.trim() : '';
     if (!text) {
       throw badRequest('empty-agent-action', 'Agent action text is required.');
     }
-    const confirmed = body.confirmed === true;
     const clientContext = readContext(body.context);
-    const submission: MonarchIntentJobSubmission = {
-      text,
-      source: 'api',
-      confirmed,
-      timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : 180000,
-      context: {
-        ...clientContext,
-        agentDispatch: true,
-        excludedModuleIds: ['assistant', 'oscar'],
-        modelProposed: clientContext.modelProposed === true,
-        originatingUserText: readBoundedContextText(clientContext.originatingUserText, 4000),
-        proposalReason: readBoundedContextText(clientContext.proposalReason, 500),
-      },
-    };
-    if (confirmed) {
-      if (typeof body.confirmationToken !== 'string') {
-        throw badRequest('missing-confirmation-token', 'Confirmed agent action requires a confirmation token.');
-      }
-      submission.confirmationToken = body.confirmationToken;
-    }
-    const job = await app.submitIntentJob(submission);
+    rejectLegacyTextConfirmation(body);
+    markLegacyAdapter(response, '/api/agent/jobs');
+    const result = await submitLegacyTurn(app, request, principal, '/api/agent/jobs', text, {
+      ...clientContext,
+      legacyAgentDispatch: true,
+      modelProposed: clientContext.modelProposed === true,
+      originatingUserText: readBoundedContextText(clientContext.originatingUserText, 4000),
+      proposalReason: readBoundedContextText(clientContext.proposalReason, 500),
+    });
+    const job = legacyTurnJob(result, text, typeof body.timeoutMs === 'number' ? body.timeoutMs : 180_000);
     sendJson(response, 202, { ok: true, job, profile: app.getPermissionProfile() });
     return;
   }
 
   const cancelIntentJobMatch = url.pathname.match(/^\/api\/intent-jobs\/([^/]+)\/cancel$/);
   if (request.method === 'POST' && cancelIntentJobMatch?.[1]) {
-    enforceMutationGuards(request, session);
-    const job = app.cancelIntentJob(decodeURIComponent(cancelIntentJobMatch[1]));
-    if (!job) {
+    enforceMutationGuards(principal);
+    markLegacyAdapter(response, '/api/intent-jobs/:id/cancel');
+    const turnId = decodeURIComponent(cancelIntentJobMatch[1]);
+    const checkpoint = await app.oscarTurnCoordinator.getTurn(turnId);
+    if (!checkpoint || !checkpoint.turn.conversationId.startsWith('legacy:')) {
       sendJson(response, 404, {
         ok: false,
         error: 'job-not-found',
@@ -764,6 +1087,12 @@ async function handleRequest(
       });
       return;
     }
+    const requestSource = principal.source;
+    if (checkpoint.turn.source !== requestSource) {
+      throw { statusCode: 403, code: 'turn-source-mismatch', message: 'Legacy Turn belongs to another surface.' } satisfies JsonError;
+    }
+    const cancelled = await app.oscarTurnCoordinator.cancel(turnId, requestSource);
+    const job = legacyCheckpointJob(cancelled);
     sendJson(response, 200, {
       ok: true,
       job,
@@ -772,8 +1101,28 @@ async function handleRequest(
     return;
   }
 
+  if (request.method === 'POST' && url.pathname === '/api/computer-use/emergency-stop') {
+    // This is deliberately a dedicated, payload-free control path. It never
+    // enters Agent planning or the legacy device-control adapter, so the
+    // desktop global shortcut can revoke the native input epoch immediately
+    // while an unrelated Agent task is still running.
+    enforceMutationGuards(principal);
+    const result = await app.executeCapability({
+      moduleId: 'computer',
+      capabilityId: 'computer.control.stop',
+      input: {},
+      requestedBy: principal.source === 'desktop'
+        ? 'desktop-emergency-stop'
+        : 'local-emergency-stop',
+      source: principal.source,
+      confirmed: false,
+    });
+    sendJson(response, 200, { ok: result.ok, result });
+    return;
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/execute') {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const body = await readJsonBody<Partial<MonarchCapabilityExecution> & { includeState?: boolean }>(request);
     const moduleId = typeof body.moduleId === 'string' ? body.moduleId.trim() : '';
     const capabilityId = typeof body.capabilityId === 'string' ? body.capabilityId.trim() : '';
@@ -781,20 +1130,39 @@ async function handleRequest(
       throw badRequest('empty-execution-target', 'moduleId and capabilityId are required.');
     }
 
+    rejectLegacyTextConfirmation(body);
+    markLegacyAdapter(response, '/api/execute');
+    const capability = app.runtime.kernel.getCapability(capabilityId);
+    if (!capability || capability.moduleId !== moduleId) {
+      throw badRequest('capability-not-found', 'moduleId and capabilityId do not identify one bounded Kernel capability.');
+    }
+    if (capability.risk !== 'none' && capability.risk !== 'read') {
+      const result = await submitLegacyTurn(
+        app,
+        request,
+        principal,
+        '/api/execute',
+        `Выполни только точную capability ${capabilityId} через Agent Runtime с exact input=${boundedLegacyPayload(body.input ?? {})}.`,
+        { legacyCapabilityExecution: true },
+      );
+      sendJson(response, 202, {
+        ok: false,
+        accepted: true,
+        result,
+        successor: '/api/oscar/turns',
+        ...(body.includeState === false ? {} : { state: await app.getState() }),
+      });
+      return;
+    }
+
     const execution: MonarchCapabilityExecution = {
       moduleId,
       capabilityId,
       input: body.input,
       requestedBy: typeof body.requestedBy === 'string' ? body.requestedBy : 'api',
-      source: executionSourceForHttpRequest(request, session),
-      confirmed: Boolean(body.confirmed),
+      source: principal.source,
+      confirmed: false,
     };
-    if (execution.confirmed && typeof body.confirmationToken !== 'string') {
-      throw badRequest('missing-confirmation-token', 'Confirmed capability execution requires a confirmation token.');
-    }
-    if (typeof body.confirmationToken === 'string') {
-      execution.confirmationToken = body.confirmationToken;
-    }
     if (typeof body.intentId === 'string') {
       execution.intentId = body.intentId;
     }
@@ -802,7 +1170,7 @@ async function handleRequest(
     const result = await app.executeCapability(execution);
 
     const clientIp = request.socket.remoteAddress || 'unknown';
-    const auditMessage = `Direct API capability execution: ${moduleId}.${capabilityId} requested by '${execution.requestedBy}' (confirmed: ${execution.confirmed}).`;
+    const auditMessage = `Legacy read-only API capability observation: ${moduleId}.${capabilityId} requested by '${execution.requestedBy}'.`;
     app.runtime.kernel.audit(
       'security',
       auditMessage,
@@ -810,7 +1178,7 @@ async function handleRequest(
         moduleId,
         capabilityId,
         requestedBy: execution.requestedBy,
-        confirmed: execution.confirmed,
+        confirmed: false,
         ok: result.ok,
         error: result.error || null,
         clientIp,
@@ -828,7 +1196,7 @@ async function handleRequest(
   }
 
   if (request.method === 'POST' && url.pathname === '/api/execute-stream') {
-    enforceMutationGuards(request, session);
+    enforceMutationGuards(principal);
     const body = await readJsonBody<Partial<MonarchCapabilityExecution>>(request);
     const moduleId = typeof body.moduleId === 'string' ? body.moduleId.trim() : '';
     const capabilityId = typeof body.capabilityId === 'string' ? body.capabilityId.trim() : '';
@@ -836,20 +1204,40 @@ async function handleRequest(
       throw badRequest('empty-execution-target', 'moduleId and capabilityId are required.');
     }
 
+    rejectLegacyTextConfirmation(body);
+    markLegacyAdapter(response, '/api/execute-stream');
+    const capability = app.runtime.kernel.getCapability(capabilityId);
+    if (!capability || capability.moduleId !== moduleId) {
+      throw badRequest('capability-not-found', 'moduleId and capabilityId do not identify one bounded Kernel capability.');
+    }
+    if (capability.risk !== 'none' && capability.risk !== 'read') {
+      const result = await submitLegacyTurn(
+        app,
+        request,
+        principal,
+        '/api/execute-stream',
+        `Выполни только точную capability ${capabilityId} через Agent Runtime с exact input=${boundedLegacyPayload(body.input ?? {})}.`,
+        { legacyCapabilityExecution: true },
+      );
+      response.writeHead(202, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+      response.write(`event: turn\ndata: ${formatSseData(result)}\n\n`);
+      response.write(`event: done\ndata: ${formatSseData({ turnId: result.intent.id })}\n\n`);
+      response.end();
+      return;
+    }
+
     const execution: MonarchCapabilityExecution = {
       moduleId,
       capabilityId,
       input: body.input,
       requestedBy: typeof body.requestedBy === 'string' ? body.requestedBy : 'api',
-      source: executionSourceForHttpRequest(request, session),
-      confirmed: Boolean(body.confirmed),
+      source: principal.source,
+      confirmed: false,
     };
-    if (execution.confirmed && typeof body.confirmationToken !== 'string') {
-      throw badRequest('missing-confirmation-token', 'Confirmed capability execution requires a confirmation token.');
-    }
-    if (typeof body.confirmationToken === 'string') {
-      execution.confirmationToken = body.confirmationToken;
-    }
     if (typeof body.intentId === 'string') {
       execution.intentId = body.intentId;
     }
@@ -1090,6 +1478,200 @@ function readContext(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function readOscarDispositionHistory(value: unknown): Array<{ role: 'user' | 'assistant'; content: string }> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 4) {
+    throw badRequest('invalid-oscar-disposition-history', 'Oscar disposition history must contain at most 4 messages.');
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== 'object' || !('role' in entry) || !('content' in entry)) {
+      throw badRequest('invalid-oscar-disposition-history', 'Oscar disposition history contains an invalid message.');
+    }
+    const role = entry.role;
+    const content = entry.content;
+    if ((role !== 'user' && role !== 'assistant') || typeof content !== 'string' || !content.trim() || content.length > 4_000) {
+      throw badRequest('invalid-oscar-disposition-history', 'Oscar disposition history contains an invalid message.');
+    }
+    return { role, content };
+  });
+}
+
+function markLegacyAdapter(response: ServerResponse, endpoint: string): void {
+  response.setHeader('Deprecation', 'true');
+  response.setHeader('Sunset', 'Sat, 29 Aug 2026 00:00:00 GMT');
+  response.setHeader('Link', '</api/oscar/turns>; rel="successor-version"');
+  response.setHeader('X-Monarch-Legacy-Adapter', endpoint);
+}
+
+function rejectLegacyTextConfirmation(body: Record<string, unknown>): void {
+  if (body.confirmed === true || typeof body.confirmationToken === 'string') {
+    throw {
+      statusCode: 410,
+      code: 'legacy-text-confirmation-disabled',
+      message: 'Text confirmation tokens cannot authorize an action. Use the exact structured Agent approval endpoint.',
+    } satisfies JsonError;
+  }
+}
+
+function boundedLegacyPayload(value: unknown): string {
+  const serialized = JSON.stringify(value);
+  if (!serialized || serialized.length > 12_000) {
+    throw badRequest('legacy-payload-too-large', 'Legacy action payload is too large for a bounded Agent Turn.');
+  }
+  return serialized;
+}
+
+async function submitLegacyTurn(
+  app: MonarchApplication,
+  request: IncomingMessage,
+  principal: MonarchHttpPrincipal,
+  endpoint: string,
+  text: string,
+  contextInput: Record<string, unknown>,
+) {
+  const source = principal.source;
+  const nonce = randomBytes(12).toString('hex');
+  const context = {
+    ...contextInput,
+    clientConversationId: `legacy:${source}:${readBoundedContextText(contextInput.clientConversationId, 160) || nonce}`,
+    clientRequestId: readBoundedContextText(contextInput.clientRequestId, 256)
+      || `legacy:${source}:${endpoint.replace(/[^A-Za-z0-9]/g, '_')}:${nonce}`,
+    clientMessageId: readBoundedContextText(contextInput.clientMessageId, 256)
+      || `legacy:${source}:message:${nonce}`,
+  };
+  await app.runtime.kernel.audit('legacy-api', 'Legacy endpoint adapted to Oscar Turn.', {
+    endpoint,
+    method: request.method || 'UNKNOWN',
+    source,
+  }, 'warn');
+  return app.submitAgentSurfaceIntent({ text, source, context });
+}
+
+function legacyTurnJob(result: MonarchIntentResult, text: string, timeoutMs: number) {
+  const now = new Date().toISOString();
+  const output = result.execution?.output && typeof result.execution.output === 'object'
+    ? result.execution.output as Record<string, unknown>
+    : {};
+  const id = typeof output.turnId === 'string' ? output.turnId : result.intent.id;
+  const pending = result.execution?.error === 'confirmation-required'
+    || result.execution?.error === 'clarification-required'
+    || result.execution?.error === 'turn-running';
+  const status = pending ? 'running' : result.execution?.ok ? 'completed' : 'failed';
+  return {
+    id,
+    text,
+    source: result.intent.source,
+    status,
+    createdAt: result.intent.createdAt,
+    updatedAt: now,
+    startedAt: result.intent.createdAt,
+    finishedAt: pending ? null : now,
+    timeoutMs: Number.isFinite(timeoutMs) ? Math.max(1_000, Math.min(600_000, Math.floor(timeoutMs))) : 180_000,
+    summary: result.summary,
+    progress: [`turn:${String(output.status || status)}`],
+    result,
+    error: pending || result.execution?.ok ? null : result.execution?.error || 'turn-failed',
+    turnId: id,
+    legacy: true,
+  };
+}
+
+function legacyCheckpointJob(checkpoint: OscarTurnCheckpoint) {
+  const turn = checkpoint.turn;
+  const status = legacyTurnStatus(turn);
+  const terminal = ['completed', 'failed', 'cancelled'].includes(status);
+  const summary = turn.outcome?.summary
+    || latestTurnPrompt(checkpoint)
+    || 'Oscar Turn выполняется.';
+  const result = legacyTurnResult(checkpoint, summary);
+  return {
+    id: turn.id,
+    text: turn.request.text,
+    source: turn.source,
+    status,
+    createdAt: turn.createdAt,
+    updatedAt: turn.updatedAt,
+    startedAt: turn.createdAt,
+    finishedAt: terminal ? turn.outcome?.completedAt || turn.updatedAt : null,
+    timeoutMs: 180_000,
+    summary,
+    progress: checkpoint.events.map((event) => event.type),
+    result,
+    error: turn.status === 'failed' || turn.status === 'blocked' ? turn.outcome?.kind || turn.status : null,
+    turnId: turn.id,
+    legacy: true,
+  };
+}
+
+function legacyTurnStatus(turn: OscarTurnV1): string {
+  if (turn.status === 'succeeded') return 'completed';
+  if (turn.status === 'cancelled') return 'cancelled';
+  if (turn.status === 'blocked' || turn.status === 'failed') return 'failed';
+  return turn.status;
+}
+
+function isLegacyTurnSettled(status: OscarTurnV1['status']): boolean {
+  return ['waiting-for-user', 'waiting-for-approval', 'succeeded', 'blocked', 'failed', 'cancelled'].includes(status);
+}
+
+function legacyTurnResult(checkpoint: OscarTurnCheckpoint, summary: string): MonarchIntentResult {
+  const turn = checkpoint.turn;
+  const ok = turn.status === 'succeeded';
+  const error = turn.status === 'waiting-for-approval'
+    ? 'confirmation-required'
+    : turn.status === 'waiting-for-user'
+      ? 'clarification-required'
+      : turn.status === 'blocked'
+        ? 'turn-blocked'
+        : turn.status === 'failed'
+          ? 'turn-failed'
+          : turn.status === 'cancelled'
+            ? 'turn-cancelled'
+            : ok ? undefined : 'turn-running';
+  const approval = [...checkpoint.events].reverse().find((event) => event.type === 'approval.required');
+  return {
+    intent: {
+      id: turn.id,
+      text: turn.request.text,
+      source: turn.source === 'coder' ? 'desktop' : turn.source,
+      createdAt: turn.createdAt,
+    },
+    route: null,
+    plan: null,
+    execution: {
+      ok,
+      summary,
+      ...(error ? { error } : {}),
+      output: {
+        reply: summary,
+        turnId: turn.id,
+        taskId: turn.taskId || null,
+        status: turn.status,
+        outcome: turn.outcome?.kind || null,
+      },
+      ...(approval ? { metadata: { approvalPresentation: approval.payload } } : {}),
+    },
+    summary,
+  };
+}
+
+function latestTurnPrompt(checkpoint: OscarTurnCheckpoint): string {
+  const event = [...checkpoint.events].reverse().find((candidate) => candidate.type === 'user.input.required');
+  return typeof event?.payload.question === 'string' ? event.payload.question : '';
+}
+
+async function listLegacyTurnJobs(app: MonarchApplication, limit: number) {
+  const turns = [
+    ...await app.oscarTurnCoordinator.persistentStore.listTurns(),
+    ...await app.oscarTurnCoordinator.volatileStore.listTurns(),
+  ]
+    .filter((turn) => turn.conversationId.startsWith('legacy:'))
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, limit);
+  const checkpoints = await Promise.all(turns.map((turn) => app.oscarTurnCoordinator.getTurn(turn.id)));
+  return checkpoints.filter((entry): entry is OscarTurnCheckpoint => Boolean(entry)).map(legacyCheckpointJob);
+}
+
 function badRequest(code: string, message: string): JsonError {
   return {
     statusCode: 400,
@@ -1179,11 +1761,6 @@ function formatSseEventName(value: unknown): string {
   return /^[a-zA-Z0-9_-]{1,64}$/.test(name) ? name : 'message';
 }
 
-function isInternalAgentProgressCapability(moduleId: unknown, capabilityId: unknown): boolean {
-  return (moduleId === 'memory' && capabilityId === 'memory.search')
-    || (moduleId === 'security' && capabilityId === 'security.controller.check');
-}
-
 function formatSseData(value: unknown): string {
   return JSON.stringify(value ?? {});
 }
@@ -1212,8 +1789,59 @@ function createHttpSession(options: MonarchHttpServerOptions): MonarchHttpSessio
   };
 }
 
-function enforceMutationGuards(request: IncomingMessage, session: MonarchHttpSession): void {
-  if (!isMutationPeerAllowed(request.socket.remoteAddress, session.allowNonLoopbackMutations)) {
+function deriveMonarchHttpPrincipal(
+  request: IncomingMessage,
+  session: MonarchHttpSession,
+): MonarchHttpPrincipal {
+  const loopback = isLoopbackRemoteAddress(request.socket.remoteAddress);
+  const originHeader = readHeader(request, 'origin').trim();
+  const origin: MonarchHttpOriginState = !originHeader
+    ? 'absent'
+    : sameOrigin(originHeader, session.origin)
+      ? 'same-origin'
+      : 'mismatch';
+  const suppliedToken = readApiToken(request);
+  const apiToken: MonarchHttpCredentialState = !session.requireApiToken
+    ? 'disabled'
+    : !suppliedToken
+      ? 'absent'
+      : constantTimeEquals(suppliedToken, session.apiToken)
+        ? 'valid'
+        : 'invalid';
+  const attestation = readHeader(request, 'x-monarch-desktop-attestation').trim();
+  const desktopAttestation: MonarchHttpPrincipal['desktopAttestation'] = !attestation
+    ? 'absent'
+    : session.desktopAttestationToken && constantTimeEquals(attestation, session.desktopAttestationToken)
+      ? 'valid'
+      : 'invalid';
+  const source = loopback && desktopAttestation === 'valid' && origin !== 'mismatch'
+    ? 'desktop'
+    : 'api';
+
+  return Object.freeze({
+    source,
+    loopback,
+    mutationPeerAllowed: isMutationPeerAllowed(request.socket.remoteAddress, session.allowNonLoopbackMutations),
+    origin,
+    apiToken,
+    desktopAttestation,
+  });
+}
+
+export function projectMonarchStateForPrincipal(
+  state: MonarchApplicationState,
+  principal: MonarchHttpPrincipal,
+): MonarchApplicationState {
+  if (principal.source === 'desktop' && principal.desktopAttestation === 'valid') return state;
+  const { ownerDev: _ownerDev, ...publicState } = state;
+  return {
+    ...publicState,
+    authority: MONARCH_PUBLIC_AUTHORITY_CONTEXT,
+  };
+}
+
+function enforceMutationGuards(principal: MonarchHttpPrincipal): void {
+  if (!principal.mutationPeerAllowed) {
     throw {
       statusCode: 403,
       code: 'non-loopback-host-blocked',
@@ -1221,8 +1849,7 @@ function enforceMutationGuards(request: IncomingMessage, session: MonarchHttpSes
     } satisfies JsonError;
   }
 
-  const origin = readHeader(request, 'origin');
-  if (origin && !sameOrigin(origin, session.origin)) {
+  if (principal.origin === 'mismatch') {
     throw {
       statusCode: 403,
       code: 'untrusted-origin',
@@ -1230,48 +1857,61 @@ function enforceMutationGuards(request: IncomingMessage, session: MonarchHttpSes
     } satisfies JsonError;
   }
 
-  if (!session.requireApiToken) {
+  if (principal.source === 'desktop' && principal.desktopAttestation === 'valid') {
     return;
   }
+  if (principal.apiToken === 'disabled' || principal.apiToken === 'valid') {
+    return;
+  }
+  throw {
+    statusCode: 401,
+    code: 'invalid-api-token',
+    message: 'Mutating Monarch API calls require a valid UI session token.',
+  } satisfies JsonError;
+}
 
-  const suppliedToken = readApiToken(request);
-  if (!suppliedToken || !constantTimeEquals(suppliedToken, session.apiToken)) {
+function enforceReadApiToken(principal: MonarchHttpPrincipal): void {
+  if (principal.origin === 'mismatch') {
     throw {
-      statusCode: 401,
-      code: 'invalid-api-token',
-      message: 'Mutating Monarch API calls require a valid UI session token.',
+      statusCode: 403,
+      code: 'untrusted-origin',
+      message: 'Monarch API reads reject a mismatched browser origin.',
     } satisfies JsonError;
   }
-}
 
-function executionSourceForHttpRequest(
-  request: IncomingMessage,
-  session: MonarchHttpSession,
-): Extract<import('../core').MonarchIntentSource, 'desktop' | 'api'> {
-  return isTrustedDesktopMutationRequest(request, session) ? 'desktop' : 'api';
-}
-
-function isTrustedDesktopMutationRequest(request: IncomingMessage, session: MonarchHttpSession): boolean {
-  if (!isLoopbackRemoteAddress(request.socket.remoteAddress)) return false;
-  const origin = readHeader(request, 'origin');
-  if (!origin || !sameOrigin(origin, session.origin)) return false;
-  const attestation = readHeader(request, 'x-monarch-desktop-attestation').trim();
-  return Boolean(attestation)
-    && Boolean(session.desktopAttestationToken)
-    && constantTimeEquals(attestation, session.desktopAttestationToken);
-}
-
-function enforceReadApiToken(request: IncomingMessage, session: MonarchHttpSession): void {
-  if (!session.requireApiToken) {
+  if (principal.source === 'desktop' && principal.desktopAttestation === 'valid') {
     return;
   }
+  if (principal.apiToken === 'disabled' || principal.apiToken === 'valid') {
+    return;
+  }
+  throw {
+    statusCode: 401,
+    code: 'invalid-api-token',
+    message: 'Sensitive Monarch API reads require a valid UI session token.',
+  } satisfies JsonError;
+}
 
-  const suppliedToken = readApiToken(request);
-  if (!suppliedToken || !constantTimeEquals(suppliedToken, session.apiToken)) {
+function enforceDesktopSettingsPrincipal(principal: MonarchHttpPrincipal, mutation: boolean): void {
+  if (mutation && !principal.mutationPeerAllowed) {
     throw {
-      statusCode: 401,
-      code: 'invalid-api-token',
-      message: 'Sensitive Monarch API reads require a valid UI session token.',
+      statusCode: 403,
+      code: 'settings-loopback-required',
+      message: 'Local settings changes require the local Desktop runtime.',
+    } satisfies JsonError;
+  }
+  if (principal.origin === 'mismatch') {
+    throw {
+      statusCode: 403,
+      code: 'untrusted-origin',
+      message: 'Local settings reject a mismatched browser origin.',
+    } satisfies JsonError;
+  }
+  if (!principal.loopback || principal.source !== 'desktop' || principal.desktopAttestation !== 'valid') {
+    throw {
+      statusCode: 403,
+      code: 'settings-desktop-required',
+      message: 'Local context settings require a valid Desktop attestation.',
     } satisfies JsonError;
   }
 }

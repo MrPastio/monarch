@@ -63,22 +63,25 @@ export class MonarchActionLedger {
       createdAt: timestamp,
       updatedAt: timestamp,
     };
-    this.records.set(key, record);
-    this.prune();
-    this.persist();
-    return { status: 'started', record: cloneRecord(record) };
+    return this.commit(() => {
+      this.records.set(key, record);
+      this.prune();
+      return { status: 'started', record: cloneRecord(record) };
+    });
   }
 
   complete(idempotencyKey: string, result: MonarchExecutionResult): MonarchActionLedgerRecord | null {
     const record = this.records.get(idempotencyKey);
     if (!record) return null;
-    record.status = result.ok ? 'completed' : 'failed';
-    record.updatedAt = nowIso();
-    record.summary = result.summary.slice(0, 1_000);
-    if (result.error) record.error = result.error.slice(0, 200);
-    record.result = cloneResult(result);
-    this.persist();
-    return cloneRecord(record);
+    return this.commit(() => {
+      record.status = result.ok ? 'completed' : 'failed';
+      record.updatedAt = nowIso();
+      record.summary = result.summary.slice(0, 1_000);
+      if (result.error) record.error = result.error.slice(0, 200);
+      else delete record.error;
+      record.result = cloneResult(result);
+      return cloneRecord(record);
+    });
   }
 
   list(limit = 100): MonarchActionLedgerRecord[] {
@@ -101,10 +104,11 @@ export class MonarchActionLedger {
   setRollback(idempotencyKey: string, rollback: MonarchActionRollbackState): MonarchActionLedgerRecord | null {
     const record = this.records.get(idempotencyKey);
     if (!record) return null;
-    record.rollback = { ...rollback };
-    record.updatedAt = nowIso();
-    this.persist();
-    return cloneRecord(record);
+    return this.commit(() => {
+      record.rollback = { ...rollback };
+      record.updatedAt = nowIso();
+      return cloneRecord(record);
+    });
   }
 
   private prune(): void {
@@ -148,6 +152,21 @@ export class MonarchActionLedger {
       version: 1,
       records: this.list(this.maxRecords).filter((record) => record.durable === true).map(sanitizeRecordForPersistence),
     } satisfies PersistedActionLedgerV1);
+  }
+
+  private commit<R>(mutation: () => R): R {
+    const previous = new Map(
+      [...this.records.entries()].map(([key, record]) => [key, cloneRecord(record)]),
+    );
+    try {
+      const result = mutation();
+      this.persist();
+      return result;
+    } catch (error) {
+      this.records.clear();
+      for (const [key, record] of previous) this.records.set(key, record);
+      throw error;
+    }
   }
 }
 

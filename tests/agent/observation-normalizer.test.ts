@@ -139,6 +139,37 @@ describe('agent observation normalizer', () => {
     });
   });
 
+  it('treats an explicit Computer Use not-dispatched receipt as a recoverable no-effect attempt', () => {
+    const observation = normalizeAgentObservation({
+      taskId: 'task-computer-focus-rejected',
+      actionAttemptId: 'attempt-computer-focus-rejected',
+      executionId: 'execution-computer-focus-rejected',
+      capabilityId: 'computer.window.type',
+      moduleId: 'computer',
+      startedAt: '2026-08-13T04:00:00.000Z',
+      completedAt: '2026-08-13T04:00:00.500Z',
+      result: {
+        ok: false,
+        summary: 'Exact window focus was rejected before keyboard dispatch.',
+        error: 'window-focus-rejected',
+        output: {
+          performed: false,
+          verified: false,
+          reconciliation: 'fresh-observation-required',
+          requiresFreshObservation: true,
+          recoveryCapabilityId: 'computer.window.observe',
+        },
+      },
+      mutation: 'temporary',
+    });
+
+    expect(observation.status).toBe('failed');
+    expect(observation.structuredData).toMatchObject({
+      mutationTruth: { state: 'no-effect', source: 'pre-execution-receipt' },
+      sideEffects: [],
+    });
+  });
+
   it('preserves reported side-effect and Kernel verification provenance', () => {
     const observation = normalizeAgentObservation({
       taskId: 'task-3',

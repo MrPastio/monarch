@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -17,6 +16,7 @@ import {
   permissionModeForRisk,
   resolveMonarchRuntimePaths,
 } from '../../core';
+import { writeDurableJsonAtomically } from '../../core/durable-json-file';
 import { applyStudioEdit, stepStudioHistory } from './editor';
 import { studioManifest } from './manifest';
 import {
@@ -353,7 +353,6 @@ export class StudioModule implements MonarchModule {
       };
     }
 
-    const temporary = `${target}.${randomUUID()}.tmp`;
     try {
       await mkdir(path.dirname(target), { recursive: true });
       const [realRoot, realParent] = await Promise.all([
@@ -367,13 +366,8 @@ export class StudioModule implements MonarchModule {
           error: 'studio-project-path-blocked',
         };
       }
-      await writeFile(temporary, `${JSON.stringify(project, null, 2)}\n`, {
-        encoding: 'utf8',
-        flag: 'wx',
-      });
-      await rename(temporary, target);
+      await writeDurableJsonAtomically(target, project);
     } catch (error) {
-      await rm(temporary, { force: true }).catch(() => undefined);
       return {
         ok: false,
         summary: `Studio project could not be saved: ${error instanceof Error ? error.message : String(error)}`,

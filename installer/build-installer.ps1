@@ -1,9 +1,10 @@
 param(
   [string]$SourceRoot = "",
+  [string]$RuntimeDependenciesRoot = "",
   [string]$OutputDirectory = "",
-  [string]$AppVersion = "0.2.4.1",
+  [string]$AppVersion = "0.2.5.0",
   [string]$RuntimeVersion = "2026.07.7",
-  [string]$BackendEnvironment = "backend-0.1.5-offline5",
+  [string]$BackendEnvironment = "backend-0.1.5-offline8",
   [int]$DataSchemaVersion = 1,
   [int]$MinimumReadableDataSchema = 1,
   [int]$MaximumReadableDataSchema = 1,
@@ -26,6 +27,13 @@ $output = if ($OutputDirectory) {
   [System.IO.Path]::GetFullPath($OutputDirectory)
 } else {
   Join-Path $installerRoot "out"
+}
+$runtimeDependencies = if ($RuntimeDependenciesRoot) {
+  [System.IO.Path]::GetFullPath($RuntimeDependenciesRoot).TrimEnd("\")
+} elseif (Test-Path -LiteralPath (Join-Path $root "installer\runtime-dependencies\windows-x64") -PathType Container) {
+  Join-Path $root "installer\runtime-dependencies\windows-x64"
+} else {
+  Join-Path $projectRoot "installer\runtime-dependencies\windows-x64"
 }
 $temporarySource = $null
 
@@ -232,6 +240,7 @@ try {
   & (Join-Path $root "installer\build-offline-payload.ps1") `
     -SourceRoot $root `
     -BuildRuntimeRoot $runtimeBuildRoot `
+    -RuntimeDependenciesRoot $runtimeDependencies `
     -OutputDirectory $offlinePayloadOutput `
     -AppVersion $AppVersion `
     -RuntimeVersion $RuntimeVersion `

@@ -32,6 +32,8 @@ $MonarchPublicAllowedRootFiles = @(
   'PROJECT_STATUS.json',
   'PROJECT.md',
   'README.md',
+  'OWNER_AUTHORITY_V1.md',
+  'SECURITY.md',
   'tsconfig.json',
   'vitest.config.ts'
 )
@@ -94,6 +96,8 @@ $MonarchPublicBlockedFilePatterns = @(
   '^remove-(?:artifacts|memory|profile|workspace)\.js$',
   '^remove-workspace-smoke\.cjs$',
   '^(AI_HANDOFF|agent_notes|ORIGINAL_REQUEST|MARK_ALFA_FINDINGS|design-qa)\.md$',
+  '^docs/architecture/CODEX_[^/]+\.md$',
+  '^docs/release/MONARCH_0\.2\.5_COMPLETE_CHANGELOG\.md$',
   '^docs/OSCAR_AGENT_RUNTIME_QA_[^/]+\.md$',
   '^docs/(10_REPAIR_PLAN_[^/]+|CONTROL_PLANE_ARCHITECTURE_AUDIT_[^/]+|TECH_AUDIT_[^/]+|TECH_REVIEW_[^/]+|WORK_CHECKPOINT_[^/]+)\.md$',
   '^docs/astra/STRUCTURAL_PROGRESS\.md$',
@@ -139,8 +143,8 @@ $MonarchPublicTextFileNames = @(
 )
 
 $MonarchPublicReviewedBinarySha256 = @{
-  'assets/icon.ico' = '005333eacdb4c4801842a7608335606eb026ff2f5d7edda96413bbd47f2d1cc5'
-  'assets/icon.png' = '08a3c2441ae8d563f53f898302d678234f862141be468908e2684f03d64fe92d'
+  'assets/icon.ico' = '56949cee58cad8ea8096982d30c71e97ed9f8e34b85cc06ec53ded728b49ea0a'
+  'assets/icon.png' = '81cf1442dff4249f2ea0e00806fdbf72f99e6796dc59d6a529523a6cf86b0960'
   'assets/safe/monarch-safe-logo.png' = '7235a10ddf470b207f33359633f47c7bae3c780c281d966d4a04aa2895a3f6ed'
   'assets/safe/monarch-safe.ico' = 'b1d6cb23385a2aa6868452a6af93c5d8ce0f3a98f037d54a7421b32178b739ef'
   'assets/voice/aurora-reference.wav' = '47d7eeef4f4e1b9eff20d9664b047196a20f6479f2d0e579a6da76f10a12f1c5'
@@ -152,7 +156,7 @@ $MonarchPublicReviewedBinarySha256 = @{
   'docs/safe/design/safe-workspace-concept.png' = '0bb8ef9b6e45d542db8ffbfa0a668f0e469c84e974feb2d0588ac39511a1dd49'
   'docs/security-rebuild/2026-07-11/design/security-incident-reference.png' = '5059edaa02507a72010eed5e2ae318ae1e8470a44fd460820bfd4554bcbd5e85'
   'docs/security-rebuild/2026-07-11/design/security-overview-selected.png' = '4eebc5bdd2510db3d57fa9bb550ffa9fed2f330ced110f0ee661bdb1bef4707b'
-  'oscar/frontend/public/assets/brand/monarch-icon.png' = '08a3c2441ae8d563f53f898302d678234f862141be468908e2684f03d64fe92d'
+  'oscar/frontend/public/assets/brand/monarch-icon.png' = '81cf1442dff4249f2ea0e00806fdbf72f99e6796dc59d6a529523a6cf86b0960'
   'oscar/frontend/public/assets/brand/monarch-mark.png' = '2821f1df15f051310587e64326516cc6384c7269170bcbd56cb15c668ce4fde3'
   'oscar/frontend/public/assets/mascot/oscar-coding.png' = 'f8b9c3bbf1c373e40aaaa468a753162dec148ae27697488cb832620c141a4487'
   'oscar/frontend/public/assets/mascot/oscar-error.png' = '8c860bba4d6f04af3fb9615242c92e7a53af719699d4318097946b2f205145ab'
@@ -161,8 +165,9 @@ $MonarchPublicReviewedBinarySha256 = @{
   'oscar/frontend/public/assets/mascot/oscar-security.png' = 'b43b890cfc073d0833dd2b84c5936e105b3c04103e1b4b9bb3d0491204681af1'
   'oscar/frontend/public/assets/mascot/oscar-success.png' = '88a59f176ef76d3854e33ca96df6fde3626cc25397744be8b847eb18c25d9587'
   'oscar/frontend/public/assets/mascot/oscar-thinking.png' = '0f1d3e5a957463bc7e2eb6e9a1669677898e775b32a303af5c9aeb649192c23a'
-  'oscar/frontend/public/favicon.ico' = '005333eacdb4c4801842a7608335606eb026ff2f5d7edda96413bbd47f2d1cc5'
-  'src/ui/public/assets/brand/monarch-icon.png' = '08a3c2441ae8d563f53f898302d678234f862141be468908e2684f03d64fe92d'
+  'oscar/frontend/public/favicon.ico' = '56949cee58cad8ea8096982d30c71e97ed9f8e34b85cc06ec53ded728b49ea0a'
+  'src/ui/public/assets/brand/monarch-icon.png' = '81cf1442dff4249f2ea0e00806fdbf72f99e6796dc59d6a529523a6cf86b0960'
+  'src/ui/public/assets/brand/monarch-incognito-hooded.png' = '4e8e0ae26c1f188f4a855f2de70ff0942738b1a47985355ad5ff65cec6fca0ce'
   'src/ui/public/assets/brand/monarch-mark.png' = '2821f1df15f051310587e64326516cc6384c7269170bcbd56cb15c668ce4fde3'
   'src/ui/public/assets/brand/monarch-startup-3d.png' = '31700673a5e43d03983b2dd22603475a5bb66fa03dd9fbfd48af73ed27b1c15c'
   'src/ui/public/assets/mascot/oscar-coding.png' = 'f8b9c3bbf1c373e40aaaa468a753162dec148ae27697488cb832620c141a4487'
@@ -177,7 +182,14 @@ $MonarchPublicReviewedBinarySha256 = @{
   'src/ui/public/assets/studio/preset-auto.png' = '76e9b8a2ff146db294b2b544f1e4ddf9d5ac4e18f9eac1a22b6c06d23878cb7b'
   'src/ui/public/assets/studio/preset-cool.png' = 'baf3c304784f49a7f4273a78f223b48ff5d0e804f6a0078e1f4993e518e8c9ce'
   'src/ui/public/assets/studio/preset-warm.png' = '7be4491a7e02b5716bcf4e44834b810e94bc52e660c7d6e906f06785961f66f6'
-  'src/ui/public/favicon.ico' = '005333eacdb4c4801842a7608335606eb026ff2f5d7edda96413bbd47f2d1cc5'
+  'src/ui/public/favicon.ico' = '56949cee58cad8ea8096982d30c71e97ed9f8e34b85cc06ec53ded728b49ea0a'
+  'tools/computer-use/assets/oscar-cursor-idle.png' = '0a84b4fee7a33fab24ee069dec1bd407f199c0581b8927d5535ab6e3e3a0b5df'
+  'tools/computer-use/assets/oscar-cursor-hover.png' = '20f396ea6b52be11c24b3007ce61777f5f421b347103b4fb327beeefdffa2843'
+  'tools/computer-use/assets/oscar-cursor-pressed.png' = '2f3d816b32c3d79efeb6a765d69d0e58fd4ee2a3594cfa37cd1442af03b1e3d6'
+  'tools/computer-use/assets/oscar-cursor-moving.png' = '80c8f3c9d66f04b04b5a0d0fe3045f9d84d705e4264f46b33534ce6707714228'
+  'tools/computer-use/assets/oscar-cursor-busy.png' = '72e31a3872c6ea6de7228b607ae9c529ff74324e6c06ff5e8da93069429f20e2'
+  'tools/computer-use/assets/oscar-cursor-text.png' = '2ee973a6a236868cb936f9fba16ddd7e61f3e9c4bee72a2960034770554a2e3f'
+  'tools/computer-use/assets/oscar-cursor-disabled.png' = '3a36a2035b89bc668037e8b53d30118b59b1cf676a60335e21070a7e6333ea3a'
 }
 
 $MonarchPublicForbiddenContentPatterns = @(

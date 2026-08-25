@@ -55,7 +55,7 @@ Scriptable commands:
 monarch_sec commands
 monarch_sec start --no-llm
 monarch_sec status
-monarch_sec stop
+monarch_sec stop --confirm
 monarch_sec scan-path C:\Users\Example\Downloads --recursive --no-llm
 monarch_sec deep-scan-file C:\Users\Example\Downloads\sample.exe --no-llm
 monarch_sec deep-scan-file C:\Users\Example\Downloads\sample.exe --defender --no-llm
@@ -96,9 +96,20 @@ It deduplicates by stable signatures in `data/state.json`, writes decisions to
 new audit records are sealed with an HMAC integrity key so local tampering is
 detectable with `monarch_sec verify-integrity`.
 
-The background stop path uses a per-run HMAC token and PID binding. A blind
-write to `data/protector.stop` is ignored and audited instead of stopping the
+The user-facing stop and `profile-set --level off` paths require explicit
+confirmation plus the configured six-digit Security PIN. Desktop requests send
+the PIN through the child process stdin pipe, bind it to the exact operation and
+a one-use UUID, and never place it in arguments or a request file. The internal
+background stop path additionally uses a per-run HMAC token and PID binding. A
+blind write to `data/protector.stop` is ignored and audited instead of stopping the
 protector.
+
+Once a PIN is configured, this authorization closes the unauthenticated direct
+CLI/Desktop stop and Off calls. It does not turn the current per-user protector
+into a protected Windows service: initial PIN enrollment still needs an installed
+OS-authenticated boundary, and a process running as the same Windows account can
+still terminate a user-mode process directly. Service identity, enrollment, and
+installed-package acceptance remain separate release gates.
 
 ## Scanning and Control
 
@@ -256,6 +267,22 @@ monarch_sec response-service-install --confirm-service-install
 monarch_sec response-service-status
 monarch_sec response-actions
 ```
+
+The install command is fail-closed for user-owned source checkouts, editable
+environments, and other mutable runtimes. Before it registers anything, it
+walks the active
+Python runtime, base runtime, Security import roots, config file, Windows
+PowerShell, and every parent path. Reparse points, an untrusted owner, or any
+write-like ACL granted outside SYSTEM, Administrators, or TrustedInstaller stop
+installation. The resulting task stores a content digest and repeats the same
+ACL, parent-path, inventory, and digest checks before importing Python code. It
+runs with `-I -P -B`, a fixed system PowerShell path, a bounded environment, and
+does not execute `run_monarch_security.py`.
+
+Consequently, `response-service-install` is expected to refuse a development
+checkout. It is only available from a separately installed, administrator-owned
+runtime whose configuration is protected by the same boundary. A refusal does
+not create or replace the scheduled task.
 
 Removal stops the executor, rolls back active rules, and removes its scheduled
 task:

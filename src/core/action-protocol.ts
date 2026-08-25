@@ -12,10 +12,12 @@ import type {
   MonarchActionScope,
   MonarchActionScopeLevel,
   MonarchCapability,
+  MonarchExecutionRequest,
   MonarchRisk,
   MonarchRiskVector,
 } from './contracts';
 import { actionPredicateValueError } from './action-predicate';
+import { resolveKnownFolderTarget, sameCanonicalFilesystemPath } from './known-folder-target';
 import { createMonarchId } from './utils';
 
 const MAX_PROPOSAL_REASON_CHARS = 1_000;
@@ -85,14 +87,16 @@ export function normalizeActionProposal(
   const provenance = normalizeProvenance(value.provenance, options);
   const preconditions = normalizePredicates(value.preconditions, 'preconditions');
   const verification = normalizePredicates(value.verification, 'verification');
+  const identityArgs = canonicalizeActionIdentityArgs(args, options.workspaceRoot);
+  const identityScope = canonicalizeActionIdentityScope(scope, options.workspaceRoot);
 
   const actionIdentity = {
     version: 1,
     intentId,
     intentHash,
     capabilityId,
-    args,
-    scope,
+    args: identityArgs,
+    scope: identityScope,
     reversibility,
     riskVector,
   };
@@ -166,6 +170,19 @@ export function canonicalProposalHash(value: unknown): string {
   return sha256(stableStringify(value));
 }
 
+/**
+ * Builds a semantic identity for filesystem-bearing action arguments without
+ * changing the exact arguments dispatched to the capability. On Windows this
+ * collapses separator, dot-segment, relative/absolute and case aliases so a
+ * model cannot mint a second idempotency identity for the same target.
+ */
+export function canonicalizeActionIdentityArgs(
+  args: Record<string, unknown>,
+  workspaceRoot: string,
+): Record<string, unknown> {
+  return canonicalizeActionIdentityValue(args, '', workspaceRoot) as Record<string, unknown>;
+}
+
 export function extractActionPaths(args: Record<string, unknown>): string[] {
   const result: string[] = [];
   collectStringValues(args, '', (key, value) => {
@@ -173,6 +190,8 @@ export function extractActionPaths(args: Record<string, unknown>): string[] {
       result.push(value);
     }
   });
+  const knownFolderTarget = resolveKnownFolderTarget(args);
+  if (knownFolderTarget) result.push(knownFolderTarget.path);
   return uniqueStrings(result).slice(0, 32);
 }
 
@@ -198,6 +217,22 @@ export function normalizeAutonomyModeFromSandbox(
   return 'workspace-autonomous';
 }
 
+export function isTrustedRuntimeOwnedProposal(
+  request: Pick<MonarchExecutionRequest, 'proposalId' | 'proposalSource' | 'executionMode'>,
+): boolean {
+  return Boolean(request.proposalId)
+    && request.executionMode === 'agent-runtime'
+    && (request.proposalSource === 'runtime-grammar' || request.proposalSource === 'deterministic-router');
+}
+
+export function isModelOwnedExecutionProposal(
+  request: Pick<MonarchExecutionRequest, 'proposalId' | 'proposalSource' | 'executionMode'>,
+): boolean {
+  // Missing provenance stays conservative. Public/API callers cannot obtain a
+  // runtime-owned classification by writing provenance into proposal JSON.
+  return Boolean(request.proposalId) && !isTrustedRuntimeOwnedProposal(request);
+}
+
 function normalizeScope(
   value: Partial<MonarchActionScope> | undefined,
   args: Record<string, unknown>,
@@ -209,12 +244,17 @@ function normalizeScope(
     ...normalizeStringList(value?.paths, 32),
     ...extractActionPaths(args),
   ]).map((entry) => canonicalizePathHint(entry, workspaceRoot)).filter(Boolean));
+  const knownFolderTarget = resolveKnownFolderTarget(args);
   const roots = uniqueStrings(normalizeStringList(value?.roots, 8)
     .map((entry) => canonicalizePathHint(entry, workspaceRoot)));
   if (paths.length > 0 && roots.length === 0) {
-    roots.push(...(allowExternalPaths
-      ? uniqueStrings(paths.map((entry) => path.dirname(entry))).slice(0, 8)
-      : [path.resolve(workspaceRoot)]));
+    const exactKnownFolderTarget = knownFolderTarget
+      && paths.some((entry) => sameCanonicalFilesystemPath(entry, knownFolderTarget.path));
+    roots.push(...(exactKnownFolderTarget
+      ? [knownFolderTarget.root]
+      : allowExternalPaths
+        ? uniqueStrings(paths.map((entry) => path.dirname(entry))).slice(0, 8)
+        : [path.resolve(workspaceRoot)]));
   }
   const origins = uniqueStrings([
     ...normalizeStringList(value?.origins, 16),
@@ -287,6 +327,66 @@ function normalizePredicates(value: MonarchActionPredicate[] | undefined, field:
     }
   }
   return result;
+}
+
+function canonicalizeActionIdentityScope(
+  scope: MonarchActionScope,
+  workspaceRoot: string,
+): MonarchActionScope {
+  return {
+    ...scope,
+    ...(scope.roots ? {
+      roots: scope.roots.map((entry) => canonicalizeFilesystemIdentityPath(entry, workspaceRoot)),
+    } : {}),
+    ...(scope.paths ? {
+      paths: scope.paths.map((entry) => canonicalizeFilesystemIdentityPath(entry, workspaceRoot)),
+    } : {}),
+  };
+}
+
+function canonicalizeActionIdentityValue(
+  value: unknown,
+  key: string,
+  workspaceRoot: string,
+  depth = 0,
+): unknown {
+  if (depth > 24) return value;
+  if (typeof value === 'string') {
+    return isFilesystemIdentityKey(key)
+      ? canonicalizeFilesystemIdentityPath(value, workspaceRoot)
+      : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => canonicalizeActionIdentityValue(entry, key, workspaceRoot, depth + 1));
+  }
+  if (!value || typeof value !== 'object') return value;
+  const result: Record<string, unknown> = {};
+  for (const [entryKey, entryValue] of Object.entries(value as Record<string, unknown>)) {
+    result[entryKey] = canonicalizeActionIdentityValue(entryValue, entryKey, workspaceRoot, depth + 1);
+  }
+  return result;
+}
+
+function isFilesystemIdentityKey(value: string): boolean {
+  const normalized = value.replace(/[^a-z0-9]/giu, '').toLocaleLowerCase('en-US');
+  return normalized === 'path'
+    || normalized === 'paths'
+    || normalized === 'targetpath'
+    || normalized === 'sourcepath'
+    || normalized === 'destinationpath'
+    || normalized === 'cwd'
+    || normalized === 'workingdirectory'
+    || normalized === 'root'
+    || normalized === 'roots';
+}
+
+function canonicalizeFilesystemIdentityPath(value: string, workspaceRoot: string): string {
+  const windowsStyle = process.platform === 'win32'
+    || /^[a-z]:[\\/]/iu.test(workspaceRoot)
+    || /^\\\\/u.test(workspaceRoot);
+  const pathApi = windowsStyle ? path.win32 : path;
+  const canonical = pathApi.normalize(pathApi.resolve(workspaceRoot, value.trim()));
+  return windowsStyle ? canonical.toLocaleLowerCase('en-US') : canonical;
 }
 
 function canonicalizeJsonObject(value: Record<string, unknown>): Record<string, unknown> {

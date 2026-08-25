@@ -60,15 +60,13 @@ Live `npm run status` on 2026-07-22 reported 21/21 active modules, 202 capabilit
 - result is formatted for Telegram but not returned to a model.
 - task/approval state and cancellation do not survive restart.
 
-### Voice scripted actions
+### Voice
 
-`src/ui/public/modules/oscar-voice-mode.js` -> `voice-mode-dispatch.js` rule classifier -> hard mapping in `api.js` -> direct `/api/execute`.
+`src/ui/public/modules/oscar-voice-mode.js` -> local STT -> Oscar Turn (`source=voice`) -> common AgentTask -> Kernel -> terminal outcome -> local TTS.
 
-- UI and `VoiceSessionStore` own transient state.
-- there is no plan or replan.
-- some Device actions have local read-back, but there is no common goal verifier.
-- aborting the renderer fetch does not cancel an already dispatched capability.
-- `voice.mode.execute-scripted` is a trusted narrow fast path, not common task semantics.
+- Voice is transport-only; the private classifier, session store, Micro/Lite worker, scripted executor and `voice.mode.*` capabilities were removed.
+- Ordinary spoken answers and operations share Desktop planning, discovery, receipts, verification, replanning, budgets, cancellation and recovery semantics.
+- Voice cannot resolve approvals or mutate Owner/Security settings; exact action-cards remain Desktop-owned.
 
 ### Coder
 
@@ -86,7 +84,7 @@ The caller chooses the capability. There is no AgentTask, goal, plan, cancellati
 
 - Desktop has two incompatible orchestration paths.
 - Python Oscar duplicates workspace, memory, search and chat routing responsibilities.
-- Voice, Telegram and renderer code contain domain-specific planning or keyword dispatch.
+- Telegram and remaining compatibility renderer code must not introduce domain-specific planning or keyword dispatch.
 - Coder owns the only feedback loop, but cannot be reused by other surfaces.
 - V1 `MonarchPlan` is a one-route execution description, not durable agent state.
 - `ActionLedger` preserves mutations, not task progress.

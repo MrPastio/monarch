@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import path from 'node:path';
+import { mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { normalizeActionProposal, MonarchActionProtocolError } from '../../src/core/action-protocol';
 import type { MonarchActionPredicate, MonarchCapability } from '../../src/core/contracts';
+import { workspaceManifest } from '../../src/modules/workspace/manifest';
 
 const workspaceWrite: MonarchCapability = {
   id: 'workspace.files.write',
@@ -56,6 +59,38 @@ describe('Action Protocol v1', () => {
     expect(proposal.scope.roots).toEqual([path.dirname(externalPath)]);
   });
 
+  it('binds a known-folder action to the exact Kernel-resolved leaf before policy and approval', () => {
+    const previousDesktop = process.env.MONARCH_DESKTOP_DIR;
+    const desktop = path.join(tmpdir(), 'monarch-action-protocol-desktop');
+    mkdirSync(desktop, { recursive: true });
+    process.env.MONARCH_DESKTOP_DIR = desktop;
+    try {
+      const capability = workspaceManifest.capabilities.find((entry) => (
+        entry.id === 'workspace.known-folder.write'
+      ));
+      expect(capability).toBeDefined();
+      const proposal = normalizeActionProposal({
+        capabilityId: capability!.id,
+        args: { knownFolder: 'desktop', basename: 'ромашка.txt', content: '', overwrite: false },
+      }, {
+        capability: capability!,
+        workspaceRoot: 'E:\\Monarch',
+        originatingUserText: 'создай на рабочем столе текстовый файл с именем ромашка',
+      });
+
+      expect(proposal.scope).toMatchObject({
+        level: 'single-object',
+        roots: [desktop],
+        paths: [path.join(desktop, 'ромашка.txt')],
+      });
+      expect(proposal.riskVector).toMatchObject({ effect: 'write', scope: 'single-object', data: 'personal' });
+    } finally {
+      if (previousDesktop === undefined) delete process.env.MONARCH_DESKTOP_DIR;
+      else process.env.MONARCH_DESKTOP_DIR = previousDesktop;
+      rmSync(desktop, { recursive: true, force: true });
+    }
+  });
+
   it('rejects prototype-bearing and non-JSON arguments before policy evaluation', () => {
     const args = JSON.parse('{"path":"ok.txt","__proto__":{"polluted":true}}') as Record<string, unknown>;
     expect(() => normalizeActionProposal({ capabilityId: workspaceWrite.id, args }, {
@@ -89,6 +124,32 @@ describe('Action Protocol v1', () => {
     }, { capability: workspaceWrite, workspaceRoot: 'E:\\Monarch', intentId: 'intent_same' });
     expect(changed.canonicalHash).not.toBe(base.canonicalHash);
     expect(changed.idempotencyKey).toBe(base.idempotencyKey);
+  });
+
+  it('uses one action identity for Windows path aliases while preserving dispatch args', () => {
+    const relative = '.\\RUNTIME\\..\\runtime\\LOG.txt';
+    const absolute = 'e:\\monarch\\runtime\\log.txt';
+    const first = normalizeActionProposal({
+      capabilityId: workspaceWrite.id,
+      args: { path: relative, content: 'same bytes' },
+    }, {
+      capability: workspaceWrite,
+      workspaceRoot: 'E:\\Monarch',
+      intentId: 'intent_path_alias',
+    });
+    const second = normalizeActionProposal({
+      capabilityId: workspaceWrite.id,
+      args: { path: absolute, content: 'same bytes' },
+    }, {
+      capability: workspaceWrite,
+      workspaceRoot: 'E:\\Monarch',
+      intentId: 'intent_path_alias',
+    });
+
+    expect(first.args.path).toBe(relative);
+    expect(second.args.path).toBe(absolute);
+    expect(second.idempotencyKey).toBe(first.idempotencyKey);
+    expect(second.canonicalHash).toBe(first.canonicalHash);
   });
 
   it('rejects malformed predicates on the public proposal path', () => {

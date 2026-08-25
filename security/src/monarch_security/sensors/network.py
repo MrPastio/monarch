@@ -21,6 +21,8 @@ class NetworkSensor:
         self._signatures: dict[str, str] = dict(initial_signatures or {})
         self._first_poll = not bool(initial_signatures)
         self.last_error: str | None = None
+        self._overflow = False
+        self._overflow_detail: dict[str, dict[str, int]] = {}
 
     @property
     def signatures(self) -> dict[str, str]:
@@ -29,8 +31,18 @@ class NetworkSensor:
     def snapshot_signatures(self) -> dict[str, str]:
         return {item["key"]: item["signature"] for item in self.snapshot()}
 
+    @property
+    def overflow(self) -> bool:
+        return self._overflow
+
+    @property
+    def overflow_detail(self) -> dict[str, dict[str, int]]:
+        return {key: dict(value) for key, value in self._overflow_detail.items()}
+
     def snapshot(self) -> list[dict[str, Any]]:
         self.last_error = None
+        self._overflow = False
+        self._overflow_detail = {}
         native_tcp_items = _native_tcp_items(
             self.config.max_listeners,
             self.config.max_connections,
@@ -54,6 +66,19 @@ class NetworkSensor:
         items = [item for item in snapshot_items if item.get("kind") != "dns_cache"]
         if native_tcp_items is not None:
             items.extend(native_tcp_items)
+        limits = {
+            "neighbor": max(1, int(self.config.max_neighbors)),
+            "listener": max(1, int(self.config.max_listeners)),
+            "connection": max(1, int(self.config.max_connections)),
+        }
+        for kind, limit in limits.items():
+            observed = sum(1 for item in items if item.get("kind") == kind)
+            if observed > limit:
+                self._overflow_detail[kind] = {
+                    "observed": observed,
+                    "configured_threshold": limit,
+                }
+        self._overflow = bool(self._overflow_detail)
         _enrich_process_names(items)
         _enrich_dns_names(items, dns_cache)
         return [_with_signature(item) for item in items]
@@ -109,7 +134,6 @@ ForEach-Object {
 
 
 def _neighbors_command(max_neighbors: int) -> str:
-    max_items = max(1, int(max_neighbors))
     return rf"""
 Get-NetNeighbor -ErrorAction SilentlyContinue |
 Where-Object {{
@@ -118,7 +142,6 @@ Where-Object {{
   $_.LinkLayerAddress -ne '00-00-00-00-00-00' -and
   @('Permanent','Unreachable') -notcontains [string]$_.State
 }} |
-Select-Object -First {max_items} |
 ForEach-Object {{
   [pscustomobject]@{{
     kind = 'neighbor'
@@ -133,10 +156,8 @@ ForEach-Object {{
 
 
 def _listeners_command(max_listeners: int) -> str:
-    max_items = max(1, int(max_listeners))
     return rf"""
 Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-Select-Object -First {max_items} |
 ForEach-Object {{
   [pscustomobject]@{{
     kind = 'listener'
@@ -151,10 +172,8 @@ ForEach-Object {{
 
 
 def _connections_command(max_connections: int) -> str:
-    max_items = max(1, int(max_connections))
     return rf"""
 Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue |
-Select-Object -First {max_items} |
 ForEach-Object {{
   [pscustomobject]@{{
     kind = 'connection'
@@ -213,7 +232,7 @@ def _native_tcp_items(max_listeners: int, max_connections: int) -> list[dict[str
         local_address, local_port = _socket_address_parts(connection.laddr)
         remote_address, remote_port = _socket_address_parts(connection.raddr)
         pid = connection.pid
-        if status == "LISTEN" and len(listeners) < max(1, int(max_listeners)):
+        if status == "LISTEN":
             listeners.append({
                 "kind": "listener",
                 "subject": f"{local_address}:{local_port}",
@@ -222,7 +241,7 @@ def _native_tcp_items(max_listeners: int, max_connections: int) -> list[dict[str
                 "local_port": local_port,
                 "owning_process": pid,
             })
-        elif status == "ESTABLISHED" and len(established) < max(1, int(max_connections)):
+        elif status == "ESTABLISHED":
             established.append({
                 "kind": "connection",
                 "subject": f"{remote_address}:{remote_port}",

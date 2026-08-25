@@ -42,6 +42,8 @@ let child = null;
 let window = null;
 let capabilityKey = null;
 let serviceSequence = 0;
+let activityKeepAliveTimer = null;
+let activityKeepAliveBusy = false;
 const servicePending = new Map();
 ipcMain.handle('monarch-safe:authorize-write', (event, value = {}) => {
   if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id || !capabilityKey) return null;
@@ -164,6 +166,7 @@ async function runQa() {
   await evaluate(`new Promise((resolve) => setTimeout(resolve, 150))`);
   await capture(screenshotPaths.unlock);
   await waitFor(() => evaluate(`document.querySelector('#safe-transition').hidden && !document.querySelector('#vault-screen').hidden`));
+  startQaActivityKeepAlive();
 
   const chatMarker = 'SAFE_QA_CHAT_MARKER_63D9';
   const encryptedChat = await requestSafeService('chatUpsert', {
@@ -273,13 +276,7 @@ async function runQa() {
   await evaluate(`document.querySelector('#confirm-form button[value="cancel"]').click()`);
   await waitFor(() => evaluate(`!document.querySelector('#confirm-dialog').open`));
   assert(await evaluate(`!document.querySelector('#vault-screen').hidden && document.querySelector('#text-editor').value === ${JSON.stringify(dirtyGuardMarker)}`), 'canceling manual lock with a dirty draft must keep the unlocked editor intact');
-  // Exercise the same activity path as a real user. Calling the bridge
-  // directly refreshes the vault timer but not the renderer's independent
-  // lock timer, which left this QA sequence racing the intentional 20s lock.
-  await evaluate(`(() => {
-    document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-    return window.monarchSafe.request('touch');
-  })()`);
+  await touchQaActivity();
   await evaluate(`document.querySelector('[data-file-id] .file-open-button').click()`);
   await waitFor(() => evaluate(`document.querySelector('#confirm-dialog').open`));
   await evaluate(`document.querySelector('#confirm-action').click()`);
@@ -291,6 +288,7 @@ async function runQa() {
       dialogReturnValue: document.querySelector('#confirm-dialog').returnValue,
       dirty: document.querySelector('#save-file').dataset.dirty,
       editorVisible: !document.querySelector('#editor-active').hidden,
+      openTransition: document.querySelector('#editor-active').dataset.openTransition || '',
       authVisible: !document.querySelector('#auth-screen').hidden,
       toast: document.querySelector('#toast').textContent,
       status,
@@ -424,6 +422,8 @@ async function runQa() {
   const destructiveAuthorization = { unauthorisedDeleteDenied, authorisedDelete, replayDeleteDenied };
   await evaluate(`document.querySelector('#toast').hidden = true`);
 
+  stopQaActivityKeepAlive();
+  await touchQaActivity();
   await evaluate(`window.__safeAutoLockEvents = 0; window.monarchSafe.onEvent(({ event }) => { if (event === 'auto-lock') window.__safeAutoLockEvents += 1; }); window.monarchSafe.request('list')`);
   await waitFor(
     () => evaluate(`!document.querySelector('#auth-screen').hidden && window.__safeAutoLockEvents === 1`),
@@ -514,12 +514,41 @@ async function runQa() {
   await writeFile(path.join(outputRoot, 'qa-report.json'), JSON.stringify({ ok: false, error: String(error?.stack || error) }, null, 2), 'utf8');
   process.exitCode = 1;
  } finally {
+  stopQaActivityKeepAlive();
  try { child?.kill(); } catch { /* stopped */ }
   capabilityKey?.fill(0);
   try { window?.destroy(); } catch { /* closed */ }
   queueProfileCleanup();
   app.exit(process.exitCode || 0);
  }
+}
+
+function startQaActivityKeepAlive() {
+  if (activityKeepAliveTimer) return;
+  activityKeepAliveTimer = setInterval(() => {
+    if (activityKeepAliveBusy) return;
+    activityKeepAliveBusy = true;
+    void touchQaActivity()
+      .catch(() => undefined)
+      .finally(() => { activityKeepAliveBusy = false; });
+  }, 4_000);
+  activityKeepAliveTimer.unref?.();
+}
+
+function stopQaActivityKeepAlive() {
+  if (activityKeepAliveTimer) clearInterval(activityKeepAliveTimer);
+  activityKeepAliveTimer = null;
+  activityKeepAliveBusy = false;
+}
+
+function touchQaActivity() {
+  if (!window || window.isDestroyed()) return Promise.resolve();
+  // Keep both the renderer activity timer and the isolated vault timer alive.
+  // The final auto-lock assertion stops this loop and then waits for one exact event.
+  return evaluate(`(() => {
+    document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    return window.monarchSafe.request('touch');
+  })()`);
 }
 
 function queueProfileCleanup() {

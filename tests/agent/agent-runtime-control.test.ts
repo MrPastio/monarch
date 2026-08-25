@@ -1,9 +1,10 @@
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MonarchApplication } from '../../src/app/application';
 import {
+  AGENT_EXECUTION_PROFILE_SCHEMA_VERSION,
   InMemoryAgentTaskStore,
   ReplayAgentDecisionProvider,
   type AgentDecisionProvider,
@@ -11,6 +12,7 @@ import {
   type AgentModelDecisionResponse,
   type AgentTaskCheckpoint,
 } from '../../src/agent';
+import { createDeterministicSecurityModule } from '../fixtures/agent/deterministic-security-module';
 
 const roots: string[] = [];
 
@@ -19,6 +21,30 @@ afterEach(async () => {
 });
 
 describe('Oscar Agent Runtime V2 durable controls', () => {
+  it('runs legacy completed-plan reconciliation before startup claim recovery', async () => {
+    const root = await temporaryRoot('monarch-agent-startup-recovery-');
+    const store = new InMemoryAgentTaskStore();
+    const legacyReconciliation = vi.spyOn(store, 'reconcileLegacyCompletedPlans');
+    const claimRecovery = vi.spyOn(store, 'recoverExpiredClaims');
+    const app = new MonarchApplication({
+      workspaceRoot: root,
+      enabledModules: ['workspace'],
+      enableLocalSystemRouter: false,
+      enableAgentRuntimeV2: true,
+      agentTaskStore: store,
+    });
+
+    await app.start();
+    try {
+      expect(legacyReconciliation).toHaveBeenCalledTimes(1);
+      expect(claimRecovery).toHaveBeenCalledTimes(1);
+      expect(legacyReconciliation.mock.invocationCallOrder[0])
+        .toBeLessThan(claimRecovery.mock.invocationCallOrder[0]!);
+    } finally {
+      await app.stop();
+    }
+  });
+
   it('deduplicates concurrent task creation by clientRequestId', async () => {
     const root = await temporaryRoot('monarch-agent-create-idempotency-');
     const store = new InMemoryAgentTaskStore();
@@ -72,6 +98,61 @@ describe('Oscar Agent Runtime V2 durable controls', () => {
         code: 'client-request-reused',
       });
       expect((await app.agentRuntime!.getTask(created.task.id))?.task.status).toBe('created');
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it('binds an idempotent Coder task to one trusted project execution profile', async () => {
+    const root = await temporaryRoot('monarch-agent-coder-profile-');
+    const projectRoot = path.join(root, 'project');
+    await mkdir(projectRoot, { recursive: true });
+    const app = new MonarchApplication({
+      workspaceRoot: root,
+      enabledModules: ['workspace'],
+      enableLocalSystemRouter: false,
+      enableAgentRuntimeV2: true,
+      agentTaskStore: new InMemoryAgentTaskStore(),
+    });
+    await app.start();
+    try {
+      const input = {
+        request: 'Inspect this exact Coder project.',
+        source: { surface: 'coder' as const },
+        clientRequestId: 'coder-profile-idempotency-1',
+        autoStart: false,
+        executionProfile: {
+          schemaVersion: AGENT_EXECUTION_PROFILE_SCHEMA_VERSION,
+          kind: 'coder-project' as const,
+          projectId: 'project-profile-idempotency',
+          projectRoot,
+          permissionProfile: {
+            sandboxMode: 'workspace-write' as const,
+            approvalPolicy: 'on-request' as const,
+            autonomyMode: 'workspace-autonomous' as const,
+          },
+        },
+      };
+      const created = await app.createAgentTask(input);
+      const replayed = await app.createAgentTask(input);
+      expect(replayed.task.id).toBe(created.task.id);
+      expect(replayed.task.executionProfile).toEqual({
+        ...input.executionProfile,
+        projectRoot: path.resolve(projectRoot),
+      });
+
+      await expect(app.createAgentTask({
+        ...input,
+        executionProfile: {
+          ...input.executionProfile,
+          permissionProfile: { ...input.executionProfile.permissionProfile, approvalPolicy: 'never' as const },
+        },
+      })).rejects.toMatchObject({ statusCode: 409, code: 'client-request-reused' });
+      await expect(app.createAgentTask({
+        ...input,
+        clientRequestId: 'desktop-profile-injection-1',
+        source: { surface: 'desktop' as const },
+      })).rejects.toMatchObject({ statusCode: 400, code: 'invalid-execution-profile' });
     } finally {
       await app.stop();
     }
@@ -148,6 +229,7 @@ describe('Oscar Agent Runtime V2 durable controls', () => {
         grantScope: 'once' as const,
         requestId: 'approval-resolution-race-1',
         reason: 'Approve the exact checkpointed write.',
+        actorSurface: 'api' as const,
       };
 
       await expect(Promise.all([
@@ -164,6 +246,60 @@ describe('Oscar Agent Runtime V2 durable controls', () => {
         ...resolution,
         grantScope: 'task',
       })).rejects.toMatchObject({ statusCode: 409, code: 'approval-request-reused' });
+    } finally {
+      await app.stop();
+    }
+  }, 30_000);
+
+  it('requires an exact same-surface durable arm when the approval surface marks an action sensitive', async () => {
+    const { app } = await approvalApp();
+    await app.start();
+    try {
+      const created = await createApprovalTask(app);
+      const waiting = await waitForStatus(app, created.task.id, 'waiting-for-approval');
+      const approval = waiting.approvals[0]!;
+
+      await expect(app.agentRuntime!.resolveApproval(created.task.id, approval.id, {
+        decision: 'approve',
+        actorSurface: 'desktop',
+        requireArm: true,
+      })).rejects.toMatchObject({ statusCode: 403, code: 'approval-surface-mismatch' });
+      await expect(app.agentRuntime!.resolveApproval(created.task.id, approval.id, {
+        decision: 'approve',
+        actorSurface: 'api',
+        requireArm: true,
+      })).rejects.toMatchObject({ statusCode: 409, code: 'approval-arm-required' });
+      await expect(app.agentRuntime!.armApproval(created.task.id, approval.id, {
+        canonicalProposalHash: 'sha256:stale',
+        capabilityId: approval.capabilityId,
+        actorSurface: 'api',
+      })).rejects.toMatchObject({ statusCode: 409, code: 'approval-binding-mismatch' });
+
+      const armed = await app.agentRuntime!.armApproval(created.task.id, approval.id, {
+        canonicalProposalHash: approval.canonicalProposalHash,
+        capabilityId: approval.capabilityId,
+        actorSurface: 'api',
+        requestId: 'approval-arm-exact-1',
+      });
+      expect(armed.approvals[0]?.arm).toMatchObject({
+        canonicalProposalHash: approval.canonicalProposalHash,
+        capabilityId: approval.capabilityId,
+        armedBySurface: 'api',
+      });
+      expect(armed.events.filter((event) => event.type === 'approval.armed')).toHaveLength(1);
+
+      await expect(app.agentRuntime!.resolveApproval(created.task.id, approval.id, {
+        decision: 'approve',
+        actorSurface: 'desktop',
+        requireArm: true,
+      })).rejects.toMatchObject({ statusCode: 403, code: 'approval-surface-mismatch' });
+      await app.agentRuntime!.resolveApproval(created.task.id, approval.id, {
+        decision: 'approve',
+        actorSurface: 'api',
+        requireArm: true,
+        requestId: 'approval-after-arm-1',
+      });
+      await waitForStatus(app, created.task.id, 'completed');
     } finally {
       await app.stop();
     }
@@ -191,6 +327,7 @@ describe('Oscar Agent Runtime V2 durable controls', () => {
       await app.agentRuntime!.resolveApproval(created.task.id, approval.id, {
         decision: 'approve',
         requestId: 'approval-after-message-1',
+        actorSurface: 'api',
       });
       await waitForStatus(app, created.task.id, 'completed');
       await expect(access(path.join(root, 'runtime', 'approval.txt'))).resolves.toBeUndefined();
@@ -219,6 +356,7 @@ describe('Oscar Agent Runtime V2 durable controls', () => {
       });
       await expect(app.agentRuntime!.resolveApproval(created.task.id, approvalId, {
         decision: 'approve',
+        actorSurface: 'api',
       })).rejects.toMatchObject({ statusCode: 409, code: 'approval-already-resolved' });
       await expect(access(path.join(root, 'runtime', 'approval.txt'))).rejects.toBeDefined();
     } finally {
@@ -244,6 +382,7 @@ describe('Oscar Agent Runtime V2 durable controls', () => {
 
       await expect(app.agentRuntime!.resolveApproval(created.task.id, approvalId, {
         decision: 'approve',
+        actorSurface: 'api',
       })).rejects.toMatchObject({ statusCode: 409, code: 'approval-binding-mismatch' });
     } finally {
       await app.stop();
@@ -272,6 +411,7 @@ describe('Oscar Agent Runtime V2 durable controls', () => {
 
       await expect(app.agentRuntime!.resolveApproval(created.task.id, approvalId, {
         decision: 'approve',
+        actorSurface: 'api',
       })).rejects.toMatchObject({ statusCode: 409, code: 'task-terminal' });
     } finally {
       await app.stop();
@@ -351,13 +491,14 @@ describe('Oscar Agent Runtime V2 durable controls', () => {
     const root = await temporaryRoot('monarch-agent-task-lease-');
     const app = new MonarchApplication({
       workspaceRoot: root,
-      enabledModules: ['workspace', 'security'],
+      enabledModules: ['workspace'],
       enableLocalSystemRouter: false,
       enableAgentRuntimeV2: true,
       agentTaskStore: new InMemoryAgentTaskStore(),
       agentDecisionProvider: new TaskLeaseDecisionProvider(),
       permissionProfile: { sandboxMode: 'read-only', approvalPolicy: 'on-request', autonomyMode: 'guided' },
     });
+    app.runtime.kernel.registerModule(createDeterministicSecurityModule());
     await app.start();
     try {
       const created = await app.createAgentTask({
@@ -373,6 +514,7 @@ describe('Oscar Agent Runtime V2 durable controls', () => {
       await app.agentRuntime!.resolveApproval(created.task.id, waiting.approvals[0]!.id, {
         decision: 'approve',
         grantScope: 'task',
+        actorSurface: 'api',
       });
       const completed = await waitForStatus(app, created.task.id, 'completed');
 
@@ -527,18 +669,20 @@ async function approvalApp(): Promise<{
 }> {
   const root = await temporaryRoot('monarch-agent-approval-control-');
   const store = new InMemoryAgentTaskStore();
+  const app = new MonarchApplication({
+    workspaceRoot: root,
+    enabledModules: ['workspace'],
+    enableLocalSystemRouter: false,
+    enableAgentRuntimeV2: true,
+    agentTaskStore: store,
+    agentDecisionProvider: new ApprovalWriteDecisionProvider(),
+    permissionProfile: { sandboxMode: 'read-only', approvalPolicy: 'on-request', autonomyMode: 'guided' },
+  });
+  app.runtime.kernel.registerModule(createDeterministicSecurityModule());
   return {
     root,
     store,
-    app: new MonarchApplication({
-      workspaceRoot: root,
-      enabledModules: ['workspace', 'security'],
-      enableLocalSystemRouter: false,
-      enableAgentRuntimeV2: true,
-      agentTaskStore: store,
-      agentDecisionProvider: new ApprovalWriteDecisionProvider(),
-      permissionProfile: { sandboxMode: 'read-only', approvalPolicy: 'on-request', autonomyMode: 'guided' },
-    }),
+    app,
   };
 }
 

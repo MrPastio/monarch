@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import path from 'node:path';
-import { rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { MonarchKernel } from '../../src/core';
 import { MemoryModule } from '../../src/modules/memory';
 import { MonarchMemoryStore } from '../../src/modules/memory/store';
@@ -29,6 +29,93 @@ describe('Memory Module', () => {
     } finally {
       await rm(filePath, { force: true });
     }
+  });
+
+  it('serializes independent file-backed stores without cross-instance lost updates', async () => {
+    const runtimeRoot = path.join(process.cwd(), 'runtime');
+    await mkdir(runtimeRoot, { recursive: true });
+    const root = await mkdtemp(path.join(runtimeRoot, 'memory-cross-instance-'));
+    const filePath = path.join(root, 'memory.json');
+    try {
+      const first = new MonarchMemoryStore({ filePath });
+      const second = new MonarchMemoryStore({ filePath });
+      await Promise.all([first.load(), second.load()]);
+
+      await Promise.all(Array.from({ length: 30 }, (_, index) => (
+        (index % 2 === 0 ? first : second).remember(`cross instance ${index}`, 'test')
+      )));
+
+      const recovered = new MonarchMemoryStore({ filePath });
+      await recovered.load();
+      const records = recovered.list(100);
+      expect(records).toHaveLength(30);
+      expect(new Set(records.map((record) => record.text)).size).toBe(30);
+      expect(await readdir(root)).toEqual(['memory.json']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rolls back every in-memory mutation when durable state becomes corrupt', async () => {
+    const runtimeRoot = path.join(process.cwd(), 'runtime');
+    await mkdir(runtimeRoot, { recursive: true });
+    const root = await mkdtemp(path.join(runtimeRoot, 'memory-rollback-'));
+    const filePath = path.join(root, 'memory.json');
+    try {
+      const store = new MonarchMemoryStore({ filePath });
+      await store.load();
+      const baseline = await store.remember('transactional baseline memory', 'test');
+      const validSnapshot = await readFile(filePath, 'utf8');
+      const operations = [
+        () => store.remember('must not leak', 'test'),
+        () => store.search('transactional baseline'),
+        () => store.update(baseline.id, { text: 'must not replace baseline' }),
+        () => store.closeTemporary(baseline.id),
+        () => store.forget(baseline.id),
+      ];
+
+      for (const operation of operations) {
+        const before = store.list(20, { includeClosed: true, includeExpired: true });
+        await writeFile(filePath, '{ broken memory json', 'utf8');
+        await expect(operation()).rejects.toThrow('invalid JSON');
+        expect(store.list(20, { includeClosed: true, includeExpired: true })).toEqual(before);
+        await writeFile(filePath, validSnapshot, 'utf8');
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('can retry load after malformed state is repaired', async () => {
+    const runtimeRoot = path.join(process.cwd(), 'runtime');
+    await mkdir(runtimeRoot, { recursive: true });
+    const root = await mkdtemp(path.join(runtimeRoot, 'memory-load-retry-'));
+    const filePath = path.join(root, 'memory.json');
+    try {
+      await writeFile(filePath, '[]', 'utf8');
+      const store = new MonarchMemoryStore({ filePath });
+      await expect(store.load()).rejects.toThrow('failed schema validation');
+
+      await writeFile(filePath, JSON.stringify({ version: 3, records: [] }), 'utf8');
+      await store.load();
+      expect(store.size).toBe(0);
+      await expect(store.remember('recovered memory', 'test')).resolves.toMatchObject({ text: 'recovered memory' });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('returns defensive record snapshots that cannot mutate store state', async () => {
+    const store = new MonarchMemoryStore();
+    await store.load();
+    const created = await store.remember('immutable caller boundary', 'test', { tags: ['original'] });
+    created.text = 'caller mutation';
+    created.tags.push('leaked');
+
+    const listed = store.list();
+    expect(listed[0]).toMatchObject({ text: 'immutable caller boundary', tags: ['original'] });
+    listed[0].relatedFiles.push('leaked.txt');
+    expect(store.list()[0].relatedFiles).toEqual([]);
   });
 
   it('should require confirmation and persist memory', async () => {

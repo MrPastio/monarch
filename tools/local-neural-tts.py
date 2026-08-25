@@ -8,6 +8,7 @@ are redirected to stderr so Electron never has to parse third-party logs.
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import re
@@ -15,6 +16,7 @@ import sys
 import threading
 import time
 import traceback
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -48,12 +50,12 @@ VOICE_REFERENCES = {
     "oscar-clear": WORKSPACE_ROOT / "assets" / "voice" / "oscar-clear-reference.wav",
     "aurora": WORKSPACE_ROOT / "assets" / "voice" / "aurora-reference.wav",
 }
-STYLE_INSTRUCTIONS = {
-    "natural": "",
-    "calm": "Говори спокойно, ровно и уверенно, с естественными короткими паузами.",
-    "warm": "Говори тепло, дружелюбно и естественно, без наигранности.",
-    "focused": "Говори собранно, точно и уверенно, выделяя ключевые выводы.",
-    "energetic": "Говори живо и энергично, сохраняя естественность и ясную дикцию.",
+STYLE_GENERATION_OFFSETS = {
+    "natural": (0.0, 0, 0.0),
+    "calm": (-0.08, -4, -0.025),
+    "warm": (0.02, 2, 0.005),
+    "focused": (-0.04, -2, -0.035),
+    "energetic": (0.08, 5, 0.015),
 }
 
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -106,45 +108,116 @@ def speech_controls(request: dict[str, Any]) -> dict[str, Any]:
     speed = bounded_integer(request.get("speed"), 80, 120, 100)
     pitch = bounded_integer(request.get("pitch"), -2, 2, 0)
     expressiveness = bounded_integer(request.get("expressiveness"), 0, 100, 55)
+    style = str(request.get("style") or "natural").strip().lower()
+    temperature_offset, top_k_offset, top_p_offset = STYLE_GENERATION_OFFSETS.get(
+        style, STYLE_GENERATION_OFFSETS["natural"]
+    )
     return {
         "speed": speed,
         "pitch": pitch,
         "expressiveness": expressiveness,
         "pause_ms": bounded_integer(request.get("pauseMs"), 40, 400, 80),
         "volume": bounded_integer(request.get("volume"), 20, 100, 100),
-        "temperature": round(0.68 + expressiveness * 0.003, 3),
-        "top_k": round(24 + expressiveness * 0.16),
-        "top_p": round(0.88 + expressiveness * 0.0009, 3),
+        "temperature": round(max(0.35, min(1.15, 0.68 + expressiveness * 0.003 + temperature_offset)), 3),
+        "top_k": max(12, min(64, round(24 + expressiveness * 0.16 + top_k_offset))),
+        "top_p": round(max(0.72, min(0.98, 0.88 + expressiveness * 0.0009 + top_p_offset)), 3),
         "repetition_penalty": round(1.10 - expressiveness * 0.0004, 3),
     }
 
 
 def speech_instruction(request: dict[str, Any]) -> str | None:
-    style = str(request.get("style") or "natural").strip().lower()
-    controls = speech_controls(request)
-    custom = " ".join(str(request.get("instruction") or "").split()).strip()[:300]
-    speed = controls["speed"]
-    pitch = controls["pitch"]
-    expressiveness = controls["expressiveness"]
-    speed_instruction = (
-        "Говори заметно медленнее обычного." if speed <= 88 else
-        "Говори немного медленнее обычного." if speed < 98 else
-        "Говори заметно быстрее обычного, но не торопись." if speed >= 114 else
-        "Говори немного быстрее обычного, сохраняя ясность." if speed > 102 else ""
+    # Qwen3-TTS 0.6B Base is a voice-clone model, not the instruction-capable
+    # VoiceDesign/CustomVoice variant. Style and expressiveness are mapped to
+    # measurable generation parameters; speed/pitch are applied as DSP.
+    return None
+
+
+def prepare_qwen_speech_text(value: str) -> str:
+    """Remove stress markup unsupported by Qwen3-TTS Base.
+
+    Silero Stress predicts Russian stress correctly, but Qwen3-TTS 0.6B Base
+    was not trained to consume plus notation or Unicode stress marks. Passing
+    those tokens makes pronunciation less stable, so the current engine gets
+    ordinary orthography until a stress-aware model advertises that capability.
+    """
+    text = str(value or "")
+    text = re.sub(
+        r"([аеёиоуыэюя])[\u0301\u02ca\u00b4]",
+        r"\1",
+        text,
+        flags=re.IGNORECASE,
     )
-    pitch_instruction = (
-        "Используй ощутимо более низкую высоту голоса." if pitch == -2 else
-        "Используй немного более низкую высоту голоса." if pitch == -1 else
-        "Используй ощутимо более высокую высоту голоса." if pitch == 2 else
-        "Используй немного более высокую высоту голоса." if pitch == 1 else ""
-    )
-    expression_instruction = (
-        "Подача сдержанная и стабильная, без лишних эмоций." if expressiveness <= 25 else
-        "Подача выразительная и эмоционально живая, но естественная." if expressiveness >= 75 else ""
-    )
-    parts = [STYLE_INSTRUCTIONS.get(style, ""), speed_instruction, pitch_instruction, expression_instruction, custom]
-    result = " ".join(part for part in parts if part).strip()
-    return result or None
+    return re.sub(r"\+([аеёиоуыэюя])", r"\1", text, flags=re.IGNORECASE)
+
+
+def apply_audio_dsp(
+    audio: Any,
+    sample_rate: int,
+    controls: dict[str, Any],
+    torch: Any,
+    torchaudio: Any,
+    numpy: Any,
+) -> Any:
+    samples = numpy.asarray(audio, dtype=numpy.float32).reshape(-1)
+    if samples.size < 64:
+        return samples
+    waveform = torch.from_numpy(samples.copy()).reshape(1, -1)
+
+    def time_stretch(source: Any, rate: float, target_length: int | None = None) -> Any:
+        n_fft = 1024 if source.shape[-1] >= 2048 else 256
+        hop_length = n_fft // 4
+        window = torch.hann_window(n_fft, dtype=source.dtype, device=source.device)
+        spectrum = torch.stft(
+            source,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=n_fft,
+            window=window,
+            return_complex=True,
+        )
+        phase_advance = torch.linspace(
+            0,
+            math.pi * hop_length,
+            spectrum.shape[-2],
+            dtype=source.dtype,
+            device=source.device,
+        ).reshape(-1, 1)
+        stretched = torchaudio.functional.phase_vocoder(
+            spectrum, rate=rate, phase_advance=phase_advance
+        )
+        expected_length = target_length or max(1, round(source.shape[-1] / rate))
+        return torch.istft(
+            stretched,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=n_fft,
+            window=window,
+            length=expected_length,
+        )
+
+    pitch_steps = float(controls.get("pitch") or 0)
+    if abs(pitch_steps) > 1e-6:
+        original_length = int(waveform.shape[-1])
+        pitch_factor = 2 ** (pitch_steps / 12.0)
+        ratio = Fraction(pitch_factor).limit_denominator(64)
+        expanded_length = max(1, round(original_length * float(ratio)))
+        waveform = time_stretch(waveform, 1.0 / float(ratio), expanded_length)
+        # Small integer rates keep the sinc kernel bounded. Arbitrary floating
+        # sample rates can make torchaudio allocate a multi-gigabyte kernel.
+        waveform = torchaudio.functional.resample(
+            waveform, orig_freq=ratio.numerator, new_freq=ratio.denominator
+        )
+        if waveform.shape[-1] > original_length:
+            waveform = waveform[..., :original_length]
+        elif waveform.shape[-1] < original_length:
+            waveform = torch.nn.functional.pad(
+                waveform, (0, original_length - waveform.shape[-1])
+            )
+    speed_rate = max(0.8, min(1.2, float(controls.get("speed") or 100) / 100.0))
+    if abs(speed_rate - 1.0) > 1e-6:
+        target_length = max(1, round(waveform.shape[-1] / speed_rate))
+        waveform = time_stretch(waveform, speed_rate, target_length)
+    return waveform.squeeze(0).detach().cpu().numpy().astype(numpy.float32, copy=False)
 
 
 def split_speech_text(value: Any) -> list[str]:
@@ -402,6 +475,7 @@ class NeuralSpeechEngine:
     def __init__(self) -> None:
         self.model: Any = None
         self.torch: Any = None
+        self.torchaudio: Any = None
         self.numpy: Any = None
         self.sounddevice: Any = None
         self.model_lock = threading.Lock()
@@ -422,6 +496,7 @@ class NeuralSpeechEngine:
         import numpy as np
         import sounddevice as sd
         import torch
+        import torchaudio
         from faster_qwen3_tts import FasterQwen3TTS
 
         if not torch.cuda.is_available():
@@ -431,6 +506,7 @@ class NeuralSpeechEngine:
         torch.backends.cudnn.allow_tf32 = True
 
         self.torch = torch
+        self.torchaudio = torchaudio
         self.numpy = np
         self.sounddevice = sd
         self.model = FasterQwen3TTS.from_pretrained(
@@ -463,6 +539,8 @@ class NeuralSpeechEngine:
             "device": torch.cuda.get_device_name(0),
             "loadSeconds": round(loaded_at - started, 3),
             "warmupSeconds": round(warmed_at - loaded_at, 3),
+            "stressAccentor": "unavailable",
+            "pronunciationDiagnostic": "qwen-base-stress-markup-unsupported",
         }
 
     def cancel_active(self, wait_seconds: float = 2.0) -> bool:
@@ -532,7 +610,8 @@ class NeuralSpeechEngine:
         first_audio_at: float | None = None
         generation_finished_at: float | None = None
         player: StreamingAudioPlayer | None = None
-        segments = split_speech_text(text)
+        prepared_text = prepare_qwen_speech_text(text) if language == "Russian" else text
+        segments = split_speech_text(prepared_text)
         try:
             with self.model_lock:
                 for segment_index, segment in enumerate(segments):
@@ -554,31 +633,45 @@ class NeuralSpeechEngine:
                         max_new_tokens=768,
                         instruct=instruction,
                     )
+                    segment_chunks: list[Any] = []
+                    sample_rate = 0
                     for audio_chunk, sample_rate, _timing in generator:
                         if cancelled.is_set():
                             break
-                        if player is None:
-                            player = StreamingAudioPlayer(
-                                self.sounddevice,
-                                self.numpy,
-                                int(sample_rate),
-                                controls["volume"],
-                                on_telemetry=lambda frame: emit(
-                                    {
-                                        "type": "frame",
-                                        "id": request_id,
-                                        **frame,
-                                    }
-                                ),
-                            )
-                            with self.active_lock:
-                                if self.active_request_id == request_id:
-                                    self.active_player = player
-                            first_audio_at = time.perf_counter()
-                            emit({"type": "speaking", "id": request_id, "engine": "qwen3-tts-cuda-graph"})
-                        player.put(audio_chunk)
+                        segment_chunks.append(self.numpy.asarray(audio_chunk, dtype=self.numpy.float32).reshape(-1))
                     if cancelled.is_set():
                         break
+                    if not segment_chunks or not sample_rate:
+                        continue
+                    segment_audio = self.numpy.concatenate(segment_chunks)
+                    segment_audio = apply_audio_dsp(
+                        segment_audio,
+                        int(sample_rate),
+                        controls,
+                        self.torch,
+                        self.torchaudio,
+                        self.numpy,
+                    )
+                    if player is None:
+                        player = StreamingAudioPlayer(
+                            self.sounddevice,
+                            self.numpy,
+                            int(sample_rate),
+                            controls["volume"],
+                            on_telemetry=lambda frame: emit(
+                                {
+                                    "type": "frame",
+                                    "id": request_id,
+                                    **frame,
+                                }
+                            ),
+                        )
+                        with self.active_lock:
+                            if self.active_request_id == request_id:
+                                self.active_player = player
+                        first_audio_at = time.perf_counter()
+                        emit({"type": "speaking", "id": request_id, "engine": "qwen3-tts-cuda-graph"})
+                    player.put(segment_audio)
                     if player is not None and segment_index < len(segments) - 1:
                         player.put(
                             self.numpy.zeros(

@@ -236,6 +236,7 @@ function endpointForRole(role: MonarchModelRole, env: NodeJS.ProcessEnv): string
   case 'gemma4-balanced':
   case 'gemma4-deepthinking':
   case 'gemma4-31b':
+  case 'qwen3.8-27b-pro':
   case 'qwen3-coder-30b-a3b-instruct':
   case 'deepseek-coder-v2-lite-instruct':
     return gemmaProfileEnv(env, role, 'ENDPOINT')
@@ -262,6 +263,7 @@ function runnerPathForRole(role: MonarchModelRole, env: NodeJS.ProcessEnv): stri
   case 'gemma4-balanced':
   case 'gemma4-deepthinking':
   case 'gemma4-31b':
+  case 'qwen3.8-27b-pro':
   case 'qwen3-coder-30b-a3b-instruct':
   case 'deepseek-coder-v2-lite-instruct':
     return gemmaProfileEnv(env, role, 'COMMAND');
@@ -287,6 +289,7 @@ function modelNameForRole(role: MonarchModelRole, env: NodeJS.ProcessEnv): strin
   case 'gemma4-balanced':
   case 'gemma4-deepthinking':
   case 'gemma4-31b':
+  case 'qwen3.8-27b-pro':
   case 'qwen3-coder-30b-a3b-instruct':
   case 'deepseek-coder-v2-lite-instruct':
     return gemmaProfileEnv(env, role, 'NAME');
@@ -298,7 +301,7 @@ function gemmaProfileEnv(
   role: MonarchModelRole,
   suffix: 'ENDPOINT' | 'COMMAND' | 'NAME'
 ): string {
-  const normalizedRole = role.toUpperCase().replaceAll('-', '_');
+  const normalizedRole = role.toUpperCase().replace(/[^A-Z0-9]/g, '_');
   return normalizeEnv(env[`MONARCH_${normalizedRole}_MODEL_${suffix}`])
     || normalizeEnv(env[`MONARCH_${role.toUpperCase()}_MODEL_${suffix}`]);
 }
@@ -333,6 +336,7 @@ function runnerHintForRole(role: MonarchModelRole): string {
   case 'gemma4-balanced':
   case 'gemma4-deepthinking':
   case 'gemma4-31b':
+  case 'qwen3.8-27b-pro':
   case 'qwen3-coder-30b-a3b-instruct':
   case 'deepseek-coder-v2-lite-instruct':
     return `Configure MONARCH_${role.toUpperCase()}_MODEL_COMMAND with a local runtime owned by this project.`;

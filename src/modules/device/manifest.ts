@@ -196,13 +196,13 @@ export const deviceManifest: MonarchModuleManifest = {
       id: 'device.apps.search',
       moduleId: 'device',
       title: 'Find installed Windows applications',
-      description: 'Search the real Windows Start application registry and return exact launchable display names before opening an app.',
+      description: 'Search the trusted Windows Start/App Paths catalog with layout, transliteration, phonetic, and typo-tolerant ranking without exposing launch identifiers.',
       risk: 'read',
       agent: {
         tags: ['windows', 'device', 'application', 'installed-apps', 'discovery'],
         effects: [{
           kind: 'installed-application-observation',
-          description: 'Returns bounded Start application names and identifiers without launching them.',
+          description: 'Returns bounded ranked display names without launching them or exposing executable paths and shell application identifiers.',
           targetScope: 'application',
         }],
         idempotency: 'idempotent',
@@ -257,13 +257,13 @@ export const deviceManifest: MonarchModuleManifest = {
       id: 'device.app.open',
       moduleId: 'device',
       title: 'Open an installed Windows application',
-      description: 'Resolve an exact installed Start application name or a common alias, launch it, and return the observed Windows launch receipt.',
+      description: 'Atomically resolve a user-written application name against the trusted Windows catalog, launch the exact internal target, and verify a visible window.',
       risk: 'device-control',
       agent: {
         tags: ['windows', 'device', 'application', 'launch', 'open'],
         preconditions: [{
           kind: 'installed-application-resolved',
-          description: 'The application must resolve uniquely through a known alias or the Windows Start application registry.',
+          description: 'The application must resolve uniquely inside Device runtime; ambiguous or weak matches fail closed before dispatch.',
         }],
         effects: [{
           kind: 'application-launch',
@@ -311,6 +311,9 @@ export const deviceManifest: MonarchModuleManifest = {
         properties: {
           opened: { type: 'boolean' },
           displayName: { type: 'string' },
+          resolvedName: { type: 'string' },
+          resolutionScore: { type: 'number' },
+          resolutionMatchKind: { type: 'string' },
           launcher: { type: 'string' },
           performed: { type: 'boolean' },
           verified: { type: 'boolean' },

@@ -1,6 +1,7 @@
 import base64
 import binascii
 import json
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -142,6 +143,19 @@ class ChatAccessContext(BaseModel):
     approvalPolicy: Literal["on-request", "never"] = "on-request"
 
 
+class ChatDevModeV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    zero_retention: bool = False
+    internet_enabled: bool = True
+    memory_enabled: bool = True
+    history_context_enabled: bool = True
+    personality_enabled: bool = True
+    skills_enabled: bool = True
+    runtime_context_enabled: bool = True
+    quality_regeneration_enabled: bool = True
+
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=MAX_CHAT_MESSAGES)
     conversation_id: str | None = Field(default=None, max_length=MAX_RESOURCE_ID_CHARS)
@@ -158,9 +172,14 @@ class ChatRequest(BaseModel):
     # explicit user overrides; neither grants additional action authority.
     research_mode: Literal["auto", "off", "deep"] = "auto"
     use_memory: bool = True
+    context_profile: Literal["full", "compact-social"] = "full"
     # Ordinary chat is answer-only. System effects are selected and verified
     # by the TypeScript Agent Runtime, never by this legacy chat flag.
     allow_tools: bool = False
+    execution_authority: Literal["none", "agent-controller"] = "none"
+    persistence_owner: Literal["backend", "coordinator"] = "backend"
+    turn_id: str | None = Field(default=None, max_length=MAX_RESOURCE_ID_CHARS)
+    client_message_id: str | None = Field(default=None, max_length=MAX_RESOURCE_ID_CHARS)
     reasoning_effort: Literal["low", "medium", "high"] = "low"
     max_new_tokens: int = Field(default=65_536, ge=32, le=262_144)
     temperature: float = Field(default=0.3, ge=0.0, le=1.5)
@@ -173,11 +192,18 @@ class ChatRequest(BaseModel):
     capabilities: list[ChatCapabilityContext] = Field(default_factory=list, max_length=80)
     access: ChatAccessContext | None = None
     inference_lane: Literal["interactive", "agent", "coder", "background"] = "interactive"
+    # Trusted internal policy supplied by the Desktop coordinator. It never
+    # grants authority; every field can only remove context or capability.
+    dev_mode: ChatDevModeV1 | None = None
 
     @model_validator(mode="after")
     def validate_user_message(self) -> "ChatRequest":
         if not any(message.role == "user" for message in self.messages):
             raise ValueError("messages must include a user message")
+        if self.execution_authority == "none" and (self.allow_tools or self.capabilities or self.access):
+            raise ValueError("answer-only chat cannot receive tools, capabilities, or an access profile")
+        if self.persistence_owner == "coordinator" and not self.turn_id:
+            raise ValueError("coordinator-owned chat requires turn_id")
         return self
 
     @field_validator("conversation_id")
@@ -200,100 +226,14 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    ok: bool = True
     answer: str
-    outcome: Literal["completed", "action-proposed"] = "completed"
+    outcome: Literal["answered", "answered:source-grounded", "action-proposed"] = "answered"
     conversation_id: str | None = None
     sources: list[ChatSource] = Field(default_factory=list)
     tool_results: list["WorkspaceToolResult"] = Field(default_factory=list)
     action_proposals: list[dict[str, Any]] = Field(default_factory=list)
     usage: dict[str, int | bool | str] = Field(default_factory=dict)
-
-
-class VoiceHistoryMessage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=800)
-
-    @field_validator("content")
-    @classmethod
-    def validate_content(cls, value: str) -> str:
-        return require_non_blank_text(value)
-
-
-class VoiceFastRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    text: str = Field(min_length=1, max_length=1200)
-    language: str | None = Field(default=None, max_length=32)
-    history: list[VoiceHistoryMessage] = Field(default_factory=list, max_length=8)
-
-    @field_validator("text")
-    @classmethod
-    def validate_text(cls, value: str) -> str:
-        return require_non_blank_text(value)
-
-    @field_validator("language")
-    @classmethod
-    def validate_language(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip().lower()
-        return cleaned or None
-
-
-class VoiceFastResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    text: str
-    model: Literal["gemma4-fast"] = "gemma4-fast"
-    generation_ms: float = Field(ge=0)
-
-
-class VoiceRealtimeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    text: str = Field(min_length=1, max_length=600)
-    kind: Literal["weather", "web-search"]
-    language: str | None = Field(default=None, max_length=32)
-    location: str | None = Field(default=None, min_length=1, max_length=120)
-    history: list[VoiceHistoryMessage] = Field(default_factory=list, max_length=8)
-
-    @field_validator("text")
-    @classmethod
-    def validate_text(cls, value: str) -> str:
-        return require_non_blank_text(value)
-
-    @field_validator("language")
-    @classmethod
-    def validate_language(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip().lower()
-        return cleaned or None
-
-    @field_validator("location")
-    @classmethod
-    def validate_location(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        if any(ord(char) < 32 or ord(char) == 127 for char in value):
-            raise ValueError("location contains control characters")
-        cleaned = " ".join(value.split())
-        if not cleaned or not any(char.isalnum() for char in cleaned):
-            raise ValueError("location must contain a letter or number")
-        return cleaned
-
-
-class VoiceRealtimeResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    text: str
-    model: Literal["none", "gemma4-fast", "open-meteo"] = "gemma4-fast"
-    kind: Literal["weather", "web-search"]
-    source_count: int = Field(ge=0, le=3)
-    search_ms: float = Field(ge=0)
-    generation_ms: float = Field(ge=0)
 
 
 class ChatRoutePreview(BaseModel):
@@ -312,6 +252,9 @@ class ChatRoutePreview(BaseModel):
     projected_ram_available_gb: float | None = None
     ram_warning: Literal["none", "caution", "critical"] = "none"
     ram_warning_message: str | None = None
+    configured_context_tokens: int | None = None
+    effective_context_tokens: int | None = None
+    adaptive_context_applied: bool = False
 
 
 MemoryEntryType = Literal[
@@ -371,11 +314,31 @@ class ConversationMessageCreate(BaseModel):
     token_count: int | None = Field(default=None, ge=0)
     elapsed_ms: int | None = Field(default=None, ge=0)
     model_tier: str | None = Field(default=None, max_length=80)
+    client_message_id: str | None = Field(default=None, max_length=MAX_RESOURCE_ID_CHARS)
+    turn_id: str | None = Field(default=None, max_length=MAX_RESOURCE_ID_CHARS)
+    task_id: str | None = Field(default=None, max_length=MAX_RESOURCE_ID_CHARS)
+    provenance: dict[str, Any] | None = None
+    outcome: str | None = Field(default=None, max_length=80)
+    integrity_warning: str | None = Field(default=None, max_length=1000)
+    create_conversation_if_missing: bool = True
+    required_previous_message_id: str | None = Field(default=None, max_length=MAX_RESOURCE_ID_CHARS)
+    attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
+    sources: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
 
     @field_validator("content")
     @classmethod
     def validate_content(cls, value: str) -> str:
         return require_non_blank_text(value)
+
+    @field_validator("client_message_id", "turn_id", "task_id", "required_previous_message_id")
+    @classmethod
+    def validate_binding_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", cleaned):
+            raise ValueError("message binding id contains unsupported characters")
+        return cleaned
 
 
 class MemoryItemCreate(BaseModel):
@@ -442,6 +405,126 @@ class MemoryItemUpdate(BaseModel):
         if value is None:
             return None
         return [item.strip() for item in value if item.strip()]
+
+
+SettingsKind = Literal["memory", "profile", "personality", "voice", "prompts"]
+SettingsCommand = Literal[
+    "memory.create",
+    "memory.update",
+    "memory.delete",
+    "memory.restore",
+    "memory.cross-chat.set",
+    "profile.update",
+    "personality.profile.create",
+    "personality.profile.update",
+    "personality.profile.select",
+    "personality.personalization.set",
+    "personality.scope.copy",
+    "voice.update",
+    "voice.preset.create",
+    "voice.preset.update",
+    "voice.preset.delete",
+    "voice.pronunciation.create",
+    "voice.pronunciation.update",
+    "voice.pronunciation.delete",
+    "prompts.update",
+    "prompts.reset",
+    "prompts.reset-all",
+]
+
+
+class SettingsScopeV1(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    type: Literal["chat", "coder-project"]
+    project_id: str | None = Field(default=None, alias="projectId", max_length=160)
+
+    @model_validator(mode="after")
+    def validate_scope(self):
+        if self.type == "chat" and self.project_id:
+            raise ValueError("chat scope cannot carry projectId")
+        if self.type == "coder-project":
+            cleaned = (self.project_id or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", cleaned):
+                raise ValueError("coder-project scope requires a bounded projectId")
+            self.project_id = cleaned
+        return self
+
+
+class SettingsReadRequestV1(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    schema_version: Literal[1] = Field(alias="schemaVersion")
+    kind: SettingsKind
+    scope: SettingsScopeV1
+
+
+class SettingsCommandRequestV1(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    schema_version: Literal[1] = Field(alias="schemaVersion")
+    client_request_id: str = Field(alias="clientRequestId", min_length=1, max_length=256)
+    command: SettingsCommand
+    scope: SettingsScopeV1
+    expected_revision: int = Field(alias="expectedRevision", ge=0)
+    payload: dict[str, Any]
+    policy_decision_hash: str = Field(alias="policyDecisionHash", pattern=r"^[a-f0-9]{64}$")
+
+    @field_validator("client_request_id")
+    @classmethod
+    def validate_client_request_id(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", cleaned):
+            raise ValueError("clientRequestId contains unsupported characters")
+        return cleaned
+
+
+class MemoryEpisodeIndexRequestV1(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    schema_version: Literal[1] = Field(alias="schemaVersion")
+    source: Literal["desktop", "coder"]
+    scope: SettingsScopeV1
+    conversation_id: str = Field(alias="conversationId", min_length=1, max_length=256)
+    turn_id: str = Field(alias="turnId", min_length=1, max_length=256)
+    project_name: str | None = Field(default=None, alias="projectName", max_length=160)
+    user_text: str | None = Field(default=None, alias="userText", max_length=8000)
+    assistant_text: str | None = Field(default=None, alias="assistantText", max_length=8000)
+    structured_summary: dict[str, Any] | None = Field(default=None, alias="structuredSummary")
+
+    @field_validator("conversation_id", "turn_id")
+    @classmethod
+    def validate_episode_id(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", cleaned):
+            raise ValueError("episode binding id contains unsupported characters")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_source_scope(self):
+        if self.source == "desktop" and self.scope.type != "chat":
+            raise ValueError("desktop chat episodes require chat scope")
+        if self.source == "coder":
+            if self.scope.type != "coder-project":
+                raise ValueError("coder episodes require coder-project scope")
+            if not (self.user_text or "").strip() or not (self.assistant_text or "").strip():
+                raise ValueError("coder episodes require userText and assistantText")
+            if not isinstance(self.structured_summary, dict):
+                raise ValueError("coder episodes require structuredSummary")
+        return self
+
+
+class MemoryContextRequestV1(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    schema_version: Literal[1] = Field(alias="schemaVersion")
+    query: str = Field(min_length=1, max_length=MAX_SEARCH_QUERY_CHARS)
+    scope: SettingsScopeV1
+
+    @field_validator("query")
+    @classmethod
+    def validate_memory_query(cls, value: str) -> str:
+        return require_non_blank_text(value)
 
 
 class SearchRequest(BaseModel):

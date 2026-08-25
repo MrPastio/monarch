@@ -23,4 +23,16 @@ describe('agent recovery policy', () => {
       capability: legacyAgentCapabilityDefaults('read'),
     })).toMatchObject({ action: 'replan', mayRepeatSameAction: false });
   });
+
+  it.each([
+    'agent-response-model-unavailable',
+    'agent-response-runtime-busy',
+    'connection-refused',
+  ])('waits for an infrastructure failure instead of replanning: %s', (error) => {
+    expect(decideAgentRecovery({
+      ok: false, verified: false, error, retryable: false,
+      attemptsForAction: 1, totalFailures: 1, maxFailures: 5,
+      capability: legacyAgentCapabilityDefaults('read'),
+    })).toMatchObject({ action: 'wait-runtime', mayRepeatSameAction: false });
+  });
 });

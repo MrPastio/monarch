@@ -95,24 +95,44 @@ describe('Monarch Access and Monarch Security confirmation', () => {
     }
   });
 
-  it('lets the user override a Security block for the exact confirmed request', async () => {
+  it('allows only an exact policy-bound Owner override for a non-hard Security block', async () => {
     const kernel = new MonarchKernel({
       permissionProfile: { sandboxMode: 'workspace-write', approvalPolicy: 'on-request' },
+      authorityContext: {
+        tier: 'owner',
+        source: 'signed-device-entitlement',
+        entitlementId: 'entitlement-test',
+        keyId: 'owner-root-test',
+        verifiedAt: new Date(0).toISOString(),
+        deviceIdPrefix: '0123456789ab',
+        diagnostic: null,
+      },
     });
     kernel.registerModule(createSecurityApprovalModule('blocked'));
     kernel.registerModule(createDeleteModule());
     await kernel.start();
 
     try {
-      const blocked = await kernel.execute(createDeleteRequest(true));
+      const blocked = await kernel.execute({ ...createDeleteRequest(true), source: 'desktop' });
       expect(blocked).toMatchObject({
         ok: false,
         error: 'confirmation-required',
-        metadata: { status: 'blocked', securityOverride: true },
+        metadata: { securityOverride: true },
       });
+      const unbound = await kernel.execute({
+        ...createDeleteRequest(true),
+        source: 'desktop',
+        securityOverrideConfirmed: true,
+      });
+      expect(unbound).toMatchObject({ ok: false, error: 'confirmation-required' });
+      const policy = blocked.metadata?.policy as { policyDecisionHash: string; authorityTier: 'owner' };
       const result = await kernel.execute({
         ...createDeleteRequest(true),
+        source: 'desktop',
         securityOverrideConfirmed: true,
+        approvalPurpose: 'owner-security-override',
+        approvalPolicyDecisionHash: policy.policyDecisionHash,
+        authorityTierAtApproval: policy.authorityTier,
       });
       expect(result).toMatchObject({ ok: true, summary: 'Deleted smoke fixture.' });
       expect(kernel.getSnapshot().audit.some((entry) => entry.message.includes('User overrode a Security block'))).toBe(true);
@@ -464,43 +484,6 @@ describe('Monarch Access and Monarch Security confirmation', () => {
     }
   });
 
-  it('keeps the exact deterministic UI volume action off the Security LLM roundtrip', async () => {
-    const capturedActionInputs: string[] = [];
-    const kernel = new MonarchKernel({
-      permissionProfile: { sandboxMode: 'danger-full-access', approvalPolicy: 'never' },
-    });
-    kernel.registerModule(createSecurityCaptureModule(capturedActionInputs));
-    kernel.registerModule(createVoiceVolumeSmokeModule());
-    await kernel.start();
-
-    try {
-      const directVoice = await kernel.execute({
-        id: 'exec_voice_volume_fast_path',
-        intentId: 'intent_voice_volume_fast_path',
-        moduleId: 'voice',
-        capabilityId: 'voice.mode.execute-scripted',
-        input: { text: 'Поставь громкость на максимум' },
-        createdAt: new Date(0).toISOString(),
-        requestedBy: 'ui:voice-mode',
-      });
-      const nonUiCaller = await kernel.execute({
-        id: 'exec_voice_volume_api',
-        intentId: 'intent_voice_volume_api',
-        moduleId: 'voice',
-        capabilityId: 'voice.mode.execute-scripted',
-        input: { text: 'Поставь громкость на максимум' },
-        createdAt: new Date(0).toISOString(),
-        requestedBy: 'api',
-      });
-
-      expect(directVoice).toMatchObject({ ok: true, summary: 'Verified volume action.' });
-      expect(nonUiCaller).toMatchObject({ ok: true, summary: 'Verified volume action.' });
-      expect(capturedActionInputs).toHaveLength(1);
-    } finally {
-      await kernel.stop();
-    }
-  });
-
   it('keeps every local read, including opaque voice inspection, off the Security controller hot path', async () => {
     const capturedActionInputs: string[] = [];
     const kernel = new MonarchKernel({
@@ -603,6 +586,7 @@ describe('Monarch Access and Monarch Security confirmation', () => {
       permissionProfile: { sandboxMode: 'workspace-write', approvalPolicy: 'on-request' },
     });
     kernel.registerModule(new SecurityModule(fakeSecurityClient as any));
+    kernel.registerModule(createDeleteModule());
     await kernel.start();
 
     try {
@@ -613,9 +597,9 @@ describe('Monarch Access and Monarch Security confirmation', () => {
         capabilityId: 'security.controller.check',
         input: {
           intentText: 'удали runtime/a.txt',
-          actionModule: 'workspace',
-          actionCapability: 'workspace.files.delete',
-          actionInput: '{"path":"runtime/a.txt"}',
+          actionModule: 'smoke-delete',
+          actionCapability: 'smoke.delete',
+          actionInput: '{"path":"runtime/smoke.txt"}',
           actionRisk: 'delete',
           requestedBy: 'api',
           monarchConfirmed: true,
@@ -633,7 +617,288 @@ describe('Monarch Access and Monarch Security confirmation', () => {
     }
   });
 
-  it('does not run controller checks after the user explicitly disables Security', async () => {
+  it('blocks an unregistered action capability before the Python controller', async () => {
+    const forwarded: string[] = [];
+    const fakeSecurityClient = {
+      config: {
+        projectRoot: 'E:\\Monarch\\security',
+        configPath: 'E:\\Monarch\\security\\config\\monarch_security.toml',
+        pythonPath: 'python',
+        timeoutMs: 30000,
+      },
+      available: true,
+      checkAction: async (input: { actionCapability?: string }) => {
+        forwarded.push(input.actionCapability || '');
+        return {
+          ok: true,
+          exitCode: 0,
+          args: ['check-action', '--request-file', '<test>'],
+          stdout: '',
+          stderr: '',
+          jsonLines: [{ ok: true, status: 'allowed', report: 'Unexpected allow.' }],
+        };
+      },
+    };
+    const kernel = new MonarchKernel({
+      permissionProfile: { sandboxMode: 'workspace-write', approvalPolicy: 'on-request' },
+    });
+    kernel.registerModule(new SecurityModule(fakeSecurityClient as any));
+    await kernel.start();
+
+    try {
+      const result = await kernel.execute({
+        id: 'exec_unregistered_security_controller_action',
+        intentId: 'intent_unregistered_security_controller_action',
+        moduleId: 'security',
+        capabilityId: 'security.controller.check',
+        input: {
+          intentText: 'show device status',
+          actionModule: 'device',
+          actionCapability: 'device.invented.root',
+          actionInput: '{}',
+          actionRisk: 'read',
+          requestedBy: 'api',
+          monarchConfirmed: false,
+          noLlm: true,
+        },
+        createdAt: new Date(0).toISOString(),
+        requestedBy: 'api',
+        confirmed: true,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.output).toMatchObject({
+        payload: {
+          ok: false,
+          status: 'blocked',
+          disposition: 'hard-deny',
+          evidenceCodes: expect.arrayContaining(['capability.unregistered', 'action-guard.hard-boundary']),
+          decision: { action: 'block' },
+        },
+      });
+      expect(forwarded).toEqual([]);
+    } finally {
+      await kernel.stop();
+    }
+  });
+
+  it('keeps exact Computer Use atoms on the target-aware local Guard instead of the generic Python device rule', async () => {
+    const forwarded: string[] = [];
+    const fakeSecurityClient = {
+      config: {
+        projectRoot: 'E:\\Monarch\\security',
+        configPath: 'E:\\Monarch\\security\\config\\monarch_security.toml',
+        pythonPath: 'python',
+        timeoutMs: 30000,
+      },
+      available: true,
+      checkAction: async (input: { actionCapability?: string }) => {
+        forwarded.push(input.actionCapability || '');
+        return {
+          ok: true,
+          exitCode: 0,
+          args: ['check-action', '--request-file', '<test>'],
+          stdout: '',
+          stderr: '',
+          jsonLines: [{ ok: false, status: 'approval_required', report: 'Generic device rule.' }],
+        };
+      },
+    };
+    const kernel = new MonarchKernel({
+      permissionProfile: { sandboxMode: 'danger-full-access', approvalPolicy: 'never' },
+    });
+    kernel.registerModule(new SecurityModule(fakeSecurityClient as any));
+    kernel.registerModule(createComputerRegistryModule());
+    await kernel.start();
+
+    try {
+      await kernel.emitRuntimeEvent('security.model_policy.changed', 'security', {
+        enabled: true,
+        agentSecurityMode: 'guard',
+        actionGuardReaction: 'guard',
+      });
+      const result = await kernel.execute({
+        id: 'exec_exact_computer_controller_action',
+        intentId: 'intent_exact_computer_controller_action',
+        moduleId: 'security',
+        capabilityId: 'security.controller.check',
+        input: {
+          intentText: 'введи текст в тестовое поле',
+          actionModule: 'computer',
+          actionCapability: 'computer.window.type',
+          actionInput: '{"text":"Готово"}',
+          actionRisk: 'device-control',
+          requestedBy: 'agent:oscar',
+          monarchConfirmed: false,
+          modelProposed: true,
+          actionGuardReaction: 'guard',
+          noLlm: true,
+          trustedActionContext: {
+            schemaVersion: 1,
+            sourceModuleId: 'computer',
+            target: {
+              window: { processName: 'notepad.exe', title: 'QA note' },
+              subject: { kind: 'semantic', name: 'Editor', controlType: 'Edit' },
+            },
+          },
+        },
+        createdAt: new Date(0).toISOString(),
+        requestedBy: 'system',
+        confirmed: true,
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        output: { payload: { ok: true, status: 'allowed', disposition: 'informational' } },
+      });
+      expect(forwarded).toEqual([]);
+    } finally {
+      await kernel.stop();
+    }
+  });
+
+  it('keeps ordinary typed Device control on the local Action Guard in Full Access', async () => {
+    const forwarded: string[] = [];
+    const fakeSecurityClient = {
+      config: {
+        projectRoot: 'E:\\Monarch\\security',
+        configPath: 'E:\\Monarch\\security\\config\\monarch_security.toml',
+        pythonPath: 'python',
+        timeoutMs: 30000,
+      },
+      available: true,
+      checkAction: async (input: { actionCapability?: string }) => {
+        forwarded.push(input.actionCapability || '');
+        return {
+          ok: true,
+          exitCode: 0,
+          args: ['check-action', '--request-file', '<test>'],
+          stdout: '',
+          stderr: '',
+          jsonLines: [{ ok: false, status: 'approval_required', report: 'Legacy blanket device rule.' }],
+        };
+      },
+    };
+    const kernel = new MonarchKernel({
+      permissionProfile: { sandboxMode: 'danger-full-access', approvalPolicy: 'never' },
+    });
+    kernel.registerModule(new SecurityModule(fakeSecurityClient as any));
+    kernel.registerModule(createDeviceRegistryModule());
+    await kernel.start();
+
+    try {
+      const explicit = await kernel.execute({
+        id: 'exec_typed_device_controller_action',
+        intentId: 'intent_typed_device_controller_action',
+        moduleId: 'security',
+        capabilityId: 'security.controller.check',
+        input: {
+          intentText: 'открой Photos',
+          actionModule: 'device',
+          actionCapability: 'device.app.open',
+          actionInput: '{"app":"Photos"}',
+          actionRisk: 'device-control',
+          requestedBy: 'agent:oscar',
+          monarchConfirmed: false,
+          modelProposed: true,
+          actionGuardReaction: 'guard',
+          noLlm: true,
+        },
+        createdAt: new Date(0).toISOString(),
+        requestedBy: 'system',
+        confirmed: true,
+      });
+      const unrelated = await kernel.execute({
+        id: 'exec_unrelated_device_controller_action',
+        intentId: 'intent_unrelated_device_controller_action',
+        moduleId: 'security',
+        capabilityId: 'security.controller.check',
+        input: {
+          intentText: 'расскажи о Photos',
+          actionModule: 'device',
+          actionCapability: 'device.app.open',
+          actionInput: '{"app":"Photos"}',
+          actionRisk: 'device-control',
+          requestedBy: 'agent:oscar',
+          monarchConfirmed: false,
+          modelProposed: true,
+          actionGuardReaction: 'guard',
+          noLlm: true,
+        },
+        createdAt: new Date(0).toISOString(),
+        requestedBy: 'system',
+        confirmed: true,
+      });
+
+      expect(explicit).toMatchObject({
+        ok: true,
+        output: { payload: { ok: true, status: 'allowed', disposition: 'informational' } },
+      });
+      expect(unrelated).toMatchObject({
+        ok: true,
+        output: { payload: { ok: false, status: 'approval_required', disposition: 'owner-confirmable' } },
+      });
+      expect(forwarded).toEqual([]);
+    } finally {
+      await kernel.stop();
+    }
+  });
+
+  it('passes module-resolved live target context to Security outside the model action input', async () => {
+    const capturedActionInputs: string[] = [];
+    const capturedControllerInputs: Array<Record<string, unknown>> = [];
+    const kernel = new MonarchKernel({
+      permissionProfile: { sandboxMode: 'danger-full-access', approvalPolicy: 'never' },
+    });
+    kernel.registerModule(createSecurityCaptureModule(capturedActionInputs, capturedControllerInputs));
+    kernel.registerModule(createTrustedContextWriteModule());
+    await kernel.start();
+
+    try {
+      await kernel.emitRuntimeEvent('security.model_policy.changed', 'security', {
+        enabled: true,
+        agentSecurityMode: 'guard',
+        actionGuardReaction: 'guard',
+      });
+      const result = await kernel.execute({
+        id: 'exec_trusted_action_context',
+        intentId: 'intent_trusted_action_context',
+        moduleId: 'trusted-context',
+        capabilityId: 'trusted-context.write',
+        input: { value: 'model-visible-input' },
+        createdAt: new Date(0).toISOString(),
+        requestedBy: 'agent:oscar',
+        proposalId: 'proposal_trusted_context',
+        originatingUserText: 'измени тестовое значение',
+        executionMode: 'agent-runtime',
+        riskVector: {
+          effect: 'write',
+          scope: 'workspace',
+          reversibility: 'compensatable',
+          externality: 'trusted-origin',
+          privilege: 'elevated',
+          data: 'personal',
+          novelty: 'new-args',
+        },
+      });
+
+      expect(result).toMatchObject({ ok: true, summary: 'Trusted context fixture executed.' });
+      expect(capturedActionInputs).toEqual(['{"value":"model-visible-input"}']);
+      expect(capturedControllerInputs).toHaveLength(1);
+      expect(capturedControllerInputs[0]).toMatchObject({
+        trustedActionContext: {
+          schemaVersion: 1,
+          sourceModuleId: 'trusted-context',
+          target: { kind: 'live-fixture', label: 'Kernel-owned target' },
+        },
+      });
+      expect(capturedActionInputs[0]).not.toContain('Kernel-owned target');
+    } finally {
+      await kernel.stop();
+    }
+  });
+
+  it('keeps exact Action Guard observation active when background Security monitoring is off', async () => {
     const controllerCalls: string[] = [];
     const kernel = new MonarchKernel({
       permissionProfile: { sandboxMode: 'danger-full-access', approvalPolicy: 'never' },
@@ -654,7 +919,7 @@ describe('Monarch Access and Monarch Security confirmation', () => {
       });
 
       expect(result).toMatchObject({ ok: true, summary: 'Wrote smoke fixture.' });
-      expect(controllerCalls).toEqual([]);
+      expect(controllerCalls).toEqual(['security.controller.check']);
     } finally {
       await kernel.stop();
     }
@@ -754,33 +1019,6 @@ function createVoiceTranscribeSmokeModule(): MonarchModule {
   };
 }
 
-function createVoiceVolumeSmokeModule(): MonarchModule {
-  return {
-    manifest: {
-      id: 'voice',
-      name: 'Voice Volume Smoke',
-      version: '0.1.0',
-      kind: 'runtime',
-      description: 'Test-only deterministic volume module.',
-      owns: ['voice'],
-      permissions: ['read', 'execute'],
-      capabilities: [{
-        id: 'voice.mode.execute-scripted',
-        moduleId: 'voice',
-        title: 'Execute scripted voice command',
-        risk: 'read',
-      }],
-    },
-    resolveCapabilityRisk(): 'execute' {
-      return 'execute';
-    },
-    async activate(): Promise<void> {},
-    async executeCapability(): Promise<MonarchExecutionResult> {
-      return { ok: true, summary: 'Verified volume action.' };
-    },
-  };
-}
-
 function createSecurityApprovalModule(status = 'approval_required'): MonarchModule {
   return {
     manifest: {
@@ -807,6 +1045,7 @@ function createSecurityApprovalModule(status = 'approval_required'): MonarchModu
           payload: {
             ok: status === 'allowed',
             status,
+            disposition: status === 'allowed' ? 'informational' : 'owner-confirmable',
             report: status === 'allowed' ? 'Allowed by security.'
               : status === 'blocked' ? 'Hard boundary violation.'
                 : 'Legacy passkey required.',
@@ -818,7 +1057,10 @@ function createSecurityApprovalModule(status = 'approval_required'): MonarchModu
   };
 }
 
-function createSecurityCaptureModule(capturedActionInputs: string[]): MonarchModule {
+function createSecurityCaptureModule(
+  capturedActionInputs: string[],
+  capturedControllerInputs: Array<Record<string, unknown>> = [],
+): MonarchModule {
   return {
     manifest: {
       id: 'security',
@@ -837,10 +1079,14 @@ function createSecurityCaptureModule(capturedActionInputs: string[]): MonarchMod
     },
     async activate(): Promise<void> {},
     async executeCapability(request: MonarchExecutionRequest): Promise<MonarchExecutionResult> {
-      const actionInput = typeof (request.input as { actionInput?: unknown })?.actionInput === 'string'
-        ? (request.input as { actionInput: string }).actionInput
+      const controllerInput = request.input && typeof request.input === 'object'
+        ? request.input as Record<string, unknown>
+        : {};
+      const actionInput = typeof controllerInput.actionInput === 'string'
+        ? controllerInput.actionInput
         : '';
       capturedActionInputs.push(actionInput);
+      capturedControllerInputs.push(controllerInput);
       return {
         ok: true,
         summary: 'Security capture completed.',
@@ -848,10 +1094,90 @@ function createSecurityCaptureModule(capturedActionInputs: string[]): MonarchMod
           payload: {
             ok: true,
             status: 'allowed',
+            disposition: 'informational',
             report: 'Allowed by security capture.',
           },
         },
       };
+    },
+  };
+}
+
+function createTrustedContextWriteModule(): MonarchModule {
+  return {
+    manifest: {
+      id: 'trusted-context',
+      name: 'Trusted Context Fixture',
+      version: '0.1.0',
+      kind: 'tooling',
+      description: 'Test-only trusted Security context resolver.',
+      owns: ['trusted context'],
+      permissions: ['write'],
+      capabilities: [{
+        id: 'trusted-context.write',
+        moduleId: 'trusted-context',
+        title: 'Write with trusted target context',
+        risk: 'write',
+      }],
+    },
+    async activate(): Promise<void> {},
+    resolveSecurityActionContext() {
+      return {
+        schemaVersion: 1 as const,
+        sourceModuleId: 'trusted-context',
+        target: { kind: 'live-fixture', label: 'Kernel-owned target' },
+      };
+    },
+    async executeCapability(): Promise<MonarchExecutionResult> {
+      return { ok: true, summary: 'Trusted context fixture executed.' };
+    },
+  };
+}
+
+function createComputerRegistryModule(): MonarchModule {
+  return {
+    manifest: {
+      id: 'computer',
+      name: 'Computer Registry Fixture',
+      version: '0.1.0',
+      kind: 'domain',
+      description: 'Test-only Computer Use registry entry.',
+      owns: ['computer'],
+      permissions: ['device-control'],
+      capabilities: [{
+        id: 'computer.window.type',
+        moduleId: 'computer',
+        title: 'Type in observed window',
+        risk: 'device-control',
+      }],
+    },
+    async activate(): Promise<void> {},
+    async executeCapability(): Promise<MonarchExecutionResult> {
+      return { ok: true, summary: 'Computer registry fixture executed.' };
+    },
+  };
+}
+
+function createDeviceRegistryModule(): MonarchModule {
+  return {
+    manifest: {
+      id: 'device',
+      name: 'Device Registry Fixture',
+      version: '0.1.0',
+      kind: 'runtime',
+      description: 'Registers ordinary typed Device control for Security tests.',
+      owns: ['device registry fixture'],
+      permissions: ['device-control'],
+      capabilities: [{
+        id: 'device.app.open',
+        moduleId: 'device',
+        title: 'Open application fixture',
+        risk: 'device-control',
+      }],
+    },
+    async activate(): Promise<void> {},
+    async executeCapability(): Promise<MonarchExecutionResult> {
+      return { ok: true, summary: 'Device registry fixture.' };
     },
   };
 }
@@ -874,14 +1200,17 @@ function createDisabledSecurityModule(controllerCalls: string[]): MonarchModule 
       }],
     },
     async activate(context): Promise<void> {
-      await context.emit('security.activated', 'security', { securityLevel: 'off' });
+      await context.emit('security.activated', 'security', {
+        securityLevel: 'off',
+        actionGuardReaction: 'observe',
+      });
     },
     async executeCapability(): Promise<MonarchExecutionResult> {
       controllerCalls.push('security.controller.check');
       return {
         ok: true,
         summary: 'Unexpected controller call.',
-        output: { payload: { ok: true, status: 'allowed', report: 'Allowed.' } },
+        output: { payload: { ok: true, status: 'allowed', disposition: 'informational', report: 'Allowed.' } },
       };
     },
   };

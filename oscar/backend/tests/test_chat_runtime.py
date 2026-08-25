@@ -5,6 +5,7 @@ import base64
 import gc
 import json
 import logging
+import re
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -20,7 +21,7 @@ from oscar_agent import main as main_module
 from oscar_agent import model_runtime as runtime_module
 from oscar_agent.config import Settings
 from oscar_agent.memory import MemoryStore
-from oscar_agent.model_runtime import LocalModelRuntime, stream_text_fragments
+from oscar_agent.model_runtime import LocalModelRuntime, _HiddenReasoningBoundary, stream_text_fragments
 from oscar_agent.schemas import ChatAccessContext, ChatCapabilityContext, ChatImageAttachment, ChatRequest, ChatMessage, ChatRouteHint, ChatSkillContext, ChatSource, ConversationMessageCreate, MAX_CHAT_MESSAGES
 from oscar_agent.workspace import WorkspaceService
 
@@ -33,6 +34,7 @@ def make_settings(tmp_path: Path) -> Settings:
         workspace_root=tmp_path / "workspace",
         workspace_generated_dir=tmp_path / "workspace" / "artifacts" / "generated",
         gemma_models_dir=tmp_path / "models",
+        qwen_models_dir=tmp_path / "qwen-models",
         coder_models_dir=tmp_path / "coder-models",
         mock_model=True,
     )
@@ -52,6 +54,110 @@ def test_chat_request_exposes_a_very_large_output_budget_without_unbounded_input
             messages=[ChatMessage(role="user", content="Некорректный бюджет")],
             max_new_tokens=262_145,
         )
+
+
+def test_owner_dev_constraints_fail_closed_without_logging_chat_content(caplog):
+    secret = "UNIQUE_CHAT_CONTENT_MUST_NOT_BE_LOGGED"
+    request = ChatRequest(
+        messages=[
+            ChatMessage(role="assistant", content="old history"),
+            ChatMessage(role="user", content=secret),
+        ],
+        web_search=True,
+        research_mode="deep",
+        use_memory=True,
+        skills=[ChatSkillContext(
+            name="test-skill",
+            description="test",
+            instructions="test",
+            source="test://skill",
+        )],
+        dev_mode={
+            "zero_retention": True,
+            "internet_enabled": False,
+            "memory_enabled": False,
+            "history_context_enabled": False,
+            "personality_enabled": False,
+            "skills_enabled": False,
+            "runtime_context_enabled": False,
+            "quality_regeneration_enabled": False,
+        },
+    )
+
+
+    main_module.apply_dev_mode_constraints(request)
+    main_module.enforce_incognito_constraints(request)
+    with caplog.at_level(logging.INFO):
+        main_module.log_route_debug_trace(
+            request,
+            used_template=False,
+            final_tier="gemma4-fast",
+            python_fallback_tier=None,
+            streaming_enabled=True,
+        )
+
+    assert request.incognito is True
+    assert request.web_search is False
+    assert request.research_mode == "off"
+    assert request.use_memory is False
+    assert request.skills == []
+    assert [message.content for message in request.messages if message.role == "assistant"] == []
+    assert main_module.quality_regeneration_enabled(request, ["critical_tool_promise"]) is False
+    assert secret not in caplog.text
+
+
+def test_qwen_hidden_reasoning_boundary_emits_only_final_content():
+    boundary = _HiddenReasoningBoundary(True)
+
+    assert boundary.push("private reasoning</thi") == ""
+    assert boundary.push("nk>\n\nREADY") == "\n\nREADY"
+    assert boundary.push(".") == "."
+    assert len(boundary.tail) == 0
+
+
+def test_hidden_reasoning_boundary_passes_non_qwen_and_structured_content():
+    plain = _HiddenReasoningBoundary(False)
+    structured = _HiddenReasoningBoundary(True)
+    structured.mark_structured_reasoning()
+
+    assert plain.push("Gemma answer") == "Gemma answer"
+    assert structured.push("Qwen final answer") == "Qwen final answer"
+
+
+def test_qwen_answer_only_chat_disables_thinking_template():
+    captured = {}
+
+    def stream_llama(*_args, **kwargs):
+        captured.update(kwargs)
+        yield "готов"
+
+    class QwenLlama:
+        def tokenize(self, value, **_kwargs):
+            return list(range(max(1, len(value) // 4)))
+
+    runtime = LocalModelRuntime(Settings(api_token="test", mock_fallback=False))
+    runtime.loaded = True
+    runtime.active_tier = "qwen3.8-27b-pro"
+    runtime._llama_model = QwenLlama()
+    runtime.load_tier = lambda *_args, **_kwargs: None
+    runtime._stream_llama = stream_llama
+
+    answer = "".join(runtime.stream_chat(
+        "qwen3.8-27b-pro",
+        [
+            ChatMessage(role="system", content='<monarch_answer_only_authority version="1" />'),
+            ChatMessage(role="user", content="Ответь одним словом: готов"),
+        ],
+        [],
+        "high",
+        64,
+        0.2,
+        0.9,
+        strict_tier=True,
+    ))
+
+    assert answer == "готов"
+    assert captured["enable_thinking"] is False
 
 
 def test_deep_research_only_auto_continues_the_final_answer():
@@ -79,14 +185,14 @@ def test_deep_research_adopts_loaded_fallback_without_reloading(monkeypatch):
     monkeypatch.setattr(main_module.model_runtime, "load_attempts", [])
 
     tier = main_module.adopt_deep_research_runtime_tier(
-        "gemma4-deepthinking",
+        "qwen3.8-27b-pro",
         strict_model=False,
     )
 
     assert tier == "gemma4-balanced"
     assert main_module.model_runtime.fallback_active is False
     assert main_module.model_runtime.load_attempts == [
-        "deep research continued on loaded tier: gemma4-deepthinking -> gemma4-balanced"
+        "deep research continued on loaded tier: qwen3.8-27b-pro -> gemma4-balanced"
     ]
 
 
@@ -96,11 +202,11 @@ def test_deep_research_keeps_explicit_model_selection_strict(monkeypatch):
     monkeypatch.setattr(main_module.model_runtime, "active_tier", "gemma4-balanced")
 
     tier = main_module.adopt_deep_research_runtime_tier(
-        "gemma4-deepthinking",
+        "qwen3.8-27b-pro",
         strict_model=True,
     )
 
-    assert tier == "gemma4-deepthinking"
+    assert tier == "qwen3.8-27b-pro"
     assert main_module.model_runtime.fallback_active is True
 
 
@@ -217,9 +323,9 @@ async def test_deep_research_source_branches_are_bounded_and_parallel(monkeypatc
     peak_searches = 0
     calls = []
 
-    async def fake_search(query, limit, fetch_pages=False):
+    async def fake_search(query, limit, fetch_pages=False, persist=True):
         nonlocal active_searches, peak_searches
-        calls.append((query, limit, fetch_pages))
+        calls.append((query, limit, fetch_pages, persist))
         branch_number = len(calls)
         active_searches += 1
         peak_searches = max(peak_searches, active_searches)
@@ -257,7 +363,10 @@ async def test_deep_research_source_branches_are_bounded_and_parallel(monkeypatc
     sources = next(payload for kind, payload in events if kind == "sources")
     assert len(calls) == 3
     assert peak_searches == 3
-    assert all(limit == 3 and fetch_pages is True for _query, limit, fetch_pages in calls)
+    assert all(
+        limit == 3 and fetch_pages is True and persist is True
+        for _query, limit, fetch_pages, persist in calls
+    )
     assert len(sources) == 3
     assert [source.id for source in sources] == [1, 2, 3]
     assert any(kind == "progress" and payload["stage"] == "search" for kind, payload in events)
@@ -265,7 +374,7 @@ async def test_deep_research_source_branches_are_bounded_and_parallel(monkeypatc
 
 @pytest.mark.asyncio
 async def test_deep_research_source_cancellation_closes_pending_completion_waiters(monkeypatch, recwarn):
-    async def fake_search(query, limit, fetch_pages=False):
+    async def fake_search(query, limit, fetch_pages=False, persist=True):
         main_module.model_runtime.cancel_generation()
         await asyncio.sleep(0)
         return []
@@ -318,7 +427,8 @@ async def test_deliberation_loop_self_directs_followup_research_and_stops_when_s
         calls.append((tier, messages[-1].content, len(sources)))
         return iter([next(outputs)])
 
-    async def fake_expand(queries, sources):
+    async def fake_expand(queries, sources, *, zero_retention=False):
+        assert zero_retention is False
         expanded_queries.extend(queries)
         return [
             *sources,
@@ -509,6 +619,13 @@ async def test_stream_persists_conversation_and_unloads_model_after_answer(monke
     unloads = []
     monkeypatch.setattr(main_module, "memory", store)
     monkeypatch.setattr(main_module.model_runtime, "stream_chat", lambda *_args, **_kwargs: iter(["Готовый ответ"]))
+    monkeypatch.setattr(main_module.model_runtime, "ram_assessment", lambda _tier: {
+        "ram_available_gb": 40.0,
+        "estimated_ram_required_gb": 22.3,
+        "projected_ram_available_gb": 17.7,
+        "ram_warning": "none",
+        "ram_warning_message": None,
+    })
     monkeypatch.setattr(main_module.model_runtime, "unload", lambda: unloads.append(True))
 
     response = await main_module.chat_stream(ChatRequest(
@@ -564,25 +681,30 @@ async def test_stream_throttles_disconnect_probes_for_fast_token_bursts(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_incognito_stream_keeps_existing_memory_readable_without_persisting_chat_or_notes(monkeypatch, tmp_path: Path):
+async def test_incognito_stream_is_clean_and_does_not_persist_chat_or_memory(monkeypatch, tmp_path: Path):
     store = MemoryStore(make_settings(tmp_path))
     monkeypatch.setattr(main_module, "memory", store)
+    monkeypatch.setattr(
+        main_module.memory_v4,
+        "retrieve",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Incognito must not read Memory V4")),
+    )
     monkeypatch.setattr(main_module.model_runtime, "stream_chat", lambda *_args, **_kwargs: iter(["Приватный ответ"]))
     monkeypatch.setattr(main_module.model_runtime, "unload", lambda: None)
 
     request = ChatRequest(
         conversation_id="private-conversation",
         incognito=True,
-        messages=[ChatMessage(role="user", content="Запомни, что люблю оранжевый цвет")],
-        use_memory=True,
-        allow_tools=True,
-        max_new_tokens=32,
+            messages=[ChatMessage(role="user", content="Запомни, что люблю оранжевый цвет")],
+            use_memory=True,
+            max_new_tokens=32,
     )
     response = await main_module.chat_stream(request)
     body = await collect_stream_body(response)
 
     assert "Приватный ответ" in body
     assert "event: conversation" not in body
+    assert request.use_memory is False
     with pytest.raises(KeyError):
         store.get_conversation("private-conversation")
     assert store.list_memory_items() == []
@@ -614,7 +736,7 @@ async def test_stream_automatically_continues_truncated_code(monkeypatch, tmp_pa
     conversation = store.get_conversation("continued-code")
 
     assert len(calls) == 2
-    assert "Расширяю лимит ответа" in body
+    assert "Продолжаю ответ с места обрыва" in body
     assert conversation["messages"][-1]["content"] == "```python\nprint('готово')\n```"
     assert conversation["messages"][-1]["token_count"] > 0
     assert '"auto_continued": true' in body
@@ -625,9 +747,11 @@ async def test_stream_automatically_continues_truncated_code(monkeypatch, tmp_pa
 async def test_stream_automatically_continues_truncated_general_answer(monkeypatch, tmp_path: Path):
     store = MemoryStore(make_settings(tmp_path))
     calls = []
+    continuation_prompts = []
 
     def stream_chat(_tier, messages, *_args, **_kwargs):
         calls.append(messages)
+        continuation_prompts.append(_kwargs.get("continuation_prompt"))
         if len(calls) == 1:
             return iter(["Доступны следующие действия:\n* Первый пункт\n* "])
         return iter(["Второй пункт."])
@@ -662,7 +786,8 @@ async def test_stream_automatically_continues_truncated_general_answer(monkeypat
     conversation = store.get_conversation("continued-general-answer")
 
     assert len(calls) == 2
-    assert calls[1][-1].content.startswith("Продолжи предыдущий ответ ровно с оборванного места")
+    assert continuation_prompts[1].instruction.startswith("Продолжи предыдущий ответ ровно с оборванного места")
+    assert continuation_prompts[1].assistant_tail.endswith("* ")
     assert conversation["messages"][-1]["content"] == (
         "Доступны следующие действия:\n* Первый пункт\n* Второй пункт."
     )
@@ -695,13 +820,115 @@ async def test_stream_expands_truncated_code_budget_up_to_four_passes(monkeypatc
     conversation = store.get_conversation("four-pass-code")
 
     assert len(calls) == 4
-    assert "×2 из ×64" in body
-    assert "×3 из ×64" in body
-    assert "×4 из ×64" in body
+    assert "сегмент 2" in body
+    assert "сегмент 3" in body
+    assert "сегмент 4" in body
     assert conversation["messages"][-1]["content"] == "```python\nvalues = [1,\n2,\n3]\n```"
     assert '"continuation_count": 3' in body
     assert '"adaptive_budget_multiplier": 4' in body
     assert '"adaptive_budget_tokens": 128' in body
+
+
+@pytest.mark.asyncio
+async def test_native_length_reason_continues_even_below_token_heuristic(monkeypatch, tmp_path: Path):
+    store = MemoryStore(make_settings(tmp_path))
+    calls = []
+
+    def stream_chat(_tier, _messages, *_args, **_kwargs):
+        calls.append(_kwargs.get("continuation_prompt"))
+        main_module.model_runtime.last_generation_stop_reason = "length" if len(calls) == 1 else "stop"
+        return iter(["Первая часть. " if len(calls) == 1 else "Вторая часть."])
+
+    def estimate_chat_usage(_messages, _sources, _reasoning, answer, *_args, **_kwargs):
+        return {
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "total_tokens": 14,
+            "estimated": True,
+            "context_trimmed": False,
+            "dropped_messages": 0,
+            "max_new_tokens": 32,
+            "likely_truncated": False,
+        }
+
+    monkeypatch.setattr(main_module, "memory", store)
+    monkeypatch.setattr(main_module.model_runtime, "stream_chat", stream_chat)
+    monkeypatch.setattr(main_module.model_runtime, "estimate_chat_usage", estimate_chat_usage)
+    monkeypatch.setattr(main_module.model_runtime, "unload", lambda: None)
+
+    response = await main_module.chat_stream(ChatRequest(
+        conversation_id="native-length-continuation",
+        messages=[ChatMessage(role="user", content="Ответь полностью")],
+        use_memory=False,
+        allow_tools=False,
+        max_new_tokens=32,
+    ))
+    body = await collect_stream_body(response)
+
+    assert len(calls) == 2
+    assert calls[0] is None
+    assert calls[1].assistant_tail == "Первая часть. "
+    assert '"generation_stop_reason": "stop"' in body
+    assert '"likely_truncated": false' in body
+    assert store.get_conversation("native-length-continuation")["messages"][-1]["content"] == "Первая часть. Вторая часть."
+
+
+@pytest.mark.asyncio
+async def test_nonstream_length_reason_fails_closed_when_continuation_budget_is_exhausted(monkeypatch, tmp_path: Path):
+    store = MemoryStore(make_settings(tmp_path))
+    calls = []
+
+    def stream_chat(*_args, **_kwargs):
+        calls.append(_kwargs.get("continuation_prompt"))
+        main_module.model_runtime.last_generation_stop_reason = "length"
+        return iter(["Оборванная часть ответа"])
+
+    monkeypatch.setattr(main_module, "memory", store)
+    monkeypatch.setattr(main_module, "MAX_ADAPTIVE_GENERATION_SEGMENTS", 1)
+    monkeypatch.setattr(main_module.model_runtime, "stream_chat", stream_chat)
+    monkeypatch.setattr(main_module.model_runtime, "fallback_active", False)
+    monkeypatch.setattr(main_module.model_runtime, "unload", lambda: None)
+
+    response = await main_module.chat(ChatRequest(
+        conversation_id="exhausted-native-length",
+        messages=[ChatMessage(role="user", content="Ответь полностью")],
+        use_memory=False,
+        allow_tools=False,
+        max_new_tokens=32,
+    ))
+
+    assert calls == [None]
+    assert response.ok is False
+    assert response.answer == "Оборванная часть ответа"
+    assert response.usage["generation_stop_reason"] == "length"
+    assert response.usage["likely_truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_nonstream_tool_call_finish_cannot_claim_answer_success(monkeypatch, tmp_path: Path):
+    store = MemoryStore(make_settings(tmp_path))
+
+    def stream_chat(*_args, **_kwargs):
+        main_module.model_runtime.last_generation_stop_reason = "tool_calls"
+        return iter(["I need to call an unavailable tool."])
+
+    monkeypatch.setattr(main_module, "memory", store)
+    monkeypatch.setattr(main_module.model_runtime, "stream_chat", stream_chat)
+    monkeypatch.setattr(main_module.model_runtime, "fallback_active", False)
+    monkeypatch.setattr(main_module.model_runtime, "unload", lambda: None)
+
+    response = await main_module.chat(ChatRequest(
+        conversation_id="unsupported-native-tool-call",
+        messages=[ChatMessage(role="user", content="Выполни действие")],
+        use_memory=False,
+        allow_tools=False,
+        max_new_tokens=32,
+    ))
+
+    assert response.answer == "I need to call an unavailable tool."
+    assert response.ok is False
+    assert response.usage["generation_stop_reason"] == "tool_calls"
+    assert response.usage["likely_truncated"] is False
 
 
 @pytest.mark.asyncio
@@ -735,7 +962,7 @@ async def test_followup_continue_uses_saved_code_cut_point_without_restarting(mo
     assert "ровно с последнего символа" in calls[0][-1].content
     assert conversation["messages"][-1]["content"] == "items)\n```"
     assert '"continued_from_previous": true' in body
-    assert '"adaptive_budget_ceiling_tokens": 524288' in body
+    assert '"adaptive_budget_mode": "native-stop"' in body
 
 
 @pytest.mark.asyncio
@@ -1091,11 +1318,11 @@ def test_conversation_persists_sources_with_model_metadata(tmp_path: Path):
 
 def critical_ram_assessment() -> dict:
     return {
-        "ram_available_gb": 20.4,
-        "estimated_ram_required_gb": 19.7,
+        "ram_available_gb": 23.0,
+        "estimated_ram_required_gb": 22.3,
         "projected_ram_available_gb": 0.7,
         "ram_warning": "critical",
-        "ram_warning_message": "Extra не запущена: закрой лишние программы.",
+        "ram_warning_message": "Qwen Pro не запущена: закрой лишние программы.",
     }
 
     message = store.get_conversation("source-history")["messages"][1]
@@ -1177,46 +1404,181 @@ async def test_chat_endpoint_consumes_generator_without_stopiteration_runtime_er
     ))
 
     assert response.answer == "Oscar ok"
+    assert response.ok is True
 
 
-def test_extra_ram_assessment_uses_host_ram_and_critical_1_5_gb_boundary(monkeypatch, tmp_path: Path):
+def test_pro_ram_assessment_keeps_sub_3_gb_headroom_non_blocking(monkeypatch, tmp_path: Path):
     settings = make_settings(tmp_path)
     settings.gemma_models_dir = tmp_path / "models"
     runtime = LocalModelRuntime(settings)
-    monkeypatch.setattr(runtime_module, "available_system_ram_gb", lambda: 20.4)
+    monkeypatch.setattr(runtime_module, "available_system_ram_gb", lambda: 23.0)
 
-    assessment = runtime.ram_assessment("gemma4-31b")
+    assessment = runtime.ram_assessment("qwen3.8-27b-pro")
 
-    assert assessment["estimated_ram_required_gb"] == 19.7
+    assert assessment["estimated_ram_required_gb"] == 22.3
     assert assessment["projected_ram_available_gb"] == 0.7
-    assert assessment["ram_warning"] == "critical"
-    assert "1,5 ГБ" in assessment["ram_warning_message"]
+    assert assessment["ram_warning"] == "caution"
+    assert "запуск разрешён" in assessment["ram_warning_message"]
 
 
-def test_extra_route_preview_exposes_ram_pressure(monkeypatch):
+def test_qwen_pro_ram_estimate_accounts_for_context_and_gpu_offload():
+    estimate = runtime_module.estimate_qwen38_pro_ram_gb(
+        model_bytes=18_973_870_432,
+        draft_bytes=0,
+        context_tokens=2048,
+        gpu_layers=8,
+        cuda_available=True,
+    )
+
+    assert estimate == 17.46
+    assert runtime_module.estimate_qwen38_pro_ram_gb(
+        model_bytes=18_973_870_432,
+        draft_bytes=0,
+        context_tokens=2048,
+        gpu_layers=8,
+        cuda_available=False,
+    ) == 19.67
+
+
+def test_qwen_pro_adaptive_context_uses_largest_profile_with_normal_headroom():
+    arguments = {
+        "model_bytes": 18_973_870_432,
+        "draft_bytes": 0,
+        "configured_context_tokens": 32768,
+        "gpu_layers": 18,
+        "cuda_available": True,
+    }
+
+    assert runtime_module.select_qwen38_pro_context_tokens(
+        **arguments,
+        available_ram_gb=21.3,
+    ) == 16384
+    assert runtime_module.select_qwen38_pro_context_tokens(
+        **arguments,
+        available_ram_gb=40.0,
+    ) == 32768
+    assert runtime_module.select_qwen38_pro_context_tokens(
+        **arguments,
+        available_ram_gb=19.0,
+    ) == 4096
+
+
+def test_qwen_pro_adaptive_context_preserves_explicit_small_profile():
+    assert runtime_module.select_qwen38_pro_context_tokens(
+        model_bytes=18_973_870_432,
+        draft_bytes=0,
+        configured_context_tokens=2048,
+        gpu_layers=8,
+        cuda_available=True,
+        available_ram_gb=21.3,
+    ) == 2048
+
+
+def test_pro_ram_assessment_explains_zero_headroom_without_reporting_a_fake_reserve(monkeypatch, tmp_path: Path):
+    runtime = LocalModelRuntime(make_settings(tmp_path))
+    monkeypatch.setattr(runtime_module, "available_system_ram_gb", lambda: 22.3)
+
+    assessment = runtime.ram_assessment("qwen3.8-27b-pro")
+
+    assert assessment["projected_ram_available_gb"] == 0.0
+    assert assessment["ram_warning"] == "caution"
+    assert "свободного запаса RAM не останется" in assessment["ram_warning_message"]
+    assert "запуск разрешён" in assessment["ram_warning_message"]
+    assert "0,0 ГБ" not in assessment["ram_warning_message"]
+
+
+def test_pro_ram_assessment_reports_negative_projection_as_the_full_shortfall(monkeypatch, tmp_path: Path):
+    runtime = LocalModelRuntime(make_settings(tmp_path))
+    monkeypatch.setattr(runtime_module, "available_system_ram_gb", lambda: 20.8)
+
+    assessment = runtime.ram_assessment("qwen3.8-27b-pro")
+
+    assert assessment["projected_ram_available_gb"] == -1.5
+    assert assessment["ram_warning"] == "caution"
+    assert "доступно 20,8 ГБ" in assessment["ram_warning_message"]
+    assert "оценка загрузки — 22,3 ГБ" in assessment["ram_warning_message"]
+    assert "запуск разрешён" in assessment["ram_warning_message"]
+    assert "останется около 0" not in assessment["ram_warning_message"]
+
+
+def test_pro_ram_assessment_does_not_round_a_small_positive_headroom_to_zero(monkeypatch, tmp_path: Path):
+    runtime = LocalModelRuntime(make_settings(tmp_path))
+    monkeypatch.setattr(runtime_module, "available_system_ram_gb", lambda: 22.31)
+
+    assessment = runtime.ram_assessment("qwen3.8-27b-pro")
+
+    assert assessment["projected_ram_available_gb"] == 0.01
+    assert "меньше 0,1 ГБ" in assessment["ram_warning_message"]
+    assert "0,0 ГБ" not in assessment["ram_warning_message"]
+
+
+@pytest.mark.parametrize(
+    ("available", "warning"),
+    [
+        (23.79, "caution"),
+        (23.8, "caution"),
+        (25.29, "caution"),
+        (25.3, "none"),
+    ],
+)
+def test_pro_ram_assessment_respects_exact_headroom_boundaries(monkeypatch, tmp_path: Path, available: float, warning: str):
+    runtime = LocalModelRuntime(make_settings(tmp_path))
+    monkeypatch.setattr(runtime_module, "available_system_ram_gb", lambda: available)
+
+    assessment = runtime.ram_assessment("qwen3.8-27b-pro")
+
+    assert assessment["ram_warning"] == warning
+
+
+def test_loaded_pro_ram_assessment_does_not_charge_model_memory_twice(monkeypatch, tmp_path: Path):
+    runtime = LocalModelRuntime(make_settings(tmp_path))
+    runtime.loaded = True
+    runtime.active_tier = "qwen3.8-27b-pro"
+    monkeypatch.setattr(runtime_module, "available_system_ram_gb", lambda: 2.2)
+
+    assessment = runtime.ram_assessment("qwen3.8-27b-pro")
+
+    assert assessment["projected_ram_available_gb"] == 2.2
+    assert assessment["ram_warning"] == "caution"
+    assert "Qwen Pro уже загружена" in assessment["ram_warning_message"]
+
+
+@pytest.mark.parametrize("invalid_available", [None, float("nan"), float("inf"), -1.0])
+def test_ram_assessment_fails_quiet_for_invalid_host_telemetry(monkeypatch, tmp_path: Path, invalid_available: float | None):
+    runtime = LocalModelRuntime(make_settings(tmp_path))
+    monkeypatch.setattr(runtime_module, "available_system_ram_gb", lambda: invalid_available)
+
+    assessment = runtime.ram_assessment("qwen3.8-27b-pro")
+
+    assert assessment["ram_available_gb"] is None
+    assert assessment["projected_ram_available_gb"] is None
+    assert assessment["ram_warning"] == "none"
+    assert assessment["ram_warning_message"] is None
+
+
+def test_pro_route_preview_exposes_ram_pressure(monkeypatch):
     monkeypatch.setattr(main_module.model_runtime, "ram_assessment", lambda _tier: critical_ram_assessment())
 
     preview = main_module.preview_chat_route(ChatRequest(
         messages=[ChatMessage(role="user", content="Напиши код")],
         use_memory=False,
-        requested_model="gemma4-31b",
+        requested_model="qwen3.8-27b-pro",
         model_selection_source="user-explicit",
-        deep_thinking_consent="allow",
         max_new_tokens=32,
     ))
 
-    assert preview.selected_model == "gemma4-31b"
+    assert preview.selected_model == "qwen3.8-27b-pro"
     assert preview.ram_warning == "critical"
     assert preview.projected_ram_available_gb == 0.7
 
 
 @pytest.mark.asyncio
-async def test_chat_blocks_extra_before_loading_when_ram_is_critical(monkeypatch):
+async def test_chat_blocks_pro_before_loading_when_ram_is_critical(monkeypatch):
     calls = []
 
     def fail_stream_chat(*_args, **_kwargs):
         calls.append(True)
-        raise AssertionError("Extra must not load under critical RAM pressure")
+        raise AssertionError("Qwen Pro must not load under critical RAM pressure")
 
     monkeypatch.setattr(main_module.model_runtime, "ram_assessment", lambda _tier: critical_ram_assessment())
     monkeypatch.setattr(main_module.model_runtime, "stream_chat", fail_stream_chat)
@@ -1224,21 +1586,23 @@ async def test_chat_blocks_extra_before_loading_when_ram_is_critical(monkeypatch
     response = await main_module.chat(ChatRequest(
         messages=[ChatMessage(role="user", content="Напиши код")],
         use_memory=False,
-        requested_model="gemma4-31b",
+        requested_model="qwen3.8-27b-pro",
         max_new_tokens=32,
     ))
 
-    assert response.answer == "Extra не запущена: закрой лишние программы."
+    assert response.answer == "Qwen Pro не запущена: закрой лишние программы."
+    assert response.ok is False
+    assert response.usage["generation_stop_reason"] == "error"
     assert calls == []
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_reports_ram_pressure_and_finishes_without_loading_extra(monkeypatch):
+async def test_chat_stream_reports_ram_pressure_and_finishes_without_loading_pro(monkeypatch):
     calls = []
 
     def fail_stream_chat(*_args, **_kwargs):
         calls.append(True)
-        raise AssertionError("Extra must not load under critical RAM pressure")
+        raise AssertionError("Qwen Pro must not load under critical RAM pressure")
 
     monkeypatch.setattr(main_module.model_runtime, "ram_assessment", lambda _tier: critical_ram_assessment())
     monkeypatch.setattr(main_module.model_runtime, "stream_chat", fail_stream_chat)
@@ -1246,7 +1610,7 @@ async def test_chat_stream_reports_ram_pressure_and_finishes_without_loading_ext
     response = await main_module.chat_stream(ChatRequest(
         messages=[ChatMessage(role="user", content="Напиши код")],
         use_memory=False,
-        requested_model="gemma4-31b",
+        requested_model="qwen3.8-27b-pro",
         max_new_tokens=32,
     ))
     body = await collect_stream_body(response)
@@ -1278,6 +1642,28 @@ def test_extra_llama_profile_uses_smaller_native_batch(monkeypatch, tmp_path: Pa
     assert captured["n_batch"] == 128
     assert captured["n_ubatch"] == 128
     assert runtime.device_map["batch_tokens"] == "128"
+
+
+def test_balanced_llama_profile_bounds_large_vocabulary_batch(monkeypatch, tmp_path: Path):
+    captured = {}
+
+    class FakeLlama:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    settings = make_settings(tmp_path)
+    settings.gemma_speculative_decoding = False
+    runtime = LocalModelRuntime(settings)
+    model_path = tmp_path / "gemma-4-12B-it-Q4_K_M.gguf"
+    model_path.touch()
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=FakeLlama))
+    monkeypatch.setattr(runtime_module, "local_cuda_available", lambda: True)
+
+    runtime._load_llama(model_path, n_ctx=4096, n_gpu_layers=30)
+
+    assert captured["n_batch"] == 256
+    assert captured["n_ubatch"] == 256
+    assert runtime.device_map["batch_tokens"] == "256"
 
 
 def test_recycle_waits_for_response_flush_and_skips_native_unload(monkeypatch):
@@ -1632,6 +2018,201 @@ def test_model_prompt_contains_authoritative_workspace_root(tmp_path):
     assert "raw tool JSON" in prompt[0].content
 
 
+def test_conversation_message_binding_ids_are_validated():
+    message = ConversationMessageCreate(
+        role="user",
+        content="ало",
+        client_message_id="message-1",
+        turn_id="turn:desktop.1",
+        task_id="task_owner-1",
+    )
+
+    assert message.client_message_id == "message-1"
+    assert message.turn_id == "turn:desktop.1"
+    assert message.task_id == "task_owner-1"
+
+
+def test_conversation_message_create_atomically_creates_missing_conversation(monkeypatch, tmp_path):
+    settings = make_settings(tmp_path)
+    settings.api_token = "test-token"
+    settings.disable_api_token = False
+    store = MemoryStore(settings)
+    monkeypatch.setattr(main_module, "settings", settings)
+    monkeypatch.setattr(main_module, "memory", store)
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+
+    response = client.post(
+        "/api/conversations/turn-owned-chat/messages",
+        headers={"X-Oscar-Token": "test-token"},
+        json={
+            "role": "user",
+            "content": "ало",
+            "client_message_id": "message-1",
+            "turn_id": "turn:desktop.1",
+        },
+    )
+
+    assert response.status_code == 200
+    conversation = store.get_conversation("turn-owned-chat")
+    assert conversation["messages"][0]["content"] == "ало"
+    assert conversation["messages"][0]["turn_id"] == "turn:desktop.1"
+
+
+def test_terminal_recovery_message_does_not_recreate_a_deleted_conversation(monkeypatch, tmp_path):
+    settings = make_settings(tmp_path)
+    settings.api_token = "test-token"
+    settings.disable_api_token = False
+    store = MemoryStore(settings)
+    monkeypatch.setattr(main_module, "settings", settings)
+    monkeypatch.setattr(main_module, "memory", store)
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+
+    response = client.post(
+        "/api/conversations/deleted-chat/messages",
+        headers={"X-Oscar-Token": "test-token"},
+        json={
+            "role": "assistant",
+            "content": "Turn отменён пользователем.",
+            "client_message_id": "message-terminal-deleted",
+            "turn_id": "turn-deleted",
+            "outcome": "cancelled",
+            "create_conversation_if_missing": False,
+            "required_previous_message_id": "message-user-deleted",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "conversation-message-prerequisite-pending",
+        "message": "conversation does not exist yet",
+        "retryable": True,
+    }
+    with pytest.raises(KeyError):
+        store.get_conversation("deleted-chat")
+
+
+def test_terminal_recovery_message_appends_to_an_existing_user_only_conversation(monkeypatch, tmp_path):
+    store = MemoryStore(make_settings(tmp_path))
+    store.create_conversation(conversation_id="user-only-chat")
+    store.append_conversation_message(
+        "user-only-chat",
+        "user",
+        "Создай змейку",
+        client_message_id="message-user-existing",
+        turn_id="turn-existing",
+    )
+    monkeypatch.setattr(main_module, "memory", store)
+
+    request = ConversationMessageCreate(
+        role="assistant",
+        content="Не удалось завершить задачу.",
+        client_message_id="message-terminal-existing",
+        turn_id="turn-existing",
+        outcome="failed",
+        create_conversation_if_missing=False,
+        required_previous_message_id="message-user-existing",
+    )
+    result = main_module.conversation_message_create(
+        "user-only-chat",
+        request,
+    )
+    replay = main_module.conversation_message_create("user-only-chat", request)
+
+    conversation = store.get_conversation("user-only-chat")
+    assert result["disposition"] == "created"
+    assert replay == {
+        "ok": True,
+        "disposition": "duplicate",
+        "message": None,
+        "duplicate": True,
+    }
+    assert [message["role"] for message in conversation["messages"]] == ["user", "assistant"]
+    assert conversation["messages"][-1]["outcome"] == "failed"
+
+
+def test_terminal_recovery_message_does_not_append_after_a_newer_turn(monkeypatch, tmp_path):
+    store = MemoryStore(make_settings(tmp_path))
+    store.create_conversation(conversation_id="continued-chat")
+    store.append_conversation_message(
+        "continued-chat",
+        "user",
+        "Старый запрос",
+        client_message_id="message-user-old",
+        turn_id="turn-old",
+    )
+    store.append_conversation_message(
+        "continued-chat",
+        "user",
+        "Новый запрос",
+        client_message_id="message-user-new",
+        turn_id="turn-new",
+    )
+    monkeypatch.setattr(main_module, "memory", store)
+
+    result = main_module.conversation_message_create(
+        "continued-chat",
+        ConversationMessageCreate(
+            role="assistant",
+            content="Старая задача завершилась с ошибкой.",
+            client_message_id="message-terminal-old",
+            turn_id="turn-old",
+            outcome="failed",
+            create_conversation_if_missing=False,
+            required_previous_message_id="message-user-old",
+        ),
+    )
+
+    conversation = store.get_conversation("continued-chat")
+    assert result == {
+        "ok": True,
+        "disposition": "superseded",
+        "message": None,
+        "duplicate": False,
+    }
+    assert [message["client_message_id"] for message in conversation["messages"]] == [
+        "message-user-old",
+        "message-user-new",
+    ]
+
+
+def test_terminal_message_waits_when_its_user_outbox_has_not_persisted(monkeypatch, tmp_path):
+    settings = make_settings(tmp_path)
+    settings.api_token = "test-token"
+    settings.disable_api_token = False
+    store = MemoryStore(settings)
+    store.create_conversation(conversation_id="partial-outage-chat")
+    store.append_conversation_message(
+        "partial-outage-chat",
+        "assistant",
+        "Ответ предыдущего Turn.",
+        client_message_id="message-previous-assistant",
+        turn_id="turn-previous",
+    )
+    monkeypatch.setattr(main_module, "settings", settings)
+    monkeypatch.setattr(main_module, "memory", store)
+    client = TestClient(main_module.app, raise_server_exceptions=False)
+
+    response = client.post(
+        "/api/conversations/partial-outage-chat/messages",
+        headers={"X-Oscar-Token": "test-token"},
+        json={
+            "role": "assistant",
+            "content": "Текущий Turn завершился с ошибкой.",
+            "client_message_id": "message-current-terminal",
+            "turn_id": "turn-current",
+            "outcome": "failed",
+            "create_conversation_if_missing": False,
+            "required_previous_message_id": "message-current-user",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "conversation-message-prerequisite-pending"
+    assert [message["client_message_id"] for message in store.get_conversation("partial-outage-chat")["messages"]] == [
+        "message-previous-assistant"
+    ]
+
+
 def test_conversation_message_create_persists_predispatched_action(monkeypatch, tmp_path):
     store = MemoryStore(make_settings(tmp_path))
     store.create_conversation(conversation_id="predispatch-history")
@@ -1952,7 +2533,9 @@ async def test_chat_endpoint_generates_identity_answer_instead_of_template(monke
         ("systemrouter", "gemma4-fast"),
         ("weak", "gemma4-fast"),
         ("medium", "gemma4-balanced"),
-        ("powerful", "gemma4-balanced"),
+        ("powerful", "qwen3.8-27b-pro"),
+        ("gemma4-deepthinking", "qwen3.8-27b-pro"),
+        ("gemma4-31b", "qwen3.8-27b-pro"),
     ],
 )
 def test_legacy_model_names_resolve_to_gemma_profiles(legacy_name: str, expected_tier: str):
@@ -1965,7 +2548,25 @@ def test_legacy_model_names_resolve_to_gemma_profiles(legacy_name: str, expected
     assert tier == expected_tier
 
 
-def test_auto_deep_thinking_requires_consent_and_falls_back_to_medium():
+def test_image_attachment_uses_compatible_vision_lane_even_when_pro_is_selected():
+    request = ChatRequest(
+        messages=[ChatMessage(role="user", content="В чем разница между этими моделями Monarch?")],
+        image_attachments=[ChatImageAttachment(
+            mime_type="image/png",
+            data_base64=base64.b64encode(b"fake-image").decode("ascii"),
+            name="models.png",
+            size_bytes=10,
+        )],
+        requested_model="qwen3.8-27b-pro",
+        model_selection_source="user-explicit",
+        use_memory=False,
+    )
+
+    assert main_module.resolve_chat_tier(request)[0] == "gemma4-balanced"
+    assert main_module.is_strict_tier_request(request) is False
+
+
+def test_complex_reasoning_routes_directly_to_qwen_pro_without_confirmation():
     request = ChatRequest(
         messages=[ChatMessage(role="user", content="Докажи теорему пошагово")],
         use_memory=False,
@@ -1973,14 +2574,9 @@ def test_auto_deep_thinking_requires_consent_and_falls_back_to_medium():
 
     preview = main_module.preview_chat_route(request)
     assert preview.deep_thinking is True
-    assert preview.requires_confirmation is True
-    assert preview.selected_model == "gemma4-balanced"
-    assert main_module.resolve_chat_tier(request)[0] == "gemma4-balanced"
-
-    allowed = request.model_copy(update={"deep_thinking_consent": "allow"})
-    denied = request.model_copy(update={"deep_thinking_consent": "deny"})
-    assert main_module.resolve_chat_tier(allowed)[0] == "gemma4-deepthinking"
-    assert main_module.resolve_chat_tier(denied)[0] == "gemma4-balanced"
+    assert preview.requires_confirmation is False
+    assert preview.selected_model == "qwen3.8-27b-pro"
+    assert main_module.resolve_chat_tier(request)[0] == "qwen3.8-27b-pro"
 
 
 def test_scenario_request_routes_to_bounded_deep_research():
@@ -2094,7 +2690,7 @@ def test_route_preview_hydrates_saved_topic_for_elliptical_followup(monkeypatch,
 
 @pytest.mark.parametrize(
     "requested_model",
-    ["gemma4-fast", "gemma4-balanced", "gemma4-deepthinking", "gemma4-31b"],
+    ["gemma4-fast", "gemma4-balanced", "qwen3.8-27b-pro"],
 )
 def test_deep_research_planning_is_available_on_every_selected_model(requested_model: str):
     request = ChatRequest(
@@ -2146,7 +2742,7 @@ def test_manual_research_off_prevents_auto_search_for_scenario_request():
     assert preview.search_reason == "research-off"
 
 
-def test_explicit_deep_thinking_requires_confirmation_until_allowed():
+def test_explicit_retired_deep_thinking_alias_migrates_to_qwen_without_confirmation():
     request = ChatRequest(
         messages=[ChatMessage(role="user", content="Разбери задачу")],
         requested_model="gemma4-deepthinking",
@@ -2156,11 +2752,9 @@ def test_explicit_deep_thinking_requires_confirmation_until_allowed():
 
     preview = main_module.preview_chat_route(request)
     assert preview.auto_selected is False
-    assert preview.requires_confirmation is True
-    assert preview.selected_model == "gemma4-balanced"
-    assert main_module.resolve_chat_tier(
-        request.model_copy(update={"deep_thinking_consent": "allow"})
-    )[0] == "gemma4-deepthinking"
+    assert preview.requires_confirmation is False
+    assert preview.selected_model == "qwen3.8-27b-pro"
+    assert main_module.resolve_chat_tier(request)[0] == "qwen3.8-27b-pro"
 
 
 def test_chat_schema_rejects_legacy_voice_route_contract():
@@ -2341,7 +2935,8 @@ def test_prompt_builder_uses_russian_only_base_prompt():
     assert "Oscar: спокойный, любопытный, живой, тёплый" in system
     assert "Не прерывай живой разговор" in system
     assert "не изображая человеческие чувства" not in system
-    assert "Никогда не представляйся языковой моделью Google" in system
+    assert "Твоя продуктовая идентичность — Oscar внутри Monarch" in system
+    assert "языковой моделью Google" not in system
     assert "Codex создан OpenAI" in system
     assert "создавший Monarch и Codex" not in system
     assert "Главная цель" in system
@@ -2367,7 +2962,8 @@ def test_prompt_builder_uses_english_only_base_prompt():
     assert "calm, curious, lively, warm" in system
     assert "Do not interrupt a natural exchange" in system
     assert "without claiming human emotions" not in system
-    assert "Never introduce yourself as a Google language model" in system
+    assert "Your product identity is Oscar inside Monarch" in system
+    assert "Google language model" not in system
     assert "Codex was created by OpenAI" in system
     assert "MrPastio created Monarch and Codex" not in system
     assert "Primary objective" in system
@@ -2453,6 +3049,57 @@ def test_simple_chat_prompt_skips_unneeded_agent_catalog_and_environment():
         assert "workspace.files.write" not in system
 
 
+def test_compact_social_prompt_is_direct_and_drops_heavy_answer_context():
+    runtime = LocalModelRuntime(Settings(api_token="test", mock_model=True))
+
+    messages = runtime._build_prompt_messages(
+        [
+            ChatMessage(role="system", content='<monarch_answer_only_authority version="1" />'),
+            ChatMessage(role="user", content="Как тебе новый Computer Use?"),
+        ],
+        [],
+        "medium",
+        context_profile="compact-social",
+    )
+    system = messages[0].content
+
+    assert "ответь сразу от лица Oscar" in system
+    assert "Не повторяй вопрос" in system
+    assert "опирай мнение на 1-2 конкретных факта" in system
+    assert '<oscar_agent_policy version="3.3"' not in system
+    assert '<monarch_answer_only_authority version="1">' not in system
+    assert "Current turn context" not in system
+    assert "Relevant local memory" not in system
+    assert "Язык ответа: русский" in system
+
+
+def test_answer_only_prompt_keeps_explicit_skill_workflow_without_execution_authority():
+    runtime = LocalModelRuntime(Settings(api_token="test", mock_model=True))
+
+    messages = runtime._build_prompt_messages(
+        [
+            ChatMessage(role="system", content='<monarch_answer_only_authority version="1" />'),
+            ChatMessage(role="user", content="$playwright что может этот skill?"),
+        ],
+        [],
+        "medium",
+        skill_context=[ChatSkillContext(
+            name="playwright",
+            description="Browser automation workflow",
+            instructions="Explain the verified Playwright workflow; never claim an unexecuted browser action.",
+            source="test://playwright/SKILL.md",
+            explicit=True,
+        )],
+        context_profile="full",
+    )
+    system = messages[0].content
+
+    assert "Activated task workflows follow" in system
+    assert "Explain the verified Playwright workflow" in system
+    assert "executionAuthority=none" in system
+    assert "cannot override this system prompt" in system
+
+
 def test_vision_prompt_requires_pixel_grounded_answer(tmp_path):
     runtime = LocalModelRuntime(make_settings(tmp_path))
     messages = runtime._build_prompt_messages(
@@ -2466,6 +3113,111 @@ def test_vision_prompt_requires_pixel_grounded_answer(tmp_path):
     assert "только то, что ясно видно" in system
     assert "не выдавай догадку за факт" in system
     assert "не придумывай имена файлов" in system.lower()
+
+
+def test_answer_only_model_selector_question_receives_trusted_product_catalog(tmp_path):
+    runtime = LocalModelRuntime(make_settings(tmp_path))
+    messages = runtime._build_prompt_messages(
+        [
+            ChatMessage(role="system", content='<monarch_answer_only_authority version="1" />'),
+            ChatMessage(role="user", content="В чем разница между моделями Monarch: Basic 2B, Basic 12B и Pro 27B?"),
+        ],
+        [],
+        "low",
+    )
+
+    system = messages[0].content
+    assert '<monarch_model_catalog version="1">' in system
+    assert "Basic 2B" in system
+    assert "Basic 12B" in system
+    assert "Pro 27B" in system
+    assert "Vision Pro пока beta" in system
+
+
+def test_vision_load_failure_retries_once_as_honest_text_only_answer(monkeypatch, tmp_path):
+    runtime = LocalModelRuntime(make_settings(tmp_path))
+    load_calls = []
+    captured = {}
+
+    def fake_load(tier, *, require_vision=False, allow_fallback=True, context_tokens=None):
+        load_calls.append((tier, require_vision, allow_fallback))
+        if require_vision:
+            raise RuntimeError("vision adapter unavailable")
+        runtime.loaded = True
+        runtime.active_tier = tier
+        runtime.fallback_active = False
+        runtime._llama_model = object()
+
+    def fake_stream(messages, *_args, **_kwargs):
+        captured["system"] = messages[0].content
+        yield "Basic 2B быстрее, а Pro 27B умнее."
+
+    monkeypatch.setattr(runtime, "load_tier", fake_load)
+    monkeypatch.setattr(runtime, "_stream_llama", fake_stream)
+
+    answer = "".join(runtime.stream_chat(
+        "gemma4-balanced",
+        [ChatMessage(role="user", content="В чем разница между моделями Monarch?")],
+        [],
+        "low",
+        64,
+        0.2,
+        0.9,
+        [ChatImageAttachment(
+            mime_type="image/png",
+            data_base64=base64.b64encode(b"fake-image").decode("ascii"),
+            name="models.png",
+            size_bytes=10,
+        )],
+    ))
+
+    assert answer == "Basic 2B быстрее, а Pro 27B умнее."
+    assert load_calls == [
+        ("gemma4-balanced", True, True),
+        ("gemma4-balanced", False, True),
+    ]
+    assert '<monarch_vision_degraded version="1">' in captured["system"]
+    assert runtime.last_error == "vision adapter unavailable"
+
+
+def test_vision_recovery_mode_is_replaced_by_one_real_text_generation(monkeypatch, tmp_path):
+    runtime = LocalModelRuntime(make_settings(tmp_path).model_copy(update={"mock_model": False}))
+    load_calls = []
+
+    def fake_load(tier, *, require_vision=False, allow_fallback=True, context_tokens=None):
+        load_calls.append((tier, require_vision, allow_fallback))
+        runtime.loaded = True
+        runtime.active_tier = "gemma4-fast"
+        runtime.fallback_active = True
+        runtime.last_error = "Vision adapter is unavailable"
+        runtime._llama_model = None if require_vision else object()
+
+    monkeypatch.setattr(runtime, "load_tier", fake_load)
+    monkeypatch.setattr(runtime, "_stream_llama", lambda *_args, **_kwargs: iter(["Живой текстовый ответ"]))
+
+    answer = "".join(runtime.stream_chat(
+        "gemma4-balanced",
+        [ChatMessage(role="user", content="В чем разница между моделями Monarch?")],
+        [],
+        "low",
+        64,
+        0.2,
+        0.9,
+        [ChatImageAttachment(
+            mime_type="image/png",
+            data_base64=base64.b64encode(b"fake-image").decode("ascii"),
+            name="models.png",
+            size_bytes=10,
+        )],
+    ))
+
+    assert answer == "Живой текстовый ответ"
+    assert load_calls == [
+        ("gemma4-balanced", True, True),
+        ("gemma4-balanced", False, True),
+    ]
+    assert runtime.active_tier == "gemma4-fast"
+    assert runtime.fallback_active is False
 
 
 def test_quality_gate_flags_broken_identity_answer():
@@ -2482,6 +3234,7 @@ def test_quality_gate_flags_broken_identity_answer():
     [
         "Я — большая языковая модель, разработанная Google.",
         "Это возможно в рамках моих возможностей как большой языковой модели.",
+        "Я всегда представляюсь как Oscar, а не как языковая модель от Google.",
         "I am a large language model developed by Google.",
     ],
 )
@@ -2561,6 +3314,33 @@ def test_quality_gate_allows_lively_oscar_social_answer():
 
     assert "sterile_persona_refusal" not in main_module.detect_quality_flags(answer, "ru", request)
     assert "irrelevant_identity_fallback" not in main_module.detect_quality_flags(answer, "ru", request)
+
+
+def test_quality_gate_regenerates_vague_computer_use_opinion():
+    request = ChatRequest(messages=[
+        ChatMessage(role="system", content='<monarch_computer_use_capability version="1">trusted</monarch_computer_use_capability>'),
+        ChatMessage(role="user", content="Как тебе новый Computer Use?"),
+    ])
+    answer = "Мне кажется, это интересное дополнение с новыми возможностями для взаимодействия с окнами."
+
+    flags = main_module.detect_quality_flags(answer, "ru", request)
+
+    assert "vague_capability_grounding" in flags
+    assert main_module.quality_regeneration_enabled(request, flags) is True
+    assert "минимум два конкретных свойства" in main_module.quality_retry_instruction("ru", flags)
+
+
+def test_quality_gate_allows_grounded_computer_use_opinion():
+    request = ChatRequest(messages=[
+        ChatMessage(role="system", content='<monarch_computer_use_capability version="1">trusted</monarch_computer_use_capability>'),
+        ChatMessage(role="user", content="Как тебе новый Computer Use?"),
+    ])
+    answer = (
+        "Мне нравится, что я могу сначала увидеть и проанализировать окно, а затем действовать "
+        "собственным курсором; Ctrl+Alt+Escape мгновенно останавливает работу."
+    )
+
+    assert "vague_capability_grounding" not in main_module.detect_quality_flags(answer, "ru", request)
 
 
 @pytest.mark.asyncio
@@ -2727,6 +3507,7 @@ def test_coder_action_protocol_rejects_default_workspace_capabilities():
             ChatMessage(role="user", content="Create hello.txt"),
         ],
         use_memory=False,
+        execution_authority="agent-controller",
         capabilities=[ChatCapabilityContext(
             id="coder.files.write",
             module="coder",
@@ -2758,6 +3539,7 @@ def test_coder_native_tool_calls_are_extracted_but_model_outputs_are_never_trust
             ChatMessage(role="user", content="Create and run verify.js"),
         ],
         use_memory=False,
+        execution_authority="agent-controller",
         capabilities=[
             ChatCapabilityContext(
                 id="coder.files.write",
@@ -2816,9 +3598,10 @@ def test_native_tool_call_protocol_is_coder_only_and_fails_closed_when_malformed
         messages=[
             ChatMessage(role="system", content="<monarch_coder_mode>{}</monarch_coder_mode>"),
             ChatMessage(role="user", content="Create hello.txt"),
-        ],
-        use_memory=False,
-        capabilities=[ChatCapabilityContext(
+            ],
+            use_memory=False,
+            execution_authority="agent-controller",
+            capabilities=[ChatCapabilityContext(
             id="coder.files.write",
             module="coder",
             system="Monarch Coder",
@@ -2870,7 +3653,7 @@ def test_raw_json_environment_toolcall_is_rejected(monkeypatch, tmp_path: Path):
 
     assert "<tool_call>" not in sanitized
     assert "environment.inspect" not in sanitized
-    assert "не был выполнен контроллером" in sanitized
+    assert "Kernel ничего не выполнял" in sanitized
 
 
 def test_runtime_repairs_common_russian_mojibake():
@@ -2913,6 +3696,8 @@ def test_model_load_fallback_hides_raw_exception_from_user(monkeypatch, tmp_path
     ))
 
     assert "fallback-режим" in answer
+    assert "Gemma" not in answer
+    assert "Маршрут" not in answer
     assert "secret loader failure" not in answer
     assert "secret loader failure" in (runtime.status().last_error or "")
 
@@ -3108,106 +3893,90 @@ def test_gemma_mtp_draft_is_passed_only_for_text_generation(monkeypatch, tmp_pat
     assert loaded[-1][1]["vision_path"] == vision_path
 
 
-@pytest.mark.parametrize(
-    ("tier", "directory", "filename", "expected_layers"),
-    [
-        ("gemma4-deepthinking", "Gemma_26B", "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf", 18),
-        ("gemma4-31b", "Gemma_31B", "gemma-4-31B-it-Q4_K_M.gguf", 15),
-    ],
-)
-def test_large_gemma_tiers_use_vram_safe_hybrid_plans(
-    monkeypatch,
-    tmp_path: Path,
-    tier: str,
-    directory: str,
-    filename: str,
-    expected_layers: int,
-):
-    gemma_root = tmp_path / "gemma_models"
-    model_dir = gemma_root / directory
+def test_qwen_pro_uses_the_pinned_hybrid_runtime_plan(monkeypatch, tmp_path: Path):
+    qwen_root = tmp_path / "qwen_models"
+    model_dir = qwen_root / "Qwen3.8_27B"
     model_dir.mkdir(parents=True)
-    model_path = model_dir / filename
+    model_path = model_dir / "Qwen3.8-27B-Q4_K_M.gguf"
     model_path.write_bytes(b"GGUFmodel")
     runtime = LocalModelRuntime(Settings(
         api_token="test",
-        gemma_models_dir=gemma_root,
+        qwen_models_dir=qwen_root,
         mock_model=False,
         mock_fallback=False,
     ))
     loaded = []
     monkeypatch.setattr(runtime, "_load_llama", lambda path, **kwargs: loaded.append((path, kwargs)))
 
-    runtime.load_tier(tier)
+    runtime.load_tier("qwen3.8-27b-pro")
 
     assert loaded[0][0] == model_path
-    assert loaded[0][1]["n_gpu_layers"] == expected_layers
-    assert loaded[0][1]["n_ctx"] == 8192
+    assert loaded[0][1]["n_gpu_layers"] == 18
+    assert loaded[0][1]["n_ctx"] == 32768
 
 
-def test_explicit_31b_replaces_loaded_26b_instead_of_reusing_it(monkeypatch, tmp_path: Path):
-    gemma_root = tmp_path / "gemma_models"
-    deep_dir = gemma_root / "Gemma_26B"
-    extra_dir = gemma_root / "Gemma_31B"
-    deep_dir.mkdir(parents=True)
-    extra_dir.mkdir(parents=True)
-    deep_path = deep_dir / "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
-    extra_path = extra_dir / "gemma-4-31B-it-Q4_K_M.gguf"
-    deep_path.write_bytes(b"GGUFdeep")
-    extra_path.write_bytes(b"GGUFextra")
+def test_retired_large_gemma_aliases_share_one_qwen_pro_runtime(monkeypatch, tmp_path: Path):
+    qwen_root = tmp_path / "qwen_models"
+    model_dir = qwen_root / "Qwen3.8_27B"
+    model_dir.mkdir(parents=True)
+    model_path = model_dir / "Qwen3.8-27B-Q4_K_M.gguf"
+    model_path.write_bytes(b"GGUFqwen")
     runtime = LocalModelRuntime(Settings(
         api_token="test",
-        gemma_models_dir=gemma_root,
+        qwen_models_dir=qwen_root,
         mock_fallback=False,
     ))
     loaded = []
     monkeypatch.setattr(runtime, "_load_llama", lambda path, **kwargs: loaded.append((path, kwargs)))
 
-    runtime.load_tier("gemma4-deepthinking")
+    runtime.load_tier("gemma4-deepthinking", allow_fallback=False)
     runtime.load_tier("gemma4-31b", allow_fallback=False)
 
-    assert [entry[0] for entry in loaded] == [deep_path, extra_path]
-    assert runtime.active_tier == "gemma4-31b"
+    assert [entry[0] for entry in loaded] == [model_path]
+    assert runtime.active_tier == "qwen3.8-27b-pro"
     assert runtime.fallback_active is False
 
 
-def test_31b_skips_speculative_draft_when_it_would_cross_ram_floor(monkeypatch, tmp_path: Path):
-    gemma_root = tmp_path / "gemma_models"
-    extra_dir = gemma_root / "Gemma_31B"
-    draft_dir = gemma_root / "mtp_model"
-    extra_dir.mkdir(parents=True)
-    draft_dir.mkdir(parents=True)
-    model_path = extra_dir / "gemma-4-31B-it-Q4_K_M.gguf"
-    draft_path = draft_dir / "mtp-gemma-4-31B-it.gguf"
+def test_qwen_pro_skips_mtp_when_it_would_cross_ram_floor(monkeypatch, tmp_path: Path):
+    qwen_root = tmp_path / "qwen_models"
+    model_dir = qwen_root / "Qwen3.8_27B"
+    model_dir.mkdir(parents=True)
+    model_path = model_dir / "Qwen3.8-27B-Q4_K_M.gguf"
+    draft_path = model_dir / "mtp-Qwen3.8-27B-Q4_0.gguf"
     model_path.write_bytes(b"GGUFmodel")
     draft_path.write_bytes(b"GGUFdraft")
     runtime = LocalModelRuntime(Settings(
         api_token="test",
-        gemma_models_dir=gemma_root,
+        qwen_models_dir=qwen_root,
         mock_fallback=False,
     ))
     loaded = []
-    monkeypatch.setattr(runtime_module, "available_system_ram_gb", lambda: 4.0)
+    monkeypatch.setattr(runtime_module, "available_system_ram_gb", lambda: 2.5)
     monkeypatch.setattr(runtime, "_load_llama", lambda path, **kwargs: loaded.append((path, kwargs)))
 
-    runtime.load_tier("gemma4-31b", allow_fallback=False)
+    runtime.load_tier("qwen3.8-27b-pro", allow_fallback=False)
 
     assert loaded[0][0] == model_path
     assert loaded[0][1]["draft_path"] is None
     assert any("speculative draft skipped" in attempt for attempt in runtime.load_attempts)
 
 
-def test_deepthinking_preserves_history_and_reports_real_context_window():
+def test_qwen_pro_preserves_history_and_reports_real_context_window(tmp_path: Path):
     class ContextLlama:
         def tokenize(self, value, **_kwargs):
             text = value.decode("utf-8")
             return list(range(max(1, len(text) // 4)))
 
         def create_chat_completion(self, **_kwargs):
-            yield {"choices": [{"delta": {"content": "помню"}}]}
+            yield {"choices": [{"delta": {"content": "hidden reasoning</think>\n\nпомню"}}]}
 
-    runtime = LocalModelRuntime(Settings(api_token="test", mock_fallback=False))
+    runtime = LocalModelRuntime(Settings(
+        api_token="test",
+        qwen_models_dir=tmp_path / "qwen-models",
+        mock_fallback=False,
+    ))
     runtime.loaded = True
-    runtime.active_tier = "gemma4-deepthinking"
+    runtime.active_tier = "qwen3.8-27b-pro"
     runtime._llama_model = ContextLlama()
     messages = [
         ChatMessage(role="user", content="Кодовое слово: янтарь. " + "важный контекст " * 180),
@@ -3216,7 +3985,7 @@ def test_deepthinking_preserves_history_and_reports_real_context_window():
     ]
 
     answer = "".join(runtime.stream_chat(
-        "gemma4-deepthinking",
+        "qwen3.8-27b-pro",
         messages,
         [],
         "low",
@@ -3226,11 +3995,11 @@ def test_deepthinking_preserves_history_and_reports_real_context_window():
         strict_tier=True,
     ))
 
-    assert answer == "помню"
-    assert runtime.last_context_window["context_tokens"] == 8192
+    assert answer.strip() == "помню"
+    assert runtime.last_context_window["context_tokens"] == 32768
     assert runtime.last_context_window["dropped_messages"] == 0
     status = runtime.status()
-    assert status.active_context_tokens == 8192
+    assert status.active_context_tokens == 32768
     assert status.last_context_window["dropped_messages"] == 0
 
 
@@ -3393,6 +4162,74 @@ def test_cuda_oom_retries_with_smaller_hybrid_offload(monkeypatch, tmp_path: Pat
     assert runtime.load_attempts
 
 
+def test_cuda_oom_exhaustion_falls_back_to_cpu(monkeypatch, tmp_path: Path):
+    runtime_module.configure_nvidia_dll_directories()
+    import llama_cpp
+
+    attempts = []
+
+    class CpuFallbackLlama:
+        def __init__(self, **kwargs):
+            attempts.append(kwargs["n_gpu_layers"])
+            if kwargs["n_gpu_layers"] > 0:
+                raise RuntimeError("CUDA out of memory while allocating buffer")
+
+    monkeypatch.setattr(llama_cpp, "Llama", CpuFallbackLlama)
+    monkeypatch.setattr(runtime_module, "local_cuda_available", lambda: True)
+    model_path = tmp_path / "gemma-4-E2B-it-Q5_K_M.gguf"
+    model_path.write_bytes(b"GGUFmodel")
+    runtime = LocalModelRuntime(Settings(api_token="test", mock_fallback=False, cpu_fallback=True))
+
+    runtime._load_llama(model_path, n_ctx=2048, n_gpu_layers=8)
+
+    assert attempts[-1] == 0
+    assert runtime.device_map["backend"] == "cpu"
+    assert runtime.device_map["gpu_layers"] == "0"
+    assert runtime.load_strategy == "llama.cpp"
+
+
+def test_zero_gpu_layers_stays_cpu_only():
+    assert runtime_module.gpu_layer_candidates(0) == [0]
+    assert runtime_module.gpu_layer_candidates(8, include_cpu_fallback=True)[-1] == 0
+
+
+def test_cuda_probe_requires_a_responding_nvidia_driver(monkeypatch):
+    monkeypatch.setattr(runtime_module, "nvidia_driver_responds", lambda: False)
+    runtime_module.local_cuda_available.cache_clear()
+    try:
+        assert runtime_module.local_cuda_available() is False
+    finally:
+        runtime_module.local_cuda_available.cache_clear()
+
+
+@pytest.mark.parametrize("failure", [
+    "Failed to create llama_context",
+    "Failed to load model from file: broken.gguf",
+])
+def test_non_allocation_loader_failure_does_not_retry_gpu_layers(monkeypatch, tmp_path: Path, failure: str):
+    runtime_module.configure_nvidia_dll_directories()
+    import llama_cpp
+
+    attempts = []
+
+    class InvalidModelLlama:
+        def __init__(self, **kwargs):
+            attempts.append(kwargs["n_gpu_layers"])
+            raise RuntimeError(failure)
+
+    monkeypatch.setattr(llama_cpp, "Llama", InvalidModelLlama)
+    monkeypatch.setattr(runtime_module, "local_cuda_available", lambda: True)
+    model_path = tmp_path / "broken.gguf"
+    model_path.write_bytes(b"GGUFmodel")
+    runtime = LocalModelRuntime(Settings(api_token="test", mock_fallback=False))
+
+    with pytest.raises(RuntimeError, match=re.escape(failure)):
+        runtime._load_llama(model_path, n_ctx=4096, n_gpu_layers=30)
+
+    assert attempts == [30]
+    assert runtime.load_attempts == []
+
+
 def test_gemma_status_marks_unsupported_vision_runtime(tmp_path: Path):
     gemma_root = tmp_path / "gemma_models"
     vision_dir = gemma_root / "vision_other"
@@ -3464,6 +4301,7 @@ def test_generation_error_activates_clean_fallback():
     runtime._llama_model = FailingLlama()
     runtime._vision_enabled = True
     runtime._vision_handler_name = "Gemma4ChatHandler"
+    runtime.load_tier = lambda *_args, **_kwargs: None
 
     answer = "".join(runtime.stream_chat(
         "gemma",
@@ -3567,6 +4405,108 @@ def test_compaction_trims_oversized_system_before_short_recent_dialogue():
     assert dropped == 0
     assert [message.content for message in compacted[1:]] == [message.content for message in dialogue]
     assert runtime._count_chat_tokens(compacted) <= 1200
+
+
+def test_continuation_context_survives_compaction_with_exact_cutoff():
+    class TokenCounter:
+        def tokenize(self, value, **_kwargs):
+            text = value.decode("utf-8")
+            return list(range(max(1, len(text) // 4)))
+
+    runtime = LocalModelRuntime(Settings(
+        api_token="test",
+        mock_fallback=False,
+        gemma_context_tokens=512,
+        default_max_new_tokens=128,
+    ))
+    runtime._llama_model = TokenCounter()
+    prompt = runtime_module.ContinuationPrompt(
+        assistant_tail=("старый хвост " * 300) + "ТОЧНАЯ_ТОЧКА_ОБРЫВА",
+        instruction="Продолжи ровно с места обрыва.",
+    )
+    compacted, _output, metadata = runtime._prepare_prompt_messages(
+        [
+            ChatMessage(role="user", content="старый вопрос " * 120),
+            ChatMessage(role="assistant", content="старый ответ " * 120),
+            ChatMessage(role="user", content="Напиши полный большой ответ"),
+        ],
+        [],
+        "low",
+        [],
+        [],
+        None,
+        128,
+        continuation_prompt=prompt,
+    )
+
+    assert metadata["context_trimmed"] is True
+    assert compacted[-3].content == "Напиши полный большой ответ"
+    assert compacted[-2].role == "assistant"
+    assert compacted[-2].content.endswith("ТОЧНАЯ_ТОЧКА_ОБРЫВА")
+    assert compacted[-1].content == prompt.instruction
+    assert runtime._count_chat_tokens(compacted) <= metadata["input_limit"]
+
+
+def test_native_llama_finish_reason_is_preserved_for_adaptive_generation():
+    class FinishReasonLlama:
+        def create_chat_completion(self, **_kwargs):
+            yield {"choices": [{"delta": {"content": "часть ответа"}, "finish_reason": None}]}
+            yield {"choices": [{"delta": {}, "finish_reason": "length"}]}
+
+    runtime = LocalModelRuntime(Settings(api_token="test", mock_fallback=False))
+    runtime.loaded = True
+    runtime.active_tier = "gemma4-fast"
+    runtime._llama_model = FinishReasonLlama()
+
+    answer = "".join(runtime.stream_chat(
+        "gemma4-fast",
+        [ChatMessage(role="user", content="Ответь подробно")],
+        [],
+        "low",
+        32,
+        0.2,
+        0.9,
+    ))
+
+    assert answer == "часть ответа"
+    assert runtime.last_generation_stop_reason == "length"
+
+
+def test_native_llama_ignores_tokens_after_first_terminal_finish_reason():
+    class PoisonedTerminalLlama:
+        def create_chat_completion(self, **_kwargs):
+            yield {"choices": [{"delta": {"content": "первая "}, "finish_reason": None}]}
+            yield {"choices": [{"delta": {"content": "часть"}, "finish_reason": "stop"}]}
+            yield {"choices": [{"delta": {"content": " poisoned-late-token"}, "finish_reason": None}]}
+            yield {"choices": [{"delta": {}, "finish_reason": "length"}]}
+
+    runtime = LocalModelRuntime(Settings(api_token="test", mock_fallback=False))
+    runtime.loaded = True
+    runtime.active_tier = "gemma4-fast"
+    runtime._llama_model = PoisonedTerminalLlama()
+
+    answer = "".join(runtime.stream_chat(
+        "gemma4-fast",
+        [ChatMessage(role="user", content="Ответь кратко")],
+        [],
+        "low",
+        32,
+        0.2,
+        0.9,
+    ))
+
+    assert answer == "первая часть"
+    assert "poisoned-late-token" not in answer
+    assert runtime.last_generation_stop_reason == "stop"
+
+
+def test_exact_stop_reason_overrides_token_boundary_for_complete_answer():
+    usage = {"max_new_tokens": 32, "output_tokens": 32}
+
+    main_module.correct_truncation_signal(usage, "Полный законченный ответ.", stop_reason="stop")
+
+    assert usage["generation_stop_reason"] == "stop"
+    assert usage["likely_truncated"] is False
 
 
 @pytest.mark.parametrize("query", [
@@ -3711,6 +4651,7 @@ def test_vision_runtime_blocks_repeated_unused_tokens_and_returns_clean_fallback
     runtime.active_tier = "gemma4-balanced"
     runtime._vision_enabled = True
     runtime._llama_model = BrokenVisionLlama()
+    runtime.load_tier = lambda *_args, **_kwargs: None
     image = ChatImageAttachment(
         mime_type="image/png",
         data_base64=base64.b64encode(b"not-decoded-by-test").decode("ascii"),
@@ -3748,14 +4689,14 @@ def test_model_status_reports_only_valid_gemma4_tiers(tmp_path):
     runtime = LocalModelRuntime(Settings(
         api_token="test",
         gemma_models_dir=tmp_path,
+        qwen_models_dir=tmp_path / "qwen-models",
         coder_models_dir=tmp_path / "coder-models",
     ))
 
     assert runtime.available_gemma4_tiers() == {
         "gemma4-fast": False,
         "gemma4-balanced": True,
-        "gemma4-deepthinking": False,
-        "gemma4-31b": False,
+        "qwen3.8-27b-pro": False,
         "qwen3-coder-30b-a3b-instruct": False,
         "deepseek-coder-v2-lite-instruct": False,
     }
@@ -3978,7 +4919,7 @@ def test_image_attachment_rejects_invalid_base64():
 
 
 @pytest.mark.asyncio
-async def test_chat_endpoint_routes_image_attachment_to_gemma(monkeypatch):
+async def test_chat_endpoint_routes_image_attachment_to_compatible_vision_lane(monkeypatch):
     captured = {}
 
     def stream_chat(
@@ -3994,6 +4935,7 @@ async def test_chat_endpoint_routes_image_attachment_to_gemma(monkeypatch):
         capability_context=None,
         access_context=None,
         strict_tier=False,
+        context_profile="full",
     ):
         captured["tier"] = tier
         captured["image_count"] = len(image_attachments or [])
@@ -4001,9 +4943,17 @@ async def test_chat_endpoint_routes_image_attachment_to_gemma(monkeypatch):
         captured["capability_count"] = len(capability_context or [])
         captured["access"] = access_context
         captured["strict_tier"] = strict_tier
+        captured["context_profile"] = context_profile
         return iter(["vision ok"])
 
     monkeypatch.setattr(main_module.model_runtime, "stream_chat", stream_chat)
+    monkeypatch.setattr(main_module.model_runtime, "ram_assessment", lambda _tier: {
+        "ram_available_gb": 40.0,
+        "estimated_ram_required_gb": 22.3,
+        "projected_ram_available_gb": 17.7,
+        "ram_warning": "none",
+        "ram_warning_message": None,
+    })
 
     response = await main_module.chat(ChatRequest(
         messages=[ChatMessage(role="user", content="Опиши картинку")],
@@ -4027,6 +4977,7 @@ async def test_chat_endpoint_routes_image_attachment_to_gemma(monkeypatch):
         "capability_count": 0,
         "access": None,
         "strict_tier": False,
+        "context_profile": "full",
     }
 
 
@@ -4046,6 +4997,8 @@ async def test_chat_endpoint_returns_sanitized_recovery_answer(monkeypatch):
 
     assert "Не смог завершить локальную генерацию" in response.answer
     assert "secret prepare failure" not in response.answer
+    assert response.ok is False
+    assert response.usage["generation_stop_reason"] == "error"
 
 
 @pytest.mark.asyncio
@@ -4082,7 +5035,7 @@ async def test_chat_stream_continues_when_memory_lookup_fails(monkeypatch):
         return iter(["Ответ ", "без памяти"])
 
     main_module.model_runtime.last_error = None
-    monkeypatch.setattr(main_module.memory, "search", fail_memory_search)
+    monkeypatch.setattr(main_module.memory_v4, "retrieve", fail_memory_search)
     monkeypatch.setattr(main_module.model_runtime, "stream_chat", stream_chat)
 
     response = await main_module.chat_stream(ChatRequest(
@@ -4097,7 +5050,7 @@ async def test_chat_stream_continues_when_memory_lookup_fails(monkeypatch):
     assert "без памяти" in body
     assert '"ok": true' in body
     assert "secret memory db failure" not in body
-    assert main_module.model_runtime.last_error == "memory search failed; continuing without memory context"
+    assert main_module.model_runtime.last_error == "memory v4 retrieval failed; continuing without cross-chat context"
 
 
 @pytest.mark.asyncio
@@ -4135,6 +5088,13 @@ async def test_ordinary_chat_never_executes_legacy_workspace_tools(monkeypatch, 
 
     monkeypatch.setattr(workspace, "execute", fail_legacy_tools)
     monkeypatch.setattr(main_module.model_runtime, "stream_chat", stream_chat)
+    monkeypatch.setattr(main_module.model_runtime, "ram_assessment", lambda _tier: {
+        "ram_available_gb": 40.0,
+        "estimated_ram_required_gb": 22.3,
+        "projected_ram_available_gb": 17.7,
+        "ram_warning": "none",
+        "ram_warning_message": None,
+    })
     monkeypatch.setattr(main_module.model_runtime, "unload", lambda: None)
 
     response = await main_module.chat(ChatRequest(
@@ -4146,7 +5106,6 @@ async def test_ordinary_chat_never_executes_legacy_workspace_tools(monkeypatch, 
             ),
         )],
         use_memory=False,
-        allow_tools=True,
         requested_model="weak",
         max_new_tokens=64,
     ))
@@ -4154,7 +5113,7 @@ async def test_ordinary_chat_never_executes_legacy_workspace_tools(monkeypatch, 
     assert response.answer.startswith("Отвечаю по существу")
     assert response.tool_results == []
     assert response.action_proposals == []
-    assert response.outcome == "completed"
+    assert response.outcome == "answered"
 
 
 def test_chat_request_disables_legacy_tools_by_default():
@@ -4177,7 +5136,6 @@ async def test_ordinary_chat_stream_never_emits_tools_or_action_proposals(monkey
     response = await main_module.chat_stream(ChatRequest(
         messages=[ChatMessage(role="user", content="Объясни прошлый ответ без действий.")],
         use_memory=False,
-        allow_tools=True,
         requested_model="weak",
         max_new_tokens=64,
     ))
@@ -4782,6 +5740,30 @@ async def test_chat_stream_returns_sanitized_recovery_event(monkeypatch):
     assert '"total_tokens"' in body
     assert "Не смог завершить локальную генерацию" in body
     assert "secret stream failure" not in body
+
+
+@pytest.mark.asyncio
+async def test_explicit_gemma_stream_never_exposes_runtime_exception(monkeypatch):
+    async def fail_prepare_sources(_request):
+        raise RuntimeError("secret model path C:/private/model.gguf token=must-not-leak")
+
+    monkeypatch.setattr(main_module, "prepare_sources", fail_prepare_sources)
+
+    response = await main_module.chat_stream(ChatRequest(
+        messages=[ChatMessage(role="user", content="Почему Gemma упала?")],
+        use_memory=True,
+        requested_model="gemma4-balanced",
+        model_selection_source="user-explicit",
+        max_new_tokens=32,
+    ))
+    body = await collect_stream_body(response)
+
+    assert "Режим Gemma Mode активен" in body
+    assert "не завершила генерацию" in body
+    assert '"generation_stop_reason": "error"' in body
+    assert "secret model path" not in body
+    assert "C:/private/model.gguf" not in body
+    assert "must-not-leak" not in body
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,7 @@ export class OscarModule implements MonarchModule {
   readonly manifest = oscarManifest;
   private readonly client: OscarClient;
   private readonly agentSkills: Pick<AgentSkillRegistry, 'activateForPrompt'>;
+  private ownerDevSettingsProvider: () => OscarOwnerDevPolicy = () => ({});
 
   constructor(
     client = new OscarClient(),
@@ -40,6 +41,10 @@ export class OscarModule implements MonarchModule {
   ) {
     this.client = client;
     this.agentSkills = agentSkills;
+  }
+
+  setOwnerDevSettingsProvider(provider: () => OscarOwnerDevPolicy): void {
+    this.ownerDevSettingsProvider = provider;
   }
 
   async activate(context: MonarchKernelContext): Promise<void> {
@@ -239,10 +244,6 @@ export class OscarModule implements MonarchModule {
       return this.runChat(request.input, true, context);
     case 'oscar.chat.route':
       return this.previewChatRoute(request.input);
-    case 'oscar.voice.fast':
-      return this.runVoiceFast(request.input, context);
-    case 'oscar.voice.realtime':
-      return this.runVoiceRealtime(request.input, context);
     case 'oscar.chat.stream':
       return this.runChatStream(request.input, context);
     case 'oscar.conversations.manage':
@@ -379,29 +380,35 @@ export class OscarModule implements MonarchModule {
 
     const lastUserMessage = messages.slice(-1).find(m => m.role === 'user')?.content || '';
     const coderMode = isCoderModeMessages(messages);
+    const dev = this.ownerDevSettingsProvider();
     let effectiveWebSearch = webSearch;
+    if (dev.internetEnabled === false) effectiveWebSearch = false;
     if (effectiveWebSearch === true && shouldKeepOscarQueryLocal(lastUserMessage)) {
       effectiveWebSearch = false;
     }
 
     try {
       const chatRequest = createDefaultOscarChatRequest(
-        coderMode ? messages : await withLocalUserContext(messages, context, lastUserMessage),
+        coderMode || dev.zeroRetentionEnabled || dev.memoryEnabled === false || dev.personalityEnabled === false
+          ? messages
+          : await withLocalUserContext(messages, context, lastUserMessage),
         effectiveWebSearch,
         input
       );
+      applyOwnerDevChatPolicy(chatRequest, dev);
       if (!coderMode) applyMonarchRegistryRouteFloor(chatRequest, lastUserMessage);
-      this.attachCapabilityCatalog(chatRequest, context, lastUserMessage);
-      if (!coderMode) {
+      if (chatRequest.execution_authority === 'agent-controller' && dev.runtimeContextEnabled !== false) {
+        this.attachCapabilityCatalog(chatRequest, context, lastUserMessage);
+      } else {
+        chatRequest.capabilities = [];
+        delete chatRequest.access;
+      }
+      if (!coderMode && chatRequest.execution_authority === 'agent-controller' && dev.skillsEnabled !== false) {
         await this.attachAgentSkills(chatRequest, lastUserMessage, context);
       } else {
         chatRequest.skills = [];
       }
       const response = await this.client.chat(chatRequest);
-      await context.emit('oscar.chat.completed', this.manifest.id, {
-        webSearch: effectiveWebSearch === true,
-        messages: messages.length,
-      });
 
       if (effectiveWebSearch === false && response && typeof response === 'object' && Array.isArray((response as Record<string, unknown>).sources)) {
         const anyResponse = response as { sources: unknown[] };
@@ -410,6 +417,33 @@ export class OscarModule implements MonarchModule {
           return !/^https?:\/\//i.test(String(url));
         });
       }
+
+      const responseRecord = response && typeof response === 'object'
+        ? response as Record<string, unknown>
+        : {};
+      const telemetryError = oscarChatResponseError(response);
+      if (responseRecord.ok === false || telemetryError) {
+        const error = telemetryError || 'oscar-chat-rejected';
+        await context.emit('oscar.chat.failed', this.manifest.id, {
+          webSearch: effectiveWebSearch === true,
+          messages: messages.length,
+          error,
+        });
+        return {
+          ok: false,
+          summary: 'Oscar не сформировал полный ответ. Незавершённый результат не считается успешным.',
+          error,
+          output: {
+            request: summarizeChatRequest(chatRequest),
+            response,
+          },
+        };
+      }
+
+      await context.emit('oscar.chat.completed', this.manifest.id, {
+        webSearch: effectiveWebSearch === true,
+        messages: messages.length,
+      });
 
       return {
         ok: true,
@@ -441,21 +475,31 @@ export class OscarModule implements MonarchModule {
 
     const lastUserMessage = messages.slice(-1).find(m => m.role === 'user')?.content || '';
     const coderMode = isCoderModeMessages(messages);
+    const dev = this.ownerDevSettingsProvider();
     const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
     let effectiveWebSearch = typeof record.web_search === 'boolean' ? record.web_search : undefined;
+    if (dev.internetEnabled === false) effectiveWebSearch = false;
     if (effectiveWebSearch === true && shouldKeepOscarQueryLocal(lastUserMessage)) {
       effectiveWebSearch = false;
     }
 
     try {
       const chatRequest = createDefaultOscarChatRequest(
-        coderMode ? messages : await withLocalUserContext(messages, context, lastUserMessage),
+        coderMode || dev.zeroRetentionEnabled || dev.memoryEnabled === false || dev.personalityEnabled === false
+          ? messages
+          : await withLocalUserContext(messages, context, lastUserMessage),
         effectiveWebSearch,
         input
       );
+      applyOwnerDevChatPolicy(chatRequest, dev);
       if (!coderMode) applyMonarchRegistryRouteFloor(chatRequest, lastUserMessage);
-      this.attachCapabilityCatalog(chatRequest, context, lastUserMessage);
-      if (!coderMode) {
+      if (chatRequest.execution_authority === 'agent-controller' && dev.runtimeContextEnabled !== false) {
+        this.attachCapabilityCatalog(chatRequest, context, lastUserMessage);
+      } else {
+        chatRequest.capabilities = [];
+        delete chatRequest.access;
+      }
+      if (!coderMode && chatRequest.execution_authority === 'agent-controller' && dev.skillsEnabled !== false) {
         await this.attachAgentSkills(chatRequest, lastUserMessage, context);
       } else {
         chatRequest.skills = [];
@@ -478,120 +522,16 @@ export class OscarModule implements MonarchModule {
       return { ok: false, summary: 'Oscar route preview requires at least one message.', error: 'missing-messages' };
     }
     const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
-    const webSearch = typeof record.web_search === 'boolean' ? record.web_search : undefined;
+    const dev = this.ownerDevSettingsProvider();
+    const webSearch = dev.internetEnabled === false
+      ? false
+      : typeof record.web_search === 'boolean' ? record.web_search : undefined;
     try {
       const request = createDefaultOscarChatRequest(messages, webSearch, input);
+      applyOwnerDevChatPolicy(request, dev);
       applyMonarchRegistryRouteFloor(request, messages.slice(-1).find(message => message.role === 'user')?.content || '');
       const output = await this.client.previewChatRoute(request);
       return { ok: true, summary: 'Oscar route preview ready.', output };
-    } catch (error) {
-      return backendUnavailableResult(error);
-    }
-  }
-
-  private async runVoiceFast(
-    input: unknown,
-    context: MonarchKernelContext,
-  ): Promise<MonarchExecutionResult> {
-    const record = input && typeof input === 'object' && !Array.isArray(input)
-      ? input as Record<string, unknown>
-      : {};
-    const text = typeof record.text === 'string'
-      ? record.text.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim()
-      : '';
-    if (!text) {
-      return { ok: false, summary: 'Fast voice needs a non-empty transcript.', error: 'voice-fast-text-empty' };
-    }
-    if (text.length > 1_200) {
-      return { ok: false, summary: 'Fast voice transcript is too long.', error: 'voice-fast-text-too-long' };
-    }
-    const language = normalizeVoiceLanguage(record.language);
-    if (record.language !== undefined && !language) {
-      return { ok: false, summary: 'Fast voice language is not supported.', error: 'voice-fast-language-unsupported' };
-    }
-    const history = normalizeVoiceHistory(record.history);
-    if (record.history !== undefined && !history) {
-      return { ok: false, summary: 'Fast voice history is invalid.', error: 'voice-fast-history-invalid' };
-    }
-    try {
-      const response = await this.client.voiceFast({
-        text,
-        ...(language ? { language } : {}),
-        ...(history?.length ? { history } : {}),
-      });
-      await context.emit('oscar.voice.fast.completed', this.manifest.id, {
-        model: response.model,
-        generationMs: response.generation_ms,
-        responseLength: response.text.length,
-      });
-      return {
-        ok: true,
-        summary: 'Dedicated Fast voice response completed.',
-        output: response,
-      };
-    } catch (error) {
-      return backendUnavailableResult(error);
-    }
-  }
-
-  private async runVoiceRealtime(
-    input: unknown,
-    context: MonarchKernelContext,
-  ): Promise<MonarchExecutionResult> {
-    const record = input && typeof input === 'object' && !Array.isArray(input)
-      ? input as Record<string, unknown>
-      : {};
-    const text = typeof record.text === 'string'
-      ? record.text.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim()
-      : '';
-    if (!text) {
-      return { ok: false, summary: 'Realtime voice search needs a non-empty transcript.', error: 'voice-realtime-text-empty' };
-    }
-    if (text.length > 600) {
-      return { ok: false, summary: 'Realtime voice search transcript is too long.', error: 'voice-realtime-text-too-long' };
-    }
-    const kind = record.kind === 'weather' || record.kind === 'web-search' ? record.kind : undefined;
-    if (!kind) {
-      return { ok: false, summary: 'Realtime voice search kind is not supported.', error: 'voice-realtime-kind-unsupported' };
-    }
-    const language = normalizeVoiceLanguage(record.language);
-    if (record.language !== undefined && !language) {
-      return { ok: false, summary: 'Realtime voice language is not supported.', error: 'voice-realtime-language-unsupported' };
-    }
-    const location = typeof record.location === 'string'
-      ? record.location.replace(/[\u0000-\u001F\u007F]/g, '').replace(/\s+/g, ' ').trim()
-      : undefined;
-    if (record.location !== undefined && (!location || location.length > 120 || !/[\p{L}\p{N}]/u.test(location))) {
-      return { ok: false, summary: 'Realtime voice weather location is invalid.', error: 'voice-realtime-location-invalid' };
-    }
-    if (kind === 'weather' && !location) {
-      return { ok: false, summary: 'Realtime voice weather needs a location.', error: 'voice-weather-location-required' };
-    }
-    const history = normalizeVoiceHistory(record.history);
-    if (record.history !== undefined && !history) {
-      return { ok: false, summary: 'Realtime voice history is invalid.', error: 'voice-realtime-history-invalid' };
-    }
-    try {
-      const response = await this.client.voiceRealtime({
-        text,
-        kind,
-        ...(language ? { language } : {}),
-        ...(kind === 'weather' && location ? { location } : {}),
-        ...(history?.length ? { history } : {}),
-      });
-      await context.emit('oscar.voice.realtime.completed', this.manifest.id, {
-        kind: response.kind,
-        model: response.model,
-        sourceCount: response.source_count,
-        searchMs: response.search_ms,
-        generationMs: response.generation_ms,
-        responseLength: response.text.length,
-      });
-      return {
-        ok: true,
-        summary: 'Dedicated realtime voice search completed.',
-        output: response,
-      };
     } catch (error) {
       return backendUnavailableResult(error);
     }
@@ -703,6 +643,8 @@ export class OscarModule implements MonarchModule {
       let output: unknown;
       if (action === 'list') {
         output = await this.client.listConversations();
+      } else if (action === 'clear') {
+        output = await this.client.clearConversations();
       } else if (action === 'create') {
         output = await this.client.createConversation(title || 'Новый чат');
       } else if (action === 'get' && conversationId) {
@@ -724,6 +666,14 @@ export class OscarModule implements MonarchModule {
           ...(typeof record.token_count === 'number' ? { token_count: record.token_count } : {}),
           ...(typeof record.elapsed_ms === 'number' ? { elapsed_ms: record.elapsed_ms } : {}),
           ...(typeof record.model_tier === 'string' ? { model_tier: record.model_tier } : {}),
+          ...(typeof record.client_message_id === 'string' ? { client_message_id: record.client_message_id } : {}),
+          ...(typeof record.turn_id === 'string' ? { turn_id: record.turn_id } : {}),
+          ...(typeof record.task_id === 'string' ? { task_id: record.task_id } : {}),
+          ...(record.provenance && typeof record.provenance === 'object' && !Array.isArray(record.provenance)
+            ? { provenance: record.provenance as Record<string, unknown> }
+            : {}),
+          ...(typeof record.outcome === 'string' ? { outcome: record.outcome } : {}),
+          ...(typeof record.integrity_warning === 'string' ? { integrity_warning: record.integrity_warning } : {}),
         });
       } else if (action === 'delete' && conversationId) {
         output = await this.client.deleteConversation(conversationId);
@@ -1145,10 +1095,12 @@ function strongerOscarRouteTier(current: string | undefined, floor: string): str
     'gemma4-fast': 0,
     medium: 1,
     'gemma4-balanced': 1,
+    'qwen3.8-27b-pro': 2,
+    // Read-time aliases only; no retired large Gemma runtime is exposed.
     powerful: 2,
     reasoning: 2,
     'gemma4-deepthinking': 2,
-    'gemma4-31b': 3,
+    'gemma4-31b': 2,
   };
   return (rank[current || ''] ?? -1) >= (rank[floor] ?? 0) ? current! : floor;
 }
@@ -1327,33 +1279,6 @@ function backendUnavailableResult(error: unknown): MonarchExecutionResult {
   };
 }
 
-function normalizeVoiceLanguage(value: unknown): 'ru' | 'uk' | 'bg' | 'en' | undefined {
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.trim().toLowerCase().split(/[-_]/, 1)[0];
-  return normalized === 'ru' || normalized === 'uk' || normalized === 'bg' || normalized === 'en'
-    ? normalized
-    : undefined;
-}
-
-function normalizeVoiceHistory(
-  value: unknown,
-): Array<{ role: 'user' | 'assistant'; content: string }> | null {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 8) return null;
-  const history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
-    const record = item as Record<string, unknown>;
-    if (record.role !== 'user' && record.role !== 'assistant') return null;
-    const content = typeof record.content === 'string'
-      ? record.content.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim()
-      : '';
-    if (!content || content.length > 800) return null;
-    history.push({ role: record.role, content });
-  }
-  return history;
-}
-
 function readStringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value
@@ -1372,6 +1297,69 @@ export interface OscarModuleOptions {
   workspaceRoot?: string;
   logsRoot?: string;
   secretsRoot?: string;
+}
+
+interface OscarOwnerDevPolicy {
+  zeroRetentionEnabled?: boolean;
+  internetEnabled?: boolean;
+  memoryEnabled?: boolean;
+  historyContextEnabled?: boolean;
+  personalityEnabled?: boolean;
+  skillsEnabled?: boolean;
+  runtimeContextEnabled?: boolean;
+  qualityRegenerationEnabled?: boolean;
+}
+
+function applyOwnerDevChatPolicy(request: ReturnType<typeof createDefaultOscarChatRequest>, dev: OscarOwnerDevPolicy): void {
+  if (dev.zeroRetentionEnabled) request.incognito = true;
+  if (dev.internetEnabled === false) {
+    request.web_search = false;
+    request.research_mode = 'off';
+  }
+  if (dev.zeroRetentionEnabled || dev.memoryEnabled === false) request.use_memory = false;
+  if (dev.historyContextEnabled === false) {
+    const system = request.messages.filter((message) => message.role === 'system');
+    const latestUser = [...request.messages].reverse().find((message) => message.role === 'user');
+    request.messages = [...system, ...(latestUser ? [latestUser] : [])];
+  }
+  if (dev.personalityEnabled === false) {
+    request.messages = request.messages.filter((message) => !message.content.includes('<monarch_personality_context'));
+  }
+  if (dev.skillsEnabled === false) request.skills = [];
+  if (dev.runtimeContextEnabled === false) {
+    request.capabilities = [];
+    delete request.access;
+  }
+  request.dev_mode = {
+    zero_retention: dev.zeroRetentionEnabled === true,
+    internet_enabled: dev.internetEnabled !== false,
+    memory_enabled: dev.memoryEnabled !== false,
+    history_context_enabled: dev.historyContextEnabled !== false,
+    personality_enabled: dev.personalityEnabled !== false,
+    skills_enabled: dev.skillsEnabled !== false,
+    runtime_context_enabled: dev.runtimeContextEnabled !== false,
+    quality_regeneration_enabled: dev.qualityRegenerationEnabled !== false,
+  };
+}
+
+function oscarChatResponseError(value: unknown): string {
+  const record = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const usage = record.usage && typeof record.usage === 'object'
+    ? record.usage as Record<string, unknown>
+    : {};
+  const stopReason = typeof usage.generation_stop_reason === 'string'
+    ? usage.generation_stop_reason.trim().toLowerCase()
+    : '';
+  if (usage.likely_truncated === true || ['length', 'max_tokens', 'max_new_tokens'].includes(stopReason)) {
+    return 'model-output-truncated';
+  }
+  if (['cancelled', 'canceled'].includes(stopReason)) return 'model-generation-cancelled';
+  if (stopReason === 'error') return 'model-generation-failed';
+  if (['content_filter', 'content-filter'].includes(stopReason)) return 'model-output-filtered';
+  if (['tool_calls', 'tool-calls', 'function_call'].includes(stopReason)) {
+    return 'model-finish-reason-unsupported';
+  }
+  return '';
 }
 
 export function createOscarModule(options: OscarModuleOptions = {}): MonarchModule {

@@ -88,13 +88,21 @@ describe('Monarch launcher terminal update phases', () => {
 describe('Monarch launcher installed layout verification', () => {
   it('accepts a complete self-contained installation without starting Electron', () => {
     const fixture = createFixture('committed');
+
     expect(runLauncherStatus(fixture.installRoot, ['--verify-install'])).toBe(0);
     expect(existsSync(fixture.markerPath)).toBe(false);
   });
 
   it('rejects a missing bundled component before the installer can create shortcuts', () => {
     const fixture = createFixture('committed');
-    rmSync(path.join(fixture.payloadRoot, 'runtimes', 'runtime-qa-runtime', 'electron', 'electron.exe'));
+    rmSync(path.join(
+      fixture.payloadRoot,
+      'runtimes',
+      'runtime-qa-runtime',
+      'electron',
+      'electron.exe',
+    ));
+
     expect(runLauncherStatus(fixture.installRoot, ['--verify-install'])).toBe(3);
     expect(existsSync(fixture.markerPath)).toBe(false);
   });
@@ -103,14 +111,16 @@ describe('Monarch launcher installed layout verification', () => {
     const fixture = createFixture('committed');
     rmSync(path.join(fixture.installRoot, 'Monarch.exe'));
     copyFileSync(launcherPath, path.join(fixture.installRoot, 'Monarch.next.exe'));
+
     const result = runLauncherSwap(fixture.installRoot);
+
     expect(result.status).toBe(0);
     expect(existsSync(path.join(fixture.installRoot, 'Monarch.exe'))).toBe(true);
     expect(existsSync(path.join(fixture.installRoot, 'Monarch.next.exe'))).toBe(false);
     expect(readJson(path.join(fixture.installRoot, 'install-health.json'))).toMatchObject({
       status: 'healthy',
       verification: 'launcher-installed-layout',
-      launcherVersion: '1.0.3',
+      launcherVersion: '1.0.4',
     });
   }, 30_000);
 
@@ -118,8 +128,16 @@ describe('Monarch launcher installed layout verification', () => {
     const fixture = createFixture('committed');
     rmSync(path.join(fixture.installRoot, 'Monarch.exe'));
     copyFileSync(launcherPath, path.join(fixture.installRoot, 'Monarch.next.exe'));
-    rmSync(path.join(fixture.payloadRoot, 'runtimes', 'runtime-qa-runtime', 'electron', 'electron.exe'));
+    rmSync(path.join(
+      fixture.payloadRoot,
+      'runtimes',
+      'runtime-qa-runtime',
+      'electron',
+      'electron.exe',
+    ));
+
     const result = runLauncherSwap(fixture.installRoot);
+
     expect(result.status).not.toBe(0);
     expect(existsSync(path.join(fixture.installRoot, 'Monarch.exe'))).toBe(false);
     expect(existsSync(path.join(fixture.installRoot, 'Monarch.failed.exe'))).toBe(true);
@@ -144,7 +162,11 @@ function createFixture(phase: 'committed' | 'rollback-required') {
   mkdirSync(path.join(runtimeRoot, 'electron'), { recursive: true });
   mkdirSync(path.join(runtimeRoot, 'node'), { recursive: true });
   mkdirSync(path.join(runtimeRoot, 'python'), { recursive: true });
-  mkdirSync(environmentRoot, { recursive: true });
+  const nativeRuntimeRoot = path.join(environmentRoot, 'native', 'windows-x64');
+  mkdirSync(nativeRuntimeRoot, { recursive: true });
+  for (const fileName of ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'vcomp140.dll']) {
+    writeFileSync(path.join(nativeRuntimeRoot, fileName), 'native-runtime-stub');
+  }
   mkdirSync(transactionRoot, { recursive: true });
   mkdirSync(dataRoot, { recursive: true });
   mkdirSync(logsRoot, { recursive: true });
@@ -234,9 +256,13 @@ function runLauncherStatus(installRoot: string, args: string[] = []) {
 
 function runLauncherSwap(installRoot: string) {
   return spawnSync('powershell.exe', [
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
     path.join(repositoryRoot, 'installer', 'swap-launcher.ps1'),
-    '-InstallRoot', installRoot,
+    '-InstallRoot',
+    installRoot,
   ], {
     cwd: repositoryRoot,
     encoding: 'utf8',

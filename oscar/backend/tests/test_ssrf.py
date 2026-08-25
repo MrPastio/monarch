@@ -365,6 +365,27 @@ async def test_search_and_ingest_drops_unsafe_provider_results():
 
 
 @pytest.mark.asyncio
+async def test_zero_retention_search_returns_transient_sources_without_memory_writes():
+    memory = MagicMock()
+    provider = StaticSearchProvider([
+        RawSearchResult(title="Safe", url="https://safe-public.com/page", snippet="transient snippet"),
+    ])
+    service = WebSearchService(Settings(), memory, search_provider=provider)
+
+    with patch("socket.getaddrinfo", side_effect=mock_getaddrinfo):
+        results = await service.search_and_ingest(
+            "private chat query",
+            max_results=3,
+            fetch_pages=False,
+            persist=False,
+        )
+
+    assert [result.snippet for result in results] == ["transient snippet"]
+    assert results[0].status_detail == "zero-retention"
+    memory.upsert_document.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_voice_search_context_is_safe_bounded_and_never_writes_chat_memory():
     settings = Settings()
     memory = MagicMock()

@@ -41,6 +41,9 @@ class PersistenceSensor:
         self._approved_signatures: dict[str, str] = dict(approved_signatures or {})
         self._first_poll = not bool(initial_signatures)
         self.last_error: str | None = None
+        self._cursor = 0
+        self._overflow = False
+        self._cycle_seen: set[str] = set()
 
     @property
     def signatures(self) -> dict[str, str]:
@@ -49,25 +52,69 @@ class PersistenceSensor:
     def snapshot_signatures(self) -> dict[str, str]:
         return {item["key"]: item["signature"] for item in self.snapshot()}
 
+    @property
+    def checkpoint_cursor(self) -> int:
+        return self._cursor
+
+    @property
+    def overflow(self) -> bool:
+        return self._overflow
+
+    def restore_checkpoint_cursor(self, value: object) -> None:
+        try:
+            cursor = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("persistence cursor is invalid") from exc
+        if cursor < 0:
+            raise ValueError("persistence cursor is negative")
+        self._cursor = cursor
+
+    @property
+    def checkpoint_metadata(self) -> dict[str, list[str]]:
+        return {"cycle_seen": sorted(self._cycle_seen)}
+
+    def restore_checkpoint_metadata(self, value: object) -> None:
+        if not isinstance(value, dict) or not isinstance(value.get("cycle_seen"), list):
+            raise ValueError("persistence checkpoint metadata is invalid")
+        self._cycle_seen = {str(item) for item in value["cycle_seen"]}
+
     def snapshot(self) -> list[dict[str, Any]]:
         self.last_error = None
         items: list[dict[str, Any]] = []
         items.extend(self._startup_folder_items())
         items.extend(self._run_key_items())
-        items.extend(self._scheduled_task_items())
-        return [_with_signature(item) for item in items[: self.config.max_entries]]
+        scheduled, _ = self._scheduled_task_items(skip=0, limit=None)
+        items.extend(scheduled)
+        return [_with_signature(item) for item in items]
 
     def poll(self) -> list[SecurityEvent]:
-        snapshot = self.snapshot()
+        previous_cursor = self._cursor
+        snapshot = self._snapshot_page()
+        if self.last_error:
+            self._cursor = previous_cursor
+            self._overflow = False
+            return []
         changed = [
             item
             for item in snapshot
             if self._signatures.get(str(item["key"])) != str(item["signature"])
         ]
-        self._signatures = {str(item["key"]): str(item["signature"]) for item in snapshot}
+        self._signatures.update({
+            str(item["key"]): str(item["signature"])
+            for item in snapshot
+        })
+        self._cycle_seen.update(str(item["key"]) for item in snapshot)
+        if self._cursor == 0:
+            self._signatures = {
+                key: value
+                for key, value in self._signatures.items()
+                if key in self._cycle_seen
+            }
+            self._cycle_seen.clear()
 
         if self._first_poll and not self.include_existing:
-            self._first_poll = False
+            if self._cursor == 0:
+                self._first_poll = False
             return []
 
         self._first_poll = False
@@ -81,6 +128,23 @@ class PersistenceSensor:
             current["approved_baseline_entry_changed"] = bool(approved and approved != signature)
             enriched.append(current)
         return [self._event_from_item(item) for item in enriched]
+
+    def _snapshot_page(self) -> list[dict[str, Any]]:
+        self.last_error = None
+        items: list[dict[str, Any]] = []
+        items.extend(self._startup_folder_items())
+        items.extend(self._run_key_items())
+        page_size = max(1, int(self.config.max_entries))
+        scheduled, has_more = self._scheduled_task_items(
+            skip=self._cursor,
+            limit=page_size,
+        )
+        if self.last_error:
+            return []
+        items.extend(scheduled)
+        self._overflow = has_more
+        self._cursor = self._cursor + len(scheduled) if has_more else 0
+        return [_with_signature(item) for item in items]
 
     def _startup_folder_items(self) -> list[dict[str, Any]]:
         roots = [
@@ -146,11 +210,23 @@ class PersistenceSensor:
                 continue
         return items
 
-    def _scheduled_task_items(self) -> list[dict[str, Any]]:
+    def _scheduled_task_items(
+        self,
+        *,
+        skip: int,
+        limit: int | None,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        selection = ""
+        if limit is not None:
+            selection = (
+                f"Select-Object -Skip {max(0, int(skip))} "
+                f"-First {max(1, int(limit)) + 1} |"
+            )
         command = rf"""
 Get-ScheduledTask -ErrorAction SilentlyContinue |
 Where-Object {{ $_.TaskPath -notlike '\Microsoft\*' }} |
-Select-Object -First {max(1, self.config.max_entries)} |
+Sort-Object TaskPath,TaskName |
+{selection}
 ForEach-Object {{
   [pscustomobject]@{{
     kind = 'scheduled_task'
@@ -166,12 +242,16 @@ ForEach-Object {{
         parsed, error = _run_powershell_json(command, timeout=45)
         if error:
             self.last_error = error if self.last_error is None else f"{self.last_error}; {error}"
-            return []
+            return [], False
         if isinstance(parsed, dict):
             parsed = [parsed]
         if not isinstance(parsed, list):
-            return []
-        return [item for item in parsed if isinstance(item, dict)]
+            return [], False
+        items = [item for item in parsed if isinstance(item, dict)]
+        if limit is None:
+            return items, False
+        page_size = max(1, int(limit))
+        return items[:page_size], len(items) > page_size
 
     @staticmethod
     def _event_from_item(item: dict[str, Any]) -> SecurityEvent:

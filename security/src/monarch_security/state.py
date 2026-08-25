@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import copy
 import json
 import os
 import time
@@ -144,6 +145,35 @@ class StateStore:
         if self.data.get(key) == normalized:
             return
         self.data[key] = normalized
+        self.data["updated_at"] = utc_now()
+        self._dirty = True
+
+    def get_json(self, key: str, default: Any = None) -> Any:
+        """Return an isolated JSON-compatible value from the signed state."""
+        if key not in self.data:
+            return copy.deepcopy(default)
+        return copy.deepcopy(self.data[key])
+
+    def set_json(self, key: str, value: Any) -> None:
+        """Persist only strict JSON data; reject NaN and non-serializable objects."""
+        serialized = json.dumps(
+            value,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        normalized = json.loads(serialized)
+        if self.data.get(key) == normalized:
+            return
+        self.data[key] = normalized
+        self.data["updated_at"] = utc_now()
+        self._dirty = True
+
+    def delete(self, key: str) -> None:
+        if key not in self.data:
+            return
+        del self.data[key]
         self.data["updated_at"] = utc_now()
         self._dirty = True
 

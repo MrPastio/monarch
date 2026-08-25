@@ -116,6 +116,7 @@ export async function streamChat(
         for (const event of flushed.events) {
           if (event.event === 'done') receivedDoneEvent = true;
           onEvent(event.event, event.data);
+          if (receivedDoneEvent) break;
         }
         break;
       }
@@ -123,12 +124,19 @@ export async function streamChat(
       const drained = drainSseBuffer(buffer);
       buffer = drained.buffer;
       for (const event of drained.events) {
-        if (event.event === 'done') receivedDoneEvent = true;
+        if (event.event === 'done') {
+          receivedDoneEvent = true;
+          try {
+            await reader.cancel();
+          } catch {
+            // The backend may close the response at the same moment.
+          }
+        }
         onEvent(event.event, event.data);
+        if (receivedDoneEvent) break;
       }
+      if (receivedDoneEvent) break;
     }
-  } catch (error) {
-    if (!receivedDoneEvent) throw error;
   } finally {
     reader.releaseLock();
   }

@@ -1,6 +1,6 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { nowIso, normalizeText, uniqueStrings } from '../../core';
+import { DurableJsonFile } from '../../core/durable-json-file';
 
 export interface MonarchProfile {
   version: 1;
@@ -30,8 +30,16 @@ export interface MonarchProfileStoreOptions {
 export class MonarchProfileStore {
   private profile = createDefaultProfile();
   private loaded = false;
+  private readonly durableFile?: DurableJsonFile<Record<string, unknown>>;
 
-  constructor(private readonly options: MonarchProfileStoreOptions = {}) {}
+  constructor(private readonly options: MonarchProfileStoreOptions = {}) {
+    if (options.filePath) {
+      this.durableFile = new DurableJsonFile(options.filePath, {
+        createEmpty: () => ({ ...createDefaultProfile() }),
+        validate: assertProfileDocument,
+      });
+    }
+  }
 
   get adapter(): 'in-memory' | 'local-json' {
     return this.options.filePath ? 'local-json' : 'in-memory';
@@ -45,20 +53,20 @@ export class MonarchProfileStore {
     if (this.loaded) {
       return;
     }
-    this.loaded = true;
 
-    if (!this.options.filePath) {
+    if (!this.durableFile) {
+      this.loaded = true;
       return;
     }
 
     try {
-      const raw = await readFile(this.options.filePath, 'utf8');
-      this.profile = readProfile(raw, this.options.filePath);
+      this.profile = await this.durableFile.mutate((document) => {
+        const normalized = normalizeProfile(document);
+        replaceProfileDocument(document, normalized);
+        return { changed: true, value: normalized };
+      });
+      this.loaded = true;
     } catch (error) {
-      if (isMissingFileError(error)) {
-        await this.persist();
-        return;
-      }
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Unable to load profile store ${this.options.filePath}: ${message}`);
     }
@@ -69,29 +77,18 @@ export class MonarchProfileStore {
   }
 
   async update(patch: MonarchProfilePatch): Promise<MonarchProfile> {
-    this.profile = normalizeProfile({
-      ...this.profile,
-      ...normalizePatch(patch),
-      preferences: {
-        ...this.profile.preferences,
-        ...(patch.preferences || {}),
-      },
-      updatedAt: nowIso(),
-    });
-    await this.persist();
-    return this.read();
-  }
-
-  private async persist(): Promise<void> {
-    if (!this.options.filePath) {
-      return;
+    if (!this.durableFile) {
+      this.profile = applyProfilePatch(this.profile, patch);
+      return this.read();
     }
 
-    const directory = path.dirname(this.options.filePath);
-    const tempPath = `${this.options.filePath}.${process.pid}.${Date.now()}.tmp`;
-    await mkdir(directory, { recursive: true });
-    await writeFile(tempPath, `${JSON.stringify(this.profile, null, 2)}\n`, 'utf8');
-    await rename(tempPath, this.options.filePath);
+    const updated = await this.durableFile.mutate((document) => {
+      const next = applyProfilePatch(normalizeProfile(document), patch);
+      replaceProfileDocument(document, next);
+      return { changed: true, value: next };
+    });
+    this.profile = updated;
+    return this.read();
   }
 }
 
@@ -114,12 +111,28 @@ function createDefaultProfile(): MonarchProfile {
   };
 }
 
-function readProfile(raw: string, filePath: string): MonarchProfile {
-  const parsed = JSON.parse(raw) as unknown;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`profile ${filePath} must be an object.`);
+function assertProfileDocument(value: unknown): asserts value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('profile must be an object.');
   }
-  return normalizeProfile(parsed as Record<string, unknown>);
+}
+
+function applyProfilePatch(profile: MonarchProfile, patch: MonarchProfilePatch): MonarchProfile {
+  const normalizedPatch = normalizePatch(patch);
+  return normalizeProfile({
+    ...profile,
+    ...normalizedPatch,
+    preferences: {
+      ...profile.preferences,
+      ...(normalizedPatch.preferences || {}),
+    },
+    updatedAt: nowIso(),
+  });
+}
+
+function replaceProfileDocument(document: Record<string, unknown>, profile: MonarchProfile): void {
+  for (const key of Object.keys(document)) delete document[key];
+  Object.assign(document, profile);
 }
 
 function normalizeProfile(value: Record<string, unknown>): MonarchProfile {
@@ -188,13 +201,4 @@ function readStringRecord(value: unknown): Record<string, string> {
     .map(([key, entryValue]) => [key.trim(), readString(entryValue)] as const)
     .filter(([key, entryValue]) => key && entryValue);
   return Object.fromEntries(entries);
-}
-
-function isMissingFileError(error: unknown): boolean {
-  return Boolean(
-    error
-    && typeof error === 'object'
-    && 'code' in error
-    && (error as { code?: unknown }).code === 'ENOENT'
-  );
 }

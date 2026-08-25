@@ -1,6 +1,6 @@
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { clampConfidence, createMonarchId, nowIso, normalizeText } from '../../core';
+import { DurableJsonFile } from '../../core/durable-json-file';
 import type { MonarchMemoryEntryType } from '../../core';
 
 export type MonarchMemoryTier = 'working' | 'long' | 'permanent';
@@ -61,21 +61,6 @@ export interface MonarchMemoryStoreOptions {
   filePath?: string;
 }
 
-interface MonarchMemoryStoreSnapshotV1 {
-  version: 1;
-  records: Array<{
-    id: string;
-    text: string;
-    source: string;
-    createdAt: string;
-  }>;
-}
-
-interface MonarchMemoryStoreSnapshotV2 {
-  version: 2;
-  records: MonarchMemoryRecord[];
-}
-
 interface MonarchMemoryStoreSnapshotV3 {
   version: 3;
   records: MonarchMemoryRecord[];
@@ -88,18 +73,23 @@ interface NormalizedMemorySearchFilters {
   includeExpired: boolean;
 }
 
-type MonarchMemoryStoreSnapshot = MonarchMemoryStoreSnapshotV1 | MonarchMemoryStoreSnapshotV2 | MonarchMemoryStoreSnapshotV3;
-
 export class MonarchMemoryStore {
   private records: MonarchMemoryRecord[] = [];
   private loaded = false;
-  private readonly searchTextCache = new WeakMap<MonarchMemoryRecord, string>();
-  private persistWorker: Promise<void> | null = null;
-  private persistRevision = 0;
-  private persistedRevision = 0;
-  private persistSequence = 0;
+  private searchTextCache = new WeakMap<MonarchMemoryRecord, string>();
+  private readonly durableFile?: DurableJsonFile<Record<string, unknown>>;
 
-  constructor(private readonly options: MonarchMemoryStoreOptions = {}) {}
+  constructor(private readonly options: MonarchMemoryStoreOptions = {}) {
+    if (options.filePath) {
+      this.durableFile = new DurableJsonFile(options.filePath, {
+        createEmpty: () => ({ version: 3, records: [] }),
+        jsonSpace: 0,
+        validate: (value): asserts value is Record<string, unknown> => {
+          assertMemorySnapshotDocument(value, options.filePath!);
+        },
+      });
+    }
+  }
 
   get adapter(): 'in-memory' | 'local-json' {
     return this.options.filePath ? 'local-json' : 'in-memory';
@@ -117,21 +107,18 @@ export class MonarchMemoryStore {
     if (this.loaded) {
       return;
     }
-    this.loaded = true;
 
-    if (!this.options.filePath) {
+    if (!this.durableFile) {
+      this.loaded = true;
       return;
     }
 
     try {
-      const raw = await readFile(this.options.filePath, 'utf8');
-      this.records = readSnapshot(raw, this.options.filePath).records;
+      const document = await this.durableFile.read();
+      this.records = readSnapshotValue(document, this.options.filePath!).records;
+      this.searchTextCache = new WeakMap();
+      this.loaded = true;
     } catch (error) {
-      if (isMissingFileError(error)) {
-        this.records = [];
-        return;
-      }
-
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Unable to load memory store ${this.options.filePath}: ${message}`);
     }
@@ -171,9 +158,10 @@ export class MonarchMemoryStore {
       record.expiresAt = expiresAt;
     }
 
-    this.records.push(record);
-    await this.persist();
-    return record;
+    return this.mutateRecords((records) => {
+      records.push(record);
+      return { changed: true, value: record };
+    });
   }
 
   async search(
@@ -182,166 +170,154 @@ export class MonarchMemoryStore {
     filters: MonarchMemorySearchFilters = {}
   ): Promise<MonarchMemoryRecord[]> {
     const normalizedQuery = normalizeText(query).toLowerCase();
-    if (!normalizedQuery) {
-      return this.list(limit, filters);
-    }
-
-    const terms = normalizedQuery.split(' ').filter(Boolean);
     const normalizedFilters = normalizeSearchFilters(filters);
-    const records = this.records
-      .filter((record) => memoryRecordMatchesFilters(record, normalizedFilters))
-      .map((record) => ({
-        record,
-        score: scoreRecord(record, terms, this.searchText(record)),
-      }))
-      .filter((entry) => entry.score > 0)
-      .sort((left, right) => right.score - left.score)
-      .slice(0, normalizeLimit(limit))
-      .map((entry) => entry.record);
-    if (records.length > 0) {
-      const accessedAt = nowIso();
-      for (const record of records) {
-        record.accessCount += 1;
-        record.lastAccessedAt = accessedAt;
+    return this.mutateRecords((records) => {
+      if (!normalizedQuery) {
+        return {
+          changed: false,
+          value: listMemoryRecords(records, limit, normalizedFilters),
+        };
       }
-      await this.persist();
-    }
-    return records;
+
+      const terms = normalizedQuery.split(' ').filter(Boolean);
+      const matches = records
+        .filter((record) => memoryRecordMatchesFilters(record, normalizedFilters))
+        .map((record) => ({
+          record,
+          score: scoreRecord(record, terms, this.searchText(record)),
+        }))
+        .filter((entry) => entry.score > 0)
+        .sort((left, right) => right.score - left.score)
+        .slice(0, normalizeLimit(limit))
+        .map((entry) => entry.record);
+      if (matches.length > 0) {
+        const accessedAt = nowIso();
+        for (const record of matches) {
+          record.accessCount += 1;
+          record.lastAccessedAt = accessedAt;
+        }
+      }
+      return { changed: matches.length > 0, value: matches };
+    });
   }
 
   list(limit = 20, filters: MonarchMemorySearchFilters = {}): MonarchMemoryRecord[] {
-    const normalizedFilters = normalizeSearchFilters(filters);
-    return this.records
-      .filter((record) => memoryRecordMatchesFilters(record, normalizedFilters))
-      .slice(-normalizeLimit(limit))
-      .reverse();
+    return cloneJsonResult(listMemoryRecords(this.records, limit, normalizeSearchFilters(filters)));
   }
 
   async update(id: string, patch: MonarchMemoryPatch): Promise<MonarchMemoryRecord | undefined> {
-    const record = this.records.find((entry) => entry.id === id);
-    if (!record) {
-      return undefined;
-    }
+    return this.mutateRecords((records) => {
+      const record = records.find((entry) => entry.id === id);
+      if (!record) {
+        return { changed: false, value: undefined };
+      }
 
-    if (patch.text !== undefined) {
-      record.text = normalizeText(patch.text);
-    }
-    if (patch.type !== undefined) {
-      record.type = patch.type;
-      record.category = patch.category || categoryForType(patch.type, record.text);
-    }
-    if (patch.title !== undefined) {
-      record.title = normalizeMemoryTitle(patch.title || inferTitle(record.text));
-    }
-    if (patch.tags !== undefined) {
-      record.tags = normalizeTags(patch.tags);
-    }
-    if (patch.category !== undefined) {
-      record.category = patch.category;
-    }
-    if (patch.tier !== undefined) {
-      record.tier = patch.tier;
-      record.decayRate = defaultDecayRateFor(patch.tier);
-    }
-    if (patch.importance !== undefined) {
-      record.importance = clampConfidence(patch.importance);
-      record.priority = record.importance;
-    }
-    if (patch.priority !== undefined) {
-      record.priority = clampConfidence(patch.priority);
-      record.importance = record.priority;
-    }
-    if (patch.pinned !== undefined) {
-      record.pinned = patch.pinned;
-    }
-    if (patch.expiresAt !== undefined) {
-      const expiresAt = normalizeOptionalIso(patch.expiresAt);
-      if (expiresAt) {
-        record.expiresAt = expiresAt;
-      } else {
-        delete record.expiresAt;
+      if (patch.text !== undefined) {
+        record.text = normalizeText(patch.text);
       }
-    }
-    if (patch.closedAt !== undefined) {
-      const closedAt = patch.closedAt === null ? '' : normalizeOptionalIso(patch.closedAt);
-      if (closedAt) {
-        record.closedAt = closedAt;
-      } else {
-        delete record.closedAt;
+      if (patch.type !== undefined) {
+        record.type = patch.type;
+        record.category = patch.category || categoryForType(patch.type, record.text);
       }
-    }
-    if (patch.relatedFiles !== undefined) {
-      record.relatedFiles = normalizeStringList(patch.relatedFiles, 24);
-    }
-    if (patch.relatedModules !== undefined) {
-      record.relatedModules = normalizeStringList(patch.relatedModules, 16);
-    }
-    record.updatedAt = nowIso();
-    this.searchTextCache.delete(record);
-    await this.persist();
-    return { ...record };
+      if (patch.title !== undefined) {
+        record.title = normalizeMemoryTitle(patch.title || inferTitle(record.text));
+      }
+      if (patch.tags !== undefined) {
+        record.tags = normalizeTags(patch.tags);
+      }
+      if (patch.category !== undefined) {
+        record.category = patch.category;
+      }
+      if (patch.tier !== undefined) {
+        record.tier = patch.tier;
+        record.decayRate = defaultDecayRateFor(patch.tier);
+      }
+      if (patch.importance !== undefined) {
+        record.importance = clampConfidence(patch.importance);
+        record.priority = record.importance;
+      }
+      if (patch.priority !== undefined) {
+        record.priority = clampConfidence(patch.priority);
+        record.importance = record.priority;
+      }
+      if (patch.pinned !== undefined) {
+        record.pinned = patch.pinned;
+      }
+      if (patch.expiresAt !== undefined) {
+        const expiresAt = normalizeOptionalIso(patch.expiresAt);
+        if (expiresAt) {
+          record.expiresAt = expiresAt;
+        } else {
+          delete record.expiresAt;
+        }
+      }
+      if (patch.closedAt !== undefined) {
+        const closedAt = patch.closedAt === null ? '' : normalizeOptionalIso(patch.closedAt);
+        if (closedAt) {
+          record.closedAt = closedAt;
+        } else {
+          delete record.closedAt;
+        }
+      }
+      if (patch.relatedFiles !== undefined) {
+        record.relatedFiles = normalizeStringList(patch.relatedFiles, 24);
+      }
+      if (patch.relatedModules !== undefined) {
+        record.relatedModules = normalizeStringList(patch.relatedModules, 16);
+      }
+      record.updatedAt = nowIso();
+      return { changed: true, value: record };
+    });
   }
 
   async closeTemporary(id: string, closedAt = nowIso()): Promise<MonarchMemoryRecord | undefined> {
-    const record = this.records.find((entry) => entry.id === id);
-    if (!record) {
-      return undefined;
-    }
-    record.closedAt = closedAt;
-    record.updatedAt = closedAt;
-    await this.persist();
-    return { ...record };
+    return this.mutateRecords((records) => {
+      const record = records.find((entry) => entry.id === id);
+      if (!record) {
+        return { changed: false, value: undefined };
+      }
+      record.closedAt = closedAt;
+      record.updatedAt = closedAt;
+      return { changed: true, value: record };
+    });
   }
 
   async forget(id: string): Promise<MonarchMemoryRecord | undefined> {
-    const index = this.records.findIndex((entry) => entry.id === id);
-    if (index < 0) {
-      return undefined;
-    }
-    const [removed] = this.records.splice(index, 1);
-    await this.persist();
-    return removed ? { ...removed } : undefined;
+    return this.mutateRecords((records) => {
+      const index = records.findIndex((entry) => entry.id === id);
+      if (index < 0) {
+        return { changed: false, value: undefined };
+      }
+      const [removed] = records.splice(index, 1);
+      return { changed: true, value: removed };
+    });
   }
 
-  private async persist(): Promise<void> {
-    if (!this.options.filePath) {
-      return;
+  private async mutateRecords<R>(
+    mutator: (records: MonarchMemoryRecord[]) => { changed: boolean; value: R },
+  ): Promise<R> {
+    if (!this.durableFile) {
+      const workingRecords = cloneJsonResult(this.records);
+      const result = mutator(workingRecords);
+      if (result.changed) {
+        this.records = workingRecords;
+        this.searchTextCache = new WeakMap();
+      }
+      return cloneJsonResult(result.value);
     }
 
-    this.persistRevision += 1;
-    if (!this.persistWorker) {
-      this.persistWorker = this.drainPersistQueue().finally(() => {
-        this.persistWorker = null;
-      });
-    }
-    return this.persistWorker;
-  }
-
-  private async drainPersistQueue(): Promise<void> {
-    while (this.persistedRevision < this.persistRevision) {
-      const targetRevision = this.persistRevision;
-      await this.writeSnapshot();
-      this.persistedRevision = targetRevision;
-    }
-  }
-
-  private async writeSnapshot(): Promise<void> {
-    const snapshot: MonarchMemoryStoreSnapshot = {
-      version: 3,
-      records: this.records,
-    };
-    const filePath = this.options.filePath!;
-    const directory = path.dirname(filePath);
-    const tempPath = `${filePath}.${process.pid}.${Date.now()}.${this.persistSequence++}.tmp`;
-
-    await mkdir(directory, { recursive: true });
-    try {
-      await writeFile(tempPath, `${JSON.stringify(snapshot)}\n`, 'utf8');
-      await replaceFileWithRetry(tempPath, filePath);
-    } catch (error) {
-      await unlink(tempPath).catch(() => undefined);
-      throw error;
-    }
+    const outcome = await this.durableFile.mutate((document) => {
+      const records = readSnapshotValue(document, this.options.filePath!).records;
+      const result = mutator(records);
+      if (result.changed) replaceMemorySnapshotDocument(document, records);
+      return {
+        changed: result.changed,
+        value: { records, result: result.value },
+      };
+    });
+    this.records = outcome.records;
+    this.searchTextCache = new WeakMap();
+    return outcome.result;
   }
 
   private searchText(record: MonarchMemoryRecord): string {
@@ -359,8 +335,20 @@ export function defaultMemoryStorePath(workspaceRoot = process.cwd()): string {
   return path.join(workspaceRoot, 'data', 'local', 'memory.json');
 }
 
-function readSnapshot(raw: string, filePath: string): MonarchMemoryStoreSnapshotV3 {
-  const parsed = JSON.parse(raw) as { version?: unknown; records?: unknown };
+function assertMemorySnapshotDocument(
+  value: unknown,
+  filePath: string,
+): asserts value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('memory store must be an object.');
+  }
+  readSnapshotValue(value as Record<string, unknown>, filePath);
+}
+
+function readSnapshotValue(
+  parsed: Record<string, unknown>,
+  filePath: string,
+): MonarchMemoryStoreSnapshotV3 {
   if (!Array.isArray(parsed.records)) {
     throw new Error('memory store must contain records array.');
   }
@@ -380,6 +368,15 @@ function readSnapshot(raw: string, filePath: string): MonarchMemoryStoreSnapshot
     version: 3,
     records: parsed.records.map((record, index) => readRecord(record, filePath, index)),
   };
+}
+
+function replaceMemorySnapshotDocument(
+  document: Record<string, unknown>,
+  records: MonarchMemoryRecord[],
+): void {
+  for (const key of Object.keys(document)) delete document[key];
+  document.version = 3;
+  document.records = records;
 }
 
 function readLegacyRecord(record: unknown, filePath: string, index: number): MonarchMemoryRecord {
@@ -486,6 +483,11 @@ function cloneJsonValue(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value)) as unknown;
 }
 
+function cloneJsonResult<V>(value: V): V {
+  if (value === undefined) return value;
+  return JSON.parse(JSON.stringify(value)) as V;
+}
+
 function readRequiredString(
   record: Record<string, unknown>,
   key: keyof MonarchMemoryRecord,
@@ -517,37 +519,6 @@ function readOptionalNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-function isMissingFileError(error: unknown): boolean {
-  return Boolean(
-    error
-    && typeof error === 'object'
-    && 'code' in error
-    && (error as { code?: unknown }).code === 'ENOENT'
-  );
-}
-
-async function replaceFileWithRetry(source: string, destination: string): Promise<void> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await rename(source, destination);
-      return;
-    } catch (error) {
-      if (!isTransientReplaceError(error) || attempt >= 7) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 8 * (attempt + 1)));
-    }
-  }
-}
-
-function isTransientReplaceError(error: unknown): boolean {
-  if (!error || typeof error !== 'object' || !('code' in error)) {
-    return false;
-  }
-  const code = (error as { code?: unknown }).code;
-  return code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
-}
-
 function scoreRecord(record: MonarchMemoryRecord, terms: string[], haystack: string): number {
   const termScore = terms.reduce((score, term) => score + (haystack.includes(term) ? 2 : 0), 0);
   const exactScore = haystack.includes(terms.join(' ')) ? 3 : 0;
@@ -556,6 +527,17 @@ function scoreRecord(record: MonarchMemoryRecord, terms: string[], haystack: str
   const accessScore = Math.min(record.accessCount * 0.05, 0.5);
   const typeScore = record.type === 'project_decision' || record.type === 'architecture_note' ? 0.35 : 0;
   return termScore + exactScore + record.priority + tierScore + pinnedScore + accessScore + typeScore;
+}
+
+function listMemoryRecords(
+  records: MonarchMemoryRecord[],
+  limit: number,
+  filters: NormalizedMemorySearchFilters,
+): MonarchMemoryRecord[] {
+  return records
+    .filter((record) => memoryRecordMatchesFilters(record, filters))
+    .slice(-normalizeLimit(limit))
+    .reverse();
 }
 
 function normalizeLimit(limit: number): number {

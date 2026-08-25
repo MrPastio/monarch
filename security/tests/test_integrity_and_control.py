@@ -16,6 +16,11 @@ from monarch_security.config import load_config
 from monarch_security.control import protector_status, start_protector, stop_protector
 from monarch_security.events import utc_now
 from monarch_security.integrity import (
+    KEY_FILE_MAGIC,
+    IntegrityKeyAccessError,
+    IntegrityKeyProtectionError,
+    ProtectedDataResult,
+    _dpapi_protect,
     _read_key_file,
     get_or_create_key,
     hmac_sha256,
@@ -23,14 +28,153 @@ from monarch_security.integrity import (
     verify_payload,
 )
 from monarch_security.llm import LLMRouter
+from monarch_security.pin import SecurityPinManager
 from monarch_security.policy import PolicyEngine
-from monarch_security.profile import write_model_command_policy, write_security_profile
+from monarch_security.profile import read_security_profile, write_model_command_policy, write_security_profile
 from monarch_security.resources import ResourceGuard
 from monarch_security.state import FileLock, StateStore
 from monarch_security.supervisor import SecuritySupervisor
 
 
 class IntegrityAndControlTests(unittest.TestCase):
+    def test_new_integrity_key_uses_dpapi_envelope_and_reloads(self):
+        with TemporaryDirectory() as directory:
+            key_path = Path(directory) / "integrity.key"
+
+            first = get_or_create_key(key_path)
+            stored = key_path.read_bytes()
+            second = get_or_create_key(key_path)
+
+            self.assertEqual(len(first), 64)
+            self.assertTrue(stored.startswith(KEY_FILE_MAGIC))
+            self.assertNotIn(first, stored)
+            self.assertEqual(second, first)
+
+    def test_dpapi_protection_failure_leaves_no_key_file(self):
+        with TemporaryDirectory() as directory:
+            key_path = Path(directory) / "integrity.key"
+
+            with patch(
+                "monarch_security.integrity._dpapi_protect",
+                return_value=ProtectedDataResult(False, error="synthetic-dpapi-failure"),
+            ):
+                with self.assertRaisesRegex(
+                    IntegrityKeyProtectionError,
+                    "synthetic-dpapi-failure",
+                ):
+                    get_or_create_key(key_path)
+
+            self.assertFalse(key_path.exists())
+
+    def test_acl_failure_removes_only_new_key_file(self):
+        with TemporaryDirectory() as directory:
+            key_path = Path(directory) / "integrity.key"
+
+            with patch(
+                "monarch_security.integrity._set_and_verify_private_acl",
+                side_effect=IntegrityKeyAccessError("synthetic-acl-failure"),
+            ):
+                with self.assertRaisesRegex(
+                    IntegrityKeyAccessError,
+                    "synthetic-acl-failure",
+                ):
+                    get_or_create_key(key_path)
+
+            self.assertFalse(key_path.exists())
+
+    def test_existing_plaintext_key_is_migrated_without_changing_key(self):
+        with TemporaryDirectory() as directory:
+            key_path = Path(directory) / "integrity.key"
+            plaintext = b"a" * 64
+            key_path.write_bytes(plaintext + b"\n")
+
+            migrated = get_or_create_key(key_path)
+            stored = key_path.read_bytes()
+
+            self.assertEqual(migrated, plaintext)
+            self.assertTrue(stored.startswith(KEY_FILE_MAGIC))
+            self.assertNotIn(plaintext, stored)
+            self.assertEqual(get_or_create_key(key_path), plaintext)
+
+    def test_plaintext_migration_failure_preserves_original_key_file(self):
+        with TemporaryDirectory() as directory:
+            key_path = Path(directory) / "integrity.key"
+            original = b"c" * 64 + b"\n"
+            key_path.write_bytes(original)
+
+            with patch(
+                "monarch_security.integrity._dpapi_protect",
+                return_value=ProtectedDataResult(False, error="synthetic-migration-failure"),
+            ):
+                with self.assertRaisesRegex(
+                    IntegrityKeyProtectionError,
+                    "synthetic-migration-failure",
+                ):
+                    get_or_create_key(key_path)
+
+            self.assertEqual(key_path.read_bytes(), original)
+
+    def test_unprotect_failure_preserves_existing_envelope(self):
+        with TemporaryDirectory() as directory:
+            key_path = Path(directory) / "integrity.key"
+            envelope = KEY_FILE_MAGIC + b"synthetic-ciphertext"
+            key_path.write_bytes(envelope)
+
+            with patch(
+                "monarch_security.integrity._dpapi_unprotect",
+                return_value=ProtectedDataResult(False, error="synthetic-unprotect-failure"),
+            ):
+                with self.assertRaisesRegex(
+                    IntegrityKeyProtectionError,
+                    "synthetic-unprotect-failure",
+                ):
+                    get_or_create_key(key_path)
+
+            self.assertEqual(key_path.read_bytes(), envelope)
+
+    def test_legacy_raw_dpapi_blob_remains_readable(self):
+        with TemporaryDirectory() as directory:
+            key_path = Path(directory) / "integrity.key"
+            key = b"b" * 64
+            protected = _dpapi_protect(key)
+            self.assertTrue(protected.ok, protected.error)
+            self.assertIsNotNone(protected.data)
+            key_path.write_bytes(protected.data or b"")
+
+            self.assertEqual(get_or_create_key(key_path), key)
+
+    def test_hardlinked_integrity_key_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            key_path = root / "integrity.key"
+            linked_path = root / "integrity-linked.key"
+            get_or_create_key(key_path)
+            os.link(key_path, linked_path)
+
+            with self.assertRaisesRegex(
+                IntegrityKeyAccessError,
+                "integrity-key-must-be-one-unlinked-regular-file",
+            ):
+                get_or_create_key(key_path)
+
+    def test_audit_verification_reports_key_protection_failure(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            key_path = root / "integrity.key"
+            audit_path = root / "audit.jsonl"
+            key_path.write_bytes(KEY_FILE_MAGIC + b"synthetic-ciphertext")
+            audit_path.write_text("", encoding="utf-8")
+
+            with patch(
+                "monarch_security.integrity._dpapi_unprotect",
+                return_value=ProtectedDataResult(False, error="synthetic-unprotect-failure"),
+            ):
+                result = verify_audit_log(audit_path, key_path)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["records"], 0)
+            self.assertIn("synthetic-unprotect-failure", result["error"])
+
     def test_binary_dpapi_key_preserves_trailing_newline_bytes(self):
         with TemporaryDirectory() as directory:
             key_path = Path(directory) / "integrity.key"
@@ -430,7 +574,7 @@ class IntegrityAndControlTests(unittest.TestCase):
             ) as stop_mock, patch("monarch_security.cli.start_protector") as start_mock, contextlib.redirect_stdout(stream):
                 code = cli_main([
                     "--config", str(config_path), "model-policy-set",
-                    "--enabled", "false", "--confirmation", "always", "--confirm",
+                    "--enabled", "false", "--reaction", "observe", "--confirm",
                 ])
 
             self.assertEqual(code, 0)
@@ -440,21 +584,158 @@ class IntegrityAndControlTests(unittest.TestCase):
             self.assertTrue(payload["running"])
             self.assertTrue(payload["applied_live"])
             self.assertFalse(payload["restarted"])
+            self.assertEqual(payload["model_policy"]["action_guard_reaction"], "observe")
 
     def test_profile_off_rolls_back_if_running_protector_cannot_stop(self):
         with TemporaryDirectory() as directory:
             config_path = _temporary_config_path(Path(directory))
+            config = load_config(config_path)
+            SecurityPinManager(
+                config.runtime.security_pin_path,
+                config.runtime.integrity_key_path,
+            ).set_pin("483920")
+            request = json.dumps({
+                "pin": "483920",
+                "purpose": "security.profile.off",
+                "request_id": "05c94aac-a8f3-4a55-874c-1a92820ba32e",
+            })
             stream = StringIO()
             with patch("monarch_security.cli.protector_status", return_value={"running": True}), patch(
                 "monarch_security.cli.stop_protector", return_value={"running": True}
-            ), contextlib.redirect_stdout(stream):
-                code = cli_main(["--config", str(config_path), "profile-set", "--level", "off", "--confirm"])
+            ), patch("sys.stdin", StringIO(request)), contextlib.redirect_stdout(stream):
+                code = cli_main([
+                    "--config", str(config_path), "profile-set", "--level", "off",
+                    "--confirm", "--request-stdin",
+                ])
 
             self.assertEqual(code, 1)
             payload = json.loads([line for line in stream.getvalue().splitlines() if line.strip()][-1])
             self.assertEqual(payload["error"], "protection-stop-failed")
             self.assertTrue(payload["rolled_back"])
             self.assertEqual(payload["profile"]["level"], "balanced")
+
+    def test_profile_off_confirmation_without_pin_does_not_mutate_or_stop(self):
+        with TemporaryDirectory() as directory:
+            config_path = _temporary_config_path(Path(directory))
+            config = load_config(config_path)
+            SecurityPinManager(
+                config.runtime.security_pin_path,
+                config.runtime.integrity_key_path,
+            ).set_pin("483920")
+            stream = StringIO()
+            with patch("sys.stdin", StringIO("")), patch(
+                "monarch_security.cli.stop_protector"
+            ) as stop_mock, contextlib.redirect_stdout(stream):
+                code = cli_main([
+                    "--config", str(config_path), "profile-set", "--level", "off", "--confirm",
+                ])
+
+            payload = json.loads([line for line in stream.getvalue().splitlines() if line.strip()][-1])
+            self.assertEqual(code, 2)
+            self.assertEqual(payload["error"], "security-lifecycle-authorization-rejected")
+            self.assertEqual(read_security_profile(config).level, "balanced")
+            stop_mock.assert_not_called()
+
+    def test_stop_rejects_wrong_purpose_and_invalid_pin_without_signaling_control(self):
+        with TemporaryDirectory() as directory:
+            config_path = _temporary_config_path(Path(directory))
+            config = load_config(config_path)
+            manager = SecurityPinManager(
+                config.runtime.security_pin_path,
+                config.runtime.integrity_key_path,
+            )
+            manager.set_pin("483920")
+            cases = [
+                {
+                    "pin": "483920",
+                    "purpose": "security.profile.off",
+                    "request_id": "52adf495-f4b8-4ce2-bc86-cb70568ca423",
+                },
+                {
+                    "pin": "000000",
+                    "purpose": "security.protection.stop",
+                    "request_id": "b4b0c668-b52f-4dfd-91c5-f65749bb31b6",
+                },
+            ]
+            with patch("monarch_security.cli.stop_protector") as stop_mock:
+                for request in cases:
+                    stream = StringIO()
+                    with patch("sys.stdin", StringIO(json.dumps(request))), contextlib.redirect_stdout(stream):
+                        code = cli_main([
+                            "--config", str(config_path), "stop", "--wait", "0",
+                            "--confirm", "--request-stdin",
+                        ])
+                    self.assertEqual(code, 2, request)
+                    payload = json.loads([line for line in stream.getvalue().splitlines() if line.strip()][-1])
+                    self.assertEqual(payload["error"], "security-lifecycle-authorization-rejected")
+                stop_mock.assert_not_called()
+            self.assertEqual(manager.status()["failed_attempts"], 1)
+
+    def test_stop_accepts_exact_stdin_authorization_once_and_never_echoes_pin(self):
+        with TemporaryDirectory() as directory:
+            config_path = _temporary_config_path(Path(directory))
+            config = load_config(config_path)
+            SecurityPinManager(
+                config.runtime.security_pin_path,
+                config.runtime.integrity_key_path,
+            ).set_pin("483920")
+            request = {
+                "pin": "483920",
+                "purpose": "security.protection.stop",
+                "request_id": "dc7eefbf-7230-421c-99b9-dc51dbcbed50",
+            }
+            outputs: list[str] = []
+            with patch(
+                "monarch_security.cli.stop_protector",
+                return_value={"running": False, "stop_requested": True},
+            ) as stop_mock:
+                for expected_code in (0, 2):
+                    stream = StringIO()
+                    with patch("sys.stdin", StringIO(json.dumps(request))), contextlib.redirect_stdout(stream):
+                        code = cli_main([
+                            "--config", str(config_path), "stop", "--wait", "0",
+                            "--confirm", "--request-stdin",
+                        ])
+                    self.assertEqual(code, expected_code)
+                    outputs.append(stream.getvalue())
+
+            self.assertEqual(stop_mock.call_count, 1)
+            first = json.loads([line for line in outputs[0].splitlines() if line.strip()][-1])
+            second = json.loads([line for line in outputs[1].splitlines() if line.strip()][-1])
+            self.assertTrue(first["authenticated"])
+            self.assertEqual(first["authorization_request_id"], request["request_id"])
+            self.assertEqual(second["error"], "security-lifecycle-authorization-rejected")
+            self.assertIn("already consumed", second["detail"])
+            self.assertNotIn("483920", "".join(outputs))
+            self.assertNotIn("483920", config.runtime.audit_log_path.read_text(encoding="utf-8"))
+
+    def test_lifecycle_stdin_rejects_oversized_payload_before_action(self):
+        with TemporaryDirectory() as directory:
+            config_path = _temporary_config_path(Path(directory))
+            stream = StringIO()
+            with patch("sys.stdin", StringIO("x" * 4097)), patch(
+                "monarch_security.cli.stop_protector"
+            ) as stop_mock, contextlib.redirect_stdout(stream):
+                code = cli_main([
+                    "--config", str(config_path), "stop", "--confirm", "--request-stdin",
+                ])
+
+            self.assertEqual(code, 2)
+            self.assertIn("exceeds 4096", stream.getvalue())
+            stop_mock.assert_not_called()
+
+    def test_non_off_profile_change_does_not_require_pin_transport(self):
+        with TemporaryDirectory() as directory:
+            config_path = _temporary_config_path(Path(directory))
+            config = load_config(config_path)
+
+            result = _run_cli_json(config_path, [
+                "profile-set", "--level", "maximum", "--confirm",
+            ])
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["profile"]["level"], "maximum")
+            self.assertFalse(config.runtime.security_pin_path.exists())
 
     def test_stop_protector_does_not_create_stop_file_when_not_running(self):
         with TemporaryDirectory() as directory:
@@ -822,6 +1103,38 @@ class IntegrityAndControlTests(unittest.TestCase):
             self.assertEqual(rejected["status"], "invalid_request")
             self.assertEqual(rejected["decision"]["action"], "block")
 
+    def test_check_action_accepts_request_from_configured_security_data_root(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime_root = root / "runtime"
+            runtime_root.mkdir()
+            config_path = _temporary_config_path(runtime_root)
+            data_root = root / "external-security-data"
+            request_dir = data_root / "action-requests"
+            request_dir.mkdir(parents=True)
+            request_path = request_dir / "request.json"
+            request_path.write_text(
+                json.dumps({
+                    "intent_text": "создай файл",
+                    "action_module": "workspace",
+                    "action_capability": "workspace.known-folder.write",
+                    "action_input": {"knownFolder": "desktop", "basename": "ромашка.txt"},
+                    "action_risk": "write",
+                    "passkey": "",
+                    "no_llm": True,
+                }),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"MONARCH_SECURITY_DATA_ROOT": str(data_root)}):
+                result = _run_cli_json(config_path, [
+                    "check-action",
+                    "--request-file",
+                    str(request_path),
+                ])
+
+            self.assertNotEqual(result["status"], "invalid_request", result)
+
     def test_check_action_respects_permanent_blocklist(self):
         with TemporaryDirectory() as directory:
             config_path = _temporary_config_path(Path(directory))
@@ -949,6 +1262,55 @@ class IntegrityAndControlTests(unittest.TestCase):
             )
             self.assertFalse(network["ok"])
             self.assertEqual(network["status"], "approval_required")
+
+    def test_check_action_denies_unknown_capability_instead_of_failing_open(self):
+        with TemporaryDirectory() as directory:
+            config_path = _temporary_config_path(Path(directory))
+
+            payload = _run_cli_json(
+                config_path,
+                [
+                    "check-action",
+                    "--intent-text",
+                    "show device status",
+                    "--action-module",
+                    "device",
+                    "--action-capability",
+                    "device.invented.root",
+                    "--action-input",
+                    '{}',
+                    "--no-llm",
+                ],
+            )
+
+            self.assertFalse(payload["ok"], payload)
+            self.assertEqual(payload["status"], "unregistered_capability")
+            self.assertEqual(payload["risk"], "blocked")
+            self.assertEqual(payload["decision"]["action"], "block")
+            self.assertNotIn("passkey", payload)
+
+            request_dir = Path(directory) / "data" / "action-requests"
+            request_dir.mkdir(parents=True, exist_ok=True)
+            request_path = request_dir / "forged-risk.json"
+            request_path.write_text(
+                json.dumps({
+                    "intent_text": "show device status",
+                    "action_module": "device",
+                    "action_capability": "device.invented.root",
+                    "action_input": {},
+                    "action_risk": "read",
+                    "no_llm": True,
+                }),
+                encoding="utf-8",
+            )
+            forged_risk = _run_cli_json(
+                config_path,
+                ["check-action", "--request-file", str(request_path)],
+            )
+
+            self.assertFalse(forged_risk["ok"], forged_risk)
+            self.assertEqual(forged_risk["status"], "unregistered_capability")
+            self.assertEqual(forged_risk["decision"]["action"], "block")
 
     def test_custom_tools_blocklist_keeps_safe_registered_tools_available(self):
         with TemporaryDirectory() as directory:

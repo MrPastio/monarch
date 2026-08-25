@@ -45,5 +45,5 @@ export function decideAgentRecovery(input: AgentRecoveryPolicyInput): AgentRecov
 }
 
 function isRuntimeError(error: string | undefined): boolean {
-  return /(?:runtime|model).*(?:unavailable|starting|stopped|timeout)|connection-refused/i.test(error || '');
+  return /(?:runtime|model).*(?:unavailable|starting|stopped|timeout|busy|overloaded)|connection-refused/i.test(error || '');
 }

@@ -10,7 +10,7 @@ function intent(text: string): any {
 }
 
 function voiceModule(): VoiceModule {
-  return new VoiceModule({} as any, {} as any);
+  return new VoiceModule({} as any);
 }
 
 describe('semantic vocabulary does not steal ordinary chat', () => {

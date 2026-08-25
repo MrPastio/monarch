@@ -26,12 +26,75 @@ export type MonarchPermissionMode = 'allow' | 'confirm' | 'deny';
 export type MonarchSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type MonarchApprovalPolicy = 'on-request' | 'never';
 export type MonarchAutonomyMode = 'guided' | 'workspace-autonomous' | 'full-local';
+export type MonarchActionGuardReaction = 'observe' | 'guard' | 'confirm-all';
+export type MonarchAgentSecurityMode = 'off' | 'observe' | 'guard' | 'strict';
+export type MonarchAgentDangerBand = 'minimal' | 'low' | 'elevated' | 'high' | 'critical';
+export type MonarchAgentDangerResponse = 'allow' | 'observe' | 'enhanced-readback' | 'confirm' | 'block' | 'owner-override';
+export type MonarchOwnerOverrideLifetime = 'task' | 'session' | 'persistent';
+export type MonarchShellApprovalPolicy = 'always' | 'risk-based' | 'never';
+
+export interface MonarchAgentDangerFactorV1 {
+  score: number;
+  reason: string;
+}
+
+export interface AgentDangerAssessmentV1 {
+  schemaVersion: 'monarch.agent-danger-assessment.v1';
+  dangerProbability: number;
+  assessmentConfidence: number;
+  band: MonarchAgentDangerBand;
+  factors: {
+    effect: MonarchAgentDangerFactorV1;
+    scope: MonarchAgentDangerFactorV1;
+    reversibility: MonarchAgentDangerFactorV1;
+    privilege: MonarchAgentDangerFactorV1;
+    dataSensitivity: MonarchAgentDangerFactorV1;
+    externality: MonarchAgentDangerFactorV1;
+    novelty: MonarchAgentDangerFactorV1;
+    ambiguity: MonarchAgentDangerFactorV1;
+    blastRadius: MonarchAgentDangerFactorV1;
+    targetFreshness: MonarchAgentDangerFactorV1;
+    requestAlignment: MonarchAgentDangerFactorV1;
+  };
+}
+
+/** Runtime-owned state. It is never accepted from a model/tool/API payload. */
+export interface MonarchOwnerUnrestrictedOverride {
+  enabled: boolean;
+  lifetime: MonarchOwnerOverrideLifetime;
+  taskId?: string;
+  shellApprovalPolicy: MonarchShellApprovalPolicy;
+  activatedAt?: string;
+}
 
 export interface MonarchPermissionProfile {
   sandboxMode: MonarchSandboxMode;
   approvalPolicy: MonarchApprovalPolicy;
   autonomyMode?: MonarchAutonomyMode;
 }
+
+export type MonarchAuthorityTier = 'public' | 'owner';
+export type MonarchAuthoritySource = 'default' | 'signed-device-entitlement';
+
+export interface MonarchAuthorityContext {
+  tier: MonarchAuthorityTier;
+  source: MonarchAuthoritySource;
+  entitlementId: string | null;
+  keyId: string | null;
+  verifiedAt: string | null;
+  deviceIdPrefix: string | null;
+  diagnostic: string | null;
+}
+
+export const MONARCH_PUBLIC_AUTHORITY_CONTEXT: MonarchAuthorityContext = Object.freeze({
+  tier: 'public',
+  source: 'default',
+  entitlementId: null,
+  keyId: null,
+  verifiedAt: null,
+  deviceIdPrefix: null,
+  diagnostic: 'owner-entitlement-absent',
+});
 
 export type MonarchModuleStatus =
   | 'registered'
@@ -124,6 +187,32 @@ export interface MonarchAgentCapabilityVerificationDescriptor {
   predicate?: MonarchActionPredicate;
 }
 
+export type MonarchAgentCapabilityReconciliationAssertion =
+  | 'equals-source-input'
+  | 'equals-baseline-plus-source-input'
+  | 'ends-with-source-input'
+  | 'contains-source-input';
+
+/**
+ * Capability-owned recovery contract for an indeterminate mutation result.
+ * The Agent Runtime may execute only the declared read-only capability, with
+ * inputs compiled from the original action input, before it considers any
+ * repeat of the mutation.
+ */
+export interface MonarchAgentCapabilityReconciliationDescriptor {
+  capabilityId: string;
+  inputBindings: Record<string, string>;
+  constantInput?: Record<string, string | number | boolean>;
+  requiresPreActionBaseline?: boolean;
+  targetInputKey: string;
+  observationTargetPath: string;
+  assertion: {
+    kind: MonarchAgentCapabilityReconciliationAssertion;
+    observationPath: string;
+    sourceInputKey: string;
+  };
+}
+
 export interface MonarchCapabilityEffectProfile {
   mutation: 'none' | 'temporary' | 'persistent';
   targetScope: 'agent-state' | 'workspace' | 'project' | 'application' | 'device' | 'external-service';
@@ -151,6 +240,7 @@ export interface MonarchAgentCapabilityMetadataInput {
   computeClass?: MonarchAgentCapabilityComputeClass;
   cancellation?: MonarchAgentCapabilityCancellation;
   verification?: MonarchAgentCapabilityVerificationDescriptor[];
+  reconciliation?: MonarchAgentCapabilityReconciliationDescriptor;
   examples?: unknown[];
 }
 
@@ -168,6 +258,7 @@ export interface MonarchResolvedAgentCapabilityMetadata {
   computeClass: MonarchAgentCapabilityComputeClass;
   cancellation: MonarchAgentCapabilityCancellation;
   verification: MonarchAgentCapabilityVerificationDescriptor[];
+  reconciliation?: MonarchAgentCapabilityReconciliationDescriptor;
   examples: unknown[];
   source: 'explicit' | 'legacy-default';
 }
@@ -275,7 +366,8 @@ export type MonarchModelRouteRole =
   | 'vision'
   | 'gemma4-fast'
   | 'gemma4-balanced'
-  | 'gemma4-deepthinking';
+  | 'gemma4-deepthinking'
+  | 'qwen3.8-27b-pro';
 
 export interface MonarchIntentClassification {
   kind: MonarchIntentKind;
@@ -526,6 +618,17 @@ export type MonarchActionPredicateJsonValue =
   | MonarchActionPredicateJsonValue[]
   | { [key: string]: MonarchActionPredicateJsonValue };
 
+/**
+ * Kernel-owned, JSON-safe context resolved from live module state immediately
+ * before Security reviews an action. It is never accepted from a model action
+ * proposal and is intentionally kept outside the canonical action input.
+ */
+export interface MonarchTrustedActionContext {
+  schemaVersion: 1;
+  sourceModuleId: string;
+  target: { [key: string]: MonarchActionPredicateJsonValue };
+}
+
 export type MonarchActionPredicate =
   | { kind: 'exists' | 'not-exists'; target: string; value?: never }
   | { kind: 'equals'; target: string; value: MonarchActionPredicateJsonValue }
@@ -604,6 +707,12 @@ export interface MonarchPolicyDecision {
   requiresSecurityReview: boolean;
   leaseId?: string;
   securityOverride?: boolean;
+  /** A hidden local Owner override was active for this exact request. */
+  ownerUnrestrictedOverride?: boolean;
+  dangerAssessment?: AgentDangerAssessmentV1;
+  dangerResponse?: MonarchAgentDangerResponse;
+  authorityTier: MonarchAuthorityTier;
+  policyDecisionHash: string;
 }
 
 export interface MonarchCapabilityLeaseBudgets {
@@ -760,8 +869,16 @@ export interface MonarchExecutionRequest {
   source?: MonarchAgentCapabilitySource;
   confirmed?: boolean;
   securityOverrideConfirmed?: boolean;
+  /** Internal durable approval policy binding; never accepted from HTTP JSON. */
+  approvalPolicyDecisionHash?: string;
+  /** Internal durable approval purpose; never accepted from HTTP JSON. */
+  approvalPurpose?: 'policy' | 'owner-security-override';
+  /** Authority tier captured by the durable approval. */
+  authorityTierAtApproval?: MonarchAuthorityTier;
   proposalId?: string;
   proposalHash?: string;
+  /** Kernel-authored proposal provenance. HTTP callers never populate this field directly. */
+  proposalSource?: MonarchActionProposalProvenance['source'];
   intentHash?: string;
   idempotencyKey?: string;
   leaseId?: string;
@@ -776,6 +893,8 @@ export interface MonarchExecutionRequest {
   executionMode?: 'coder' | 'agent-runtime';
   /** Internal-only scoped profile used by trusted controllers, never copied from API input. */
   permissionProfileOverride?: MonarchPermissionProfile;
+  /** Ephemeral Kernel-authored dispatch flag; never accepted from HTTP, tools, or model output. */
+  ownerUnrestrictedExecution?: boolean;
 }
 
 /**
@@ -861,6 +980,11 @@ export interface MonarchModule {
     capability: MonarchCapability,
     context: MonarchKernelContext
   ): Promise<MonarchRisk | undefined> | MonarchRisk | undefined;
+  resolveSecurityActionContext?(
+    request: MonarchExecutionRequest,
+    capability: MonarchCapability,
+    context: MonarchKernelContext
+  ): Promise<MonarchTrustedActionContext | undefined> | MonarchTrustedActionContext | undefined;
   handleIntent?(
     intent: MonarchIntent,
     context: MonarchKernelContext

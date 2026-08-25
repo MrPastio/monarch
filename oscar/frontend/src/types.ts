@@ -83,6 +83,9 @@ export interface ChatRoutePreview {
   projected_ram_available_gb?: number | null;
   ram_warning?: 'none' | 'caution' | 'critical';
   ram_warning_message?: string | null;
+  configured_context_tokens?: number | null;
+  effective_context_tokens?: number | null;
+  adaptive_context_applied?: boolean;
 }
 
 export interface MemoryStats {

@@ -27,6 +27,10 @@ const WORKSPACE_REVERSIBLE_CAPABILITIES = [
   'workspace.files.restore',
 ] as const;
 
+export function supportsWorkspaceTaskLease(capabilityId: string): boolean {
+  return (WORKSPACE_REVERSIBLE_CAPABILITIES as readonly string[]).includes(capabilityId);
+}
+
 export interface IssueCapabilityLeaseOptions {
   intentHash: string;
   capabilities: string[];
@@ -87,13 +91,14 @@ export class MonarchCapabilityLeaseStore {
       status: 'active',
     };
     if (lease.capabilities.length === 0) throw new Error('Capability lease requires at least one capability.');
-    this.leases.set(lease.leaseId, lease);
-    this.persist();
-    return cloneLease(lease);
+    return this.commit(() => {
+      this.leases.set(lease.leaseId, lease);
+      return cloneLease(lease);
+    });
   }
 
   issueForProposal(proposal: MonarchActionProposalV1): MonarchCapabilityLeaseV1 {
-    const isReversibleWorkspace = proposal.capabilityId.startsWith('workspace.')
+    const isReversibleWorkspace = supportsWorkspaceTaskLease(proposal.capabilityId)
       && proposal.riskVector.effect !== 'delete'
       && proposal.riskVector.reversibility !== 'irreversible';
     return this.issue({
@@ -137,23 +142,25 @@ export class MonarchCapabilityLeaseStore {
   recordUse(leaseId: string, request: MonarchExecutionRequest, riskVector: MonarchRiskVector): MonarchCapabilityLeaseV1 | null {
     const lease = this.leases.get(leaseId);
     if (!lease || lease.status !== 'active') return null;
-    const cost = actionCost(request, riskVector);
-    lease.usage.actions += cost.actions;
-    lease.usage.files += cost.files;
-    lease.usage.bytesWritten += cost.bytesWritten;
-    lease.usage.deletes += cost.deletes;
-    lease.usage.networkRequests += cost.networkRequests;
-    if (!withinBudgets(lease.budgets, lease.usage)) lease.status = 'exhausted';
-    this.persist();
-    return cloneLease(lease);
+    return this.commit(() => {
+      const cost = actionCost(request, riskVector);
+      lease.usage.actions += cost.actions;
+      lease.usage.files += cost.files;
+      lease.usage.bytesWritten += cost.bytesWritten;
+      lease.usage.deletes += cost.deletes;
+      lease.usage.networkRequests += cost.networkRequests;
+      if (!withinBudgets(lease.budgets, lease.usage)) lease.status = 'exhausted';
+      return cloneLease(lease);
+    });
   }
 
   revoke(leaseId: string): MonarchCapabilityLeaseV1 | null {
     const lease = this.leases.get(leaseId);
     if (!lease) return null;
-    lease.status = 'revoked';
-    this.persist();
-    return cloneLease(lease);
+    return this.commit(() => {
+      lease.status = 'revoked';
+      return cloneLease(lease);
+    });
   }
 
   get(leaseId: string): MonarchCapabilityLeaseV1 | null {
@@ -172,14 +179,16 @@ export class MonarchCapabilityLeaseStore {
 
   private refreshStatuses(): void {
     const now = Date.now();
-    let changed = false;
-    for (const lease of this.leases.values()) {
-      if (lease.status === 'active' && Date.parse(lease.expiresAt) <= now) {
-        lease.status = 'expired';
-        changed = true;
+    const expiredIds = [...this.leases.values()]
+      .filter((lease) => lease.status === 'active' && Date.parse(lease.expiresAt) <= now)
+      .map((lease) => lease.leaseId);
+    if (expiredIds.length === 0) return;
+    this.commit(() => {
+      for (const leaseId of expiredIds) {
+        const lease = this.leases.get(leaseId);
+        if (lease?.status === 'active') lease.status = 'expired';
       }
-    }
-    if (changed) this.persist();
+    });
   }
 
   private restore(): void {
@@ -199,6 +208,21 @@ export class MonarchCapabilityLeaseStore {
       version: 1,
       leases: [...this.leases.values()].slice(-500).map(cloneLease),
     } satisfies PersistedCapabilityLeasesV1);
+  }
+
+  private commit<R>(mutation: () => R): R {
+    const previous = new Map(
+      [...this.leases.entries()].map(([leaseId, lease]) => [leaseId, cloneLease(lease)]),
+    );
+    try {
+      const result = mutation();
+      this.persist();
+      return result;
+    } catch (error) {
+      this.leases.clear();
+      for (const [leaseId, lease] of previous) this.leases.set(leaseId, lease);
+      throw error;
+    }
   }
 }
 

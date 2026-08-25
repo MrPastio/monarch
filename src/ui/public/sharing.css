@@ -210,6 +210,11 @@
   .nav-item[data-scroll-target="models-section"] { display: none; }
 }
 
+.sharing-workflow-connection,
+.sharing-workflow-examples { grid-template-columns: minmax(0, 1fr); }
+
+.sharing-tab-stage { min-width: 0; }
+
 @media (prefers-reduced-motion: reduce) {
   .sharing-status-card,
   .sharing-status-card::after { animation: none !important; transition: none !important; }

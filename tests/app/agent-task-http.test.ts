@@ -143,12 +143,10 @@ describe('Agent Task API v1', () => {
           body: JSON.stringify({ version: 1, autoStart: false }),
         },
       );
-      expect(apiRepeatedDesktop.status).toBe(202);
+      expect(apiRepeatedDesktop.status).toBe(404);
       await expect(apiRepeatedDesktop.json()).resolves.toMatchObject({
-        task: {
-          parentTaskId: desktopOriginal.task.id,
-          source: { surface: 'api', remote: true },
-        },
+        version: 1,
+        error: 'task-not-found',
       });
       expect(repeated.task.approvals).toEqual([]);
     } finally {
@@ -156,6 +154,111 @@ describe('Agent Task API v1', () => {
       await app.stop();
     }
   }, 30_000);
+
+  it('resolves an Incognito task by id without exposing it in the persistent task list', async () => {
+    const { app, server, baseUrl } = await setup(true);
+    try {
+      const volatile = await app.incognitoAgentRuntime!.createTask({
+        request: 'Plan a disposable Incognito operation.',
+        source: { surface: 'desktop', remote: false },
+        planningMode: 'model-first',
+        autoStart: false,
+      });
+
+      const externalAttempt = await fetch(`${baseUrl}/api/agent/tasks/${volatile.task.id}`);
+      expect(externalAttempt.status).toBe(404);
+
+      const detail = await fetch(`${baseUrl}/api/agent/tasks/${volatile.task.id}`, {
+        headers: {
+          Origin: 'http://127.0.0.1:4317',
+          'X-Monarch-Desktop-Attestation': 'agent-http-desktop-test-token',
+        },
+      });
+      expect(detail.status).toBe(200);
+      await expect(detail.json()).resolves.toMatchObject({
+        checkpoint: { task: { id: volatile.task.id, planningMode: 'model-first' } },
+      });
+
+      const list = await fetch(`${baseUrl}/api/agent/tasks`);
+      expect(list.status).toBe(200);
+      const body = await list.json() as { tasks: Array<{ id: string }> };
+      expect(body.tasks.some((task) => task.id === volatile.task.id)).toBe(false);
+      await app.stop();
+      expect(await app.incognitoAgentRuntime!.store.listTasks()).toEqual([]);
+    } finally {
+      await close(server);
+      await app.stop();
+    }
+  });
+
+  it.each([
+    ['public API principal', false],
+    ['API-token principal', true],
+  ])('keeps persistent Desktop checkpoints private from a %s while retaining local Desktop access', async (_label, requireApiToken) => {
+    const { app, server, baseUrl } = await setup(true, new ReplayAgentDecisionProvider([]), requireApiToken);
+    const apiHeaders = requireApiToken
+      ? { 'X-Monarch-Session': 'agent-http-test-token' }
+      : {};
+    const desktopHeaders = {
+      Origin: 'http://127.0.0.1:4317',
+      'X-Monarch-Desktop-Attestation': 'agent-http-desktop-test-token',
+    };
+    try {
+      const desktopTask = await app.createAgentTask({
+        request: 'Keep this local Desktop checkpoint private.',
+        source: { surface: 'desktop', remote: false },
+        autoStart: false,
+      });
+      const apiTask = await app.createAgentTask({
+        request: 'Keep this API checkpoint visible to its API principal.',
+        source: { surface: 'api', remote: true },
+        autoStart: false,
+      });
+
+      const publicList = await fetch(`${baseUrl}/api/agent/tasks`, { headers: apiHeaders });
+      expect(publicList.status).toBe(200);
+      const publicListBody = await publicList.json() as { tasks: Array<{ id: string }> };
+      expect(publicListBody.tasks.map((task) => task.id)).toContain(apiTask.task.id);
+      expect(publicListBody.tasks.map((task) => task.id)).not.toContain(desktopTask.task.id);
+
+      for (const suffix of ['', '/events?format=json']) {
+        const response = await fetch(`${baseUrl}/api/agent/tasks/${desktopTask.task.id}${suffix}`, {
+          headers: apiHeaders,
+        });
+        expect(response.status, suffix || 'checkpoint').toBe(404);
+        await expect(response.json()).resolves.toMatchObject({ version: 1, error: 'task-not-found' });
+      }
+
+      const publicCancel = await fetch(`${baseUrl}/api/agent/tasks/${desktopTask.task.id}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...apiHeaders },
+        body: JSON.stringify({ version: 1 }),
+      });
+      expect(publicCancel.status).toBe(404);
+      expect((await app.agentRuntime!.getTask(desktopTask.task.id))?.task.status).toBe('created');
+
+      const desktopList = await fetch(`${baseUrl}/api/agent/tasks`, { headers: desktopHeaders });
+      const desktopListBody = await desktopList.json() as { tasks: Array<{ id: string }> };
+      expect(desktopListBody.tasks.map((task) => task.id)).toEqual(expect.arrayContaining([
+        desktopTask.task.id,
+        apiTask.task.id,
+      ]));
+
+      const desktopDetail = await fetch(`${baseUrl}/api/agent/tasks/${desktopTask.task.id}`, {
+        headers: desktopHeaders,
+      });
+      expect(desktopDetail.status).toBe(200);
+      await expect(desktopDetail.json()).resolves.toMatchObject({
+        checkpoint: { task: { id: desktopTask.task.id, source: { surface: 'desktop' } } },
+      });
+
+      const apiDetail = await fetch(`${baseUrl}/api/agent/tasks/${apiTask.task.id}`, { headers: apiHeaders });
+      expect(apiDetail.status).toBe(200);
+    } finally {
+      await close(server);
+      await app.stop();
+    }
+  });
 
   it('rejects privileged HTTP source spoofing and accepts desktop only from the trusted loopback UI origin', async () => {
     const { app, server, baseUrl } = await setup(true);
@@ -256,6 +359,17 @@ describe('Agent Task API v1', () => {
       const invalidBodies: Array<Record<string, unknown>> = [
         { version: 1, request: 'Invalid client id.', clientRequestId: 42 },
         { version: 1, request: 'Invalid auto start.', autoStart: 'false' },
+        {
+          version: 1,
+          request: 'Public API cannot inject a trusted Coder execution profile.',
+          executionProfile: {
+            schemaVersion: 'monarch.agent-execution-profile.v1',
+            kind: 'coder-project',
+            projectId: 'forged-project',
+            projectRoot: 'E:\\ForgedProject',
+            permissionProfile: { sandboxMode: 'danger-full-access', approvalPolicy: 'never' },
+          },
+        },
         { version: 1, request: 'Invalid output container.', expectedOutputs: {} },
         {
           version: 1,

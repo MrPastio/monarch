@@ -5,6 +5,9 @@ vendor/
 
 # Global binary and build ignores
 *.dll
+!installer/runtime-dependencies/
+!installer/runtime-dependencies/windows-x64/
+!installer/runtime-dependencies/windows-x64/*.dll
 *.exe
 *.zip
 *.pdb
@@ -125,6 +128,8 @@ security/src/*.egg-info/
 /installer/out-*/
 /.monarch-public-snapshot
 /.tmp/
+/.codex-tmp/
+/.test-tmp/
 
 # OS / editor
 .vscode/

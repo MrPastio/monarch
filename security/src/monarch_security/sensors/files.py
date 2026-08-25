@@ -73,7 +73,10 @@ SCRIPT_MARKERS = {
     "wget ": "wget download utility",
 }
 
-ARCHIVE_SCAN_MAX_ENTRIES = 200
+ARCHIVE_METADATA_MAX_ENTRIES = 4096
+ARCHIVE_CENTRAL_DIRECTORY_MAX_BYTES = 4 * 1024 * 1024
+ARCHIVE_EOCD_MAX_BYTES = 22 + 65_535
+ARCHIVE_NAME_MAX_CHARS = 512
 ARCHIVE_EXECUTABLE_EXTENSIONS = {
     ".bat",
     ".cmd",
@@ -123,6 +126,12 @@ PE_SUBSYSTEM_NAMES = {
     16: "windows_boot_application",
 }
 
+PE_MAX_SECTIONS = 96
+PE_MAX_OPTIONAL_HEADER_BYTES = 4096
+PE_SECTION_HEADER_BYTES = 40
+PE_SECTION_SAMPLE_MAX_BYTES = HASH_SAMPLE_BYTES
+PE_SECTION_SAMPLE_TOTAL_BYTES = 8 * 1024 * 1024
+
 BASE64_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{96,}={0,2}")
 URL_RE = re.compile(r"https?://", re.IGNORECASE)
 
@@ -132,6 +141,13 @@ class FileScanner:
         self.config = config
 
     def inspect(self, path: Path) -> SecurityEvent:
+        from monarch_security.file_parser_worker import inspect_file_isolated
+
+        return inspect_file_isolated(path, self.config)
+
+    def _inspect_local(self, path: Path) -> SecurityEvent:
+        if os.environ.get("MONARCH_SECURITY_FILE_PARSER_WORKER") != "1":
+            raise RuntimeError("local file inspection is reserved for the isolated parser worker")
         resolved = path.resolve()
         stat = resolved.stat()
         facts = {
@@ -211,23 +227,43 @@ class FileScanner:
     def _archive_facts(self, path: Path) -> dict[str, Any]:
         facts: dict[str, Any] = {
             "archive_entry_count": 0,
+            "archive_entries_scanned": 0,
+            "archive_entries_truncated": False,
             "archive_executable_entries": [],
             "archive_double_extension_entries": [],
             "archive_macro_indicators": [],
         }
+        metadata = _zip_directory_metadata(path)
+        facts.update(metadata)
+        if metadata.get("archive_metadata_budget_exceeded"):
+            return facts
+        if metadata.get("archive_error"):
+            return facts
         try:
             with zipfile.ZipFile(path) as archive:
-                infos = archive.infolist()[:ARCHIVE_SCAN_MAX_ENTRIES]
-        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
-            facts["archive_error"] = str(exc)
+                infos = archive.infolist()
+        except (OSError, RuntimeError, ValueError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+            facts["archive_error"] = _bounded_text(str(exc))
+            return facts
+
+        if len(infos) > ARCHIVE_METADATA_MAX_ENTRIES:
+            facts.update(
+                {
+                    "archive_entry_count": len(infos),
+                    "archive_entries_truncated": True,
+                    "archive_metadata_budget_exceeded": True,
+                    "archive_error": "ZIP entry count exceeds parser budget",
+                }
+            )
             return facts
 
         executable_entries: list[str] = []
         double_extension_entries: list[str] = []
         macro_indicators: list[str] = []
         for info in infos:
-            name = info.filename.replace("\\", "/")
-            lower_name = name.lower()
+            full_name = info.filename.replace("\\", "/")
+            name = _bounded_archive_name(full_name)
+            lower_name = full_name.lower()
             entry_path = Path(lower_name)
             suffixes = [suffix.lower() for suffix in entry_path.suffixes]
             if suffixes and suffixes[-1] in ARCHIVE_EXECUTABLE_EXTENSIONS:
@@ -240,7 +276,8 @@ class FileScanner:
         facts.update(
             {
                 "archive_entry_count": len(infos),
-                "archive_entries_truncated": len(infos) >= ARCHIVE_SCAN_MAX_ENTRIES,
+                "archive_entries_scanned": len(infos),
+                "archive_entries_truncated": False,
                 "archive_executable_entries": executable_entries[:20],
                 "archive_double_extension_entries": double_extension_entries[:20],
                 "archive_macro_indicators": macro_indicators[:20],
@@ -342,38 +379,86 @@ class FileScanner:
                     characteristics,
                 ) = struct.unpack_from("<HHIIIHH", pe_header, 4)
 
+                facts.update(
+                    {
+                        "pe_machine": PE_MACHINE_NAMES.get(machine, hex(machine)),
+                        "pe_section_count": section_count,
+                        "pe_timestamp": timestamp,
+                        "pe_characteristics": characteristics,
+                        "pe_section_limit": PE_MAX_SECTIONS,
+                        "pe_section_sample_limit_bytes": PE_SECTION_SAMPLE_TOTAL_BYTES,
+                    }
+                )
+                if section_count > PE_MAX_SECTIONS:
+                    facts.update(
+                        {
+                            "pe_metadata_budget_exceeded": True,
+                            "pe_error": "PE section count exceeds parser budget",
+                        }
+                    )
+                    return facts
+                if optional_header_size > PE_MAX_OPTIONAL_HEADER_BYTES:
+                    facts.update(
+                        {
+                            "pe_metadata_budget_exceeded": True,
+                            "pe_error": "PE optional header exceeds parser budget",
+                        }
+                    )
+                    return facts
+
                 optional = handle.read(optional_header_size)
+                if len(optional) != optional_header_size:
+                    facts["pe_error"] = "truncated PE optional header"
+                    return facts
                 subsystem = None
                 optional_magic = None
                 if len(optional) >= 70:
                     optional_magic = struct.unpack_from("<H", optional, 0)[0]
                     subsystem = struct.unpack_from("<H", optional, 68)[0]
 
-                sections = []
+                sections: list[dict[str, Any]] = []
                 max_section_entropy = None
-                section_table = handle.read(max(0, section_count) * 40)
+                expected_table_bytes = section_count * PE_SECTION_HEADER_BYTES
+                section_table = handle.read(expected_table_bytes)
+                if len(section_table) != expected_table_bytes:
+                    facts["pe_error"] = "truncated PE section table"
+                    return facts
+                sampled_section_bytes = 0
+                entropy_truncated = False
                 for index in range(section_count):
-                    offset = index * 40
-                    if offset + 40 > len(section_table):
-                        break
-                    entry = section_table[offset : offset + 40]
+                    offset = index * PE_SECTION_HEADER_BYTES
+                    entry = section_table[offset : offset + PE_SECTION_HEADER_BYTES]
                     name = entry[:8].rstrip(b"\x00").decode("ascii", errors="replace")
                     raw_size = struct.unpack_from("<I", entry, 16)[0]
                     raw_pointer = struct.unpack_from("<I", entry, 20)[0]
-                    entropy = _section_entropy(handle, raw_pointer, raw_size)
+                    remaining_budget = max(
+                        0,
+                        PE_SECTION_SAMPLE_TOTAL_BYTES - sampled_section_bytes,
+                    )
+                    entropy, sampled_bytes = _section_entropy(
+                        handle,
+                        raw_pointer,
+                        raw_size,
+                        remaining_budget,
+                    )
+                    sampled_section_bytes += sampled_bytes
+                    requested_sample = min(raw_size, PE_SECTION_SAMPLE_MAX_BYTES)
+                    if requested_sample > sampled_bytes:
+                        entropy_truncated = True
                     if entropy is not None:
                         max_section_entropy = (
                             entropy
                             if max_section_entropy is None
                             else max(max_section_entropy, entropy)
                         )
-                    sections.append(
-                        {
-                            "name": name,
-                            "raw_size": raw_size,
-                            "entropy": entropy,
-                        }
-                    )
+                    if len(sections) < 12:
+                        sections.append(
+                            {
+                                "name": name,
+                                "raw_size": raw_size,
+                                "entropy": entropy,
+                            }
+                        )
 
         except (OSError, struct.error) as exc:
             facts["pe_error"] = str(exc)
@@ -382,17 +467,141 @@ class FileScanner:
         facts.update(
             {
                 "pe_valid": True,
-                "pe_machine": PE_MACHINE_NAMES.get(machine, hex(machine)),
-                "pe_section_count": section_count,
-                "pe_timestamp": timestamp,
-                "pe_characteristics": characteristics,
                 "pe_optional_magic": hex(optional_magic) if optional_magic is not None else None,
                 "pe_subsystem": PE_SUBSYSTEM_NAMES.get(subsystem, subsystem),
-                "pe_sections": sections[:12],
+                "pe_sections": sections,
                 "pe_section_max_entropy": max_section_entropy,
+                "pe_section_sampled_bytes": sampled_section_bytes,
+                "pe_section_entropy_truncated": entropy_truncated,
             }
         )
         return facts
+
+
+def _zip_directory_metadata(path: Path) -> dict[str, Any]:
+    try:
+        file_size = path.stat().st_size
+        if file_size < 22:
+            return {"archive_error": "ZIP end record is missing"}
+        with path.open("rb") as handle:
+            tail_size = min(file_size, ARCHIVE_EOCD_MAX_BYTES)
+            handle.seek(file_size - tail_size)
+            tail = handle.read(tail_size)
+            relative_offset = tail.rfind(b"PK\x05\x06")
+            if relative_offset < 0 or relative_offset + 22 > len(tail):
+                return {"archive_error": "ZIP end record is missing"}
+            (
+                _signature,
+                disk_number,
+                directory_disk,
+                entries_on_disk,
+                total_entries,
+                directory_bytes,
+                directory_offset,
+                comment_bytes,
+            ) = struct.unpack_from("<4s4H2LH", tail, relative_offset)
+            absolute_offset = file_size - tail_size + relative_offset
+            if relative_offset + 22 + comment_bytes > len(tail):
+                return {"archive_error": "ZIP end record is truncated"}
+            if (
+                total_entries == 0xFFFF
+                or entries_on_disk == 0xFFFF
+                or directory_bytes == 0xFFFFFFFF
+                or directory_offset == 0xFFFFFFFF
+            ):
+                zip64 = _zip64_directory_metadata(handle, absolute_offset, file_size)
+                if "archive_error" in zip64:
+                    return zip64
+                disk_number = int(zip64["disk_number"])
+                directory_disk = int(zip64["directory_disk"])
+                entries_on_disk = int(zip64["entries_on_disk"])
+                total_entries = int(zip64["total_entries"])
+                directory_bytes = int(zip64["directory_bytes"])
+                directory_offset = int(zip64["directory_offset"])
+    except (OSError, struct.error, ValueError) as exc:
+        return {"archive_error": _bounded_text(str(exc))}
+
+    facts: dict[str, Any] = {
+        "archive_declared_entry_count": total_entries,
+        "archive_entry_count": total_entries,
+        "archive_central_directory_bytes": directory_bytes,
+        "archive_entry_limit": ARCHIVE_METADATA_MAX_ENTRIES,
+        "archive_central_directory_limit_bytes": ARCHIVE_CENTRAL_DIRECTORY_MAX_BYTES,
+    }
+    if disk_number != 0 or directory_disk != 0 or entries_on_disk != total_entries:
+        facts["archive_error"] = "Multi-disk ZIP metadata is unsupported"
+        return facts
+    if (
+        total_entries > ARCHIVE_METADATA_MAX_ENTRIES
+        or directory_bytes > ARCHIVE_CENTRAL_DIRECTORY_MAX_BYTES
+    ):
+        facts.update(
+            {
+                "archive_entries_truncated": True,
+                "archive_metadata_budget_exceeded": True,
+                "archive_error": "ZIP metadata exceeds parser budget",
+            }
+        )
+        return facts
+    if directory_offset > file_size or directory_bytes > file_size:
+        facts["archive_error"] = "ZIP central directory range is invalid"
+        return facts
+    return facts
+
+
+def _zip64_directory_metadata(handle, eocd_offset: int, file_size: int) -> dict[str, Any]:
+    locator_offset = eocd_offset - 20
+    if locator_offset < 0:
+        return {"archive_error": "ZIP64 locator is missing"}
+    handle.seek(locator_offset)
+    locator = handle.read(20)
+    if len(locator) != 20 or locator[:4] != b"PK\x06\x07":
+        return {"archive_error": "ZIP64 locator is missing"}
+    _signature, locator_disk, record_offset, total_disks = struct.unpack("<4sLQL", locator)
+    if locator_disk != 0 or total_disks != 1 or record_offset > file_size - 56:
+        return {"archive_error": "ZIP64 locator range is invalid"}
+    handle.seek(record_offset)
+    record = handle.read(56)
+    if len(record) != 56 or record[:4] != b"PK\x06\x06":
+        return {"archive_error": "ZIP64 end record is missing"}
+    (
+        _signature,
+        record_size,
+        _created_version,
+        _required_version,
+        disk_number,
+        directory_disk,
+        entries_on_disk,
+        total_entries,
+        directory_bytes,
+        directory_offset,
+    ) = struct.unpack("<4sQ2H2L4Q", record)
+    if record_size < 44:
+        return {"archive_error": "ZIP64 end record is truncated"}
+    return {
+        "disk_number": disk_number,
+        "directory_disk": directory_disk,
+        "entries_on_disk": entries_on_disk,
+        "total_entries": total_entries,
+        "directory_bytes": directory_bytes,
+        "directory_offset": directory_offset,
+    }
+
+
+def _bounded_text(value: object, limit: int = 512) -> str:
+    text = str(value).replace("\r", " ").replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
+
+
+def _bounded_archive_name(value: str) -> str:
+    text = value.replace("\r", " ").replace("\n", " ")
+    if len(text) <= ARCHIVE_NAME_MAX_CHARS:
+        return text
+    prefix = (ARCHIVE_NAME_MAX_CHARS - 1) // 2
+    suffix = ARCHIVE_NAME_MAX_CHARS - prefix - 1
+    return text[:prefix] + "…" + text[-suffix:]
 
 
 def _magic_type(header: bytes) -> str:
@@ -413,24 +622,31 @@ def _magic_type(header: bytes) -> str:
     return "binary"
 
 
-def _section_entropy(handle, raw_pointer: int, raw_size: int) -> float | None:
-    if raw_pointer <= 0 or raw_size <= 0:
-        return None
+def _section_entropy(
+    handle,
+    raw_pointer: int,
+    raw_size: int,
+    remaining_budget: int,
+) -> tuple[float | None, int]:
+    if raw_pointer <= 0 or raw_size <= 0 or remaining_budget <= 0:
+        return None, 0
 
     try:
         current = handle.tell()
         handle.seek(raw_pointer)
-        data = handle.read(min(raw_size, HASH_SAMPLE_BYTES))
+        data = handle.read(
+            min(raw_size, PE_SECTION_SAMPLE_MAX_BYTES, remaining_budget)
+        )
         handle.seek(current)
     except OSError:
-        return None
+        return None, 0
 
     if not data:
-        return None
+        return None, 0
     counts = Counter(data)
     length = len(data)
     entropy = -sum((count / length) * math.log2(count / length) for count in counts.values())
-    return round(float(entropy), 4)
+    return round(float(entropy), 4), length
 
 
 def is_probably_same_volume(path: Path) -> bool:

@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { appendFile, copyFile, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import path from 'node:path';
@@ -19,13 +20,19 @@ import {
   defaultLocalReadOnlyRoots,
   evaluateFilesystemAccess,
   extractWorkspaceObjectName,
+  immutableMonarchSafeRoots,
+  isWritableKnownFolder,
+  normalizeKnownFolderBasename,
+  parseKnownFolderFileRequest,
   permissionModeForRisk,
   resolveKnownUserFolder,
   readOperationalContext,
+  type MonarchFilesystemAccessResult,
   type MonarchFilesystemOperation,
   type MonarchFilesystemPolicyOptions,
 } from '../../core';
 import { workspaceManifest } from './manifest';
+import { runWorkspaceStorageAudit } from './storage-audit';
 
 const DEFAULT_READ_BYTES = 128 * 1024;
 const MAX_READ_BYTES = 512 * 1024;
@@ -215,6 +222,69 @@ interface FileEntry {
   sizeBytes?: number;
 }
 
+interface InspectableFileSnapshot {
+  path: string;
+  relativePath: string;
+  sizeBytes: number;
+  modifiedMs: number;
+}
+
+interface InspectBatchSkip {
+  path: string;
+  reason: string;
+  detail?: string;
+}
+
+interface InspectBatchCursorV1 {
+  version: 1;
+  rootHash: string;
+  snapshotId: string;
+  index: number;
+}
+
+interface InspectBatchItem {
+  path: string;
+  relativePath: string;
+  name: string;
+  sizeBytes: number;
+  modifiedMs: number;
+  sha256?: string;
+  format: string;
+  status: 'read' | 'metadata-only' | 'skipped';
+  content?: string;
+  reason?: string;
+}
+
+const INSPECT_BATCH_SCHEMA_VERSION = 'monarch.workspace-files-inspect-batch.v1';
+const DEFAULT_INSPECT_BATCH_PAGE_SIZE = 50;
+const DEFAULT_INSPECT_MAX_BYTES_PER_FILE = 64 * 1024;
+const DEFAULT_INSPECT_MAX_TOTAL_CONTENT_BYTES = 256 * 1024;
+const DEFAULT_INSPECT_MAX_ENTRIES = 50_000;
+const TEXT_FILE_EXTENSIONS = new Set([
+  '', '.txt', '.md', '.markdown', '.json', '.jsonl', '.csv', '.tsv', '.log',
+  '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.ps1', '.psm1',
+  '.bat', '.cmd', '.sh', '.css', '.scss', '.less', '.html', '.htm', '.xml',
+  '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.sql', '.srt', '.vtt',
+  '.java', '.kt', '.kts', '.c', '.h', '.cpp', '.hpp', '.cs', '.go', '.rs',
+]);
+const UNSUPPORTED_DOCUMENT_EXTENSIONS = new Set([
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp', '.rtf',
+]);
+
+export function parseWorkspaceStorageAuditRequest(textInput: string): Record<string, unknown> | null {
+  const text = String(textInput || '').trim();
+  if (!/(?:audit|scan|check|inspect|analy[sz]e|review|провер|проанализ|анализ|аудит|скан).{0,80}(?:storage(?:\s+usage)?|disk(?:\s+usage)?|drive|folders?|directories|хранилищ|использован\p{L}*\s+(?:диск|хранилищ)|диск|папк|каталог|директор)/iu.test(text)) {
+    return null;
+  }
+  return {
+    root: extractPath(text) || extractDriveRoot(text),
+    topN: 20,
+    maxDepth: 64,
+    maxEntries: 500_000,
+    maxWallTimeMs: 120_000,
+  };
+}
+
 type WorkspaceTraversalPolicyGuard = (
   candidatePath: string,
   requiresRealPathCheck?: boolean
@@ -278,6 +348,10 @@ export class WorkspaceModule implements MonarchModule {
     if (isWorkspaceRootRequest(lower)) {
       return this.route(intent, 'workspace.root.get', 1, {});
     }
+    const storageAudit = parseWorkspaceStorageAuditRequest(text);
+    if (storageAudit) {
+      return this.route(intent, 'workspace.storage.audit', 0.99, storageAudit);
+    }
 
     const standalonePath = extractStandalonePath(text);
     if (standalonePath) {
@@ -297,6 +371,11 @@ export class WorkspaceModule implements MonarchModule {
       : '';
     if (isOpenEndedBuildRequest(text)) {
       return null;
+    }
+
+    const knownFolderWrite = parseKnownFolderFileRequest(text);
+    if (knownFolderWrite) {
+      return this.route(intent, 'workspace.known-folder.write', 0.99, knownFolderWrite);
     }
 
     if (/(delete|remove|удали|сотри|стереть).{0,20}(?:file|файл)/i.test(lower) || /^(удали|сотри|стереть) файл/i.test(lower)) {
@@ -371,31 +450,42 @@ export class WorkspaceModule implements MonarchModule {
     context: MonarchKernelContext,
     control: MonarchExecutionControl = {},
   ): Promise<MonarchExecutionResult> {
+    const executionContext = request.ownerUnrestrictedExecution === true
+      ? Object.assign(Object.create(context) as MonarchKernelContext, { ownerUnrestrictedExecution: true as const })
+      : context;
     switch (request.capabilityId) {
     case 'workspace.root.get':
       return this.workspaceRootCapability();
+    case 'workspace.storage.audit':
+      return this.auditStorageCapability(request.input, executionContext, control.signal);
     case 'workspace.files.read':
-      return this.readFileCapability(request.input, context);
+      return this.readFileCapability(request.input, executionContext);
     case 'workspace.files.list':
-      return this.listFiles(request.input, context);
+      return this.listFiles(request.input, executionContext);
+    case 'workspace.files.inspect-batch':
+      return this.inspectFilesBatch(request.input, executionContext, control.signal);
+    case 'workspace.known-folder.resolve':
+      return this.resolveKnownFolderCapability(request.input, executionContext);
     case 'workspace.files.search':
-      return this.searchFiles(request.input, context);
+      return this.searchFiles(request.input, executionContext);
     case 'workspace.files.write':
-      return this.writeFileCapability(request.input, context, control.signal);
+      return this.writeFileCapability(request.input, executionContext, control.signal);
+    case 'workspace.known-folder.write':
+      return this.writeKnownFolderFileCapability(request.input, executionContext, control.signal);
     case 'workspace.files.append':
-      return this.appendFileCapability(request.input, context, control.signal);
+      return this.appendFileCapability(request.input, executionContext, control.signal);
     case 'workspace.files.mkdir':
-      return this.makeDirectoryCapability(request.input, context, control.signal);
+      return this.makeDirectoryCapability(request.input, executionContext, control.signal);
     case 'workspace.files.copy':
-      return this.copyPathCapability(request.input, context, control.signal);
+      return this.copyPathCapability(request.input, executionContext, control.signal);
     case 'workspace.files.move':
-      return this.movePathCapability(request.input, context, control.signal);
+      return this.movePathCapability(request.input, executionContext, control.signal);
     case 'workspace.files.replace':
-      return this.replaceFileTextCapability(request.input, context, control.signal);
+      return this.replaceFileTextCapability(request.input, executionContext, control.signal);
     case 'workspace.files.trash':
-      return this.trashPathCapability(request.input, context, control.signal);
+      return this.trashPathCapability(request.input, executionContext, control.signal);
     case 'workspace.files.delete':
-      return this.deleteFileCapability(request.input, context, control.signal);
+      return this.deleteFileCapability(request.input, executionContext, control.signal);
     default:
       return {
         ok: false,
@@ -589,6 +679,268 @@ export class WorkspaceModule implements MonarchModule {
       return realPathBlock;
     }
 
+    return this.writeEvaluatedFile(input, context, evaluation, signal);
+  }
+
+  private async resolveKnownFolderCapability(
+    input: unknown,
+    context: MonarchKernelContext,
+  ): Promise<MonarchExecutionResult> {
+    const knownFolder = normalizeInspectableKnownFolder(readStringInput(input, 'knownFolder'));
+    if (!knownFolder) {
+      return { ok: false, summary: 'Known folder must be desktop or downloads.', error: 'invalid-known-folder' };
+    }
+    const resolvedPath = resolveKnownUserFolder(knownFolder);
+    if (!resolvedPath) {
+      return { ok: false, summary: `Windows ${knownFolder} folder could not be resolved.`, error: 'known-folder-unavailable' };
+    }
+    const evaluation = this.evaluate(resolvedPath, 'list', context, { allowRoot: true });
+    if (!evaluation.allowed) return blockedResult(evaluation.message, evaluation);
+    const realPathBlock = await this.blockIfRealPathEscapes(evaluation.resolvedPath, 'list', context);
+    if (realPathBlock) return realPathBlock;
+    const folderStat = await stat(evaluation.resolvedPath).catch(() => undefined);
+    return {
+      ok: true,
+      summary: folderStat?.isDirectory()
+        ? `Resolved ${knownFolder} to ${evaluation.resolvedPath}.`
+        : `Resolved ${knownFolder} to ${evaluation.resolvedPath}, but the directory is unavailable.`,
+      output: {
+        knownFolder,
+        path: evaluation.resolvedPath,
+        exists: Boolean(folderStat),
+        directory: folderStat?.isDirectory() === true,
+      },
+    };
+  }
+
+  private async inspectFilesBatch(
+    input: unknown,
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
+  ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
+    const knownFolder = normalizeInspectableKnownFolder(readStringInput(input, 'knownFolder'));
+    const explicitPath = readStringInput(input, 'path');
+    if ((knownFolder && explicitPath) || (!knownFolder && !explicitPath)) {
+      return {
+        ok: false,
+        summary: 'Batch inspection requires exactly one of path or knownFolder.',
+        error: 'invalid-inspect-batch-root',
+      };
+    }
+    const requestedRoot = knownFolder ? resolveKnownUserFolder(knownFolder) : explicitPath;
+    if (!requestedRoot) {
+      return { ok: false, summary: 'Batch inspection root could not be resolved.', error: 'inspect-batch-root-unavailable' };
+    }
+    const evaluation = this.evaluate(requestedRoot, 'list', context, { allowRoot: true });
+    if (!evaluation.allowed) return blockedResult(evaluation.message, evaluation);
+    const realPathBlock = await this.blockIfRealPathEscapes(evaluation.resolvedPath, 'list', context);
+    if (realPathBlock) return realPathBlock;
+    const rootInfo = await lstat(evaluation.resolvedPath).catch(() => undefined);
+    if (!rootInfo || (!rootInfo.isDirectory() && !rootInfo.isFile()) || rootInfo.isSymbolicLink()) {
+      return {
+        ok: false,
+        summary: `Batch inspection root must be one real file or directory: ${evaluation.resolvedPath}`,
+        error: 'invalid-inspect-batch-root',
+      };
+    }
+
+    const recursive = readBooleanInput(input, 'recursive', true);
+    const pageSize = normalizeLimit(readNumberInput(input, 'pageSize', DEFAULT_INSPECT_BATCH_PAGE_SIZE), 1, 50);
+    const maxBytesPerFile = normalizeLimit(
+      readNumberInput(input, 'maxBytesPerFile', DEFAULT_INSPECT_MAX_BYTES_PER_FILE),
+      1,
+      256 * 1024,
+    );
+    const maxTotalContentBytes = normalizeLimit(
+      readNumberInput(input, 'maxTotalContentBytes', DEFAULT_INSPECT_MAX_TOTAL_CONTENT_BYTES),
+      1,
+      512 * 1024,
+    );
+    const maxEntries = normalizeLimit(
+      readNumberInput(input, 'maxEntries', DEFAULT_INSPECT_MAX_ENTRIES),
+      1,
+      100_000,
+    );
+    const snapshot = await collectInspectableFileSnapshot(evaluation.resolvedPath, {
+      recursive,
+      maxEntries,
+      ...(signal ? { signal } : {}),
+      policyGuard: this.createTraversalPolicyGuard('read', context),
+    });
+    const snapshotId = inspectBatchSnapshotId(evaluation.resolvedPath, recursive, snapshot.files, snapshot.skips);
+    const rootHash = createHash('sha256').update(canonicalInspectRoot(evaluation.resolvedPath)).digest('hex');
+    const cursorText = readStringInput(input, 'cursor');
+    const cursor = cursorText ? decodeInspectBatchCursor(cursorText) : null;
+    if (cursorText && (!cursor
+      || cursor.rootHash !== rootHash
+      || cursor.snapshotId !== snapshotId
+      || cursor.index < 0
+      || cursor.index > snapshot.files.length)) {
+      return {
+        ok: false,
+        summary: 'Batch inspection cursor is invalid or stale because the target changed. Restart from the first page.',
+        error: 'stale-inspect-batch-cursor',
+        output: { root: evaluation.resolvedPath, snapshotId, restartRequired: true },
+      };
+    }
+    const startIndex = cursor?.index || 0;
+    const endIndex = Math.min(snapshot.files.length, startIndex + pageSize);
+    const page = snapshot.files.slice(startIndex, endIndex);
+    const inspected = await inspectFileSnapshotPage(page, {
+      maxBytesPerFile,
+      maxTotalContentBytes,
+      ...(signal ? { signal } : {}),
+    });
+    const nextCursor = endIndex < snapshot.files.length
+      ? encodeInspectBatchCursor({ version: 1, rootHash, snapshotId, index: endIndex })
+      : null;
+    const paginationComplete = nextCursor === null;
+    const complete = paginationComplete && !snapshot.truncated;
+    const skips = [...snapshot.skips, ...inspected.skips];
+    const readFiles = inspected.items.filter((entry) => entry.status === 'read').length;
+    const metadataOnlyFiles = inspected.items.filter((entry) => entry.status === 'metadata-only').length;
+    const skippedFiles = inspected.items.filter((entry) => entry.status === 'skipped').length;
+    return {
+      ok: true,
+      summary: complete
+        ? `Inspected the final page and accounted for ${snapshot.files.length} files under ${evaluation.resolvedPath}.`
+        : `Inspected files ${startIndex + 1}-${endIndex} of ${snapshot.files.length} under ${evaluation.resolvedPath}.`,
+      output: {
+        schemaVersion: INSPECT_BATCH_SCHEMA_VERSION,
+        root: evaluation.resolvedPath,
+        snapshotId,
+        items: inspected.items,
+        skips,
+        coverage: {
+          totalFiles: snapshot.files.length,
+          pageStart: startIndex,
+          pageEnd: endIndex,
+          returnedFiles: inspected.items.length,
+          readFiles,
+          metadataOnlyFiles,
+          skippedFiles,
+          remainingFiles: Math.max(0, snapshot.files.length - endIndex),
+          enumerationSkipped: snapshot.skips.length,
+          enumerationComplete: !snapshot.truncated,
+          paginationComplete,
+        },
+        nextCursor,
+        complete,
+      },
+      metadata: {
+        evaluation,
+        partial: !complete || skips.length > 0,
+        warnings: skips.length > 0
+          ? [`Batch inspection explicitly reported ${skips.length} skipped or metadata-only entries.`]
+          : [],
+      },
+    };
+  }
+
+  private async writeKnownFolderFileCapability(
+    input: unknown,
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
+  ): Promise<MonarchExecutionResult> {
+    signal?.throwIfAborted();
+    const knownFolder = readStringInput(input, 'knownFolder');
+    if (!isWritableKnownFolder(knownFolder)) {
+      return {
+        ok: false,
+        summary: 'Known folder must be exactly desktop or downloads.',
+        error: 'invalid-known-folder',
+        output: { verified: false },
+      };
+    }
+
+    const basename = normalizeKnownFolderBasename(readStringInput(input, 'basename'));
+    if (!basename) {
+      return {
+        ok: false,
+        summary: 'Known-folder basename must be one safe leaf name without path separators or traversal.',
+        error: 'invalid-known-folder-basename',
+        output: { knownFolder, verified: false },
+      };
+    }
+    if (readBooleanInput(input, 'overwrite', false)) {
+      return {
+        ok: false,
+        summary: 'Known-folder writes are create-only; replacing an existing user file requires a separate typed capability.',
+        error: 'known-folder-overwrite-unsupported',
+        output: { knownFolder, basename, verified: false },
+      };
+    }
+
+    const configuredRoot = resolveKnownUserFolder(knownFolder);
+    const trustedRoot = configuredRoot
+      ? await realpath(configuredRoot).catch(() => '')
+      : '';
+    const rootStat = trustedRoot
+      ? await stat(trustedRoot).catch(() => undefined)
+      : undefined;
+    if (!trustedRoot || !rootStat?.isDirectory()) {
+      return {
+        ok: false,
+        summary: `Known folder is unavailable: ${knownFolder}.`,
+        error: 'known-folder-unavailable',
+        output: { knownFolder, verified: false },
+      };
+    }
+
+    const targetPath = path.join(trustedRoot, basename);
+    const policyOptions: MonarchFilesystemPolicyOptions & { fallbackRoot: string; allowRoot?: boolean } = {
+      workspaceRoot: this.workspaceRoot,
+      sandboxRoot: trustedRoot,
+      fallbackRoot: trustedRoot,
+      allowedRoots: [trustedRoot],
+      allowFullDiskAccess: false,
+      protectWorkspaceInternals: true,
+    };
+    const evaluation = evaluateFilesystemAccess(targetPath, 'write', policyOptions);
+    if (!evaluation.allowed) {
+      return blockedResult(evaluation.message, evaluation);
+    }
+    const realPathBlock = await this.blockIfRealPathEscapes(
+      evaluation.resolvedPath,
+      'write',
+      context,
+      policyOptions,
+    );
+    if (realPathBlock) {
+      return realPathBlock;
+    }
+    const existingTarget = await lstat(evaluation.resolvedPath).catch(() => undefined);
+    if (existingTarget?.isSymbolicLink()) {
+      return {
+        ok: false,
+        summary: `Known-folder target cannot be a symbolic link: ${evaluation.resolvedPath}`,
+        error: 'known-folder-target-link-blocked',
+        output: { knownFolder, basename, path: evaluation.resolvedPath, verified: false },
+      };
+    }
+
+    return this.writeEvaluatedFile(input, context, evaluation, signal, {
+      knownFolder,
+      basename,
+      createParent: false,
+      exclusiveCreate: true,
+    });
+  }
+
+  private async writeEvaluatedFile(
+    input: unknown,
+    context: MonarchKernelContext,
+    evaluation: MonarchFilesystemAccessResult,
+    signal?: AbortSignal,
+    options: {
+      knownFolder?: 'desktop' | 'downloads';
+      basename?: string;
+      createParent?: boolean;
+      exclusiveCreate?: boolean;
+    } = {},
+  ): Promise<MonarchExecutionResult> {
+
     const content = readRawStringInput(input, 'content');
     const overwrite = readBooleanInput(input, 'overwrite', false);
     const bytes = Buffer.byteLength(content, 'utf8');
@@ -622,10 +974,29 @@ export class WorkspaceModule implements MonarchModule {
       signal?.throwIfAborted();
       await this.beforeMutation('write', [evaluation.resolvedPath], signal);
       signal?.throwIfAborted();
-      await mkdir(path.dirname(evaluation.resolvedPath), { recursive: true });
+      if (options.createParent !== false) {
+        await mkdir(path.dirname(evaluation.resolvedPath), { recursive: true });
+      }
       signal?.throwIfAborted();
-      await writeFile(evaluation.resolvedPath, content, { encoding: 'utf8', signal });
+      await writeFile(evaluation.resolvedPath, content, {
+        encoding: 'utf8',
+        signal,
+        ...(options.exclusiveCreate && !overwrite ? { flag: 'wx' } : {}),
+      });
     } catch (error) {
+      if (options.exclusiveCreate && filesystemNodeErrorCode(error) === 'EEXIST') {
+        return {
+          ok: false,
+          summary: `File already exists: ${evaluation.resolvedPath}`,
+          error: 'file-exists',
+          output: {
+            ...(options.knownFolder ? { knownFolder: options.knownFolder } : {}),
+            ...(options.basename ? { basename: options.basename } : {}),
+            path: evaluation.resolvedPath,
+            verified: false,
+          },
+        };
+      }
       return filesystemMutationFailure('write', evaluation.resolvedPath, error);
     }
     const readback = await readFile(evaluation.resolvedPath).catch(() => undefined);
@@ -652,6 +1023,8 @@ export class WorkspaceModule implements MonarchModule {
       ok: true,
       summary: `Wrote file ${evaluation.resolvedPath}.`,
       output: {
+        ...(options.knownFolder ? { knownFolder: options.knownFolder } : {}),
+        ...(options.basename ? { basename: options.basename } : {}),
         path: evaluation.resolvedPath,
         bytes,
         verified: true,
@@ -775,6 +1148,69 @@ export class WorkspaceModule implements MonarchModule {
         verified: true,
         readbackSha256: createHash('sha256').update(readback).digest('hex'),
         cancellationObservedAfterDispatch: signal?.aborted === true,
+      },
+    };
+  }
+
+  private async auditStorageCapability(
+    input: unknown,
+    context: MonarchKernelContext,
+    signal?: AbortSignal,
+  ): Promise<MonarchExecutionResult> {
+    const rootInput = readStringInput(input, 'root');
+    const evaluation = this.evaluate(rootInput, 'list', context, { allowRoot: true });
+    if (!evaluation.allowed) return blockedResult(evaluation.message, evaluation);
+    const rootInfo = await lstat(evaluation.resolvedPath).catch(() => undefined);
+    if (!rootInfo?.isDirectory() || rootInfo.isSymbolicLink()) {
+      return {
+        ok: false,
+        summary: `Storage audit root must be one real directory, not a file or reparse point: ${evaluation.resolvedPath}`,
+        error: 'invalid-audit-root',
+        metadata: { evaluation },
+      };
+    }
+    const realPathBlock = await this.blockIfRealPathEscapes(evaluation.resolvedPath, 'list', context);
+    if (realPathBlock) return realPathBlock;
+    const topN = normalizeLimit(readNumberInput(input, 'topN', 20), 1, 100);
+    const maxDepth = normalizeLimit(readNumberInput(input, 'maxDepth', 64), 0, 256);
+    const maxEntries = normalizeLimit(readNumberInput(input, 'maxEntries', 500_000), 1, 2_000_000);
+    const maxWallTimeMs = normalizeLimit(readNumberInput(input, 'maxWallTimeMs', 120_000), 100, 600_000);
+    const driveRoot = path.parse(evaluation.resolvedPath).root;
+    const fixedRedZones = [
+      ...evaluation.policy.redZoneRoots,
+      ...Array.from({ length: 26 }, (_entry, index) => `${String.fromCharCode(65 + index)}:\\MonarchData\\Safe`),
+      path.join(driveRoot, '$Recycle.Bin'),
+      path.join(driveRoot, 'System Volume Information'),
+      path.join(driveRoot, 'Recovery'),
+      path.join(driveRoot, 'Boot'),
+      path.join(driveRoot, 'EFI'),
+    ];
+    const audit = await runWorkspaceStorageAudit({
+      root: evaluation.resolvedPath,
+      topN,
+      maxDepth,
+      maxEntries,
+      maxWallTimeMs,
+      blockedRoots: [...new Set(fixedRedZones.map((entry) => path.resolve(entry)))],
+      ...(signal ? { signal } : {}),
+    });
+    const skipCount = Object.values(audit.skipReasons).reduce((sum, count) => sum + count, 0);
+    return {
+      ok: true,
+      summary: audit.partial
+        ? `Storage audit observed ${audit.directories} directories and ${audit.files} files under ${audit.root}; ${skipCount} entries or subtrees were skipped.`
+        : `Storage audit verified ${audit.directories} directories and ${audit.files} files under ${audit.root}.`,
+      output: {
+        observationVerified: true,
+        complete: !audit.partial,
+        audit,
+      },
+      metadata: {
+        evaluation,
+        partial: audit.partial,
+        warnings: audit.partial
+          ? [`Storage audit is partial. Skip reasons: ${JSON.stringify(audit.skipReasons)}.`]
+          : [],
       },
     };
   }
@@ -1160,15 +1596,23 @@ export class WorkspaceModule implements MonarchModule {
     context: MonarchKernelContext,
     overrides: { allowRoot?: boolean } = {}
   ): MonarchFilesystemPolicyOptions & { fallbackRoot: string; allowRoot?: boolean } {
+    const ownerUnrestricted = (context as MonarchKernelContext & { ownerUnrestrictedExecution?: boolean })
+      .ownerUnrestrictedExecution === true;
     const localReadOnlyRoots = defaultLocalReadOnlyRoots();
     const options: MonarchFilesystemPolicyOptions & { fallbackRoot: string; allowRoot?: boolean } = {
       workspaceRoot: this.workspaceRoot,
       sandboxRoot: this.workspaceRoot,
       fallbackRoot: this.workspaceRoot,
-      allowedRoots: [this.workspaceRoot, ...localReadOnlyRoots],
-      readOnlyRoots: localReadOnlyRoots,
-      createDirectoryRoots: localReadOnlyRoots,
-      allowFullDiskAccess: context.getPermissionProfile().sandboxMode === 'danger-full-access',
+      allowedRoots: ownerUnrestricted ? [] : [this.workspaceRoot, ...localReadOnlyRoots],
+      readOnlyRoots: ownerUnrestricted ? [] : localReadOnlyRoots,
+      createDirectoryRoots: ownerUnrestricted ? [] : localReadOnlyRoots,
+      allowFullDiskAccess: ownerUnrestricted
+        || context.getPermissionProfile().sandboxMode === 'danger-full-access',
+      ...(ownerUnrestricted ? {
+        includeDefaultRedZones: false,
+        protectWorkspaceInternals: false,
+        redZoneRoots: immutableMonarchSafeRoots(this.workspaceRoot),
+      } : {}),
     };
     if (overrides.allowRoot !== undefined) {
       options.allowRoot = overrides.allowRoot;
@@ -1214,6 +1658,231 @@ export class WorkspaceModule implements MonarchModule {
       return this.blockIfRealPathEscapes(candidatePath, operation, context, policyOptions);
     };
   }
+}
+
+async function collectInspectableFileSnapshot(
+  root: string,
+  options: {
+    recursive: boolean;
+    maxEntries: number;
+    signal?: AbortSignal;
+    policyGuard: WorkspaceTraversalPolicyGuard;
+  },
+): Promise<{ files: InspectableFileSnapshot[]; skips: InspectBatchSkip[]; truncated: boolean }> {
+  const files: InspectableFileSnapshot[] = [];
+  const skips: InspectBatchSkip[] = [];
+  const rootInfo = await lstat(root);
+  if (rootInfo.isFile()) {
+    return {
+      files: [{
+        path: root,
+        relativePath: path.basename(root),
+        sizeBytes: rootInfo.size,
+        modifiedMs: Math.trunc(rootInfo.mtimeMs),
+      }],
+      skips,
+      truncated: false,
+    };
+  }
+
+  const queue = [root];
+  let queueIndex = 0;
+  let truncated = false;
+  while (queueIndex < queue.length) {
+    options.signal?.throwIfAborted();
+    const current = queue[queueIndex++];
+    if (!current) continue;
+    let children;
+    try {
+      children = await readdir(current, { withFileTypes: true });
+    } catch (error) {
+      skips.push({
+        path: current,
+        reason: 'directory-unreadable',
+        detail: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+      });
+      continue;
+    }
+    children.sort((left, right) => left.name.localeCompare(right.name, 'en-US'));
+    for (const child of children) {
+      options.signal?.throwIfAborted();
+      const childPath = path.join(current, child.name);
+      const policyBlock = await options.policyGuard(childPath, child.isDirectory() || child.isSymbolicLink());
+      if (policyBlock) {
+        skips.push({ path: childPath, reason: 'filesystem-policy-blocked', detail: policyBlock.summary.slice(0, 500) });
+        continue;
+      }
+      if (child.isSymbolicLink()) {
+        skips.push({ path: childPath, reason: 'reparse-point-not-followed' });
+        continue;
+      }
+      if (child.isDirectory()) {
+        if (options.recursive) queue.push(childPath);
+        continue;
+      }
+      if (!child.isFile()) {
+        skips.push({ path: childPath, reason: 'unsupported-filesystem-entry' });
+        continue;
+      }
+      const childInfo = await stat(childPath).catch(() => undefined);
+      if (!childInfo?.isFile()) {
+        skips.push({ path: childPath, reason: 'file-metadata-unavailable' });
+        continue;
+      }
+      if (files.length >= options.maxEntries) {
+        truncated = true;
+        skips.push({ path: childPath, reason: 'enumeration-limit-reached' });
+        break;
+      }
+      files.push({
+        path: childPath,
+        relativePath: path.relative(root, childPath) || path.basename(childPath),
+        sizeBytes: childInfo.size,
+        modifiedMs: Math.trunc(childInfo.mtimeMs),
+      });
+    }
+    if (truncated) break;
+  }
+  files.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'en-US'));
+  return { files, skips, truncated };
+}
+
+async function inspectFileSnapshotPage(
+  files: readonly InspectableFileSnapshot[],
+  options: { maxBytesPerFile: number; maxTotalContentBytes: number; signal?: AbortSignal },
+): Promise<{ items: InspectBatchItem[]; skips: InspectBatchSkip[] }> {
+  const items: InspectBatchItem[] = [];
+  const skips: InspectBatchSkip[] = [];
+  let remainingContentBytes = options.maxTotalContentBytes;
+  for (const file of files) {
+    options.signal?.throwIfAborted();
+    const extension = path.extname(file.path).toLocaleLowerCase('en-US');
+    const format = extension ? extension.slice(1) : 'text';
+    const base: InspectBatchItem = {
+      path: file.path,
+      relativePath: file.relativePath,
+      name: path.basename(file.path),
+      sizeBytes: file.sizeBytes,
+      modifiedMs: file.modifiedMs,
+      format,
+      status: 'metadata-only',
+    };
+    try {
+      let bytes: Buffer | null = null;
+      if (file.sizeBytes <= options.maxBytesPerFile && file.sizeBytes <= remainingContentBytes) {
+        bytes = await readFile(file.path);
+      }
+      const sha256 = bytes
+        ? createHash('sha256').update(bytes).digest('hex')
+        : await sha256File(file.path, options.signal);
+      const after = await stat(file.path);
+      if (after.size !== file.sizeBytes || Math.trunc(after.mtimeMs) !== file.modifiedMs) {
+        const item = { ...base, sha256, status: 'skipped' as const, reason: 'target-changed-during-inspection' };
+        items.push(item);
+        skips.push({ path: file.path, reason: item.reason });
+        continue;
+      }
+      if (bytes && TEXT_FILE_EXTENSIONS.has(extension) && looksLikeUtf8Text(bytes)) {
+        const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        items.push({ ...base, sha256, status: 'read', content });
+        remainingContentBytes = Math.max(0, remainingContentBytes - bytes.byteLength);
+        continue;
+      }
+      let reason: string;
+      if (UNSUPPORTED_DOCUMENT_EXTENSIONS.has(extension)) reason = `unsupported-document-format:${extension.slice(1)}`;
+      else if (TEXT_FILE_EXTENSIONS.has(extension) && file.sizeBytes > options.maxBytesPerFile) reason = 'file-too-large-for-content';
+      else if (TEXT_FILE_EXTENSIONS.has(extension) && file.sizeBytes > remainingContentBytes) reason = 'page-content-budget-exhausted';
+      else if (TEXT_FILE_EXTENSIONS.has(extension)) reason = 'invalid-utf8-or-binary-content';
+      else reason = 'binary-or-unsupported-format';
+      items.push({ ...base, sha256, status: 'metadata-only', reason });
+      skips.push({ path: file.path, reason });
+    } catch (error) {
+      const reason = error instanceof Error && error.name === 'AbortError'
+        ? 'inspection-cancelled'
+        : 'file-read-failed';
+      if (reason === 'inspection-cancelled') throw error;
+      items.push({ ...base, status: 'skipped', reason });
+      skips.push({
+        path: file.path,
+        reason,
+        detail: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+      });
+    }
+  }
+  return { items, skips };
+}
+
+async function sha256File(filePath: string, signal?: AbortSignal): Promise<string> {
+  const digest = createHash('sha256');
+  const stream = createReadStream(filePath, { highWaterMark: 64 * 1024, ...(signal ? { signal } : {}) });
+  for await (const chunk of stream) {
+    signal?.throwIfAborted();
+    digest.update(chunk as Buffer);
+  }
+  return digest.digest('hex');
+}
+
+function looksLikeUtf8Text(bytes: Buffer): boolean {
+  if (bytes.includes(0)) return false;
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function inspectBatchSnapshotId(
+  root: string,
+  recursive: boolean,
+  files: readonly InspectableFileSnapshot[],
+  skips: readonly InspectBatchSkip[],
+): string {
+  return createHash('sha256').update(JSON.stringify({
+    root: canonicalInspectRoot(root),
+    recursive,
+    files: files.map((file) => [file.relativePath, file.sizeBytes, file.modifiedMs]),
+    skips: skips.map((skip) => [path.relative(root, skip.path), skip.reason]),
+  })).digest('hex');
+}
+
+function canonicalInspectRoot(value: string): string {
+  const resolved = path.resolve(value).replace(/[\\/]+$/u, '');
+  return process.platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved;
+}
+
+function encodeInspectBatchCursor(cursor: InspectBatchCursorV1): string {
+  const body = Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+  const checksum = createHash('sha256')
+    .update(`${INSPECT_BATCH_SCHEMA_VERSION}\u0000${body}`)
+    .digest('hex')
+    .slice(0, 32);
+  return `${body}.${checksum}`;
+}
+
+function decodeInspectBatchCursor(value: string): InspectBatchCursorV1 | null {
+  const [body, checksum, ...extra] = value.split('.');
+  if (!body || !checksum || extra.length > 0) return null;
+  const expected = createHash('sha256')
+    .update(`${INSPECT_BATCH_SCHEMA_VERSION}\u0000${body}`)
+    .digest('hex')
+    .slice(0, 32);
+  if (checksum !== expected) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Partial<InspectBatchCursorV1>;
+    if (parsed.version !== 1
+      || typeof parsed.rootHash !== 'string'
+      || typeof parsed.snapshotId !== 'string'
+      || !Number.isInteger(parsed.index)) return null;
+    return parsed as InspectBatchCursorV1;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeInspectableKnownFolder(value: string): 'desktop' | 'downloads' | null {
+  const normalized = value.trim().toLocaleLowerCase('en-US');
+  return normalized === 'desktop' || normalized === 'downloads' ? normalized : null;
 }
 
 async function collectFileEntries(
@@ -1373,6 +2042,11 @@ function parseExplicitWorkspaceCapability(
 
 const WORKSPACE_INPUT_ALIASES: Record<string, readonly string[]> = {
   maxBytes: ['max_bytes'],
+  maxBytesPerFile: ['max_bytes_per_file'],
+  maxTotalContentBytes: ['max_total_content_bytes'],
+  maxEntries: ['max_entries'],
+  pageSize: ['page_size'],
+  knownFolder: ['known_folder'],
   entryType: ['entry_type'],
   ensureUnique: ['ensure_unique'],
   targetPath: ['target_path'],
@@ -1382,10 +2056,16 @@ const WORKSPACE_INPUT_ALIASES: Record<string, readonly string[]> = {
 
 const WORKSPACE_CAPABILITY_INPUTS: Record<string, readonly string[]> = {
   'workspace.root.get': [],
+  'workspace.storage.audit': ['root', 'topN', 'maxDepth', 'maxEntries', 'maxWallTimeMs'],
   'workspace.files.read': ['path', 'maxBytes'],
   'workspace.files.list': ['path', 'recursive', 'limit', 'entryType', 'extension'],
+  'workspace.files.inspect-batch': [
+    'path', 'knownFolder', 'cursor', 'recursive', 'pageSize', 'maxBytesPerFile', 'maxTotalContentBytes', 'maxEntries',
+  ],
+  'workspace.known-folder.resolve': ['knownFolder'],
   'workspace.files.search': ['query', 'path', 'limit'],
   'workspace.files.write': ['path', 'content', 'overwrite'],
+  'workspace.known-folder.write': ['knownFolder', 'basename', 'content', 'overwrite'],
   'workspace.files.append': ['path', 'content'],
   'workspace.files.mkdir': ['path', 'ensureUnique'],
   'workspace.files.copy': ['path', 'targetPath'],
@@ -1424,7 +2104,7 @@ function extractStandalonePath(text: string): string {
     : '';
 }
 
-function isWorkspaceRootRequest(text: string): boolean {
+export function isWorkspaceRootRequest(text: string): boolean {
   const workspace = '(?:workspace|рабоч[^\\s]*\\s+пространств[^\\s]*|корнев[^\\s]*\\s+(?:каталог|папк|директор))';
   const location = '(?:путь|адрес|расположен[^\\s]*|находится|location|path|located)';
   return new RegExp(`(?:где|какой|укажи|покажи|назови|дай|where|what).{0,80}${location}.{0,80}${workspace}`, 'i').test(text)
@@ -1576,6 +2256,12 @@ function extractPath(text: string): string {
   const directRead = cleaned.match(/(?:^|\s)(?:read|show|open|view|прочитай|прочитать|открой|покажи|посмотри|просмотри)\s+([^\s,;]+)/i);
   const candidate = directRead?.[1]?.trim() || '';
   return looksLikePath(candidate) ? candidate : '';
+}
+
+function extractDriveRoot(text: string): string {
+  const explicit = text.match(/(?:^|\s)([A-Za-z]):[\\/]?(?:\s|$)/u)?.[1]
+    || text.match(/(?:drive|диск(?:е|а|у|ом)?)\s+([A-Za-z])\b/iu)?.[1];
+  return explicit ? `${explicit.toUpperCase()}:\\` : '';
 }
 
 function extractFileContent(text: string): string {
@@ -1849,13 +2535,17 @@ function filesystemMutationFailure(
 }
 
 function filesystemErrorCode(error: unknown, fallback: string): string {
-  const code = error && typeof error === 'object' && 'code' in error
-    ? String((error as { code?: unknown }).code || '').toUpperCase()
-    : '';
+  const code = filesystemNodeErrorCode(error);
   if (code === 'ENOSPC' || code === 'EDQUOT') return 'disk-full';
   if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return 'permission-denied';
   if (code === 'ABORT_ERR' || (error instanceof Error && error.name === 'AbortError')) return 'cancelled-before-dispatch';
   return fallback;
+}
+
+function filesystemNodeErrorCode(error: unknown): string {
+  return error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code || '').toUpperCase()
+    : '';
 }
 
 function readBooleanInput(input: unknown, key: string, fallback: boolean): boolean {

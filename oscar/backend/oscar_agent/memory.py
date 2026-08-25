@@ -18,6 +18,30 @@ from .schemas import ChatSource, MemoryStats, WorkspaceToolResult
 LOGGER = logging.getLogger(__name__)
 
 
+class ConversationMutationConflict(RuntimeError):
+    pass
+
+
+class ActionLinkedConversationError(ConversationMutationConflict):
+    pass
+
+
+class ClientMessageConflictError(ConversationMutationConflict):
+    pass
+
+
+class ConversationMessagePrerequisiteError(ConversationMutationConflict):
+    pass
+
+
+class ConversationMessageSupersededError(ConversationMutationConflict):
+    pass
+
+
+class ImmutableConversationMessageError(ConversationMutationConflict):
+    pass
+
+
 STOPWORDS = {
     "что", "как", "это", "или", "для", "про", "при", "the", "and", "you", "are", "with",
     "что-то", "почему", "зачем", "привет", "hello", "thanks", "спасибо",
@@ -145,6 +169,12 @@ class MemoryStore:
                     model_tier TEXT,
                     attachments_json TEXT,
                     sources_json TEXT,
+                    client_message_id TEXT,
+                    turn_id TEXT,
+                    task_id TEXT,
+                    provenance_json TEXT,
+                    outcome TEXT,
+                    integrity_warning TEXT,
                     created_at TEXT NOT NULL
                 );
 
@@ -153,16 +183,55 @@ class MemoryStore:
                 """
             )
             message_columns = {row["name"] for row in con.execute("PRAGMA table_info(conversation_messages)").fetchall()}
-            if "token_count" not in message_columns:
-                con.execute("ALTER TABLE conversation_messages ADD COLUMN token_count INTEGER")
-            if "elapsed_ms" not in message_columns:
-                con.execute("ALTER TABLE conversation_messages ADD COLUMN elapsed_ms INTEGER")
-            if "model_tier" not in message_columns:
-                con.execute("ALTER TABLE conversation_messages ADD COLUMN model_tier TEXT")
-            if "attachments_json" not in message_columns:
-                con.execute("ALTER TABLE conversation_messages ADD COLUMN attachments_json TEXT")
-            if "sources_json" not in message_columns:
-                con.execute("ALTER TABLE conversation_messages ADD COLUMN sources_json TEXT")
+            message_column_defs = {
+                "token_count": "INTEGER",
+                "elapsed_ms": "INTEGER",
+                "model_tier": "TEXT",
+                "attachments_json": "TEXT",
+                "sources_json": "TEXT",
+                "client_message_id": "TEXT",
+                "turn_id": "TEXT",
+                "task_id": "TEXT",
+                "provenance_json": "TEXT",
+                "outcome": "TEXT",
+                "integrity_warning": "TEXT",
+            }
+            for column, definition in message_column_defs.items():
+                if column not in message_columns:
+                    con.execute(f"ALTER TABLE conversation_messages ADD COLUMN {column} {definition}")
+            con.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS conversation_messages_client_message_idx "
+                "ON conversation_messages(client_message_id) WHERE client_message_id IS NOT NULL"
+            )
+            legacy_provenance = json.dumps(
+                {
+                    "schemaVersion": "monarch.message-provenance.v1",
+                    "origin": "legacy",
+                    "verification": "legacy-unknown",
+                    "legacy": True,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            con.execute(
+                "UPDATE conversation_messages SET provenance_json = ? "
+                "WHERE provenance_json IS NULL OR provenance_json = ''",
+                (legacy_provenance,),
+            )
+            legacy_action_rows = con.execute(
+                "SELECT id, content FROM conversation_messages "
+                "WHERE role = 'assistant' AND task_id IS NULL "
+                "AND (integrity_warning IS NULL OR integrity_warning = '')"
+            ).fetchall()
+            for legacy_row in legacy_action_rows:
+                if looks_like_unverified_legacy_action(legacy_row["content"]):
+                    con.execute(
+                        "UPDATE conversation_messages SET integrity_warning = ? WHERE id = ?",
+                        (
+                            "Действие не подтверждено: у этого legacy-сообщения нет связанного AgentTask/receipt.",
+                            legacy_row["id"],
+                        ),
+                    )
             memory_columns = {row["name"] for row in con.execute("PRAGMA table_info(memory_items)").fetchall()}
             memory_column_defs = {
                 "type": "TEXT NOT NULL DEFAULT 'planning_note'",
@@ -650,7 +719,7 @@ class MemoryStore:
             if include_messages:
                 if message_limit is None:
                     messages = con.execute(
-                        "SELECT id, role, content, token_count, elapsed_ms, model_tier, attachments_json, sources_json, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, rowid",
+                        "SELECT id, role, content, token_count, elapsed_ms, model_tier, attachments_json, sources_json, client_message_id, turn_id, task_id, provenance_json, outcome, integrity_warning, created_at FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at, rowid",
                         (conversation_id,),
                     ).fetchall()
                     result["messages"] = [conversation_message_row(message) for message in messages]
@@ -666,7 +735,8 @@ class MemoryStore:
                     descending_rows = con.execute(
                         f"""
                         SELECT rowid AS _message_cursor, id, role, content, token_count, elapsed_ms,
-                               model_tier, attachments_json, sources_json, created_at
+                               model_tier, attachments_json, sources_json, client_message_id, turn_id,
+                               task_id, provenance_json, outcome, integrity_warning, created_at
                         FROM conversation_messages
                         WHERE conversation_id = ? {cursor_filter}
                         ORDER BY created_at DESC, rowid DESC
@@ -767,6 +837,18 @@ class MemoryStore:
         return self.get_conversation(conversation_id, include_messages=False)
 
     def delete_conversation(self, conversation_id: str) -> bool:
+        with self._connection() as con:
+            linked = con.execute(
+                "SELECT 1 FROM conversation_messages WHERE conversation_id = ? "
+                "AND (task_id IS NOT NULL OR turn_id IN ("
+                "SELECT turn_id FROM conversation_messages WHERE conversation_id = ? AND task_id IS NOT NULL"
+                ")) LIMIT 1",
+                (conversation_id, conversation_id),
+            ).fetchone()
+        if linked:
+            raise ActionLinkedConversationError(
+                "Conversation contains an AgentTask/receipt link and can only be archived."
+            )
         # Refuse the migration before deleting anything if an existing reader
         # prevents us from clearing older plaintext WAL frames.
         self._checkpoint_conversation_wal(require_idle=True)
@@ -784,6 +866,58 @@ class MemoryStore:
             except Exception:
                 LOGGER.exception("SQLite WAL truncation failed after secure conversation deletion")
         return deleted
+
+    def clear_conversations(self) -> dict[str, int | bool]:
+        """Remove unlinked conversation history while preserving action evidence.
+
+        Conversations that contain a task/turn binding are part of the durable
+        action record.  They cannot be deleted by a bulk history command, so
+        the same command archives them and reports the exact split to the UI.
+        """
+        # Refuse the migration before deleting anything if an existing reader
+        # prevents us from clearing older plaintext WAL frames.
+        self._checkpoint_conversation_wal(require_idle=True)
+        now = utc_now()
+        linked_ids: list[str] = []
+        deleted = 0
+        archived = 0
+        with self._connection() as con:
+            linked_selector = (
+                "SELECT DISTINCT c.id FROM conversations c "
+                "JOIN conversation_messages m ON m.conversation_id = c.id "
+                "WHERE m.task_id IS NOT NULL OR m.turn_id IN ("
+                "SELECT turn_id FROM conversation_messages WHERE conversation_id = c.id AND task_id IS NOT NULL"
+                ")"
+            )
+            rows = con.execute(linked_selector).fetchall()
+            linked_ids = [str(row["id"]) for row in rows]
+            if linked_ids:
+                archive_cursor = con.execute(
+                    f"UPDATE conversations SET archived = 1, updated_at = ? "
+                    f"WHERE id IN ({linked_selector}) AND archived = 0",
+                    (now,),
+                )
+                archived = int(archive_cursor.rowcount)
+                delete_cursor = con.execute(
+                    f"DELETE FROM conversations WHERE id NOT IN ({linked_selector})",
+                )
+            else:
+                delete_cursor = con.execute("DELETE FROM conversations")
+            deleted = int(delete_cursor.rowcount)
+
+        if deleted:
+            # Keep the same secure-delete/WAL guarantee as single-chat removal.
+            try:
+                if not self._checkpoint_conversation_wal(require_idle=False):
+                    LOGGER.warning("SQLite WAL remained busy after bulk conversation deletion")
+            except Exception:
+                LOGGER.exception("SQLite WAL truncation failed after bulk conversation deletion")
+        return {
+            "ok": True,
+            "deleted": deleted,
+            "archived": archived,
+            "remaining": len(linked_ids),
+        }
 
     def _checkpoint_conversation_wal(self, *, require_idle: bool) -> bool:
         checkpoint = self._connect()
@@ -806,20 +940,98 @@ class MemoryStore:
         model_tier: str | None = None,
         attachments: list | None = None,
         sources: list | None = None,
+        client_message_id: str | None = None,
+        turn_id: str | None = None,
+        task_id: str | None = None,
+        provenance: dict | None = None,
+        outcome: str | None = None,
+        integrity_warning: str | None = None,
+        create_conversation_if_missing: bool = True,
+        required_previous_message_id: str | None = None,
     ) -> dict | None:
         cleaned = str(content or "").strip()
         if not cleaned:
             return None
-        self.create_conversation(conversation_id=conversation_id)
+        if create_conversation_if_missing:
+            self.create_conversation(conversation_id=conversation_id)
         now = utc_now()
         attachments_json = serialize_conversation_attachments(attachments or [])
         sources_json = serialize_conversation_sources(sources or [])
+        client_message_id = normalize_optional_message_id(client_message_id)
+        turn_id = normalize_optional_message_id(turn_id)
+        task_id = normalize_optional_message_id(task_id)
+        provenance_json = serialize_message_provenance(provenance, role)
+        normalized_outcome = normalize_optional_text(outcome, 80)
+        normalized_warning = normalize_optional_text(integrity_warning, 1000)
         with self._connection() as con:
+            if client_message_id:
+                existing = con.execute(
+                    "SELECT id, conversation_id, role, content, token_count, elapsed_ms, model_tier, "
+                    "attachments_json, sources_json, client_message_id, turn_id, task_id, provenance_json, "
+                    "outcome, integrity_warning, created_at FROM conversation_messages "
+                    "WHERE client_message_id = ?",
+                    (client_message_id,),
+                ).fetchone()
+                if existing:
+                    same = (
+                        existing["conversation_id"] == conversation_id
+                        and existing["role"] == role
+                        and existing["content"] == cleaned
+                        and existing["token_count"] == token_count
+                        and existing["elapsed_ms"] == elapsed_ms
+                        and (existing["model_tier"] or None) == model_tier
+                        and (existing["attachments_json"] or None) == attachments_json
+                        and (existing["sources_json"] or None) == sources_json
+                        and (existing["turn_id"] or None) == turn_id
+                        and (existing["task_id"] or None) == task_id
+                        and (existing["provenance_json"] or "") == provenance_json
+                        and (existing["outcome"] or None) == normalized_outcome
+                        and (existing["integrity_warning"] or None) == normalized_warning
+                    )
+                    if not same:
+                        raise ClientMessageConflictError(
+                            "client_message_id is already bound to different message content or provenance"
+                        )
+                    return None
+            if not create_conversation_if_missing:
+                conversation = con.execute(
+                    "SELECT 1 FROM conversations WHERE id = ?",
+                    (conversation_id,),
+                ).fetchone()
+                if not conversation:
+                    raise ConversationMessagePrerequisiteError(
+                        "conversation does not exist yet"
+                    )
+            if required_previous_message_id:
+                previous = con.execute(
+                    "SELECT id, role, client_message_id FROM conversation_messages "
+                    "WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    (conversation_id,),
+                ).fetchone()
+                if (
+                    not previous
+                    or previous["role"] != "user"
+                    or previous["client_message_id"] != required_previous_message_id
+                ):
+                    required = con.execute(
+                        "SELECT id, role FROM conversation_messages "
+                        "WHERE conversation_id = ? AND client_message_id = ?",
+                        (conversation_id, required_previous_message_id),
+                    ).fetchone()
+                    if required and required["role"] == "user":
+                        raise ConversationMessageSupersededError(
+                            "required previous user message is no longer the latest message"
+                        )
+                    raise ConversationMessagePrerequisiteError(
+                        "required previous user message has not been persisted yet"
+                    )
             last = con.execute(
                 "SELECT role, content, attachments_json FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 (conversation_id,),
             ).fetchone()
             if (
+                not client_message_id
+                and
                 last
                 and last["role"] == role
                 and last["content"] == cleaned
@@ -828,8 +1040,12 @@ class MemoryStore:
                 return None
             message_id = uuid.uuid4().hex
             con.execute(
-                "INSERT INTO conversation_messages(id, conversation_id, role, content, token_count, elapsed_ms, model_tier, attachments_json, sources_json, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (message_id, conversation_id, role, cleaned, token_count, elapsed_ms, model_tier, attachments_json, sources_json, now),
+                "INSERT INTO conversation_messages(id, conversation_id, role, content, token_count, elapsed_ms, model_tier, attachments_json, sources_json, client_message_id, turn_id, task_id, provenance_json, outcome, integrity_warning, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    message_id, conversation_id, role, cleaned, token_count, elapsed_ms, model_tier,
+                    attachments_json, sources_json, client_message_id, turn_id, task_id,
+                    provenance_json, normalized_outcome, normalized_warning, now,
+                ),
             )
             if role == "user":
                 title_row = con.execute("SELECT title FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
@@ -848,39 +1064,28 @@ class MemoryStore:
             "token_count": token_count,
             "elapsed_ms": elapsed_ms,
             "model_tier": model_tier,
+            "client_message_id": client_message_id,
+            "turn_id": turn_id,
+            "task_id": task_id,
+            "provenance": json.loads(provenance_json),
+            "outcome": normalized_outcome,
+            "integrity_warning": normalized_warning,
             "attachments": deserialize_conversation_attachments(attachments_json),
             "sources": deserialize_conversation_sources(sources_json),
             "created_at": now,
         }
 
     def edit_user_message(self, conversation_id: str, message_id: str, content: str) -> dict:
-        cleaned = str(content or "").strip()
-        if not cleaned:
-            raise ValueError("Message content is empty")
-        now = utc_now()
         with self._connection() as con:
             message = con.execute(
-                "SELECT rowid, role, content FROM conversation_messages WHERE id = ? AND conversation_id = ?",
+                "SELECT role FROM conversation_messages WHERE id = ? AND conversation_id = ?",
                 (message_id, conversation_id),
             ).fetchone()
             if not message or message["role"] != "user":
                 raise KeyError(message_id)
-            con.execute(
-                "UPDATE conversation_messages SET content = ? WHERE id = ? AND conversation_id = ?",
-                (cleaned, message_id, conversation_id),
-            )
-            con.execute(
-                "DELETE FROM conversation_messages WHERE conversation_id = ? AND rowid > ?",
-                (conversation_id, message["rowid"]),
-            )
-            conversation = con.execute("SELECT title FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
-            auto_title = re.sub(r"\s+", " ", message["content"]).strip()[:56]
-            if conversation and conversation["title"] == auto_title:
-                new_title = re.sub(r"\s+", " ", cleaned).strip()[:56] or "Новый чат"
-                con.execute("UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?", (new_title, now, conversation_id))
-            else:
-                con.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
-        return self.get_conversation(conversation_id)
+        raise ImmutableConversationMessageError(
+            "Conversation messages are immutable; create a new Turn with supersedesTurnId."
+        )
 
 
 def utc_now() -> str:
@@ -1091,12 +1296,25 @@ def serialize_conversation_attachments(attachments: list) -> str | None:
             value = attachment
         else:
             continue
-        compact.append({
-            "mime_type": str(value.get("mime_type") or ""),
-            "data_base64": str(value.get("data_base64") or ""),
-            "name": str(value.get("name") or "image")[:120],
-            "size_bytes": int(value.get("size_bytes") or 0),
-        })
+        attachment_id = str(value.get("id") or "").strip()
+        digest = str(value.get("digest") or "").strip()
+        if attachment_id and digest:
+            compact.append({
+                "id": attachment_id[:256],
+                "digest": digest[:96],
+                "mime_type": str(value.get("mime_type") or ""),
+                "name": str(value.get("name") or "image")[:120],
+                "size_bytes": int(value.get("size_bytes") or 0),
+            })
+        else:
+            # Compatibility only for legacy rows. Coordinator-owned messages
+            # persist immutable attachment refs and never duplicate image bytes.
+            compact.append({
+                "mime_type": str(value.get("mime_type") or ""),
+                "data_base64": str(value.get("data_base64") or ""),
+                "name": str(value.get("name") or "image")[:120],
+                "size_bytes": int(value.get("size_bytes") or 0),
+            })
     return json.dumps(compact, ensure_ascii=False, separators=(",", ":")) if compact else None
 
 
@@ -1150,7 +1368,58 @@ def conversation_message_row(row: sqlite3.Row) -> dict:
     result = dict(row)
     result["attachments"] = deserialize_conversation_attachments(result.pop("attachments_json", None))
     result["sources"] = deserialize_conversation_sources(result.pop("sources_json", None))
+    raw_provenance = result.pop("provenance_json", None)
+    try:
+        result["provenance"] = json.loads(raw_provenance) if raw_provenance else None
+    except (TypeError, ValueError):
+        result["provenance"] = None
     return result
+
+
+def serialize_message_provenance(value: dict | None, role: str) -> str:
+    payload = value if isinstance(value, dict) else {
+        "schemaVersion": "monarch.message-provenance.v1",
+        "origin": "user" if role == "user" else "legacy",
+        "verification": "user-assertion" if role == "user" else "legacy-unknown",
+        "legacy": True,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    if len(encoded) > 16000:
+        raise ValueError("message provenance exceeds size limit")
+    return encoded
+
+
+def normalize_optional_message_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", cleaned):
+        raise ValueError("message binding id contains unsupported characters")
+    return cleaned
+
+
+def normalize_optional_text(value: str | None, maximum: int) -> str | None:
+    if value is None:
+        return None
+    cleaned = re.sub(r"\s+", " ", str(value)).strip()
+    return cleaned[:maximum] or None
+
+
+def looks_like_unverified_legacy_action(content: str) -> bool:
+    text = str(content or "")
+    return bool(re.search(
+        r"(?:^|[^\wа-яё])(?:я|мы)\s+(?:уже\s+)?"
+        r"(?:просканировал|проверил|прочитал|проаудировал|создал|изменил|удалил|"
+        r"переместил|открыл|запустил|установил|очистил|сохранил|выполнил)"
+        r"(?:[^\wа-яё]|$)|"
+        r"(?:^|[^a-z])(?:i|we)\s+(?:have\s+)?"
+        r"(?:scanned|audited|inspected|created|changed|deleted|moved|opened|"
+        r"launched|installed|cleaned|saved|executed)(?:[^a-z]|$)",
+        text,
+        flags=re.IGNORECASE,
+    ))
 
 
 def conversation_row(row: sqlite3.Row) -> dict:

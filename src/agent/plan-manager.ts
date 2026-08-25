@@ -30,11 +30,14 @@ export function reviseAgentPlan(
       ? { ...step, dependsOn: [...step.dependsOn] }
       : { ...step, status: 'skipped' as const, dependsOn: [...step.dependsOn], completedAt: revisedAt }
   ));
+  const stepIds = decision.steps.map(() => createMonarchId('agent_step'));
   const newSteps: AgentPlanStep[] = decision.steps.map((step, index) => ({
-    id: createMonarchId('agent_step'),
+    id: stepIds[index]!,
     title: bounded(step.title, 500),
     status: index === 0 ? 'ready' : 'proposed',
-    dependsOn: index === 0 ? [] : [decision.steps[index - 1]?.title || 'previous-step'],
+    // Dependencies are durable runtime identifiers. Human plan titles may
+    // contain spaces/punctuation and must never cross the identifier boundary.
+    dependsOn: index === 0 ? [] : [stepIds[index - 1]!],
     expectedEffects: [{ kind: 'other', description: bounded(step.expectedEffect, 1_000) }],
     verification: [{ kind: 'other', description: 'Require evidence matching the expected effect.' }],
     attemptCount: 0,
@@ -81,6 +84,36 @@ export function settleAgentPlanStep(
   return {
     ...settled,
     steps: settled.steps.map((step, index) => index === firstReadyIndex ? { ...step, status: 'ready' } : step),
+  };
+}
+
+/**
+ * A model-authored plan is guidance, not a second source of truth. Once the
+ * runtime has independently verified every required goal target, unfinished
+ * descriptive steps must not force the same effectful action to run again.
+ * Preserve the audit trail by skipping those redundant steps explicitly.
+ */
+export function reconcileAgentPlanAfterVerifiedGoal(
+  plan: AgentPlan,
+  completedAt = nowIso(),
+): AgentPlan {
+  const unfinished = plan.steps.filter((step) => !isSettled(step));
+  if (unfinished.length === 0) return plan;
+  const unfinishedIds = new Set(unfinished.map((step) => step.id));
+  return {
+    ...plan,
+    revision: plan.revision + 1,
+    revisedAt: completedAt,
+    steps: plan.steps.map((step) => unfinishedIds.has(step.id) ? {
+      ...step,
+      status: 'skipped' as const,
+      completedAt,
+      verificationResult: {
+        status: 'not-run' as const,
+        summary: 'Skipped because Kernel evidence already verified the complete requested goal.',
+        verifiedAt: completedAt,
+      },
+    } : { ...step, dependsOn: [...step.dependsOn] }),
   };
 }
 

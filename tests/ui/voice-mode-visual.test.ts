@@ -98,13 +98,14 @@ describe('voice mode visual contract', () => {
     expect(source).toContain('drawVoiceOrbRings');
     expect(source).toContain('drawVoiceOrbBands');
     expect(source).toContain('warmVoiceModeSpeech(speech).then(recordSpeechWarmup');
+    expect(source).not.toContain('speech.prewarm();');
     expect(source).toContain('if (!isOpen || openingTurn !== turnId) return;');
-    expect(source).toContain('void prepareVoiceModeModels().catch(() =>');
-    expect(source.indexOf('void prepareVoiceModeModels().catch(() =>')).toBeLessThan(
+    expect(source).toContain('void prepareVoiceTranscription().catch(() =>');
+    expect(source.indexOf('void prepareVoiceTranscription().catch(() =>')).toBeLessThan(
       source.indexOf('void warmVoiceModeSpeech(speech).then(recordSpeechWarmup'),
     );
     expect(source).toContain('openTimer = window.setTimeout(startListening, reducedMotion?.matches ? 40 : 140)');
-    expect(source).toContain('void releaseVoiceModeModels().catch(() =>');
+    expect(source).not.toContain('releaseVoiceModeModels');
     expect(source).toContain("surface.dataset.speechWarmup = ready ? 'ready' : 'failed'");
     expect(source).toContain('describeVoiceSpeechFallback(speechState.playback)');
     expect(source).toContain("surface.dataset.speechLastError = fallbackNotice.lastError");
@@ -121,7 +122,7 @@ describe('voice mode visual contract', () => {
     expect(source).toContain('capture?.stop()');
     expect(source).toContain('Оскар говорит');
     expect(source).not.toContain('Oscar говорит');
-    expect(source).toContain("result.action === 'listen.continue' && !result.text");
+    expect(source).toContain('isWakeOnlyVoiceText(text)');
     expect(source).toContain("surface.dataset.voiceActivity = 'speech'");
     expect(source).toContain('Закончу запись автоматически после короткой паузы');
     expect(source).toContain('windowObject.devicePixelRatio');

@@ -39,6 +39,7 @@ import { BackendHttpError, cancelGeneration, getHardware, getHealth, getMemorySt
 import type { ChatImageAttachment, ChatRequest, ChatSource, HardwareInfo, MemoryStats, ModelStatus, SearchResult, StreamEvent, UiMessage, WorkspaceEntry, WorkspaceToolResult } from './types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { buildOscarRamNotice } from '../../../src/ui/public/modules/oscar-ram-pressure.js';
 // @ts-expect-error Shared browser-only easter egg used by the live shell and preview.
 import { installOscarSnakeEasterEgg } from '../../../src/ui/public/modules/oscar-snake-game.js';
 // @ts-expect-error Shared browser-only brand sequence used by the live shell and preview.
@@ -116,6 +117,7 @@ export default function App() {
   const [temperature, setTemperature] = useState(0.3);
   const [activity, setActivity] = useState('checking');
   const [busy, setBusy] = useState(false);
+  const [ramRefreshBusy, setRamRefreshBusy] = useState(false);
   const [memory, setMemory] = useState<MemoryStats | null>(null);
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
   const [model, setModel] = useState<ModelStatus | null>(null);
@@ -169,7 +171,11 @@ export default function App() {
   const visibleToolResults = useMemo(() => [...toolResults, ...workspaceActionHistory], [toolResults, workspaceActionHistory]);
 
   const selectedRequestedModel = resolveRequestedModel(modelSelection, deepThinking, imageAttachments.length > 0);
-  const ramNotice = buildRamNotice(hardware, selectedRequestedModel);
+  const ramNotice = buildOscarRamNotice({
+    requestedModel: selectedRequestedModel,
+    hardware,
+    modelStatus: model,
+  });
   const mascotState = resolveMascotState({ busy, inspectorTab, activity, model });
   const mascot = mascotAssets[mascotState];
   const deepThinkingEnabled = deepThinking !== 'off';
@@ -228,6 +234,16 @@ export default function App() {
       setActivity(health.ok ? 'ready' : 'offline');
     } catch {
       setActivity('offline');
+    }
+  }
+
+  async function refreshRamStatus() {
+    if (ramRefreshBusy) return;
+    setRamRefreshBusy(true);
+    try {
+      await refreshStatus();
+    } finally {
+      setRamRefreshBusy(false);
     }
   }
 
@@ -581,10 +597,11 @@ export default function App() {
           }
           if (eventName === 'done') {
             streamTerminalEventSeen = true;
-            streamTerminalOk = isDoneEvent(data) ? data.ok : true;
+            const doneEvent = isDoneEvent(data) ? data : null;
+            streamTerminalOk = Boolean(doneEvent?.ok) && !streamFailurePresentation(doneEvent?.usage);
             setMessages((current) =>
               current.map((message) =>
-                message.id === assistantId ? finalizeStreamMessage(message, streamTerminalOk, isDoneEvent(data) ? data.usage : undefined) : message,
+                message.id === assistantId ? finalizeStreamMessage(message, streamTerminalOk, doneEvent?.usage) : message,
               ),
             );
           }
@@ -600,7 +617,7 @@ export default function App() {
       }
       await refreshMemory();
       await refreshStatus();
-      setActivity(streamTerminalOk ? 'ready' : 'fallback');
+      setActivity(streamTerminalOk ? 'ready' : 'не завершено');
     } catch (error) {
       if (controller.signal.aborted) {
         setMessages((current) =>
@@ -868,8 +885,24 @@ export default function App() {
             <div className="composer-panel">
               {ramNotice ? (
                 <div className={`ram-pressure-warning ${ramNotice.level}`} role="status" aria-live="polite">
-                  <strong>Нужен запас RAM</strong>
+                  <strong>{ramNotice.title}</strong>
                   <span>{ramNotice.message}</span>
+                  <div className="ram-pressure-actions">
+                    {ramNotice.action === 'use-balanced' ? (
+                      <button type="button" onClick={() => {
+                        setModelSelection('gemma4-balanced');
+                        setDeepThinking('off');
+                      }}>Выбрать Balanced</button>
+                    ) : null}
+                    <button
+                      type="button"
+                      disabled={ramRefreshBusy}
+                      aria-busy={ramRefreshBusy}
+                      onClick={() => void refreshRamStatus()}
+                    >
+                      {ramRefreshBusy ? 'Проверяю…' : 'Перепроверить'}
+                    </button>
+                  </div>
                 </div>
               ) : null}
               {imageAttachments.length || imageError ? (
@@ -1971,24 +2004,6 @@ function formatDeepThinkingTitle(mode: DeepThinkingMode) {
   return 'DeepThinking выключен';
 }
 
-function buildRamNotice(info: HardwareInfo | null, requestedModel: string | undefined) {
-  const available = info?.ram_available_gb;
-  if (typeof available !== 'number') return null;
-  if (available < 1.5) {
-    return {
-      level: 'critical',
-      message: `Свободно ${available.toFixed(1)} ГБ RAM. Закрой лишние программы; красная граница — 1,5 ГБ.`,
-    };
-  }
-  if (requestedModel !== 'gemma4-31b') return null;
-  const projected = available - 19.7;
-  if (projected >= 3) return null;
-  return {
-    level: projected < 1.5 ? 'critical' : 'caution',
-    message: `Extra может занять около 19,7 ГБ RAM; ожидаемый запас — ${Math.max(0, projected).toFixed(1)} ГБ. Закрой тяжёлые программы, если они не нужны.`,
-  };
-}
-
 function formatStreamStatus(message: UiMessage) {
   const status = (message.streamStatus || '').trim();
   if (!status) return message.content ? 'пишу ответ' : 'подключаю поток';
@@ -2187,10 +2202,10 @@ export function recoverUnfinishedStreamMessage(message: UiMessage): UiMessage {
       ...message,
       content: message.content.replace(/\s+$/, ''),
       pending: false,
-      streamStatus: 'готово',
+      streamStatus: 'не завершено',
       streamUpdatedAt: Date.now(),
-      streamOk: true,
-    }, { kind: 'done', label: 'ответ сохранен', detail: 'финальное событие не пришло' });
+      streamOk: false,
+    }, { kind: 'error', label: 'поток без финала', detail: 'частичный ответ сохранён' });
   }
 
   const content = message.content.trim()
@@ -2211,16 +2226,58 @@ export function finalizeStreamMessage(
   ok: boolean,
   usage?: Record<string, string | number | boolean>,
 ): UiMessage {
+  const failure = streamFailurePresentation(usage);
+  const completed = ok && !failure;
+  const content = completed || message.content.trim()
+    ? message.content
+    : failure?.emptyContent || 'Ответ не был завершён. Попробуй повторить запрос.';
   return appendStreamEvent({
     ...message,
+    content,
     pending: false,
-    streamStatus: ok ? 'готово' : 'fallback',
+    streamStatus: completed ? 'готово' : failure?.status || 'не завершено',
     streamUpdatedAt: Date.now(),
-    streamOk: ok,
+    streamOk: completed,
     usage,
-  }, ok
+  }, completed
     ? { kind: 'done', label: 'ответ готов' }
-    : { kind: 'error', label: 'fallback-ответ', detail: 'локальная модель не завершила генерацию' });
+    : { kind: 'error', label: 'ответ не завершён', detail: failure?.detail || 'локальная модель не завершила генерацию' });
+}
+
+function streamFailurePresentation(usage?: Record<string, string | number | boolean>): {
+  status: string;
+  detail: string;
+  emptyContent: string;
+} | null {
+  const stopReason = String(usage?.generation_stop_reason || '').trim().toLowerCase();
+  if (usage?.likely_truncated === true || ['length', 'max_tokens', 'max_new_tokens'].includes(stopReason)) {
+    return {
+      status: 'не завершено',
+      detail: 'достигнут лимит генерации',
+      emptyContent: 'Ответ не был завершён из-за лимита генерации.',
+    };
+  }
+  if (['cancelled', 'canceled'].includes(stopReason)) {
+    return { status: 'остановлено', detail: 'генерация остановлена', emptyContent: 'Остановлено.' };
+  }
+  if (['content_filter', 'content-filter'].includes(stopReason)) {
+    return { status: 'не завершено', detail: 'ответ остановлен фильтром', emptyContent: 'Ответ был остановлен фильтром.' };
+  }
+  if (['tool_calls', 'tool-calls', 'function_call'].includes(stopReason)) {
+    return {
+      status: 'не завершено',
+      detail: 'модель запросила неподдерживаемый вызов инструмента',
+      emptyContent: 'Ответ не завершён: модель запросила неподдерживаемый вызов инструмента.',
+    };
+  }
+  if (stopReason === 'error' || usage?.partial === true) {
+    return {
+      status: 'не завершено',
+      detail: 'локальная генерация завершилась с ошибкой',
+      emptyContent: 'Локальная генерация завершилась с ошибкой.',
+    };
+  }
+  return null;
 }
 
 function formatToolActivity(result: WorkspaceToolResult) {

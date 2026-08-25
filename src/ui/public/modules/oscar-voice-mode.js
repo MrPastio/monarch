@@ -1,10 +1,6 @@
 import {
-  classifyVoiceModeText,
-  closeVoiceModeSession,
-  completeVoiceModeTurn,
-  prepareVoiceModeModels,
-  releaseVoiceModeModels,
-  startVoiceModeSession,
+  executeVoiceAgentTask,
+  prepareVoiceTranscription,
 } from './api.js';
 import { createOscarSpeechController } from './oscar-speech.js';
 import { attachVoiceInput } from './voice-input.js';
@@ -12,12 +8,7 @@ import {
   createAdaptiveVoiceActivityDetector,
   measureVoicePcmFrame,
 } from './voice-activity-detector.js';
-import { dispatchVoiceModeTurn } from './voice-mode-dispatch.js';
 import { createVoiceThinkingPhrasePicker } from './voice-mode-phrases.js';
-import {
-  createVoiceModeClarification,
-  resolveVoiceModeClarification,
-} from './voice-mode-clarification.js';
 import {
   advanceVoiceOrbMotion,
   blendVoiceOrbFrames,
@@ -38,8 +29,8 @@ const PHASE_COPY = Object.freeze({
   entering: ['Пробуждаюсь', 'Oscar рядом', 'Подключаю локальный микрофон'],
   listening: ['Слушаю', 'Говори', 'Закончу запись автоматически после короткой паузы'],
   recognizing: ['Распознаю локально', 'Слышу тебя', 'Перевожу звук в текст'],
-  routing: ['Выбираю маршрут', 'Понял запрос', 'Проверяю, хватит ли быстрого пути'],
-  thinking: ['Готовлю ответ', 'Сейчас отвечу', 'Работает локальный Fast ceiling'],
+  routing: ['Передаю задачу', 'Понял запрос', 'Создаю общий Agent Task'],
+  thinking: ['Выполняю задачу', 'Oscar работает', 'Действия проходят через Kernel'],
   speaking: ['Отвечаю', 'Оскар говорит', 'Нажми круг, чтобы прервать ответ'],
   error: ['Не получилось', 'Нужна ещё попытка', 'Проверь микрофон и повтори'],
 });
@@ -118,11 +109,7 @@ export function initOscarVoiceMode(root = document) {
   let lastSpeechTelemetryAt = 0;
   let expectingSpeech = false;
   let activeTurnController = null;
-  let pendingClarification = null;
   let speechWarmupFailure = null;
-  let voiceSessionId = '';
-  let voiceSessionPromise = null;
-  let voiceSessionEpoch = 0;
 
   const orbRenderer = createOrganicVoiceOrbRenderer({
     canvas: orbCanvas,
@@ -192,8 +179,6 @@ export function initOscarVoiceMode(root = document) {
       }
     },
   });
-  speech.prewarm();
-
   const capture = attachVoiceInput({
     form: captureForm,
     input: captureInput,
@@ -231,20 +216,9 @@ export function initOscarVoiceMode(root = document) {
     abortActiveTurn();
     isOpen = true;
     micMuted = false;
-    pendingClarification = null;
     speechWarmupFailure = null;
     turnId += 1;
     const openingTurn = turnId;
-    const sessionEpoch = ++voiceSessionEpoch;
-    voiceSessionId = '';
-    voiceSessionPromise = startVoiceModeSession().then((sessionId) => {
-      if (!isOpen || sessionEpoch !== voiceSessionEpoch) {
-        void closeVoiceModeSession(sessionId).catch(() => undefined);
-        return '';
-      }
-      voiceSessionId = sessionId;
-      return sessionId;
-    }).catch(() => '');
     lastFocus = document.activeElement;
     clearTimers();
     surface.hidden = false;
@@ -258,10 +232,9 @@ export function initOscarVoiceMode(root = document) {
     setPhase('entering', { detail: 'Подготавливаю локальное распознавание и голос' });
     live.textContent = 'Голосовой режим открыт. Запускаю локальное распознавание.';
     closeButton?.focus({ preventScroll: true });
-    // Streaming STT is lightweight and must never wait for the substantially
-    // heavier Qwen TTS warmup. Local LLMs stay lazy, so both preparations are
-    // safe to start independently without racing a Micro/Lite allocation.
-    void prepareVoiceModeModels().catch(() => {
+    // Streaming STT is a transport and warms independently from the common
+    // Agent Runtime decision model and the substantially heavier Qwen TTS.
+    void prepareVoiceTranscription().catch(() => {
       // Direct MediaRecorder transcription remains the truthful fallback.
     });
     openTimer = window.setTimeout(startListening, reducedMotion?.matches ? 40 : 140);
@@ -298,27 +271,11 @@ export function initOscarVoiceMode(root = document) {
   function close() {
     if (!isOpen) return;
     isOpen = false;
-    voiceSessionEpoch += 1;
-    const closingSessionId = voiceSessionId;
-    const closingSessionPromise = voiceSessionPromise;
-    voiceSessionId = '';
-    voiceSessionPromise = null;
-    pendingClarification = null;
     turnId += 1;
     abortActiveTurn();
     clearTimers();
     capture?.cancel();
     speech.stop();
-    void releaseVoiceModeModels().catch(() => {
-      // Closing must stay instant; the backend still owns exact-worker safety.
-    });
-    if (closingSessionId) {
-      void closeVoiceModeSession(closingSessionId).catch(() => undefined);
-    } else {
-      void closingSessionPromise?.then((sessionId) => (
-        sessionId ? closeVoiceModeSession(sessionId) : null
-      )).catch(() => undefined);
-    }
     analyserCleanup();
     speechLevelCleanup();
     resetVoiceLevel();
@@ -344,7 +301,6 @@ export function initOscarVoiceMode(root = document) {
     syncMuteControl();
     keepSurfaceAtOrigin();
     if (micMuted) {
-      pendingClarification = null;
       capture?.cancel();
       analyserCleanup();
       surface.dataset.voiceActivity = 'idle';
@@ -426,96 +382,22 @@ export function initOscarVoiceMode(root = document) {
     transcript.textContent = text;
     setPhase('routing');
     try {
-      const sessionId = voiceSessionId || await voiceSessionPromise || '';
-      const classifiedCandidate = await classifyVoiceModeText(text, controller.signal, sessionId);
-      if (!isOpen || currentTurn !== turnId) return;
-      const clarification = resolveVoiceModeClarification(
-        pendingClarification,
-        classifiedCandidate,
-        text,
-      );
-      const candidate = clarification.candidate;
-      pendingClarification = clarification.pending;
-      surface.dataset.lane = candidate.lane || 'scripted';
-
-      const isLocalResult = candidate.actionId === 'listen.continue' || candidate.lane === 'blocked';
-      if (!isLocalResult) {
-        setPhase('thinking', {
-          detail: candidate.lane === 'fast-llm'
-            ? 'Сложный запрос · Fast с жёстким потолком'
-            : candidate.lane === 'voice-realtime'
-              ? candidate.actionId === 'weather.query'
-                ? 'Получаю погоду напрямую · без модели'
-                : 'Ищу источники · короткий Fast-ответ'
-            : candidate.lane === 'voice-micro'
-              ? 'Мгновенный Micro-путь'
-              : candidate.lane === 'voice-lite'
-                ? 'Короткий Lite-путь'
-                : 'Выполняю без модели',
-        });
-        showThinkingPhrase();
+      if (isWakeOnlyVoiceText(text)) {
+        transcript.textContent = 'Слушаю команду после «Оскар»';
+        if (!micMuted) scheduleListening(300);
+        return;
       }
-      const result = await dispatchVoiceModeTurn({
-        text,
-        candidate,
-        signal: controller.signal,
-      });
+      surface.dataset.lane = 'agent';
+      setPhase('thinking');
+      showThinkingPhrase();
+      const result = await executeVoiceAgentTask(text, controller.signal);
       clearThinkingTimer();
       if (!isOpen || currentTurn !== turnId) return;
-      if (result.action === 'listen.continue' && !result.text) {
-        transcript.textContent = 'Слушаю команду после «Оскар»';
-        if (micMuted) {
-          setPhase('listening', {
-            kicker: 'Микрофон выключен',
-            title: 'Я не слушаю',
-            detail: 'Включи микрофон, чтобы продолжить',
-          });
-          return;
-        }
-        scheduleListening(300);
-        return;
-      }
-      if (result.blocked) {
-        setPhase('error', {
-          title: 'Лучше продолжить текстом',
-          detail: result.message || 'Этот запрос слишком большой для быстрого голосового ответа',
-        });
-        scheduleListening(3200);
-        return;
-      }
       if (!result.ok || !result.text) {
-        if (candidate.actionId !== 'listen.continue') pendingClarification = null;
         setPhase('error', { detail: readableVoiceError(result.message || result.error) });
         scheduleListening(2600);
         return;
       }
-
-      const contextTurnId = String(candidate?.context?.turnId || '').trim();
-      if (sessionId && contextTurnId) {
-        const committed = await completeVoiceModeTurn({
-          sessionId,
-          turnId: contextTurnId,
-          response: result.text,
-          actionId: candidate.actionId,
-          signal: controller.signal,
-        }).catch(() => null);
-        if (committed?.ok === false) {
-          const recoveryEpoch = voiceSessionEpoch;
-          voiceSessionId = '';
-          voiceSessionPromise = startVoiceModeSession().then((nextId) => {
-            if (!isOpen || recoveryEpoch !== voiceSessionEpoch) {
-              void closeVoiceModeSession(nextId).catch(() => undefined);
-              return '';
-            }
-            voiceSessionId = nextId;
-            return nextId;
-          }).catch(() => '');
-        }
-      }
-
-      const nextClarification = createVoiceModeClarification(candidate);
-      if (nextClarification) pendingClarification = nextClarification;
-      else if (candidate.actionId !== 'listen.continue') pendingClarification = null;
 
       transcript.textContent = compactVisibleAnswer(result.text);
       thinking.hidden = true;
@@ -1374,6 +1256,15 @@ function compactVisibleAnswer(value) {
     .replace(/\s+/g, ' ')
     .trim();
   return clean.length > 260 ? `${clean.slice(0, 257).trimEnd()}…` : clean;
+}
+
+export function isWakeOnlyVoiceText(value) {
+  const normalized = String(value || '')
+    .trim()
+    .toLocaleLowerCase('ru-RU')
+    .replace(/[.,!?;:]+$/gu, '')
+    .trim();
+  return normalized === 'оскар' || normalized === 'oscar';
 }
 
 export function readableVoiceError(value) {

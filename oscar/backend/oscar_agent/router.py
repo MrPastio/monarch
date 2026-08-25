@@ -9,7 +9,7 @@ from typing import Any
 from .meta_templates import detect_meta_intent
 from .research import has_freshness_signal
 
-TIER_ORDER = ["gemma4-fast", "gemma4-balanced", "gemma4-deepthinking"]
+TIER_ORDER = ["gemma4-fast", "gemma4-balanced", "qwen3.8-27b-pro"]
 TIER_RANK = {tier: index for index, tier in enumerate(TIER_ORDER)}
 META_INTENTS = {
     "assistant_identity",
@@ -20,8 +20,12 @@ META_INTENTS = {
 LEGACY_TIER_ALIASES = {
     "weak": "gemma4-fast",
     "medium": "gemma4-balanced",
-    "powerful": "gemma4-deepthinking",
-    "reasoning": "gemma4-deepthinking",
+    "powerful": "qwen3.8-27b-pro",
+    "reasoning": "qwen3.8-27b-pro",
+    "pro": "qwen3.8-27b-pro",
+    "extra": "qwen3.8-27b-pro",
+    "gemma4-deepthinking": "qwen3.8-27b-pro",
+    "gemma4-31b": "qwen3.8-27b-pro",
     "vision": "gemma4-balanced",
 }
 
@@ -113,7 +117,7 @@ def select_model_tier(
     intent_kind = _read_hint_intent(route_hint) or detect_meta_intent(latest_user)
 
     if use_reasoning or _has_reasoning_keyword(lowered):
-        return "gemma4-deepthinking"
+        return "qwen3.8-27b-pro"
 
     fallback_tier = _normalize_router_tier(_fallback_tier_for_text(lowered, intent_kind))
     hinted_tier = _read_hint_tier(route_hint)

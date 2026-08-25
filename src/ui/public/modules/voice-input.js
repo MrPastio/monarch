@@ -1,5 +1,6 @@
 import { transcribeVoiceAudio } from './api.js';
 import { setMascotState } from './mascot-controller.js';
+import { readVoiceInputPreferences } from './oscar-voice-settings.js';
 import { canUseDirectVoicePcm, createVoicePcmStream } from './voice-pcm-stream.js';
 
 const VOICE_DONE_HIDE_DELAY_MS = 1800;
@@ -117,6 +118,7 @@ export function attachVoiceInput(options) {
   const transcribeAudio = options.transcribeAudio || transcribeVoiceAudio;
   const createPcmStream = options.createPcmStream || createVoicePcmStream;
   const encodeAudio = options.encodeAudio || blobToBase64;
+  const getInputPreferences = options.getInputPreferences || readVoiceInputPreferences;
   let activeSession = null;
   let sessionCounter = 0;
   let destroyed = false;
@@ -125,7 +127,7 @@ export function attachVoiceInput(options) {
 
   const controller = {
     start,
-    stop: () => stop(true),
+    stop: () => stop(true, 'programmatic'),
     cancel,
     cancelSilently: () => cancelActiveSession({ showFeedback: false }),
     isListening: () => Boolean(activeSession),
@@ -136,7 +138,7 @@ export function attachVoiceInput(options) {
 
   button.addEventListener('click', () => {
     if (activeSession?.state === 'recording') {
-      stop(true);
+      stop(true, 'manual');
       return;
     }
     if (activeSession) {
@@ -201,6 +203,8 @@ export function attachVoiceInput(options) {
         pcmStream: null,
         pcmStartPromise: null,
         pcmFinalPromise: null,
+        stopReason: null,
+        autoSubmitClaimed: false,
       };
       activeSession = session;
       clearStatusTimer();
@@ -278,7 +282,7 @@ export function attachVoiceInput(options) {
       recorder.start(RECORDING_CHUNK_MS);
       session.maxTimer = setTimeout(() => {
         if (isActiveSession(session) && session.state === 'recording') {
-          stop(true);
+          stop(true, 'safety-timeout');
         }
       }, MAX_RECORDING_MS);
       syncAvailability();
@@ -289,11 +293,11 @@ export function attachVoiceInput(options) {
     }
   }
 
-  function stop(commit) {
+  function stop(commit, reason = 'programmatic') {
     const session = activeSession;
     if (!session) return;
     if (session.state === 'recording') {
-      stopRecording(session, commit);
+      stopRecording(session, commit, reason);
       return;
     }
     if (!commit || session.state === 'starting') {
@@ -378,7 +382,7 @@ export function attachVoiceInput(options) {
     }
   }
 
-  function stopRecording(session, commit) {
+  function stopRecording(session, commit, reason) {
     if (!isActiveSession(session) || session.state !== 'recording') return;
     const activeRecorder = session.recorder;
     const durationMs = readRecordingDurationMs(session);
@@ -398,6 +402,7 @@ export function attachVoiceInput(options) {
       return;
     }
     session.commit = commit;
+    session.stopReason = commit ? reason : 'cancelled';
     session.durationMs = durationMs;
     const captureStoppedAtEpochMs = Date.now();
     if (commit) {
@@ -499,8 +504,36 @@ export function attachVoiceInput(options) {
       input.value = nextValue;
       dispatchInput(input);
     }
+    const composerValue = input.value || '';
+    const shouldAutoSubmit = claimDictationAutoSubmit(session, composerValue);
     finishSession(session, true, 'Готово', 'done');
     options.onTranscript?.({ transcript: finalTranscript, language });
+    if (shouldAutoSubmit) scheduleDictationAutoSubmit(session, composerValue);
+  }
+
+  function claimDictationAutoSubmit(session, composerValue) {
+    if (session.autoSubmitClaimed || session.stopReason !== 'manual' || options.insertTranscript === false) return false;
+    if (!String(composerValue || '').trim() || typeof form.requestSubmit !== 'function') return false;
+    let preferences;
+    try {
+      preferences = getInputPreferences();
+    } catch {
+      return false;
+    }
+    if (preferences?.autoSendAfterDictation !== true) return false;
+    session.autoSubmitClaimed = true;
+    return true;
+  }
+
+  function scheduleDictationAutoSubmit(session, composerValue) {
+    const submit = () => {
+      if (destroyed || sessionCounter !== session.token || !canStartNow()) return;
+      if (String(input.value || '') !== String(composerValue || '')) return;
+      if (isComposerBusy(form, input) || input.disabled || input.getAttribute?.('aria-disabled') === 'true') return;
+      form.requestSubmit();
+    };
+    if (typeof queueMicrotask === 'function') queueMicrotask(submit);
+    else Promise.resolve().then(submit);
   }
 
   function finishSession(session, commit, message, state) {

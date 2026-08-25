@@ -20,6 +20,7 @@ def test_installed_runtime_paths_bypass_version_junctions(monkeypatch, tmp_path:
 
     config = load_config(config_path)
 
+    assert config.data_root == data_root / "security"
     assert config.runtime.state_path == data_root / "security" / "state.json"
     assert config.runtime.audit_log_path == logs_root / "security" / "audit.jsonl"
     assert config.runtime.integrity_key_path == data_root / "security" / "integrity.key"

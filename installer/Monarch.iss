@@ -7,13 +7,13 @@
 
 #define AppName "Monarch"
 #ifndef AppVersion
-  #define AppVersion "0.2.4.1"
+  #define AppVersion "0.2.5.0"
 #endif
 #ifndef RuntimeVersion
 #define RuntimeVersion "2026.07.7"
 #endif
 #ifndef BackendEnvironment
-#define BackendEnvironment "backend-0.1.5-offline5"
+#define BackendEnvironment "backend-0.1.5-offline8"
 #endif
 #ifndef DataSchemaVersion
   #define DataSchemaVersion "1"
@@ -32,6 +32,7 @@
 #endif
 #define AppPublisher "MrPastio"
 #define AppExeName "Monarch.exe"
+#define AppUserModelId "Monarch.App"
 
 [Setup]
 AppId={{9D19CB58-91DB-4A0D-9E1B-4AB5DE0E4047}
@@ -73,8 +74,8 @@ Source: "{#SourceRoot}\installer\offline-payload\payload-manifest.json"; DestDir
 Source: "{#SourceRoot}\installer\offline-payload\Monarch.exe"; DestDir: "{app}"; DestName: "Monarch.next.exe"; Flags: ignoreversion; AfterInstall: FinalizeOfflinePayload
 
 [Icons]
-Name: "{group}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Check: CriticalInstallSucceeded
-Name: "{autodesktop}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; Check: CriticalInstallSucceeded
+Name: "{group}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; AppUserModelID: "{#AppUserModelId}"; Check: CriticalInstallSucceeded
+Name: "{autodesktop}\Monarch"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; AppUserModelID: "{#AppUserModelId}"; Tasks: desktopicon; Check: CriticalInstallSucceeded
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Запустить Monarch"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Check: CriticalInstallSucceeded
@@ -86,7 +87,7 @@ begin
     '-NoProfile -ExecutionPolicy Bypass -File "' +
     ExpandConstant('{app}\versions\{#AppVersion}\installer\swap-launcher.ps1') +
     '" -InstallRoot "' + ExpandConstant('{app}') +
-    '" -LauncherVersion "1.0.3"';
+    '" -LauncherVersion "1.0.4"';
 end;
 
 function GetFinalizeParameters(Param: String): String;
@@ -106,14 +107,15 @@ begin
     ' -MaximumModelCatalogSchema "{#MaximumModelCatalogSchema}"';
 end;
 
+function GetPersistentInstallerLogPath: String;
+begin
+  Result := ExpandConstant('{localappdata}\Monarch\installer-logs');
+end;
+
 function GetDefaultInstallPath(Param: String): String;
 begin
-  if DirExists('E:\') then
-    Result := 'E:\Programs\Monarch'
-  else if DirExists('D:\') then
-    Result := 'D:\Programs\Monarch'
-  else
-    Result := ExpandConstant('{localappdata}\Programs\Monarch');
+  { Removable and optical drives can exist on a clean PC but are not valid defaults. }
+  Result := ExpandConstant('{localappdata}\Programs\Monarch');
 end;
 
 function RunCriticalStep(
@@ -157,7 +159,16 @@ begin
   );
   if not CriticalFinalizerCompleted then begin
     CriticalExitCode := 20;
-    RaiseException('Monarch не смог проверить и установить встроенные компоненты. Установка отменена.');
+    SuppressibleMsgBox(
+      'Monarch не смог завершить автономную установку.' + #13#10 + #13#10 +
+      'Компоненты не будут запускаться из неполной установки.' + #13#10 +
+      'Диагностика сохранена: ' + GetPersistentInstallerLogPath,
+      mbError,
+      MB_OK,
+      IDOK
+    );
+    WizardForm.Close;
+    Exit;
   end;
 
   CriticalLauncherCompleted := RunCriticalStep(
@@ -167,7 +178,15 @@ begin
   );
   if not CriticalLauncherCompleted then begin
     CriticalExitCode := 21;
-    RaiseException('Monarch не смог проверить загрузчик и установленную среду. Установка отменена.');
+    SuppressibleMsgBox(
+      'Monarch не смог проверить безопасный загрузчик.' + #13#10 + #13#10 +
+      'Диагностика сохранена: ' + GetPersistentInstallerLogPath,
+      mbError,
+      MB_OK,
+      IDOK
+    );
+    WizardForm.Close;
+    Exit;
   end;
 end;
 

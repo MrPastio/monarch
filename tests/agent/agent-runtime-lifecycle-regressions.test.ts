@@ -9,6 +9,7 @@ import {
   InMemoryAgentTaskStore,
   MonarchAgentRuntime,
   ReplayAgentDecisionProvider,
+  agentRunnerHeartbeatCadence,
   type AgentDecisionProvider,
   type AgentModelDecisionRequest,
   type AgentModelDecisionResponse,
@@ -31,6 +32,137 @@ const fixtureCapability: MonarchCapability = {
 };
 
 describe('Agent runtime lifecycle regressions', () => {
+  it('separates responsive control polling from bounded durable lease renewal', () => {
+    expect(agentRunnerHeartbeatCadence(300)).toEqual({ controlPollMs: 100, leaseRenewMs: 100 });
+    expect(agentRunnerHeartbeatCadence(6_000)).toEqual({ controlPollMs: 1_000, leaseRenewMs: 2_000 });
+    expect(agentRunnerHeartbeatCadence(5 * 60_000)).toEqual({
+      controlPollMs: 1_000,
+      leaseRenewMs: 30_000,
+    });
+    expect(agentRunnerHeartbeatCadence(Number.NaN)).toEqual({
+      controlPollMs: 1_000,
+      leaseRenewMs: 30_000,
+    });
+  });
+
+  it('creates and persists runtime-owned cognitive and causal working state', async () => {
+    const store = new InMemoryAgentTaskStore();
+    const runtime = createRuntime({
+      store,
+      provider: askUserProvider('unused'),
+      runnerId: 'agent_runner_cognitive_state',
+      autoRun: false,
+    });
+    await runtime.start();
+    try {
+      const created = await runtime.createTask({
+        request: 'Inspect one synthetic fixture and report the verified result.',
+        source: { surface: 'api' },
+        autoStart: false,
+        decisionModelPolicy: {
+          requestedRole: 'gemma4-fast',
+          selectionSource: 'user-explicit',
+          fallback: 'exact',
+        },
+      });
+      const persisted = (await store.getTask(created.task.id))!.task;
+
+      expect(persisted.cognitiveProfile).toMatchObject({
+        mode: 'small-local',
+        activeTier: 'fast',
+        maxDecisionSchemas: 3,
+        maxObservationFacts: 10,
+        agentCapabilityClass: 'basic',
+        planningAuthority: 'runtime-only',
+        maxPlanSteps: 3,
+        runtimeDecomposition: true,
+        runtimeRecovery: true,
+      });
+      expect(persisted.workingState).toMatchObject({
+        revision: 1,
+        phase: 'decide',
+        activeStepId: persisted.plan?.steps[0]?.id,
+        goalTargetIds: expect.arrayContaining([
+          'expected-output:verified_outcome',
+          'success-criterion:required_outputs_verified',
+        ]),
+        causalObservationIds: [],
+        failedActionFingerprints: [],
+      });
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it('observes a cross-process cancellation without durable renewal churn', async () => {
+    const store = new CountingRenewStore();
+    const provider = new ControlledModelProvider();
+    const runtime = createRuntime({
+      store,
+      provider,
+      runnerId: 'agent_runner_external_cancel',
+    });
+    await runtime.start();
+    try {
+      const created = await runtime.createTask({
+        request: 'Keep polling this active model stage without rewriting its lease every poll.',
+        source: { surface: 'api' },
+      });
+      await provider.started;
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      expect(store.renewCalls).toBe(0);
+
+      const current = (await store.getTask(created.task.id))!;
+      await store.saveTask({
+        ...current.task,
+        status: 'cancelling',
+        cancellationRequested: true,
+      }, { expectedCheckpointVersion: current.task.checkpointVersion });
+
+      const cancelled = await waitForStatus(runtime, created.task.id, 'cancelled', 3_000);
+      expect(cancelled.task.terminalReason?.code).toBe('cancelled-by-user');
+      expect(store.renewCalls).toBe(0);
+    } finally {
+      provider.finish();
+      await runtime.stop();
+    }
+  }, 8_000);
+
+  it('bounds an invalid-decision repair and detaches a non-cooperative second model call', async () => {
+    const provider = new SlowInvalidRepairProvider();
+    const runtime = createRuntime({
+      store: new InMemoryAgentTaskStore(),
+      provider,
+      runnerId: 'agent_runner_decision_cycle_budget',
+      decisionCycleBudgetMs: 100,
+    });
+    await runtime.start();
+    try {
+      const startedAt = Date.now();
+      const created = await runtime.createTask({
+        request: 'Bound both malformed decision attempts as one user-visible wait.',
+        source: { surface: 'api' },
+      });
+      const failed = await waitForStatus(runtime, created.task.id, 'failed', 2_000);
+      expect(Date.now() - startedAt).toBeLessThan(600);
+      expect(provider.calls).toBe(2);
+      expect(failed.task.terminalReason).toMatchObject({
+        code: 'budget-exhausted',
+        summary: 'Agent decision cycle exceeded its bounded time budget.',
+        detail: { exhaustedBy: 'decision-cycle' },
+      });
+      expect(failed.events.filter((event) => event.type === 'model.started')).toHaveLength(2);
+      expect(failed.events.filter((event) => event.type === 'model.completed').at(-1)?.payload).toMatchObject({
+        attempt: 2,
+        repair: true,
+        ok: false,
+        error: 'agent-decision-time-budget-exhausted',
+      });
+    } finally {
+      await runtime.stop();
+    }
+  });
+
   it('takes over a runnable task after a foreign claim expires even when started before the TTL', async () => {
     const store = new InMemoryAgentTaskStore();
     const seed = createRuntime({
@@ -252,6 +384,21 @@ class ReleaseConflictStore extends InMemoryAgentTaskStore {
   }
 }
 
+class CountingRenewStore extends InMemoryAgentTaskStore {
+  renewCalls = 0;
+
+  override async renewRunner(
+    taskId: string,
+    claimId: string,
+    ttlMs: number,
+    expectedCheckpointVersion: number,
+    clientRequestId?: string,
+  ) {
+    this.renewCalls += 1;
+    return super.renewRunner(taskId, claimId, ttlMs, expectedCheckpointVersion, clientRequestId);
+  }
+}
+
 class RenewConflictStore extends InMemoryAgentTaskStore {
   injectedConflicts = 0;
 
@@ -312,6 +459,7 @@ function createRuntime(options: {
   provider: AgentDecisionProvider;
   runnerId: string;
   runnerClaimTtlMs?: number;
+  decisionCycleBudgetMs?: number;
   autoRun?: boolean;
 }): MonarchAgentRuntime {
   const adapter = new AgentKernelExecutionAdapter(
@@ -329,6 +477,9 @@ function createRuntime(options: {
     getPermissionProfile: () => ({ sandboxMode: 'read-only', approvalPolicy: 'on-request' }),
     runnerId: options.runnerId,
     ...(options.runnerClaimTtlMs ? { runnerClaimTtlMs: options.runnerClaimTtlMs } : {}),
+    ...(options.decisionCycleBudgetMs !== undefined
+      ? { decisionCycleBudgetMs: options.decisionCycleBudgetMs }
+      : {}),
     ...(options.autoRun !== undefined ? { autoRun: options.autoRun } : {}),
   });
 }
@@ -361,6 +512,30 @@ class NonCooperativeBlockingProvider implements AgentDecisionProvider {
   decide(_request: AgentModelDecisionRequest): Promise<AgentModelDecisionResponse> {
     this.resolveStarted();
     return new Promise(() => undefined);
+  }
+}
+
+class SlowInvalidRepairProvider implements AgentDecisionProvider {
+  calls = 0;
+
+  async decide(): Promise<AgentModelDecisionResponse> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return {
+        ok: true,
+        rawText: '{"kind":"unknown"}',
+        role: 'fixture',
+        adapter: 'fixture',
+      };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return {
+      ok: true,
+      rawText: '{"kind":"unknown"}',
+      role: 'fixture',
+      adapter: 'fixture',
+    };
   }
 }
 

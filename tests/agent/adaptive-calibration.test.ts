@@ -73,6 +73,52 @@ describe('Adaptive Agent calibration release gate', () => {
     }
   });
 
+  it('rejects parity when the baseline runtime failed or silently degraded to another tier', () => {
+    for (const infrastructureFailure of [
+      { balancedInfrastructureFailures: 1 },
+      { fastInfrastructureFailures: 1 },
+    ]) {
+      const candidate = metrics('training', { minScore: 6, minMargin: 3 }, 160, {
+        balancedSuccesses: 154,
+        adaptiveSuccesses: 154,
+        fastDecisions: 120,
+        ...infrastructureFailure,
+      });
+      expect(calibrateAgentAdaptiveProfile([candidate], []).approved).toBe(false);
+    }
+  });
+
+  it('rejects equal results when Balanced emitted malformed decisions or both profiles are below absolute quality', () => {
+    const malformed = metrics('training', { minScore: 6, minMargin: 3 }, 160, {
+      balancedSuccesses: 154,
+      adaptiveSuccesses: 154,
+      balancedValidDecisions: 149,
+      fastDecisions: 120,
+    });
+    const equallyBroken = metrics('training', { minScore: 6, minMargin: 3 }, 160, {
+      balancedSuccesses: 80,
+      adaptiveSuccesses: 80,
+      fastDecisions: 120,
+    });
+
+    expect(calibrateAgentAdaptiveProfile([malformed], []).approved).toBe(false);
+    expect(calibrateAgentAdaptiveProfile([equallyBroken], []).approved).toBe(false);
+  });
+
+  it('fails closed for legacy benchmark metrics that do not prove runtime integrity', () => {
+    const legacy = metrics('training', { minScore: 6, minMargin: 3 }, 160, {
+      balancedSuccesses: 154,
+      adaptiveSuccesses: 154,
+      fastDecisions: 120,
+    }) as Partial<AgentBenchmarkMetrics>;
+    delete legacy.agentCases;
+    delete legacy.balancedValidDecisions;
+    delete legacy.balancedInfrastructureFailures;
+    delete legacy.fastInfrastructureFailures;
+
+    expect(calibrateAgentAdaptiveProfile([legacy as AgentBenchmarkMetrics], []).approved).toBe(false);
+  });
+
   it('enforces the warm and cold latency targets', () => {
     const summary = summarizeAgentBenchmark(metrics('holdout', { minScore: 6, minMargin: 3 }, 60, {
       balancedSuccesses: 58,
@@ -98,8 +144,12 @@ function metrics(
     threshold,
     split,
     cases,
+    agentCases: cases,
     balancedSuccesses: cases,
     adaptiveSuccesses: cases,
+    balancedValidDecisions: cases,
+    balancedInfrastructureFailures: 0,
+    fastInfrastructureFailures: 0,
     falseSuccesses: 0,
     wrongEffects: 0,
     permissionBypasses: 0,

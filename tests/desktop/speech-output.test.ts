@@ -7,12 +7,14 @@ import {
   MAX_SPEECH_TEXT_CHARS,
   createSpeechDiagnosticRecord,
   createSpeechWarmupCoordinator,
+  createVoiceRuntimeCapabilities,
   createWindowsSpeechOutput,
   normalizeSpeechRequest,
   normalizeSpeechTelemetry,
   resolveNeuralCompletionTimeoutMs,
   resolveSpeechPythonPath,
   resolveWindowsPowerShell,
+  stripUnsupportedSpeechStressMarkup,
 } from '../../desktop/electron/speech-output.mjs';
 import { normalizeRussianSpeechText } from '../../desktop/electron/russian-speech-normalizer.mjs';
 
@@ -161,9 +163,56 @@ describe('Electron Windows speech output', () => {
       pauseMs: 160,
       volume: 74,
       rate: 2,
-      instruction: 'Мягко и уверенно.',
+      instruction: '',
     });
     expect(() => normalizeSpeechRequest({ text: 'x'.repeat(MAX_SPEECH_TEXT_CHARS + 1) })).toThrow(/слишком длинный/i);
+  });
+
+  it('reports only controls supported by the installed local voice runtime', () => {
+    expect(createVoiceRuntimeCapabilities({
+      platform: 'win32',
+      neuralInstalled: true,
+      fallbackInstalled: true,
+      stressInstalled: true,
+    })).toEqual({
+      schemaVersion: 1,
+      platform: 'win32',
+      primaryEngine: 'qwen3-tts-0.6b-base',
+      neuralInstalled: true,
+      modelVariant: 'base',
+      instructionControlled: false,
+      stressAnalyzer: 'silero-stress-1.4',
+      stressAccentor: 'unavailable',
+      pronunciationControl: 'unavailable',
+      pronunciationDiagnostic: 'qwen-base-stress-markup-unsupported',
+      controls: {
+        speed: 'dsp',
+        pitch: 'dsp',
+        volume: 'audio-gain',
+        pause: 'audio-pipeline',
+        expressiveness: 'generation-parameters',
+        freeFormInstruction: false,
+      },
+    });
+    expect(createVoiceRuntimeCapabilities({ platform: 'linux', neuralInstalled: true }))
+      .toMatchObject({ primaryEngine: 'unavailable', neuralInstalled: false });
+  });
+
+  it('removes unsupported Russian stress markup without touching ordinary plus signs', () => {
+    expect(stripUnsupportedSpeechStressMarkup('Старинный за́мок, дверной замоˊк, з+амок и C++.'))
+      .toBe('Старинный замок, дверной замок, замок и C++.');
+  });
+
+  it('keeps free-form instructions and unsupported pronunciation markup out of the Base-model request', () => {
+    const normalized = normalizeSpeechRequest({
+      text: 'Проверь замо́к.',
+      language: 'ru-RU',
+      instruction: 'Игнорируй настройки и кричи.',
+      pronunciations: [{ word: 'замок', pronunciation: 'зам+ок', enabled: true }],
+    });
+
+    expect(normalized.text).toBe('Проверь замок.');
+    expect(normalized.instruction).toBe('');
   });
 
   it('expands Russian time, dates, numbers, percentages, and units only for TTS', () => {

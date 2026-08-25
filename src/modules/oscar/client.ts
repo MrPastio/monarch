@@ -4,7 +4,14 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import { resolveMonarchRuntimePaths } from '../../core';
+import { resolveMonarchRuntimePaths, stableStringify } from '../../core';
+import { hasWorkingNvidiaRuntime } from './runtime-profile';
+import type {
+  MonarchSettingsCommandRequestV1,
+  MonarchSettingsReadRequestV1,
+  MonarchSettingsReadResultV1,
+  MonarchSettingsWriteReceiptV1,
+} from '../../settings/contracts';
 
 const DEFAULT_OSCAR_API_TIMEOUT_MS = 30000;
 const DEFAULT_OSCAR_CHAT_TIMEOUT_MS = 300000;
@@ -49,6 +56,7 @@ export interface OscarChatRequest {
   web_search?: boolean;
   research_mode?: 'auto' | 'off' | 'deep';
   use_memory: boolean;
+  context_profile?: 'full' | 'compact-social';
   reasoning_effort: 'low' | 'medium' | 'high';
   requested_model?: string;
   model_selection_source?: 'auto' | 'user-explicit' | 'fallback' | 'recovery';
@@ -61,6 +69,20 @@ export interface OscarChatRequest {
   capabilities?: OscarCapabilityContext[];
   access?: OscarAccessContext;
   inference_lane?: 'interactive' | 'agent' | 'coder' | 'background';
+  execution_authority: 'none' | 'agent-controller';
+  persistence_owner: 'backend' | 'coordinator';
+  turn_id?: string;
+  client_message_id?: string;
+  dev_mode?: {
+    zero_retention: boolean;
+    internet_enabled: boolean;
+    memory_enabled: boolean;
+    history_context_enabled: boolean;
+    personality_enabled: boolean;
+    skills_enabled: boolean;
+    runtime_context_enabled: boolean;
+    quality_regeneration_enabled: boolean;
+  };
 }
 
 export interface OscarRawChatCompletionRequest {
@@ -70,8 +92,9 @@ export interface OscarRawChatCompletionRequest {
   top_p?: number;
   max_tokens?: number;
   reasoning_effort?: 'low' | 'medium' | 'high';
-  response_format?: { type: 'text' | 'json_object' };
+  response_format?: { type: 'text' | 'json_object'; schema?: Record<string, unknown> };
   inference_lane?: 'interactive' | 'agent' | 'coder' | 'background';
+  agent_session_id?: string;
 }
 
 export interface OscarChatRoutePreview {
@@ -90,40 +113,9 @@ export interface OscarChatRoutePreview {
   projected_ram_available_gb?: number | null;
   ram_warning?: 'none' | 'caution' | 'critical';
   ram_warning_message?: string | null;
-}
-
-export interface OscarVoiceFastRequest {
-  text: string;
-  language?: 'ru' | 'uk' | 'bg' | 'en';
-  history?: OscarVoiceHistoryMessage[];
-}
-
-export interface OscarVoiceHistoryMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-export interface OscarVoiceFastResponse {
-  text: string;
-  model: 'gemma4-fast';
-  generation_ms: number;
-}
-
-export interface OscarVoiceRealtimeRequest {
-  text: string;
-  kind: 'weather' | 'web-search';
-  language?: 'ru' | 'uk' | 'bg' | 'en';
-  location?: string;
-  history?: OscarVoiceHistoryMessage[];
-}
-
-export interface OscarVoiceRealtimeResponse {
-  text: string;
-  model: 'none' | 'gemma4-fast' | 'open-meteo';
-  kind: 'weather' | 'web-search';
-  source_count: number;
-  search_ms: number;
-  generation_ms: number;
+  configured_context_tokens?: number | null;
+  effective_context_tokens?: number | null;
+  adaptive_context_applied?: boolean;
 }
 
 export interface OscarImageAttachment {
@@ -215,6 +207,54 @@ export interface OscarBackendStatus {
 
 export interface OscarStatusOptions {
   autoStart?: boolean;
+}
+
+export interface OscarConversationMessageAppendResult {
+  ok: true;
+  disposition: 'created' | 'duplicate' | 'superseded';
+  message: Record<string, unknown> | null;
+  duplicate: boolean;
+}
+
+export interface OscarConversationMessageAppendInput {
+  role: 'user' | 'assistant';
+  content: string;
+  token_count?: number;
+  elapsed_ms?: number;
+  model_tier?: string;
+  client_message_id?: string;
+  turn_id?: string;
+  task_id?: string;
+  provenance?: Record<string, unknown>;
+  outcome?: string;
+  integrity_warning?: string;
+  create_conversation_if_missing?: boolean;
+  required_previous_message_id?: string;
+  attachments?: Array<Record<string, unknown>>;
+  sources?: Array<Record<string, unknown>>;
+}
+
+export interface OscarMemoryEpisodeIndexRequest {
+  schemaVersion: 1;
+  source: 'desktop' | 'coder';
+  scope: { type: 'chat' } | { type: 'coder-project'; projectId: string };
+  conversationId: string;
+  turnId: string;
+  projectName?: string;
+  userText?: string;
+  assistantText?: string;
+  structuredSummary?: Record<string, unknown>;
+}
+
+export class OscarBackendHttpError extends Error {
+  constructor(
+    readonly statusCode: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'OscarBackendHttpError';
+  }
 }
 
 export class OscarClient {
@@ -332,16 +372,6 @@ export class OscarClient {
     return this.postJson('/api/chat/route', request, this.config.timeoutMs) as Promise<OscarChatRoutePreview>;
   }
 
-  async voiceFast(request: OscarVoiceFastRequest): Promise<OscarVoiceFastResponse> {
-    await this.ensureBackendAvailable();
-    return this.postJson('/api/voice/fast', request, this.config.chatTimeoutMs) as Promise<OscarVoiceFastResponse>;
-  }
-
-  async voiceRealtime(request: OscarVoiceRealtimeRequest): Promise<OscarVoiceRealtimeResponse> {
-    await this.ensureBackendAvailable();
-    return this.postJson('/api/voice/realtime', request, this.config.chatTimeoutMs) as Promise<OscarVoiceRealtimeResponse>;
-  }
-
   async *streamChat(request: OscarChatRequest, signal?: AbortSignal): AsyncGenerator<any, void, unknown> {
     await this.ensureBackendAvailable();
     const url = new URL('/api/chat/stream', this.config.apiBase);
@@ -396,6 +426,9 @@ export class OscarClient {
                 receivedDoneEvent = true;
               }
               yield event;
+              if (receivedDoneEvent) {
+                break;
+              }
             }
             break;
           }
@@ -406,8 +439,19 @@ export class OscarClient {
           for (const event of drained.events) {
             if (event.type === 'done') {
               receivedDoneEvent = true;
+              try {
+                await reader.cancel();
+              } catch {
+                // The backend may close the response at the same moment.
+              }
             }
             yield event;
+            if (receivedDoneEvent) {
+              break;
+            }
+          }
+          if (receivedDoneEvent) {
+            break;
           }
         }
       } finally {
@@ -429,7 +473,9 @@ export class OscarClient {
       }
       const memory = hostMemoryInfo();
       const available = memory.ram_available_gb;
-      const extra = request.requested_model === 'gemma4-31b';
+      const pro = ['qwen3.8-27b-pro', 'gemma4-deepthinking', 'gemma4-31b'].includes(
+        String(request.requested_model || ''),
+      );
       const lowRam = typeof available === 'number' && available < 1.5;
       yield {
         type: 'error',
@@ -438,8 +484,8 @@ export class OscarClient {
           ram_available_gb: available,
           message: lowRam
             ? `Свободно ${available.toFixed(1)} ГБ RAM. Закрой лишние программы и повтори запрос; красная граница — 1,5 ГБ.`
-            : extra
-              ? 'Extra завершилась до финального события. Проверь предупреждение RAM, закрой тяжёлые программы и повтори запрос.'
+            : pro
+              ? 'Qwen Pro завершилась до финального события. Проверь предупреждение RAM, закрой тяжёлые программы и повтори запрос.'
               : 'Локальный runtime завершился до финального события. Попробуй повторить запрос.',
         },
       };
@@ -521,6 +567,36 @@ export class OscarClient {
     return this.getJson('/api/conversations');
   }
 
+  async readSettingsContext(request: MonarchSettingsReadRequestV1): Promise<MonarchSettingsReadResultV1> {
+    await this.ensureBackendAvailable();
+    return this.postJson('/api/settings/read', request) as Promise<MonarchSettingsReadResultV1>;
+  }
+
+  async executeSettingsCommand(
+    request: MonarchSettingsCommandRequestV1 & { policyDecisionHash: string },
+  ): Promise<MonarchSettingsWriteReceiptV1> {
+    await this.ensureBackendAvailable();
+    return this.postJson('/api/settings/commands', request) as Promise<MonarchSettingsWriteReceiptV1>;
+  }
+
+  async indexMemoryEpisode(request: OscarMemoryEpisodeIndexRequest): Promise<unknown> {
+    await this.ensureBackendAvailable();
+    return this.postJson('/api/memory/episodes', request);
+  }
+
+  async retrieveMemoryContext(input: {
+    query: string;
+    scope: { type: 'chat' } | { type: 'coder-project'; projectId: string };
+  }): Promise<unknown> {
+    await this.ensureBackendAvailable();
+    return this.postJson('/api/memory/context', { schemaVersion: 1, ...input });
+  }
+
+  async clearConversations(): Promise<unknown> {
+    await this.ensureBackendAvailable();
+    return this.deleteJson('/api/conversations');
+  }
+
   async createConversation(title = 'Новый чат'): Promise<unknown> {
     await this.ensureBackendAvailable();
     return this.postJson('/api/conversations', { title });
@@ -553,16 +629,11 @@ export class OscarClient {
 
   async appendConversationMessage(
     conversationId: string,
-    input: {
-      role: 'user' | 'assistant';
-      content: string;
-      token_count?: number;
-      elapsed_ms?: number;
-      model_tier?: string;
-    }
-  ): Promise<unknown> {
+    input: OscarConversationMessageAppendInput,
+  ): Promise<OscarConversationMessageAppendResult> {
     await this.ensureBackendAvailable();
-    return this.postJson(`/api/conversations/${encodeURIComponent(conversationId)}/messages`, input);
+    const result = await this.postJson(`/api/conversations/${encodeURIComponent(conversationId)}/messages`, input);
+    return conversationMessageAppendResult(result, conversationId, input);
   }
 
   async deleteConversation(conversationId: string): Promise<unknown> {
@@ -699,16 +770,96 @@ export class OscarClient {
         signal: controller.signal,
       });
       if (!response.ok) {
-        throw new Error(`Oscar backend returned HTTP ${response.status}.`);
+        const payload = await response.json().catch(() => null) as unknown;
+        const payloadRecord = payload && typeof payload === 'object' && !Array.isArray(payload)
+          ? payload as Record<string, unknown>
+          : undefined;
+        const detail = payloadRecord?.detail;
+        const openAiError = payloadRecord?.error && typeof payloadRecord.error === 'object' && !Array.isArray(payloadRecord.error)
+          ? payloadRecord.error as Record<string, unknown>
+          : undefined;
+        const detailRecord = detail && typeof detail === 'object' && !Array.isArray(detail)
+          ? detail as Record<string, unknown>
+          : undefined;
+        throw new OscarBackendHttpError(
+          response.status,
+          typeof detailRecord?.code === 'string'
+            ? detailRecord.code
+            : typeof openAiError?.code === 'string'
+              ? openAiError.code
+              : `oscar-http-${response.status}`,
+          typeof detailRecord?.message === 'string'
+            ? detailRecord.message
+            : typeof openAiError?.message === 'string'
+              ? openAiError.message
+            : typeof detail === 'string'
+              ? detail
+              : `Oscar backend returned HTTP ${response.status}.`,
+        );
       }
       return await response.json() as unknown;
     } catch (error) {
+      if (error instanceof OscarBackendHttpError) throw error;
       throw new Error(normalizeError(error, timeoutMs));
     } finally {
       clearTimeout(timeout);
       signal?.removeEventListener('abort', abortFromCaller);
     }
   }
+}
+
+function conversationMessageAppendResult(
+  value: unknown,
+  conversationId: string,
+  input: OscarConversationMessageAppendInput,
+): OscarConversationMessageAppendResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Oscar backend returned an invalid conversation message append receipt.');
+  }
+  const record = value as Record<string, unknown>;
+  const disposition = record.disposition;
+  const message = record.message;
+  const duplicate = record.duplicate;
+  const validDisposition = disposition === 'created' || disposition === 'duplicate' || disposition === 'superseded';
+  const validMessage = message === null || (typeof message === 'object' && !Array.isArray(message));
+  const consistent = disposition === 'created'
+    ? duplicate === false && message !== null
+    : disposition === 'duplicate'
+      ? duplicate === true && message === null
+      : duplicate === false && message === null;
+  if (record.ok !== true || !validDisposition || !validMessage || !consistent) {
+    throw new Error('Oscar backend returned an invalid conversation message append receipt.');
+  }
+  if (disposition === 'superseded' && (
+    input.role !== 'assistant'
+    || !input.required_previous_message_id
+  )) {
+    throw new Error('Oscar backend returned an invalid conversation message append receipt.');
+  }
+  if (disposition === 'created') {
+    const created = message as Record<string, unknown>;
+    const exactBindings = created.conversation_id === conversationId
+      && created.role === input.role
+      && created.content === input.content.trim()
+      && optionalReceiptBinding(created.client_message_id, input.client_message_id)
+      && optionalReceiptBinding(created.turn_id, input.turn_id)
+      && optionalReceiptBinding(created.task_id, input.task_id)
+      && optionalReceiptBinding(created.outcome, input.outcome)
+      && (input.provenance === undefined || stableStringify(created.provenance) === stableStringify(input.provenance));
+    if (!exactBindings) {
+      throw new Error('Oscar backend returned a conversation message receipt for a different append request.');
+    }
+  }
+  return {
+    ok: true,
+    disposition,
+    message: message as Record<string, unknown> | null,
+    duplicate: disposition === 'duplicate',
+  };
+}
+
+function optionalReceiptBinding(actual: unknown, expected: string | undefined): boolean {
+  return expected === undefined || actual === expected.trim();
 }
 
 function hostMemoryInfo() {
@@ -732,14 +883,48 @@ export function createDefaultOscarChatRequest(
   const route = readRouteInput(input);
   const deepThinkingConsent = readStringInput(input, 'deep_thinking_consent');
   const inferenceLane = readStringInput(input, 'inference_lane');
+  const requestedAuthority = readStringInput(input, 'execution_authority');
+  const persistenceOwner = readStringInput(input, 'persistence_owner');
+  const turnId = readStringInput(input, 'turn_id');
+  const clientMessageId = readStringInput(input, 'client_message_id');
+  const devMode = readRecordInput(input, 'dev_mode');
+  const contextProfile = readStringInput(input, 'context_profile');
+  const coderAuthority = messages.some((message) => (
+    message.role === 'system' && message.content.includes('<monarch_coder_mode>')
+  ));
+  const executionAuthority = requestedAuthority === 'agent-controller' || coderAuthority
+    ? 'agent-controller'
+    : 'none';
+  const effectiveMessages = executionAuthority === 'none'
+    ? [{ role: 'system' as const, content: '<monarch_answer_only_authority version="1" />' }, ...messages]
+    : messages;
   const request: OscarChatRequest = {
-    messages,
+    messages: effectiveMessages,
     use_memory: readBooleanInput(input, 'use_memory', true),
     reasoning_effort: readReasoningEffort(input),
     max_new_tokens: readNumberInput(input, 'max_new_tokens', MAX_OSCAR_NEW_TOKENS, 32, MAX_OSCAR_NEW_TOKENS),
     temperature: readNumberInput(input, 'temperature', 0.3, 0, 1.5),
     top_p: readNumberInput(input, 'top_p', 0.9, 0.1, 1),
+    execution_authority: executionAuthority,
+    persistence_owner: persistenceOwner === 'coordinator' ? 'coordinator' : 'backend',
   };
+  if (contextProfile === 'full' || contextProfile === 'compact-social') {
+    request.context_profile = contextProfile;
+  }
+  if (turnId) request.turn_id = turnId;
+  if (clientMessageId) request.client_message_id = clientMessageId;
+  if (devMode) {
+    request.dev_mode = {
+      zero_retention: readBooleanInput(devMode, 'zero_retention', false),
+      internet_enabled: readBooleanInput(devMode, 'internet_enabled', true),
+      memory_enabled: readBooleanInput(devMode, 'memory_enabled', true),
+      history_context_enabled: readBooleanInput(devMode, 'history_context_enabled', true),
+      personality_enabled: readBooleanInput(devMode, 'personality_enabled', true),
+      skills_enabled: readBooleanInput(devMode, 'skills_enabled', true),
+      runtime_context_enabled: readBooleanInput(devMode, 'runtime_context_enabled', true),
+      quality_regeneration_enabled: readBooleanInput(devMode, 'quality_regeneration_enabled', true),
+    };
+  }
   if (typeof webSearch === 'boolean') {
     request.web_search = webSearch;
   }
@@ -828,6 +1013,14 @@ export function readArrayInput(input: unknown, key: string): unknown[] {
 
   const value = (input as Record<string, unknown>)[key];
   return Array.isArray(value) ? value : [];
+}
+
+function readRecordInput(input: unknown, key: string): Record<string, unknown> | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const value = (input as Record<string, unknown>)[key];
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 export function readNumberInput(
@@ -1155,7 +1348,7 @@ function resolvePackagedOscarEnvironment(projectRoot: string): NodeJS.ProcessEnv
   const explicitProfile = String(process.env.MONARCH_OSCAR_PROFILE || '').trim().toLowerCase();
   const profile = explicitProfile === 'cpu' || explicitProfile === 'cuda'
     ? explicitProfile
-    : hasNvidiaRuntime()
+    : hasWorkingNvidiaRuntime()
       ? 'cuda'
       : 'cpu';
   const profileRoot = path.join(environmentRoot, 'oscar', 'profiles', profile);
@@ -1179,22 +1372,6 @@ function resolvePackagedOscarEnvironment(projectRoot: string): NodeJS.ProcessEnv
     PYTHONPATH: pythonPath,
     PATH: [...cudaBins, inheritedPath].filter(Boolean).join(path.delimiter),
   };
-}
-
-function hasNvidiaRuntime(): boolean {
-  if (process.platform !== 'win32') {
-    return false;
-  }
-  return [
-    path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'nvcuda.dll'),
-    path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'nvidia-smi.exe'),
-    path.join(
-      process.env.ProgramW6432 || process.env.ProgramFiles || 'C:\\Program Files',
-      'NVIDIA Corporation',
-      'NVSMI',
-      'nvidia-smi.exe'
-    ),
-  ].some((candidate) => existsSync(candidate));
 }
 
 function readApiPort(apiBase: string): number {

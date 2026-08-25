@@ -26,7 +26,7 @@ export const assistantManifest: MonarchModuleManifest = {
           image_attachments: { type: 'array' },
           model_override: {
             type: 'string',
-            enum: ['gemma', 'gemma_low', 'gemma_high', 'weak', 'medium', 'powerful', 'reasoning', 'gemma4-fast', 'gemma4-balanced', 'gemma4-deepthinking', 'gemma4-31b'],
+            enum: ['gemma', 'gemma_low', 'gemma_high', 'weak', 'medium', 'gemma4-fast', 'gemma4-balanced', 'qwen3.8-27b-pro'],
           },
           route: { type: 'object' },
         },

@@ -1,15 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
+const indexSource = readFileSync('src/ui/public/index.html', 'utf8');
 const appSource = readFileSync('src/ui/public/app.js', 'utf8');
 
-describe('workspace view rendering', () => {
-  it('renders live workspace data when the Project view is active', () => {
-    expect(appSource).toContain(
-      "if (activeView === 'models-section' || activeView === 'workspace-section') {",
-    );
-    expect(appSource).toMatch(
-      /if \(activeView === 'models-section' \|\| activeView === 'workspace-section'\) \{\s*renderModelManager\(\);\s*return;/,
-    );
+describe('removed Projects view', () => {
+  it('keeps Projects out of top-level navigation and routing', () => {
+    expect(indexSource).not.toContain('id="workspace-section"');
+    expect(indexSource).not.toContain('data-scroll-target="workspace-section"');
+    expect(appSource).not.toContain("case 'workspace-section'");
+    expect(indexSource).toContain('data-scroll-target="images-section"');
   });
 });

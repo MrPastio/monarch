@@ -18,9 +18,11 @@ import {
   resolveContextualAgentAction,
   sanitizeVisibleAssistantContent,
   readUserFacingFailure,
+  resolveOscarLiveStatus,
   formatAgentTaskFailure,
 } from '../../src/ui/public/modules/utils.js';
 import { state } from '../../src/ui/public/modules/state.js';
+import { isHydratedOscarFailure } from '../../src/ui/public/modules/oscar-history-reconciliation.js';
 
 describe('Oscar UI utils', () => {
   it('prefers the safe execution message over internal diagnostics', () => {
@@ -206,6 +208,8 @@ describe('Oscar UI utils', () => {
       expect(result).toContain('<div class="oscar-code-block">');
       expect(result).toContain('javascript');
       expect(result).toContain('Скопировать');
+      expect(result).toContain('class="oscar-copy-label"');
+      expect(result).toContain('class="oscar-copy-icon"');
       expect(result).toContain('console.log(1);');
       expect(result).not.toContain('Код вынесен');
     });
@@ -396,6 +400,19 @@ describe('Oscar UI utils', () => {
   });
 
   describe('renderOscarMessage', () => {
+    it('renders an explicit skill as a friendly badge instead of a raw marker', () => {
+      const html = renderOscarMessage(createOscarMessage(
+        'user',
+        '$monarch-file-guardian Наведи порядок в загрузках',
+        'ты',
+      ));
+
+      expect(html).toContain('message-skill-invocation');
+      expect(html).toContain('Работа с файлами');
+      expect(html).toContain('Наведи порядок в загрузках');
+      expect(html).not.toContain('$monarch-file-guardian');
+    });
+
     it('preserves one message id across all pending stream updates', () => {
       const previousMessages = state.oscar.messages;
       const pending = createOscarMessage('assistant', '', 'Fast', { pending: true });
@@ -459,6 +476,70 @@ describe('Oscar UI utils', () => {
       expect(html).toContain('Завершено за 2с');
     });
 
+    it('updates only the explicitly targeted pending message', () => {
+      const previousMessages = state.oscar.messages;
+      const stale = createOscarMessage('assistant', 'stale', 'Fast', { pending: true });
+      const active = createOscarMessage('assistant', '', 'Balanced', { pending: true });
+      state.oscar.messages = [stale, active];
+
+      try {
+        expect(replacePendingOscarMessage(
+          createOscarMessage('assistant', 'Точная ошибка', 'Oscar', { error: true }),
+          active.id,
+        )).toBe(true);
+        expect(state.oscar.messages).toHaveLength(2);
+        expect(state.oscar.messages[0]).toBe(stale);
+        expect(state.oscar.messages[1]).toMatchObject({
+          id: active.id,
+          content: 'Точная ошибка',
+          error: true,
+          pending: false,
+        });
+      } finally {
+        state.oscar.messages = previousMessages;
+      }
+    });
+
+    it('does not append a late stream update when its pending target is gone', () => {
+      const previousMessages = state.oscar.messages;
+      const current = createOscarMessage('assistant', 'Другой чат', 'Oscar');
+      state.oscar.messages = [current];
+
+      try {
+        expect(replacePendingOscarMessage(
+          createOscarMessage('assistant', 'Запоздалая ошибка', 'Oscar', { error: true }),
+          'missing-pending-id',
+        )).toBe(false);
+        expect(state.oscar.messages).toEqual([current]);
+      } finally {
+        state.oscar.messages = previousMessages;
+      }
+    });
+
+    it('uses a durable message id and keeps its coordinator client binding', () => {
+      const message = createOscarMessage('user', 'Проверь', 'ты', {
+        id: 'sqlite-message-id',
+        clientMessageId: 'desktop-message-id',
+      });
+      expect(message).toMatchObject({
+        id: 'sqlite-message-id',
+        clientMessageId: 'desktop-message-id',
+      });
+    });
+
+    it('renders a hydrated durable failure as a persistent terminal error card', () => {
+      const msg = createOscarMessage('assistant', 'Не удалось завершить задачу.', 'Oscar', {
+        outcome: 'failed',
+        provenance: { origin: 'system', verification: 'system-state' },
+        error: isHydratedOscarFailure('failed'),
+      });
+      const html = renderOscarMessage(msg);
+
+      expect(html).toMatch(/class="oscar-message assistant\s+error"/);
+      expect(html).toContain('Не завершено');
+      expect(html).not.toContain('data-message-speak');
+    });
+
     it('renders copy and edit actions for a user message', () => {
       const msg = createOscarMessage('user', 'Исправь этот вопрос', 'ты');
       const html = renderOscarMessage(msg);
@@ -466,6 +547,33 @@ describe('Oscar UI utils', () => {
       expect(html).toContain('data-message-copy');
       expect(html).toContain('data-message-edit');
       expect(html).toContain('Редактировать сообщение');
+    });
+
+    it('renders image attachments as openable controls without inventing a broken data URL', () => {
+      const local = createOscarMessage('user', 'Посмотри', 'ты', {
+        attachments: [{
+          id: 'attachment_local',
+          name: 'screen.png',
+          mime_type: 'image/png',
+          preview_url: 'data:image/png;base64,iVBORw0KGgo=',
+        }],
+      });
+      const persisted = createOscarMessage('user', 'История', 'ты', {
+        attachments: [{
+          id: 'attachment_persisted',
+          name: 'history.png',
+          mime_type: 'image/png',
+          digest: `sha256:${'a'.repeat(64)}`,
+        }],
+      });
+
+      const localHtml = renderOscarMessage(local);
+      const persistedHtml = renderOscarMessage(persisted);
+      expect(localHtml).toContain(`data-message-attachment="${local.id}:0"`);
+      expect(localHtml).toContain('data:image/png;base64,iVBORw0KGgo=');
+      expect(persistedHtml).toContain(`data-message-attachment="${persisted.id}:0"`);
+      expect(persistedHtml).toContain('Открыть сохранённое изображение');
+      expect(persistedHtml).not.toContain('base64,undefined');
     });
 
     it('renders pending stream events safely', () => {
@@ -493,7 +601,7 @@ describe('Oscar UI utils', () => {
       expect(html).not.toContain('onmouseover="alert(1)');
     });
 
-    it('shows only the bare orb during ordinary thinking', () => {
+    it('shows a compact breathing status beside the orb during ordinary thinking', () => {
       const html = renderOscarMessage(createOscarMessage('assistant', '', 'Fast', {
         pending: true,
         streamPhase: 'route',
@@ -502,13 +610,14 @@ describe('Oscar UI utils', () => {
       expect(html).toContain('assistant pending thinking-only');
       expect(html).toContain('class="monarch-thinking-orb"');
       expect(html).toContain('data-orb-phase="route"');
+      expect(html).toContain('data-orb-motion="breathing"');
       expect(html).not.toContain('oscar-work-timer');
-      expect(html).not.toContain('oscar-thinking-copy');
-      expect(html).not.toContain('<strong>Подбираю маршрут</strong>');
-      expect(html).not.toContain('Выбираю лучший путь ответа');
+      expect(html).toContain('oscar-live-copy');
+      expect(html).toContain('<strong>Подбираю маршрут</strong>');
+      expect(html).toContain('Выбираю лучший путь ответа');
     });
 
-    it('keeps status copy only for search and research activity', () => {
+    it('keeps truthful compact status copy for ordinary and search activity', () => {
       const ordinary = renderOscarMessage(createOscarMessage('assistant', 'П', 'Fast', {
         pending: true,
         streamPhase: 'write',
@@ -520,13 +629,74 @@ describe('Oscar UI utils', () => {
         streamPhase: 'search',
       }));
 
-      expect(ordinary).toContain('oscar-orb-only-status');
-      expect(ordinary).not.toContain('oscar-live-copy');
+      expect(ordinary).not.toContain('oscar-orb-only-status');
+      expect(ordinary).toContain('oscar-live-copy');
+      expect(ordinary).toContain('Пишу ответ');
       expect(ordinary).not.toContain('oscar-stream-trace');
       expect(ordinary).not.toContain('data-oscar-work-timer');
       expect(search).toContain('oscar-live-copy');
       expect(search).toContain('Ищу источники');
       expect(search).toContain('data-oscar-work-timer');
+    });
+
+    it('renders structured web activity with what is searched and a breathing rhythm', () => {
+      const message = createOscarMessage('assistant', '', 'Agent', {
+        pending: true,
+        streamPhase: 'agent-execution',
+        streamEvents: [{
+          kind: 'agent-execution',
+          label: 'Поиск · Интернет',
+          detail: 'Monarch release notes',
+          activity: {
+            operation: 'search',
+            domain: 'internet',
+            subject: 'Monarch release notes',
+            motion: 'breathing',
+            label: 'Поиск · Интернет',
+            detail: 'Monarch release notes',
+          },
+        }],
+      });
+      const status = resolveOscarLiveStatus(message, 'agent-execution');
+      const html = renderOscarMessage(message);
+
+      expect(status).toEqual({
+        label: 'Поиск · Интернет',
+        detail: 'Monarch release notes',
+        motion: 'breathing',
+        visualPhase: 'search',
+      });
+      expect(html).toContain('<strong>Поиск · Интернет</strong>');
+      expect(html).toContain('Monarch release notes');
+      expect(html).toContain('data-orb-phase="search"');
+      expect(html).toContain('data-orb-motion="breathing"');
+    });
+
+    it('renders Computer Use actions as quiet visible work with action motion', () => {
+      const message = createOscarMessage('assistant', '', 'Agent', {
+        pending: true,
+        streamPhase: 'agent-execution',
+        streamEvents: [{
+          kind: 'agent-execution',
+          label: 'Перемещаю курсор',
+          activity: {
+            operation: 'click',
+            domain: 'computer-use',
+            label: 'Перемещаю курсор',
+            motion: 'heartbeat',
+          },
+        }],
+      });
+      const status = resolveOscarLiveStatus(message, 'agent-execution');
+      const html = renderOscarMessage(message);
+
+      expect(status).toMatchObject({
+        label: 'Перемещаю курсор',
+        motion: 'heartbeat',
+        visualPhase: 'write',
+      });
+      expect(html).toContain('<strong>Перемещаю курсор</strong>');
+      expect(html).toContain('data-orb-motion="heartbeat"');
     });
 
     it('renders bounded deep-research phases as visible activity, not hidden reasoning', () => {
@@ -600,7 +770,7 @@ describe('Oscar UI utils', () => {
       expect(html).toContain('Итог');
     });
 
-    it('renders an explicit Security override action when a block is removable', () => {
+    it('does not render a legacy token as a Security override action', () => {
       const msg = createOscarMessage('assistant', 'Security заблокировал действие.', 'Monarch Security', {
         action: {
           text: 'выполни команду',
@@ -611,8 +781,30 @@ describe('Oscar UI utils', () => {
       });
       const html = renderOscarMessage(msg);
 
-      expect(html).toContain('Снять блокировку и продолжить');
-      expect(html).toContain('data-oscar-confirm-action');
+      expect(html).not.toContain('Снять блокировку и продолжить');
+      expect(html).not.toContain('data-oscar-confirm-action');
+      expect(html).not.toContain('confirmationToken');
+    });
+
+    it('renders approval controls only when the exact action is bound to an Oscar Turn', () => {
+      const action = {
+        text: 'workspace.file.read',
+        risk: 'read-only',
+        label: 'Разрешить один раз',
+        grantOptions: ['once'],
+        agentTaskId: 'task-bound',
+        agentApprovalId: 'approval-bound',
+        agentApprovalHash: 'hash-bound',
+        agentCapabilityId: 'workspace.file.read',
+      };
+      const stale = renderOscarMessage(createOscarMessage('assistant', 'Нужно разрешение.', 'Oscar', { action }));
+      const exact = renderOscarMessage(createOscarMessage('assistant', 'Нужно разрешение.', 'Oscar', {
+        action: { ...action, oscarTurnId: 'turn-bound' },
+      }));
+
+      expect(stale).not.toContain('data-oscar-confirm-action');
+      expect(exact).toContain('data-oscar-confirm-action');
+      expect(exact).toContain('data-agent-task-id="task-bound"');
     });
 
     it('keeps pending answer text in one stable plain-text node until the stream finishes', () => {
@@ -629,6 +821,13 @@ describe('Oscar UI utils', () => {
       expect(pendingHtml).not.toContain('<strong>Пишется ответ</strong>');
       expect(completedHtml).not.toContain('oscar-streaming-text');
       expect(completedHtml).toContain('<strong>Готовый ответ</strong>');
+    });
+
+    it('does not repeat the generic Oscar label below a completed operational answer', () => {
+      const html = renderOscarMessage(createOscarMessage('assistant', 'Открыл Figma.', 'Oscar'));
+
+      expect(html).toContain('<div class="message-meta">Oscar');
+      expect(html).not.toContain('<div class="message-model-note">Oscar</div>');
     });
 
     it('hides unfenced service JSON in assistant messages', () => {

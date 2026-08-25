@@ -24,6 +24,7 @@
 }
 
 .chat-mode-switch::before {
+  box-sizing: border-box;
   position: absolute;
   z-index: -1;
   inset: var(--chat-mode-padding) auto var(--chat-mode-padding) var(--chat-mode-padding);
@@ -1048,4 +1049,36 @@
 
 @media (prefers-reduced-motion: reduce) {
   .coder-command-rail button { transition: none; }
+}
+.coder-agent-approval {
+  border: 1px solid color-mix(in srgb, #ffb22e 58%, transparent);
+  background: color-mix(in srgb, #17130b 82%, transparent);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 24%);
+  backdrop-filter: blur(18px);
+}
+
+.coder-agent-approval header code,
+.coder-agent-approval small {
+  color: #ffc55b;
+}
+
+.coder-agent-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.coder-agent-approval-actions button {
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 10px;
+  background: rgb(255 255 255 / 7%);
+  color: #fff;
+  padding: 8px 12px;
+}
+
+.coder-agent-approval-actions button.primary {
+  border-color: #ffb22e;
+  background: #ffb22e;
+  color: #100b03;
 }

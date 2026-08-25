@@ -15,8 +15,33 @@ export type MonarchModelRole =
   | 'gemma4-balanced'
   | 'gemma4-deepthinking'
   | 'gemma4-31b'
+  | 'qwen3.8-27b-pro'
   | 'qwen3-coder-30b-a3b-instruct'
   | 'deepseek-coder-v2-lite-instruct';
+
+export const MONARCH_PRO_MODEL_ROLE = 'qwen3.8-27b-pro' as const;
+
+/** Read-time migration for retired Pro/Extra identifiers. */
+export function normalizeMonarchModelRoleAlias(roleInput: string): MonarchModelRole {
+  const role = String(roleInput || '').trim().toLowerCase();
+  switch (role) {
+  case 'router':
+  case 'weak':
+    return 'gemma4-fast';
+  case 'medium':
+  case 'vision':
+    return 'gemma4-balanced';
+  case 'powerful':
+  case 'reasoning':
+  case 'pro':
+  case 'extra':
+  case 'gemma4-deepthinking':
+  case 'gemma4-31b':
+    return MONARCH_PRO_MODEL_ROLE;
+  default:
+    return role as MonarchModelRole;
+  }
+}
 
 export type MonarchModelStatus =
   | 'available'
@@ -191,64 +216,30 @@ const MODEL_DIRECTORY_SPECS: ModelDirectorySpec[] = [
     experimental: false,
   },
   {
-    role: 'gemma4-deepthinking',
-    directoryName: 'gemma_models/Gemma_26B',
+    role: 'qwen3.8-27b-pro',
+    directoryName: 'qwen_models/Qwen3.8_27B',
     label: 'Pro',
-    description: 'Pro model for complex reasoning and development.',
-    id: 'gemma4-deepthinking',
-    displayName: 'Pro',
-    family: 'gemma',
-    size: '26B',
+    description: 'Full Agent Pro model for long-horizon reasoning, coding, vision, and tool use.',
+    id: 'qwen3.8-27b-pro',
+    displayName: 'Qwen 3.8 27B Pro',
+    family: 'qwen3.8',
+    size: '27B',
     quantization: 'Q4_K_M',
     backend: 'oscar-managed-backend',
-    mainModelPath: 'gemma_models/Gemma_26B/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf',
-    modelPath: 'gemma_models/Gemma_26B/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf',
-    modelCandidates: [
-      'gemma_models/Gemma_26B/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf',
-      'gemma_models/Gemma_26B/gemma-4-26B-it-Q4_K_M.gguf',
-    ],
-    mmprojPath: 'gemma_models/vision_other/mmproj-BF16_26B.gguf',
-    mmprojCandidates: ['gemma_models/vision_other/mmproj-BF16_26B.gguf'],
-    draftModelPath: 'gemma_models/mtp_model/mtp-gemma-4-26B-A4B-it.gguf',
-    draftCandidates: ['gemma_models/mtp_model/mtp-gemma-4-26B-A4B-it.gguf'],
+    mainModelPath: 'qwen_models/Qwen3.8_27B/Qwen3.8-27B-Q4_K_M.gguf',
+    modelPath: 'qwen_models/Qwen3.8_27B/Qwen3.8-27B-Q4_K_M.gguf',
+    modelCandidates: ['qwen_models/Qwen3.8_27B/Qwen3.8-27B-Q4_K_M.gguf'],
+    mmprojPath: 'qwen_models/Qwen3.8_27B/mmproj-Qwen3.8-27B-Q8_0.gguf',
+    mmprojCandidates: ['qwen_models/Qwen3.8_27B/mmproj-Qwen3.8-27B-Q8_0.gguf'],
+    draftModelPath: 'qwen_models/Qwen3.8_27B/mtp-Qwen3.8-27B-Q4_0.gguf',
+    draftCandidates: ['qwen_models/Qwen3.8_27B/mtp-Qwen3.8-27B-Q4_0.gguf'],
     draftMode: 'mtp',
     speculativeDecoding: true,
-    ctxDefault: 8192,
-    ctxMax: 16384,
-    gpuLayers: 0,
-    ramBudgetMb: 24576,
-    vramBudgetMb: 1024,
-    enabled: true,
-    experimental: true,
-  },
-  {
-    role: 'gemma4-31b',
-    directoryName: 'gemma_models/Gemma_31B',
-    label: 'Extra',
-    description: 'Extra model for maximum-depth work.',
-    id: 'gemma4-31b',
-    displayName: 'Extra',
-    family: 'gemma',
-    size: '31B',
-    quantization: 'Q4_K_M',
-    backend: 'oscar-managed-backend',
-    mainModelPath: 'gemma_models/Gemma_31B/gemma-4-31B-it-Q4_K_S.gguf',
-    modelPath: 'gemma_models/Gemma_31B/gemma-4-31B-it-Q4_K_S.gguf',
-    modelCandidates: [
-      'gemma_models/Gemma_31B/gemma-4-31B-it-Q4_K_M.gguf',
-      'gemma_models/Gemma_31B/gemma-4-31B-it-Q4_K_S.gguf',
-    ],
-    mmprojPath: 'gemma_models/vision_other/mmproj-BF16_31B.gguf',
-    mmprojCandidates: ['gemma_models/vision_other/mmproj-BF16_31B.gguf'],
-    draftModelPath: 'gemma_models/mtp_model/mtp-gemma-4-31B-it.gguf',
-    draftCandidates: ['gemma_models/mtp_model/mtp-gemma-4-31B-it.gguf'],
-    draftMode: 'mtp',
-    speculativeDecoding: true,
-    ctxDefault: 4096,
-    ctxMax: 8192,
-    gpuLayers: 0,
-    ramBudgetMb: 32768,
-    vramBudgetMb: 1024,
+    ctxDefault: 32768,
+    ctxMax: 262144,
+    gpuLayers: 18,
+    ramBudgetMb: 28672,
+    vramBudgetMb: 7168,
     enabled: true,
     experimental: true,
   },
@@ -434,13 +425,7 @@ async function readModelEntry(
 ): Promise<MonarchModelEntry> {
   const directory = resolveModelCatalogPath(root, spec.directoryName);
 
-  let enabled = spec.enabled;
-  if (spec.role === 'gemma4-31b') {
-    const envVal = process.env.MONARCH_ENABLE_GEMMA4_31B?.trim().toLowerCase();
-    if (envVal) {
-      enabled = envVal === 'true' || envVal === '1' || envVal === 'on' || envVal === 'yes';
-    }
-  }
+  const enabled = spec.enabled;
 
   if (!(await directoryExists(directory))) {
     return {
@@ -649,10 +634,16 @@ async function resolveFirstValidWorkspaceGguf(root: string, candidates: string[]
 function resolveModelCatalogPath(workspaceRoot: string, relativePath: string): string {
   const runtimePaths = resolveMonarchRuntimePaths(workspaceRoot);
   const normalized = relativePath.replaceAll('\\', '/').replace(/^\/+/, '');
-  if (runtimePaths.mode === 'installed') {
-    if (normalized === 'gemma_models' || normalized.startsWith('gemma_models/')) {
-      return path.join(runtimePaths.modelsRoot, normalized);
-    }
+  if (
+    normalized === 'gemma_models'
+    || normalized.startsWith('gemma_models/')
+    || normalized === 'qwen_models'
+    || normalized.startsWith('qwen_models/')
+  ) {
+    return path.join(runtimePaths.modelsRoot, normalized);
+  }
+  const externalModelsRoot = path.resolve(runtimePaths.modelsRoot) !== path.resolve(runtimePaths.workspaceRoot);
+  if (runtimePaths.mode === 'installed' || externalModelsRoot) {
     const coderPrefix = 'runtime/coder/models';
     if (normalized === coderPrefix || normalized.startsWith(`${coderPrefix}/`)) {
       return path.join(runtimePaths.modelsRoot, 'coder', normalized.slice(coderPrefix.length).replace(/^\/+/, ''));
@@ -680,12 +671,7 @@ async function hasGgufMagic(filePath: string): Promise<boolean> {
 }
 
 function normalizeSelectableRole(role: string): MonarchModelRole {
-  const target = role === 'router' ? 'weak' : role;
-  if (target === 'weak') return 'gemma4-fast';
-  if (target === 'medium') return 'gemma4-balanced';
-  if (target === 'powerful') return 'gemma4-deepthinking';
-  if (target === 'vision') return 'gemma4-balanced';
-  return target as MonarchModelRole;
+  return normalizeMonarchModelRoleAlias(role);
 }
 
 export function selectModelRole(normalizedInput: string): MonarchModelRole {
@@ -700,7 +686,7 @@ export function selectModelRole(normalizedInput: string): MonarchModelRole {
   ];
 
   if (normalizedInput.length > 180 || complexitySignals.some((pattern) => pattern.test(normalizedInput))) {
-    return 'powerful';
+    return 'qwen3.8-27b-pro';
   }
 
   if (normalizedInput.length > 80 || /(почему|как|объясни|plan|design|код|code)/i.test(normalizedInput)) {
@@ -723,10 +709,14 @@ export function selectionReason(role: MonarchModelRole, normalizedInput: string)
   case 'router':
     return 'route decision only';
   case 'gemma4-fast':
+    return 'Basic Fast local model';
   case 'gemma4-balanced':
+    return 'Basic Balanced local model';
   case 'gemma4-deepthinking':
   case 'gemma4-31b':
-    return `Gemma 4 model for ${role} request`;
+    return 'Retired local model identifier migrated to Qwen 3.8 Pro';
+  case 'qwen3.8-27b-pro':
+    return 'Qwen 3.8 Pro selected for full agent reasoning and tool use';
   case 'qwen3-coder-30b-a3b-instruct':
   case 'deepseek-coder-v2-lite-instruct':
     return `Dedicated Coder Mode model for ${role} request`;

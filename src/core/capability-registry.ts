@@ -87,6 +87,13 @@ export class MonarchCapabilityRegistry {
       if (this.capabilities.has(id)) {
         throw new Error(`Capability already registered: ${id}`);
       }
+      if (!normalizeId(capability.moduleId)) {
+        throw new Error(`Capability ${id} must declare moduleId.`);
+      }
+      if (normalizeId(capability.moduleId) !== normalizeId(manifest.id)) {
+        throw new Error(`Capability ${id} must belong to module ${normalizeId(manifest.id)}.`);
+      }
+      validateAgentCapabilityMetadata(capability);
       seen.add(id);
     }
   }

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { writeDurableJsonAtomically } from '../../core/durable-json-file';
 
 export const PAIRING_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
 export const PAIRING_ATTEMPT_LIMIT = 5;
@@ -129,10 +130,7 @@ export async function readPairingSnapshot(filePath: string): Promise<TelegramPai
 }
 
 export async function writeAtomicJson(filePath: string, value: unknown): Promise<void> {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  await rename(temporary, filePath);
+  await writeDurableJsonAtomically(filePath, value);
 }
 
 export function validPairing(value: unknown): value is TelegramPairing {
