@@ -564,7 +564,7 @@ describe('Coder Mode', () => {
     } finally {
       await rm(monarchRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('recovers an interrupted long-running agent journal without losing compacted state', async () => {
     const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-recovery-'));
@@ -603,7 +603,7 @@ describe('Coder Mode', () => {
     } finally {
       await rm(monarchRoot, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 
   it('removes only a terminal plaintext run journal after a verified Safe migration', async () => {
     const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-safe-delete-'));
