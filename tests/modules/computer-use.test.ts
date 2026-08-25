@@ -1,4 +1,5 @@
 import { readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -10,7 +11,7 @@ import {
   type ComputerNativeProvider,
 } from '../../src/modules/computer';
 
-const TEST_ROOT = 'E:\\Monarch-Test-Tmp\\computer-use-unit';
+const TEST_ROOT = path.join(tmpdir(), 'monarch-computer-use-unit');
 const WINDOW_REF = 'hwnd:0000000000000042';
 const ELEMENT_ID = 'el-editor-0';
 

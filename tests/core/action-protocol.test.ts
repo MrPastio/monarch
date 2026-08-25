@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import path from 'node:path';
 import { mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { normalizeActionProposal, MonarchActionProtocolError } from '../../src/core/action-protocol';
 import type { MonarchActionPredicate, MonarchCapability } from '../../src/core/contracts';
 import { workspaceManifest } from '../../src/modules/workspace/manifest';
@@ -60,7 +61,7 @@ describe('Action Protocol v1', () => {
 
   it('binds a known-folder action to the exact Kernel-resolved leaf before policy and approval', () => {
     const previousDesktop = process.env.MONARCH_DESKTOP_DIR;
-    const desktop = path.resolve('E:\\MonarchQA\\action-protocol-desktop');
+    const desktop = path.join(tmpdir(), 'monarch-action-protocol-desktop');
     mkdirSync(desktop, { recursive: true });
     process.env.MONARCH_DESKTOP_DIR = desktop;
     try {
