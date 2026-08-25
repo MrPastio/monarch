@@ -2,6 +2,9 @@ gemma_models/**/*.gguf filter=lfs diff=lfs merge=lfs -text
 /.gitattributes text eol=lf
 /assets/voice/generation-manifest.json text eol=lf
 /assets/voice/reference-provenance.json text eol=lf
+/installer/runtime-dependencies/windows-x64/bundle-source.json text eol=lf
+/installer/runtime-dependencies/windows-x64/llama-cpp-cpu-portable.json text eol=lf
+/installer/runtime-dependencies/windows-x64/manifest.json text eol=lf
 /scripts/export-public.ps1 text eol=lf
 /scripts/public-source-policy.ps1 text eol=lf
 /scripts/public-source-structure.json text eol=lf
