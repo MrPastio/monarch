@@ -352,12 +352,15 @@ class ResponseActionTests(unittest.TestCase):
             with self.assertRaisesRegex(ResponseActionError, "active Python runtime"):
                 _resolve_response_runtime_layout(python, config)
 
-    def test_runtime_attestation_rejects_user_owned_directory(self) -> None:
+    def test_runtime_attestation_rejects_user_controlled_directory(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "runtime.py").write_text("print('synthetic')\n", encoding="utf-8")
 
-            with self.assertRaisesRegex(ResponseActionError, "owner is not trusted"):
+            with self.assertRaisesRegex(
+                ResponseActionError,
+                "owner is not trusted|grants write-like access outside trusted principals",
+            ):
                 _attest_response_runtime((root,))
 
     def test_runtime_attestation_accepts_windows_binary_and_binds_digest(self) -> None:
