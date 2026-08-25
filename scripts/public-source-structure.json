@@ -325,7 +325,7 @@
     },
     "tests/modules/workspace-storage-audit.test.ts": {
       "scope": "tests",
-      "objectId": "4e645e705be43e178aea0bed70b8fb8aa724b181"
+      "objectId": "4b359ca29c477b8e76e1b5880c2decfd556caf73"
     },
     "tests/image-generation/provider-agreement.test.ts": {
       "scope": "tests",
