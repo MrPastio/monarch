@@ -32,6 +32,7 @@ ACCESS_ALLOWED_ACE_TYPE = 0x00
 INHERITED_ACE = 0x10
 FILE_ALL_ACCESS = 0x001F01FF
 SYSTEM_SID = "S-1-5-18"
+BUILTIN_ADMINISTRATORS_SID = "S-1-5-32-544"
 
 
 class IntegrityKeyError(RuntimeError):
@@ -471,8 +472,13 @@ def _set_and_verify_private_acl(path: Path) -> None:
     if current_sid != SYSTEM_SID:
         allowed_sids.append(SYSTEM_SID)
     allowed = set(allowed_sids)
+    trusted_owners = {
+        current_sid,
+        SYSTEM_SID,
+        BUILTIN_ADMINISTRATORS_SID,
+    }
     try:
-        _verify_private_acl(path, current_sid, allowed)
+        _verify_private_acl(path, trusted_owners, allowed)
         return
     except IntegrityKeyAccessError:
         pass
@@ -508,10 +514,14 @@ def _set_and_verify_private_acl(path: Path) -> None:
         local_free.argtypes = [ctypes.c_void_p]
         local_free.restype = ctypes.c_void_p
         local_free(descriptor)
-    _verify_private_acl(path, current_sid, allowed)
+    _verify_private_acl(path, trusted_owners, allowed)
 
 
-def _verify_private_acl(path: Path, owner_sid: str, allowed_sids: set[str]) -> None:
+def _verify_private_acl(
+    path: Path,
+    trusted_owner_sids: set[str],
+    allowed_sids: set[str],
+) -> None:
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
     get_security = advapi32.GetFileSecurityW
@@ -552,7 +562,7 @@ def _verify_private_acl(path: Path, owner_sid: str, allowed_sids: set[str]) -> N
     get_owner.restype = ctypes.wintypes.BOOL
     if not get_owner(descriptor, ctypes.byref(owner), ctypes.byref(owner_defaulted)):
         raise IntegrityKeyAccessError("integrity-key-owner-read-failed")
-    if _sid_to_string(owner) != owner_sid:
+    if _sid_to_string(owner) not in trusted_owner_sids:
         raise IntegrityKeyAccessError("integrity-key-owner-mismatch")
 
     control = ctypes.c_ushort()

@@ -145,7 +145,7 @@ describe('Monarch Access and Monarch Security confirmation', () => {
     const kernel = new MonarchKernel({
       permissionProfile: { sandboxMode: 'workspace-write', approvalPolicy: 'on-request' },
     });
-    kernel.registerModule(new SecurityModule());
+    kernel.registerModule(new SecurityModule(createUnavailableSecurityClient() as any));
     await kernel.start();
 
     try {
@@ -1016,6 +1016,20 @@ function createVoiceTranscribeSmokeModule(): MonarchModule {
     async executeCapability(): Promise<MonarchExecutionResult> {
       return { ok: true, summary: 'Voice smoke transcribed.' };
     },
+  };
+}
+
+function createUnavailableSecurityClient() {
+  return {
+    config: {
+      projectRoot: 'security',
+      configPath: 'security/config/monarch_security.toml',
+      pythonPath: 'python',
+      timeoutMs: 30_000,
+    },
+    available: false,
+    backgroundBenchmarkStatus: () => null,
+    dispose: () => {},
   };
 }
 
