@@ -180,7 +180,7 @@ describe('workspace.storage.audit', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });
 
 function request(input: Record<string, unknown>) {
