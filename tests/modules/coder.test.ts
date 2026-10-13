@@ -703,9 +703,9 @@ describe('Coder Mode', () => {
       await mkdir(later);
       const { execFileSync } = await import('node:child_process');
       const canonical = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-        `(Get-Acl -LiteralPath '${later.replaceAll("'", "''")}').AreAccessRulesCanonical`],
-        // A PowerShell 7 parent leaks its PSModulePath, which hides Get-Acl from Windows PowerShell.
-        { encoding: 'utf8', windowsHide: true, env: { ...process.env, PSModulePath: undefined } }).trim();
+        // .NET directly: hosted runners cannot always autoload the Get-Acl module.
+        `[IO.Directory]::GetAccessControl('${later.replaceAll("'", "''")}').AreAccessRulesCanonical`],
+        { encoding: 'utf8', windowsHide: true }).trim();
       expect(canonical).toBe('True');
     } finally {
       await rm(monarchRoot, { recursive: true, force: true });
