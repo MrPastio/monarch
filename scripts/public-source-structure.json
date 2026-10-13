@@ -353,7 +353,7 @@
     },
     "security/tests/test_supervisor_backlog.py": {
       "scope": "security",
-      "objectId": "da08643a38db237786b79c0c8c17864457dbb483"
+      "objectId": "2ab48207a4844662d96166cfb77de91131d834eb"
     },
     "src/authority/owner-authority.ts": {
       "scope": "src",
@@ -2141,7 +2141,7 @@
     },
     "security/tests/test_inspection_native.py": {
       "scope": "security",
-      "objectId": "daf95d958a90bfb5ff22497dbe3d9da6ac55b008"
+      "objectId": "8756b05beed5450fee469c686b1353ee70de88a4"
     },
     "security/tests/test_inspection_queue.py": {
       "scope": "security",
