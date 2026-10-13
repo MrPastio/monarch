@@ -114,12 +114,21 @@ export class MonarchExecutionEngine {
     control: MonarchExecutionControl = {},
   ): Promise<MonarchExecutionResult> {
     if (control.signal?.aborted) return cancelledExecutionResult(control.signal);
+    const initialFence = dispatchFenceRefusal(control);
+    if (initialFence) return initialFence;
     const module = this.modules.getModule(request.moduleId);
     if (!module) {
       return {
         ok: false,
         summary: `Module is not registered: ${request.moduleId}`,
         error: 'module-not-found',
+      };
+    }
+    if (this.modules.getRecord(request.moduleId)?.status === 'failed') {
+      return {
+        ok: false,
+        summary: `Module ${request.moduleId} did not start, so its capabilities are unavailable.`,
+        error: 'module-unavailable',
       };
     }
 
@@ -226,6 +235,7 @@ export class MonarchExecutionEngine {
       && request.moduleId !== 'security'
       && (policyDecision.outcome !== 'confirm' || securityModuleActive)) {
       let trustedActionContext: MonarchTrustedActionContext | undefined;
+      let securityFact: MonarchSecurityPolicyFact | undefined;
       try {
         trustedActionContext = await this.resolveTrustedSecurityActionContext(module, request, capability, context);
       } catch (error) {
@@ -236,20 +246,32 @@ export class MonarchExecutionEngine {
           capabilityId: request.capabilityId,
           error: message,
         }, 'error');
-        return {
+        if (!localOwnerDirectAccessActive(runtimeFacts, request)) {
+          return {
+            ok: false,
+            summary: `Action was not dispatched because its live Security target context is unavailable: ${message}`,
+            error: 'security-context-unavailable',
+            metadata: { permission, policy: policyDecision },
+          };
+        }
+        // A broken optional target observer must not turn Direct Access into an
+        // implicit Kernel deny. Hold only this exact action for the local Owner;
+        // the confirmed replay remains proposal- and policy-hash bound.
+        securityFact = {
           ok: false,
-          summary: `Action was not dispatched because its live Security target context is unavailable: ${message}`,
-          error: 'security-context-unavailable',
-          metadata: { permission, policy: policyDecision },
+          status: 'approval_required',
+          report: 'Monarch Security не смог получить живой контекст цели. Проверь точную карточку и реши, выполнять ли это действие без наблюдателя.',
+          evidenceCodes: ['security.context.unavailable'],
+          disposition: 'owner-confirmable',
         };
       }
-      const secCheck = await this.runSecurityControllerCheck(
-        request,
-        context,
-        effectiveRisk,
-        runtimeFacts,
-        trustedActionContext,
-      );
+      const secCheck = securityFact || await this.runSecurityControllerCheck(
+          request,
+          context,
+          effectiveRisk,
+          runtimeFacts,
+          trustedActionContext,
+        );
       if (control.signal?.aborted) return cancelledExecutionResult(control.signal);
       policyDecision = this.policy.finalize(preflight, request, secCheck);
       if (policyDecision.securityOverride === true && policyDecision.outcome === 'allow') {
@@ -266,8 +288,14 @@ export class MonarchExecutionEngine {
         moduleId: request.moduleId,
         capabilityId: request.capabilityId,
         decision: policyDecision,
-        final: true,
+        final: request.requireExactConfirmation !== true,
       });
+    }
+
+    if (request.requireExactConfirmation === true) {
+      policyDecision = this.policy.enforceSourceConfirmation(request, policyDecision);
+      await context.emit('policy.evaluated', 'policy-kernel', { requestId: request.id, intentId: request.intentId,
+        moduleId: request.moduleId, capabilityId: request.capabilityId, decision: policyDecision, final: true });
     }
 
     if (policyDecision.outcome === 'deny') {
@@ -301,6 +329,7 @@ export class MonarchExecutionEngine {
         metadata: {
           permission,
           policy: policyDecision,
+          dispatchControl: { dispatched: false, reason: 'policy-confirmation-required' },
           ...(policyDecision.securityOverride ? { securityOverride: true } : {}),
         },
       };
@@ -319,7 +348,8 @@ export class MonarchExecutionEngine {
         ok: false,
         summary: 'Policy or Owner authority changed after approval; a new exact action-card is required.',
         error: 'confirmation-required',
-        metadata: { permission, policy: policyDecision, policyBindingChanged: true },
+        metadata: { permission, policy: policyDecision, policyBindingChanged: true,
+          dispatchControl: { dispatched: false, reason: 'approval-policy-binding-changed' } },
       };
     }
 
@@ -389,6 +419,13 @@ export class MonarchExecutionEngine {
       ownerUnrestricted: policyDecision.ownerUnrestrictedOverride === true,
     });
     if (journalCapture.supported && !journalCapture.ok) {
+      if (policyDecision.ownerUnrestrictedOverride === true) {
+        await context.audit('execution', 'Direct Access is proceeding without a rollback snapshot.', {
+          requestId: request.id,
+          capabilityId: request.capabilityId,
+          error: journalCapture.error || 'unknown journal error',
+        }, 'warn');
+      } else {
       const blocked: MonarchExecutionResult = {
         ok: false,
         summary: `Action was not executed because a safe rollback snapshot could not be created: ${journalCapture.error || 'unknown journal error'}`,
@@ -397,6 +434,7 @@ export class MonarchExecutionEngine {
       };
       this.actionLedger.complete(ledger.record.idempotencyKey, blocked);
       return blocked;
+      }
     }
     if (control.signal?.aborted) {
       const cancelled = cancelledExecutionResult(control.signal, { permission, policy: policyDecision, ledger: ledger.record });
@@ -421,16 +459,25 @@ export class MonarchExecutionEngine {
     });
 
     let result: MonarchExecutionResult;
+    let moduleDispatched = false;
     const toolStartedAt = Date.now();
     try {
       const dispatchRequest = policyDecision.ownerUnrestrictedOverride === true
         ? { ...request, ownerUnrestrictedExecution: true as const }
         : request;
-      result = await module.executeCapability(dispatchRequest, context, control);
+      // emit/audit/preconditions above may yield. Re-check immediately at the last
+      // module boundary, not just before those awaits. A fence only removes rights.
+      const fence = dispatchFenceRefusal(control);
+      if (control.signal?.aborted) result = cancelledExecutionResult(control.signal);
+      else if (fence) result = fence;
+      else {
+        moduleDispatched = true;
+        result = await module.executeCapability(dispatchRequest, context, control.signal ? { signal: control.signal } : {});
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       result = control.signal?.aborted
-        ? cancelledExecutionResult(control.signal)
+        ? cancelledExecutionResult(control.signal, undefined, moduleDispatched)
         : {
             ok: false,
             summary: `Capability execution failed for ${request.capabilityId}: ${message}`,
@@ -438,6 +485,14 @@ export class MonarchExecutionEngine {
             metadata: { thrownError: message },
           };
     }
+    // This is an engine-owned dispatch fact, not an effect/physical-stop proof.
+    // A module cannot claim dispatched:false after receiving the request, even
+    // when it throws or notices cancellation after performing part of an action.
+    result = { ...result, metadata: { ...(result.metadata || {}), dispatchControl: {
+      dispatched: moduleDispatched,
+      reason: moduleDispatched ? 'module-returned' : result.error === 'execution-dispatch-fenced' ? 'runtime-fence'
+        : result.error === 'cancelled' ? 'cancelled' : 'not-dispatched',
+    } } };
     const toolLatencyMs = Math.max(0, Date.now() - toolStartedAt);
 
     const rollback = await this.mutationJournal.finalize(ledger.record.ledgerId, result);
@@ -628,6 +683,15 @@ export class MonarchExecutionEngine {
           disposition: 'informational',
         };
       }
+      if (localOwnerDirectAccessActive(runtimeFacts, request)) {
+        return {
+          ok: false,
+          status: 'approval_required',
+          report: 'Monarch Security временно недоступен. Действие не заблокировано навсегда: проверь точную карточку и реши, выполнять ли его без наблюдателя.',
+          evidenceCodes: ['security.locator.unavailable'],
+          disposition: 'owner-confirmable',
+        };
+      }
       return { 
         ok: false, 
         status: 'blocked', 
@@ -661,10 +725,11 @@ export class MonarchExecutionEngine {
           actionCapability: request.capabilityId,
           actionInput: JSON.stringify(actionInputForSecurityCheck(request.input)),
           actionRisk,
-          requestedBy: request.requestedBy,
+          requestedBy: request.source || request.requestedBy,
           monarchConfirmed: request.confirmed === true,
           modelProposed,
           runtimeOwnedExactAction,
+          directAccess: localOwnerDirectAccessActive(runtimeFacts, request),
           actionGuardReaction: runtimeFacts.actionGuardReaction
             || (runtimeFacts.modelConfirmationMode === 'always' ? 'confirm-all' : 'guard'),
           ...(runtimeFacts.agentSecurityMode ? { agentSecurityMode: runtimeFacts.agentSecurityMode } : {}),
@@ -684,9 +749,7 @@ export class MonarchExecutionEngine {
           const ret: MonarchSecurityPolicyFact = {
             ok: payload.ok,
             status: payload.status,
-            report: payload.status === 'approval_required'
-              ? 'Monarch Security requires an exact durable action-card for this request.'
-              : payload.report,
+            report: payload.report,
             evidenceCodes,
             disposition: payload.disposition,
           };
@@ -697,14 +760,16 @@ export class MonarchExecutionEngine {
         request,
         context,
         actionRisk,
-        'Monarch Security controller returned an invalid response.'
+        'Monarch Security controller returned an invalid response.',
+        localOwnerDirectAccessActive(runtimeFacts, request),
       );
     } catch (error) {
       return this.securityControllerFailureResult(
         request,
         context,
         actionRisk,
-        `Monarch Security controller check failed: ${error}`
+        `Monarch Security controller check failed: ${error}`,
+        localOwnerDirectAccessActive(runtimeFacts, request),
       );
     }
   }
@@ -713,7 +778,8 @@ export class MonarchExecutionEngine {
     request: MonarchExecutionRequest,
     context: MonarchKernelContext,
     actionRisk: MonarchRisk,
-    report: string
+    report: string,
+    directAccess = false,
   ): Promise<MonarchSecurityPolicyFact> {
     if (canProceedWithoutSecurityController(actionRisk)) {
       await context.audit('security', 'Security controller failed; low-risk action allowed in degraded mode.', {
@@ -731,6 +797,16 @@ export class MonarchExecutionEngine {
       };
     }
 
+    if (directAccess) {
+      return {
+        ok: false,
+        status: 'approval_required',
+        report: `${report} Прямой доступ оставляет точное решение за тобой.`,
+        evidenceCodes: ['security.locator.check-failed'],
+        disposition: 'owner-confirmable',
+      };
+    }
+
     return {
       ok: false,
       status: 'security_check_failed',
@@ -740,6 +816,17 @@ export class MonarchExecutionEngine {
   }
 }
 
+function localOwnerDirectAccessActive(
+  facts: MonarchPolicyRuntimeFacts,
+  request: MonarchExecutionRequest,
+): boolean {
+  const override = facts.ownerOverride;
+  if (!override?.enabled || (request.source !== 'desktop' && request.source !== 'coder')) return false;
+  if (override.lifetime !== 'task') return true;
+  const taskId = request.requestedBy.startsWith('agent:') ? request.requestedBy.slice('agent:'.length) : '';
+  return Boolean(taskId && override.taskId === taskId);
+}
+
 function hasActiveSecurityModule(context: MonarchKernelContext): boolean {
   return context.listModules().some((module) => module.manifest.id === 'security' && module.status === 'active');
 }
@@ -747,6 +834,7 @@ function hasActiveSecurityModule(context: MonarchKernelContext): boolean {
 function cancelledExecutionResult(
   signal: AbortSignal,
   metadata?: Record<string, unknown>,
+  moduleDispatched = false,
 ): MonarchExecutionResult {
   return {
     ok: false,
@@ -754,12 +842,20 @@ function cancelledExecutionResult(
     error: 'cancelled',
     metadata: {
       ...(metadata || {}),
+      dispatchControl: { dispatched: moduleDispatched, reason: moduleDispatched ? 'module-interrupted' : 'cancelled' },
       cancellation: {
         requested: true,
         reason: typeof signal.reason === 'string' ? signal.reason.slice(0, 200) : 'aborted',
       },
     },
   };
+}
+
+function dispatchFenceRefusal(control: MonarchExecutionControl): MonarchExecutionResult | null {
+  if (!control.dispatchGuard) return null;
+  try { if (control.dispatchGuard() === true) return null; } catch { /* Fail closed without logging callback details. */ }
+  return { ok: false, summary: 'Capability was not dispatched because its execution fence is no longer current.',
+    error: 'execution-dispatch-fenced', metadata: { dispatchControl: { dispatched: false, reason: 'runtime-fence' } } };
 }
 
 interface SecurityControllerPayload {

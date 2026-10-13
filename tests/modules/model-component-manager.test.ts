@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MonarchRuntimePaths } from '../../src/core/runtime-paths';
 import {
   MonarchModelComponentManager,
+  MONARCH_OPTIONAL_BALANCED_MODEL,
   MONARCH_REQUIRED_FAST_MODEL,
   MONARCH_OPTIONAL_PRO_MODEL_COMPONENTS,
   type MonarchModelComponentSpec,
@@ -33,6 +34,21 @@ describe('MonarchModelComponentManager', () => {
       revision: '739965d73654c0ead8020786aa998fc813070087',
       expectedBytes: 3_356_035_200,
       sha256: 'd8fc2ac6fd597481dfd9c5ef9543ea1f0bda8088086da3853ce5e5564ab43bf8',
+    });
+  });
+
+  it('pins the current balanced payload and keeps the retired revision as an accepted variant', () => {
+    expect(MONARCH_OPTIONAL_BALANCED_MODEL).toMatchObject({
+      revision: 'fc034cfff751157913579611efad8462ac1be606',
+      repository: 'unsloth/gemma-4-12b-it-GGUF',
+      remoteFile: 'gemma-4-12b-it-Q4_K_M.gguf',
+      expectedBytes: 7_121_861_440,
+      sha256: '0a270ec9fe6b34f4a0d33992b6135117b484ebc4766ab76b51d4ae8c457e4c42',
+    });
+    expect(MONARCH_OPTIONAL_BALANCED_MODEL.acceptedExistingVariants).toContainEqual({
+      revision: '52268a3069f9ba83031088c5ac10e704d3ab7047',
+      expectedBytes: 7_662_531_872,
+      sha256: 'd333b368be6cd655563fce18aede26027e208fdb13816d35eb06983ce054044b',
     });
   });
 

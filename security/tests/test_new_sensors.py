@@ -67,6 +67,15 @@ class NewSensorSignatureTests(unittest.TestCase):
         connection = next(item for item in snapshot if item["kind"] == "connection")
         self.assertEqual(connection["remote_domain"], "dns.google")
 
+    def test_network_config_drops_missing_gateway_and_dns(self):
+        # Adapters without a default gateway (host-only, Bluetooth) used to
+        # emit `gateway: [null]`, which invalidated the whole network snapshot.
+        from monarch_security.sensors.network import _network_config_command
+
+        command = _network_config_command()
+        self.assertIn("IPv4DefaultGateway.NextHop | Where-Object { $_ }", command)
+        self.assertIn("ServerAddresses | Where-Object { $_ }", command)
+
     @mock.patch("monarch_security.sensors.network._native_tcp_items", return_value=None)
     @mock.patch("monarch_security.sensors.network._run_powershell_json", return_value=([], None))
     def test_network_snapshot_keeps_powershell_tcp_fallback(self, run, _native_tcp):

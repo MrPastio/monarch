@@ -102,8 +102,8 @@ export const coderManifest: MonarchModuleManifest = {
     {
       id: 'coder.files.list',
       moduleId: 'coder',
-      title: 'List project files',
-      description: 'List a bounded file tree in the selected project.',
+      title: 'List files',
+      description: 'List a bounded file tree, by default of the selected project.',
       risk: 'read',
       inputSchema: {
         type: 'object',
@@ -119,8 +119,8 @@ export const coderManifest: MonarchModuleManifest = {
     {
       id: 'coder.files.read',
       moduleId: 'coder',
-      title: 'Read project file',
-      description: 'Read a bounded text file from the selected project or another allowed non-system path.',
+      title: 'Read file',
+      description: 'Read a bounded text file. A relative path resolves inside the selected project; an absolute path may point to any other folder the person names, except protected system, credential and Monarch paths.',
       risk: 'read',
       inputSchema: {
         type: 'object',
@@ -132,8 +132,8 @@ export const coderManifest: MonarchModuleManifest = {
     {
       id: 'coder.files.write',
       moduleId: 'coder',
-      title: 'Write project file',
-      description: 'Atomically create or replace a bounded text file outside protected Monarch and OS paths.',
+      title: 'Write file',
+      description: 'Atomically create a bounded text file; without overwrite=true it refuses to replace an existing one, so checking first is unnecessary. append=true adds content to the end of an existing file, for writing a long file in parts. A relative path resolves inside the selected project; an absolute path may point to any other folder the person names, except protected system, credential and Monarch paths.',
       risk: 'write',
       inputSchema: {
         type: 'object',
@@ -142,6 +142,7 @@ export const coderManifest: MonarchModuleManifest = {
           path: { type: 'string' },
           content: { type: 'string' },
           overwrite: { type: 'boolean' },
+          append: { type: 'boolean' },
         },
         required: ['path', 'content'],
         additionalProperties: false,
@@ -150,8 +151,8 @@ export const coderManifest: MonarchModuleManifest = {
     {
       id: 'coder.files.patch',
       moduleId: 'coder',
-      title: 'Patch project file',
-      description: 'Apply exact, atomic text replacements and fail if an edit is ambiguous.',
+      title: 'Patch file',
+      description: 'Apply exact, atomic text replacements and fail if an edit is ambiguous. A relative path resolves inside the selected project; an absolute path may point to any other folder the person names, except protected system, credential and Monarch paths.',
       risk: 'write',
       inputSchema: {
         type: 'object',
@@ -167,8 +168,8 @@ export const coderManifest: MonarchModuleManifest = {
     {
       id: 'coder.files.delete',
       moduleId: 'coder',
-      title: 'Delete project file',
-      description: 'Delete one file outside protected Monarch and OS paths; recursive directory deletion is unavailable.',
+      title: 'Delete file',
+      description: 'Delete one file; recursive directory deletion is unavailable. A relative path resolves inside the selected project; an absolute path may point to any other folder the person names, except protected system, credential and Monarch paths.',
       risk: 'delete',
       inputSchema: {
         type: 'object',

@@ -65,27 +65,39 @@ class ResponseProposalStore:
 
     def append(self, stored: StoredProposal) -> None:
         with FileLock(self.path):
-            latest, last_hash = self._read_all()
-            payload: dict[str, Any] = {
-                "kind": "response.proposal",
-                "timestamp": utc_now(),
-                "stored_proposal": stored.to_dict(),
-            }
-            integrity = audit_record_integrity(payload, self._key, last_hash)
-            payload[INTEGRITY_FIELD] = integrity
-            line = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(line + "\n")
-                handle.flush()
-                try:
-                    os.fsync(handle.fileno())
-                except OSError:
-                    pass
-            latest[stored.proposal.proposal_id] = stored
-            self._latest = latest
-            self._last_hash = integrity["record_hash"]
+            self._append_locked(stored)
+
+    def transition(self, expected: StoredProposal, replacement: StoredProposal) -> None:
+        """Reserve an approval against fresh state, never a per-instance cache."""
+        with FileLock(self.path):
+            latest, _ = self._read_all()
+            if latest.get(expected.proposal.proposal_id) != expected or expected.status != "proposed":
+                raise ResponseBrokerError("Approval requires one active proposed response")
+            if _is_expired(expected.proposal.expires_at):
+                raise ResponseBrokerError("Response proposal expired before approval")
+            if replacement.proposal != expected.proposal or replacement.status != "approved":
+                raise ResponseBrokerError("Response approval transition is invalid")
+            self._append_locked(replacement)
+
+    def _append_locked(self, stored: StoredProposal) -> None:
+        latest, last_hash = self._read_all()
+        payload: dict[str, Any] = {
+            "kind": "response.proposal", "timestamp": utc_now(), "stored_proposal": stored.to_dict(),
+        }
+        integrity = audit_record_integrity(payload, self._key, last_hash)
+        payload[INTEGRITY_FIELD] = integrity
+        line = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(line + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        latest[stored.proposal.proposal_id] = stored
+        self._latest = latest
+        self._last_hash = integrity["record_hash"]
 
     def get(self, proposal_id: str) -> StoredProposal | None:
+        with FileLock(self.path):
+            self._latest, self._last_hash = self._read_all()
         return self._latest.get(str(proposal_id))
 
     def list_latest(self, limit: int = 100) -> list[StoredProposal]:

@@ -1,18 +1,27 @@
 import { state } from './state.js';
-import { executeConfirmedCapability, executeCapability, readLocalSettings, writeLocalSettings } from './api.js';
+import { executeConfirmedCapability, executeCapability } from './api.js';
 import { swapUiSurface } from './ui-motion.js';
+import { renderSecurityPolicyPane } from './security-policy-pane.js';
+import { promptSecurityPin } from './ui-dialogs.js';
+import { dangerScaleExamples, renderSecurityDangerScale } from './security-danger-scale.js';
+import { collectionPage, renderPagedList, resetCollectionPage } from './collection-pages.js';
 import {
   escapeHtml,
   renderError,
   readNumber,
   metricCard,
-  statusPill,
   keyValueRow
 } from './utils.js';
 
 let benchmarkPollTimer = null;
 let benchmarkStatusInFlight = false;
-let ownerOverrideRevision = 0;
+let statusPollTimer = null;
+let statusPolling = false;
+let statusRevision = 0;
+let scanPollTimer = null;
+let scanStatusInFlight = false;
+let appliedScanJobId = null;
+let scanRevision = 0;
 
 const SECURITY_LEVELS = new Set(['off', 'minimal', 'balanced', 'strict', 'maximum']);
 
@@ -23,7 +32,6 @@ function normalizeSecurityLevel(level) {
 const elements = {
   securityProtectionTitle: document.querySelector('#security-protection-title'),
   securityProtectionCopy: document.querySelector('#security-protection-copy'),
-  securityStatusPills: document.querySelector('#security-status-pills'),
   securityRefresh: document.querySelector('#security-refresh'),
   securityScanSystem: document.querySelector('#security-scan-system'),
   securityIntegrity: document.querySelector('#security-integrity'),
@@ -44,7 +52,7 @@ const elements = {
   securityAuditLabel: document.querySelector('#security-audit-label'),
   securityAuditOutput: document.querySelector('#security-audit-output'),
   securityTabs: typeof document.querySelectorAll === 'function'
-    ? Array.from(document.querySelectorAll('[data-security-tab]'))
+    ? Array.from(document.querySelectorAll('[role="tab"][data-security-tab]'))
     : [],
   securityPanels: {
     overview: document.querySelector('#security-overview-panel'),
@@ -107,44 +115,62 @@ const elements = {
   securityModelConfirmation: document.querySelector('#security-model-confirmation'),
   securityModelPolicySave: document.querySelector('#security-model-policy-save'),
   securityModelPolicyFeedback: document.querySelector('#security-model-policy-feedback'),
+  securityAgentOffWarning: document.querySelector('#security-agent-off-warning'),
   securityDangerLog: document.querySelector('#security-danger-log'),
-  securityOwnerOverrideEnabled: document.querySelector('#security-owner-override-enabled'),
-  securityOwnerOverrideLifetime: document.querySelector('#security-owner-override-lifetime'),
-  securityOwnerOverrideTaskId: document.querySelector('#security-owner-override-task-id'),
-  securityOwnerShellPolicy: document.querySelector('#security-owner-shell-policy'),
-  securityOwnerOverrideSave: document.querySelector('#security-owner-override-save'),
-  securityOwnerOverrideFeedback: document.querySelector('#security-owner-override-feedback'),
 };
 
 export function initSecurityPane(appRenderCallback) {
-  elements.securityOwnerOverrideSave?.addEventListener('click', () => void saveOwnerOverride(appRenderCallback));
-  elements.securityOwnerOverrideLifetime?.addEventListener('change', syncOwnerOverrideTaskField);
+  initCoverageDisclosure();
+  initCoverageDisclosure('#security-check-history');
+  document.querySelector('#security-scan-cancel')?.addEventListener('click', async () => {
+    const jobId = state.security.scanJob?.jobId;
+    if (!jobId) return;
+    scanRevision += 1;
+    try {
+      state.security.scanJob = readSecurityPayload(await executeSecurityCapabilityAction('security.scan.cancel', { jobId }, false));
+      applyScanTerminalFeedback(state.security.scanJob);
+      renderScanLab(); renderScanJob(); syncSecurityButtons(); scheduleScanPoll(appRenderCallback);
+    } catch (error) { state.security.error = String(error?.message || error); renderProtectionHealth(); }
+  });
+  document.querySelector('#security-background-enable')?.addEventListener('click', () => void runSecurityAction('security.background.enable', {}, true, appRenderCallback));
+  document.querySelector('#security-background-disable')?.addEventListener('click', async () => {
+    const pin = await requestSecurityLifecyclePin('отключения автозапуска');
+    if (pin) await runSecurityAction('security.background.disable', { pin }, true, appRenderCallback);
+  });
+  document.addEventListener?.('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && securityPaneVisible()) void loadSecurityStatus(appRenderCallback);
+  });
+  globalThis.window?.addEventListener?.('pagehide', disposeSecurityPane, { once: true });
+  document.querySelector('#security-overview-retry')?.addEventListener('click', () => void loadSecurityStatus(appRenderCallback));
+  document.querySelector('#security-inspection-retry')?.addEventListener('click', () => void runSecurityAction('security.inspection.retry', {}, false, appRenderCallback));
+  elements.securityModelConfirmation?.addEventListener('change', syncAgentSecurityModeWarning);
+  elements.securityModelConfirmation?.addEventListener('change', renderDangerScale);
   for (const tab of elements.securityTabs) {
-    tab.addEventListener('click', () => {
-      const nextTab = tab.dataset.securityTab || 'overview';
-      const order = ['overview', 'incidents', 'network', 'quarantine', 'settings'];
-      const direction = order.indexOf(nextTab) >= order.indexOf(state.security.activeTab || 'overview') ? 1 : -1;
-      void swapUiSurface(document.querySelector('.security-page-content'), () => {
-        setSecurityTab(nextTab);
-        renderSecurity();
-        resetSecurityViewport(tab);
-      }, { direction });
-      if (tab.dataset.securityTab === 'quarantine') {
-        void loadSecurityQuarantine(appRenderCallback);
-        void loadSecurityPinStatus(appRenderCallback);
-      }
-      if (tab.dataset.securityTab === 'network') {
-        void loadSecurityNetworkCenter(appRenderCallback);
-      }
-    });
+    tab.addEventListener('click', () => openSecurityTab(tab.dataset.securityTab || 'overview', appRenderCallback));
   }
+  document.querySelector('#security-section .security-tabs')?.addEventListener('keydown', (event) => {
+    const index = SECURITY_TAB_ORDER.indexOf(state.security.activeTab || 'overview');
+    const next = { ArrowRight: index + 1, ArrowLeft: index - 1, Home: 0, End: SECURITY_TAB_ORDER.length - 1 }[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    const target = SECURITY_TAB_ORDER[(next + SECURITY_TAB_ORDER.length) % SECURITY_TAB_ORDER.length];
+    openSecurityTab(target, appRenderCallback);
+    elements.securityTabs.find((item) => item.dataset.securityTab === target)?.focus();
+  });
+  document.querySelector('#security-chrome-status')?.addEventListener('click', () => {
+    if ((state.security.activeTab || 'overview') !== 'overview') openSecurityTab('overview', appRenderCallback);
+  });
+  document.querySelector('#security-action-feedback-close')?.addEventListener('click', () => {
+    state.security.error = '';
+    renderProtectionHealth();
+  });
+  // The indicator measures real tab widths: it settles when the section first
+  // gets a size and follows window and font changes without sliding.
+  const tabList = document.querySelector('#security-section .security-tabs');
+  if (tabList && typeof ResizeObserver === 'function') new ResizeObserver(() => placeSecurityTabIndicator(false)).observe(tabList);
 
   if (elements.securityOpenIncidents) {
-    elements.securityOpenIncidents.addEventListener('click', () => {
-      setSecurityTab('incidents');
-      renderSecurity();
-      resetSecurityViewport(elements.securityTabs.find((tab) => tab.dataset.securityTab === 'incidents'));
-    });
+    elements.securityOpenIncidents.addEventListener('click', () => openSecurityTab('incidents', appRenderCallback));
   }
 
   if (elements.securityIncidentsRefresh) {
@@ -156,6 +182,7 @@ export function initSecurityPane(appRenderCallback) {
     filter.addEventListener('click', () => {
       state.security.incidentFilter = filter.dataset.securityIncidentFilter === 'all' ? 'all' : 'active';
       state.security.selectedIncidentId = null;
+      resetCollectionPage(elements.securityIncidentList);
       renderIncidentWorkspace();
     });
   }
@@ -192,6 +219,7 @@ export function initSecurityPane(appRenderCallback) {
       }
     });
     elements.securityFileDrop.addEventListener('keydown', (event) => {
+      if (event.target !== elements.securityFileDrop) return;
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
         void chooseSecurityFile(appRenderCallback);
@@ -358,13 +386,13 @@ export function initSecurityPane(appRenderCallback) {
 
   if (elements.securityStart) {
     elements.securityStart.addEventListener('click', () => {
-      void runSecurityAction('security.protection.start', { noLlm: true }, true, appRenderCallback);
+      void runSecurityAction('security.background.enable', {}, true, appRenderCallback);
     });
   }
 
   if (elements.securityStop) {
-    elements.securityStop.addEventListener('click', () => {
-      const pin = requestSecurityLifecyclePin('остановки защиты');
+    elements.securityStop.addEventListener('click', async () => {
+      const pin = await requestSecurityLifecyclePin('остановки защиты');
       if (pin) {
         void runSecurityAction('security.protection.stop', { waitSeconds: 10, pin }, true, appRenderCallback);
       }
@@ -380,77 +408,28 @@ export function initSecurityPane(appRenderCallback) {
       void saveModelCommandPolicy(appRenderCallback);
     });
   }
-  void loadOwnerOverride();
 }
 
 async function changeSecurityLevel(level, appRenderCallback) {
   if (!['off', 'minimal', 'balanced', 'strict', 'maximum'].includes(level) || state.security.busy) return;
-  const pin = level === 'off' ? requestSecurityLifecyclePin('отключения Security') : '';
+  const pin = level === 'off' ? await requestSecurityLifecyclePin('отключения Security') : '';
   if (level === 'off' && !pin) return;
   await runSecurityAction('security.profile.set', { level, ...(pin ? { pin } : {}) }, true, appRenderCallback);
 }
 
-async function loadOwnerOverride() {
-  if (!elements.securityOwnerOverrideSave || typeof window.monarchDesktop?.getMutationAttestation !== 'function') return;
-  try {
-    const context = await readLocalSettings('owner-override');
-    ownerOverrideRevision = Number(context?.revision) || 0;
-    const value = context?.value && typeof context.value === 'object' ? context.value : {};
-    elements.securityOwnerOverrideEnabled.checked = value.enabled === true;
-    elements.securityOwnerOverrideLifetime.value = ['task', 'session', 'persistent'].includes(value.lifetime) ? value.lifetime : 'session';
-    elements.securityOwnerOverrideTaskId.value = typeof value.taskId === 'string' ? value.taskId : '';
-    elements.securityOwnerShellPolicy.value = ['always', 'risk-based', 'never'].includes(value.shellApprovalPolicy)
-      ? value.shellApprovalPolicy : 'always';
-    syncOwnerOverrideTaskField();
-  } catch {
-    // Public/browser/API surfaces intentionally cannot discover this control.
-  }
-}
-
-async function saveOwnerOverride(appRenderCallback) {
-  const enabled = elements.securityOwnerOverrideEnabled?.checked === true;
-  const lifetime = elements.securityOwnerOverrideLifetime?.value || 'session';
-  const taskId = String(elements.securityOwnerOverrideTaskId?.value || '').trim();
-  const shellApprovalPolicy = elements.securityOwnerShellPolicy?.value || 'always';
-  if (enabled && lifetime === 'task' && !/^agent_task_[A-Za-z0-9_-]{4,200}$/.test(taskId)) {
-    if (elements.securityOwnerOverrideFeedback) elements.securityOwnerOverrideFeedback.textContent = 'Для task укажи точный Agent Task ID.';
-    return;
-  }
-  if (elements.securityOwnerOverrideFeedback) elements.securityOwnerOverrideFeedback.textContent = 'Применяю локальную Owner policy…';
-  try {
-    const saved = await writeLocalSettings('owner-override.update', {
-      enabled,
-      lifetime,
-      ...(enabled && lifetime === 'task' ? { taskId } : {}),
-      shellApprovalPolicy,
-    }, { expectedRevision: ownerOverrideRevision });
-    ownerOverrideRevision = Number(saved.context?.revision) || ownerOverrideRevision;
-    if (elements.securityOwnerOverrideFeedback) {
-      elements.securityOwnerOverrideFeedback.textContent = enabled
-        ? `Override включён: ${lifetime}; shell ${shellApprovalPolicy}.`
-        : 'Owner override отключён.';
-    }
-    await loadOwnerOverride();
-    appRenderCallback?.();
-  } catch (error) {
-    if (elements.securityOwnerOverrideFeedback) elements.securityOwnerOverrideFeedback.textContent = String(error?.message || error);
-  }
-}
-
-function syncOwnerOverrideTaskField() {
-  if (!elements.securityOwnerOverrideTaskId) return;
-  elements.securityOwnerOverrideTaskId.disabled = elements.securityOwnerOverrideLifetime?.value !== 'task';
-}
-
-function requestSecurityLifecyclePin(actionLabel) {
+async function requestSecurityLifecyclePin(actionLabel) {
   if (state.security.busy) return null;
-  const promptPin = globalThis.prompt;
-  if (typeof promptPin !== 'function') {
-    state.security.error = 'Security PIN недоступен в этом интерфейсе. Открой настройки Security.';
+  if (readSecurityPayload(state.security.pinStatus)?.configured === false) {
+    state.security.pinFeedback = `Сначала создай PIN для ${actionLabel}. Он защищает настройки от посторонних.`;
+    setSecurityTab('settings');
     renderSecurity();
+    void renderSecurityPolicyPane();
+    elements.securityPinNew?.dispatchEvent?.(new Event('monarch:reveal', { bubbles: true }));
+    elements.securityPinNew?.focus?.();
     return null;
   }
-  const value = promptPin(`Введи шестизначный Security PIN для ${actionLabel}:`);
+  elements.securityModelConfirmation?.addEventListener('change', syncAgentSecurityModeWarning);
+  const value = await promptSecurityPin(`Введи шестизначный Security PIN для ${actionLabel}:`);
   if (value === null) {
     state.security.error = 'Действие отменено: Security PIN не введён.';
     renderSecurity();
@@ -488,38 +467,147 @@ async function saveModelCommandPolicy(appRenderCallback) {
   appRenderCallback();
 }
 
-export async function loadSecurityStatus(appRenderCallback) {
+export async function loadSecurityStatus(appRenderCallback, options = {}) {
+  statusPolling = true;
   if (state.security.statusBusy) {
     return;
   }
 
   state.security.statusBusy = true;
-  state.security.error = '';
-  renderSecurity();
+  const revision = statusRevision;
+  if (!options.quiet) renderSecurity();
 
   try {
-    const [result, emergency] = await Promise.all([
-      executeSecurityCapabilityAction('security.status', {}, false),
-      executeSecurityCapabilityAction('security.emergency.status', {}, false),
-    ]);
+    const result = await executeSecurityCapabilityAction('security.status', {}, false);
+    if (revision !== statusRevision) return;
     state.security.status = result;
-    state.security.emergency = emergency;
+    state.security.statusError = '';
+    state.security.statusFailures = 0;
+    state.security.statusUpdatedAt = Date.now();
+    if (!options.quiet) void loadScanStatus(appRenderCallback);
     if (!state.security.lastResult) {
       state.security.lastResult = result;
     }
     const payload = readSecurityPayload(result) || {};
     const profile = payload.profile && typeof payload.profile === 'object' ? payload.profile : {};
-    if (profile.level !== 'off') {
+    if (profile.level !== 'off' && (!options.quiet || state.security.activeTab === 'incidents')) {
       void loadSecurityIncidents(appRenderCallback);
-      void loadSecurityPinStatus(appRenderCallback);
+      if (!options.quiet) void loadSecurityPinStatus(appRenderCallback);
     }
+    // Optional surfaces must never invalidate a successfully read protector status.
+    void executeSecurityCapabilityAction('security.emergency.status', {}, false).then(emergency => {
+      state.security.emergency = emergency; state.security.emergencyError = ''; renderEmergencyResponse();
+    }).catch(() => { state.security.emergencyError = 'Состояние аварийной защиты недоступно.'; });
   } catch (error) {
-    state.security.error = error instanceof Error ? error.message : String(error);
+    if (revision === statusRevision) {
+      state.security.statusError = error instanceof Error ? error.message : String(error);
+      state.security.statusFailures = (state.security.statusFailures || 0) + 1;
+    }
   } finally {
     state.security.statusBusy = false;
-    appRenderCallback();
+    if (options.quiet) {
+      renderProtectionOverview(); renderProtectionHealth(); syncSecurityButtons();
+    } else appRenderCallback();
+    scheduleStatusPoll(appRenderCallback);
+    if (revision !== statusRevision && statusPolling) void loadSecurityStatus(appRenderCallback, { quiet: true });
   }
 
+}
+
+function securityPaneVisible() {
+  const pane = document.querySelector('#security-section');
+  return document.visibilityState !== 'hidden' && Boolean(pane && !pane.classList.contains('view-hidden'));
+}
+
+function scheduleStatusPoll(appRenderCallback) {
+  if (statusPollTimer !== null) clearTimeout(statusPollTimer);
+  if (!statusPolling) return;
+  statusPollTimer = setTimeout(() => {
+    statusPollTimer = null;
+    if (securityPaneVisible()) void loadSecurityStatus(appRenderCallback, { quiet: true });
+    else scheduleStatusPoll(appRenderCallback);
+  }, statusPollDelay());
+}
+
+// A first read can miss its deadline while the watcher is still waking up.
+// Retry that quickly instead of showing "unavailable" for a full slow period.
+function statusPollDelay() {
+  if (!state.security.statusError) return 5000;
+  const failures = state.security.statusFailures || 0;
+  return failures <= 3 ? 1500 * 2 ** Math.max(0, failures - 1) : 15000;
+}
+
+export function disposeSecurityPane() {
+  statusPolling = false;
+  if (statusPollTimer !== null) clearTimeout(statusPollTimer);
+  statusPollTimer = null;
+  clearBenchmarkPoll();
+  if (scanPollTimer !== null) clearTimeout(scanPollTimer);
+  scanPollTimer = null;
+}
+
+async function startReadScan(capabilityId, input, appRenderCallback) {
+  if (state.security.busy || ['running', 'stopping'].includes(state.security.scanJob?.status)) return;
+  state.security.busy = true; state.security.error = ''; syncSecurityButtons();
+  scanRevision += 1;
+  try {
+    const job = readSecurityPayload(await executeSecurityCapabilityAction('security.scan.start', {
+      kind: capabilityId === 'security.deep_scan.file' ? 'file' : 'system',
+      ...(capabilityId === 'security.deep_scan.file' ? { path: input.path } : {}),
+    }, false));
+    state.security.scanJob = job;
+    state.security.scanFeedback = null;
+    scheduleScanPoll(appRenderCallback);
+  } catch (error) {
+    state.security.error = String(error?.message || error);
+    state.security.scanFeedback = { ok: false, pending: false, summary: state.security.error };
+  } finally { state.security.busy = false; renderSecurity(); }
+}
+
+async function loadScanStatus(appRenderCallback) {
+  if (scanStatusInFlight) return;
+  scanStatusInFlight = true;
+  const revision = scanRevision;
+  try {
+    const job = readSecurityPayload(await executeSecurityCapabilityAction('security.scan.status', {}, false));
+    if (revision !== scanRevision) return;
+    state.security.scanJob = job;
+    if (job?.jobId && job.jobId !== appliedScanJobId && job.status === 'completed' && !state.security.busy) {
+      appliedScanJobId = job.jobId;
+      await runSecurityAction(job.kind === 'file' ? 'security.deep_scan.file' : 'security.scan.system', { path: job.path }, false, appRenderCallback,
+        { ok: true, summary: 'Проверка завершена.', output: { payload: job.result } });
+    } else { applyScanTerminalFeedback(job); }
+    renderScanLab(); renderScanJob(); syncSecurityButtons();
+  } catch (error) {
+    // Losing the UI connection does not prove that the worker stopped.
+    state.security.error = 'Не удалось обновить проверку. Повторяем подключение.';
+    renderProtectionHealth();
+  } finally { scanStatusInFlight = false; scheduleScanPoll(appRenderCallback); }
+}
+
+function applyScanTerminalFeedback(job) {
+  if (!['failed', 'cancelled'].includes(job?.status)) return;
+  state.security.scanFeedback = { ok: false, cancelled: job.status === 'cancelled', pending: false,
+    summary: job.status === 'cancelled' ? 'Отменена только эта проверка. Настройки фоновой защиты сохранены.' : job.error || 'Проверка не завершена.' };
+}
+
+function scheduleScanPoll(appRenderCallback) {
+  if (scanPollTimer !== null) clearTimeout(scanPollTimer);
+  scanPollTimer = null;
+  const job = state.security.scanJob;
+  if (!['running', 'stopping'].includes(job?.status) && !(job?.status === 'completed' && job.jobId !== appliedScanJobId)) return;
+  scanPollTimer = setTimeout(() => { scanPollTimer = null; void loadScanStatus(appRenderCallback); }, 1000);
+}
+
+function renderScanJob() {
+  const row = document.querySelector('#security-scan-job');
+  if (!row) return;
+  const job = state.security.scanJob;
+  row.hidden = !['running', 'stopping'].includes(job?.status);
+  const copy = document.querySelector('#security-scan-job-copy');
+  if (copy && !row.hidden) copy.textContent = job.status === 'stopping' ? 'Останавливаем проверку…' : `${job.kind === 'file' ? 'Проверяем файл' : 'Проверяем систему'} · ${job.elapsedSeconds || 0} сек. Можно перейти в другой раздел.`;
+  const cancel = document.querySelector('#security-scan-cancel');
+  if (cancel) cancel.disabled = job?.status === 'stopping';
 }
 
 export async function loadSecurityIncidents(appRenderCallback) {
@@ -567,7 +655,7 @@ export async function loadSecurityQuarantine(appRenderCallback) {
 export async function loadSecurityNetworkCenter(appRenderCallback) {
   if (state.security.networkBusy) return;
   state.security.networkBusy = true;
-  state.security.error = '';
+  state.security.networkError = '';
   renderSecurity();
   try {
     const [networkCenter, responseActions, responseServiceStatus] = await Promise.all([
@@ -579,7 +667,8 @@ export async function loadSecurityNetworkCenter(appRenderCallback) {
     state.security.responseActions = responseActions;
     state.security.responseServiceStatus = responseServiceStatus;
   } catch (error) {
-    state.security.error = error instanceof Error ? error.message : String(error);
+    // Network data belongs to its own tab; it must not raise an alarm on every other tab.
+    state.security.networkError = error instanceof Error ? error.message : String(error);
   } finally {
     state.security.networkBusy = false;
     appRenderCallback();
@@ -601,8 +690,9 @@ async function changeNetworkProfileTrust(profileId, trusted, appRenderCallback) 
       { limit: 100 },
       false,
     );
+    state.security.networkError = '';
   } catch (error) {
-    state.security.error = error instanceof Error ? error.message : String(error);
+    state.security.networkError = error instanceof Error ? error.message : String(error);
   } finally {
     state.security.networkBusy = false;
     appRenderCallback();
@@ -829,6 +919,7 @@ async function chooseSecurityFile(appRenderCallback) {
 }
 
 async function scanSecurityFile(targetPath, appRenderCallback) {
+  if (state.security.busy) return;
   state.security.scanFeedback = {
     ok: true,
     pending: true,
@@ -844,17 +935,24 @@ async function scanSecurityFile(targetPath, appRenderCallback) {
   );
 }
 
-async function runSecurityAction(capabilityId, input, confirmed, appRenderCallback) {
+async function runSecurityAction(capabilityId, input, confirmed, appRenderCallback, providedResult = null) {
+  if (!providedResult && ['security.scan.system', 'security.deep_scan.file'].includes(capabilityId)) {
+    return startReadScan(capabilityId, input, appRenderCallback);
+  }
   if (state.security.busy) {
     return;
   }
 
   setSecurityBusy(true);
+  if (/^security\.(protection\.|background\.|profile\.set)/.test(capabilityId)) statusRevision += 1;
   state.security.error = '';
   renderSecurity();
 
   try {
-    const result = await executeSecurityCapabilityAction(capabilityId, input, confirmed);
+    if (capabilityId === 'security.background.enable' && readSecurityPayload(state.security.status)?.profile?.level === 'off') {
+      await executeSecurityCapabilityAction('security.profile.set', { level: 'balanced' }, true);
+    }
+    const result = providedResult || await executeSecurityCapabilityAction(capabilityId, input, confirmed);
     state.security.lastResult = result;
     if (capabilityId === 'security.status') {
       state.security.status = result;
@@ -881,42 +979,51 @@ async function runSecurityAction(capabilityId, input, confirmed, appRenderCallba
         : {};
       const targetPath = String(input?.path || event.subject || 'Файл');
       const eventScore = readNumber(assessment.score, 0);
-      const score = Math.min(400, eventScore * 4);
+      const score = Math.min(800, eventScore * 4);
+      const parserStatus = event.facts?.content_parser_status;
+      const incomplete = payload?.complete === false || Boolean(parserStatus && parserStatus !== 'ok');
       const scanRecord = {
         path: targetPath,
         name: securityPathName(targetPath),
         score,
+        incomplete,
         severity: String(assessment.severity || 'clean'),
         scannedAt: new Date().toISOString(),
       };
-      state.security.recentScans = [scanRecord, ...state.security.recentScans].slice(0, 8);
+      state.security.recentScans = [scanRecord, ...(state.security.recentScans || [])].slice(0, 8);
       state.security.scanFeedback = {
         ok: result.ok !== false,
         pending: false,
         path: targetPath,
         score,
-        summary: score >= 250
+        incomplete,
+        summary: incomplete
+          ? 'Проверка ограничена: содержимое файла не удалось полностью прочитать. Безопасность не подтверждена.'
+          : score >= 250
           ? 'Файл требует внимания. Откройте детали результата перед запуском.'
           : score > 0
             ? 'Проверка завершена: обнаружены сигналы для ручной оценки.'
             : 'Проверка завершена: опасные признаки не обнаружены.',
       };
     }
+    if (capabilityId === 'security.scan.system') {
+      const payload = readSecurityPayload(result) || {};
+      const complete = payload.complete !== false;
+      const findings = Number(payload.summary?.medium_or_higher || 0);
+      state.security.scanFeedback = { ok: true, pending: false, incomplete: !complete, summary: complete
+        ? findings ? `Проверка системы завершена: ${findings} сигналов требуют внимания. Подробности ниже.` : 'Проверка системы завершена: опасные признаки не обнаружены.'
+        : `Проверка системы частичная: получены данные от ${payload.coverage?.checked ?? '—'} из ${payload.coverage?.total ?? '—'} датчиков. Подробности ниже.` };
+      // The completed scan summary is already visible; diagnostics stay opt-in.
+    }
     if (capabilityId !== 'security.status') {
       void loadSecurityStatus(appRenderCallback);
     }
   } catch (error) {
     const failedResult = readErrorExecutionResult(error);
-    if (failedResult) {
-      state.security.lastResult = failedResult;
-    }
+    if (failedResult) state.security.lastResult = failedResult;
     state.security.error = error instanceof Error ? error.message : String(error);
-    if (capabilityId === 'security.deep_scan.file') {
-      state.security.scanFeedback = {
-        ok: false,
-        pending: false,
-        summary: state.security.error,
-      };
+    if (capabilityId === 'security.deep_scan.file' || capabilityId === 'security.scan.system') {
+      state.security.scanFeedback = { ok: false, pending: false, summary: state.security.error };
     }
   } finally {
     setSecurityBusy(false);
@@ -926,11 +1033,13 @@ async function runSecurityAction(capabilityId, input, confirmed, appRenderCallba
 
 async function executeSecurityCapabilityAction(capabilityId, input, confirmed) {
   if (confirmed) {
-    return executeConfirmedCapability('security', capabilityId, input, 'ui:security');
+    const result = await executeConfirmedCapability('security', capabilityId, input, 'ui:security');
+    if (result?.ok === false) throwSecurityExecutionError(result.summary || result.error || 'Security не выполнил команду.', result);
+    return result;
   }
 
   const result = await executeCapability('security', capabilityId, input, 'ui:security', confirmed);
-  if (!result.ok && !result.result?.ok) {
+  if (result.result?.ok === false || (!result.ok && !result.result?.ok)) {
     const err = result.result?.summary || result.result?.error || result.summary || result.error;
     throwSecurityExecutionError(err || 'Security не выполнил команду.', result.result || result);
   }
@@ -1046,7 +1155,7 @@ function setSecurityBusy(isBusy) {
 }
 
 function syncSecurityButtons() {
-  const isBusy = state.security.busy || state.security.statusBusy || state.security.networkBusy;
+  const isBusy = state.security.busy || state.security.networkBusy;
   const buttons = [
     elements.securityRefresh,
     elements.securityScanSystem,
@@ -1068,11 +1177,17 @@ function syncSecurityButtons() {
   }
 
   const running = readSecurityRunningState();
+  const scanning = ['running', 'stopping'].includes(state.security.scanJob?.status);
+  if (elements.securityFileChoose) elements.securityFileChoose.disabled ||= scanning;
+  if (elements.securityScanSystem) elements.securityScanSystem.disabled ||= scanning;
   const emergency = readSecurityPayload(state.security.emergency) || {};
   const emergencyActive = emergency.active === true;
   if (elements.securityStart) {
     elements.securityStart.hidden = running;
-    elements.securityStart.disabled = isBusy || running;
+    elements.securityStart.disabled = isBusy || running || !state.security.status || Boolean(state.security.statusError)
+      || readProtectionState(readSecurityPayload(state.security.status)) === 'recovery_required';
+    // Only starting protection says "Включаем"; a network refresh must not claim it.
+    elements.securityStart.textContent = state.security.busy ? 'Включаем…' : 'Включить защиту';
   }
   if (elements.securityStop) {
     elements.securityStop.hidden = !running;
@@ -1080,10 +1195,14 @@ function syncSecurityButtons() {
     elements.securityStop.title = emergencyActive ? 'Сначала заверши аварийный режим' : '';
   }
   if (elements.securityProtectionState) {
-    elements.securityProtectionState.textContent = emergencyActive
+    elements.securityProtectionState.textContent = state.security.statusError
+      ? 'Нет данных'
+      : !state.security.status && !state.security.lastResult
+        ? 'Проверка состояния'
+        : emergencyActive
       ? 'Требует внимания'
       : running
-        ? 'Защита включена'
+        ? readProtectionState(readSecurityPayload(state.security.status)) === 'protected' ? 'Наблюдение работает' : 'Проверяем защиту'
         : 'Приостановлена';
   }
 }
@@ -1094,8 +1213,10 @@ export function renderSecurity() {
   }
 
   renderProtectionOverview();
+  renderProtectionHealth();
   renderSecurityTabs();
   renderScanLab();
+  renderScanJob();
   renderIncidentWorkspace();
   renderNetworkResult();
   renderQuarantine();
@@ -1106,7 +1227,6 @@ export function renderSecurity() {
   renderEmergencyResponse();
   renderSecuritySettings();
   renderDangerLog();
-  renderSecurityPills();
   renderSecuritySummary();
   renderSecurityFindings();
   renderSecurityRuntime();
@@ -1142,11 +1262,25 @@ function renderSecuritySettings() {
     elements.securityModelConfirmation.value = agentSecurityMode;
     elements.securityModelConfirmation.disabled = state.security.busy || policy.enabled === false;
   }
+  syncAgentSecurityModeWarning();
+  renderDangerScale();
   if (elements.securityModelPolicySave) elements.securityModelPolicySave.disabled = state.security.busy;
   if (elements.securityModelPolicyFeedback) {
     elements.securityModelPolicyFeedback.textContent = state.security.modelPolicyFeedback || '';
   }
 }
+
+function renderDangerScale() {
+  const container = document.querySelector('#security-danger-scale');
+  if (!container) return;
+  const mode = elements.securityModelConfirmation?.value;
+  const segments = state.data?.dangerScale?.[mode];
+  const payload = readSecurityPayload(state.security.status) || {};
+  const html = renderSecurityDangerScale(segments, dangerScaleExamples(payload.dangerLog), escapeHtml);
+  container.hidden = !html;
+  if (renderedDangerScale !== html) { container.innerHTML = html; renderedDangerScale = html; }
+}
+let renderedDangerScale = '';
 
 function renderDangerLog() {
   if (!elements.securityDangerLog) return;
@@ -1155,12 +1289,12 @@ function renderDangerLog() {
   const receiptsByRequest = new Map(records
     .filter((entry) => entry?.type === 'security.danger.receipt' && entry.requestId)
     .map((entry) => [entry.requestId, entry]));
-  const assessments = records.filter((entry) => entry?.type === 'security.danger.assessed').slice(-30).reverse();
+  const assessments = records.filter((entry) => entry?.type === 'security.danger.assessed').reverse();
   if (!assessments.length) {
     elements.securityDangerLog.innerHTML = '<span class="setting-note">Оценённых действий пока нет</span>';
     return;
   }
-  elements.securityDangerLog.innerHTML = assessments.map((entry) => {
+  renderPagedList(elements.securityDangerLog, assessments, (entry) => {
     const assessment = entry.assessment && typeof entry.assessment === 'object' ? entry.assessment : {};
     const receipt = receiptsByRequest.get(entry.requestId)?.receipt;
     const factors = assessment.factors && typeof assessment.factors === 'object'
@@ -1173,9 +1307,9 @@ function renderDangerLog() {
     return `<article class="agency-control-item">
       <div><strong>${escapeHtml(entry.capabilityId || 'unknown action')}</strong><span>${escapeHtml(factors)}</span></div>
       <div><b>${escapeHtml(String(readNumber(assessment.dangerProbability, 0)))}%</b><span>${escapeHtml(entry.response || 'allow')}</span></div>
-      <small>${receipt ? `receipt ${escapeHtml(receipt.ledgerId || '')} · ${receipt.ok ? 'ok' : 'failed'}` : 'ожидает receipt'}</small>
+      <small>${receipt ? receipt.ok ? 'Выполнение подтверждено' : 'Не удалось выполнить' : 'ожидает результата'}</small>
     </article>`;
-  }).join('');
+  }, 'Оценённых действий пока нет');
 }
 
 export function renderSecurityPolicyControls() {
@@ -1356,7 +1490,9 @@ function renderEmergencyResponse() {
   elements.securityEmergencyPanel.hidden = !active;
   if (!active) return;
   if (elements.securityEmergencyTitle) {
-    elements.securityEmergencyTitle.textContent = emergency.state === 'contained'
+    elements.securityEmergencyTitle.textContent = emergency.test_mode === true
+      ? 'Тест блокировки и Security PIN'
+      : emergency.state === 'contained'
       ? 'Опасность временно изолирована'
       : 'Обнаружена подтверждённая критическая опасность';
   }
@@ -1364,11 +1500,17 @@ function renderEmergencyResponse() {
     const lockCopy = emergency.native_lock_succeeded === true
       ? 'Windows был заблокирован штатным механизмом.'
       : 'Windows не удалось заблокировать автоматически.';
-    elements.securityEmergencyCopy.textContent = `${lockCopy} Оценка риска ${readNumber(emergency.risk_score, 0)}/800 · действует до ${formatSecurityTime(emergency.expires_at)}.`;
+    elements.securityEmergencyCopy.textContent = emergency.test_mode === true
+      ? `${lockCopy} После входа введи Security PIN и заверши тест. Тест истекает ${formatSecurityTime(emergency.expires_at)}.`
+      : `${lockCopy} Оценка риска ${readNumber(emergency.risk_score, 0)}/800 · действует до ${formatSecurityTime(emergency.expires_at)}.`;
   }
   const service = readSecurityPayload(state.security.responseServiceStatus) || {};
-  if (elements.securityEmergencyRelease) elements.securityEmergencyRelease.disabled = Boolean(state.security.busy);
+  if (elements.securityEmergencyRelease) {
+    elements.securityEmergencyRelease.disabled = Boolean(state.security.busy);
+    elements.securityEmergencyRelease.textContent = emergency.test_mode === true ? 'Завершить тест' : 'Я беру управление';
+  }
   if (elements.securityEmergencyContinue) {
+    elements.securityEmergencyContinue.hidden = false;
     elements.securityEmergencyContinue.disabled = Boolean(state.security.busy || service.running !== true);
     elements.securityEmergencyContinue.title = service.running === true ? '' : 'Elevated executor не запущен';
   }
@@ -1378,11 +1520,10 @@ function renderEmergencyResponse() {
 
 function renderNetworkResult() {
   if (!elements.securityNetworkResult) return;
-  if (state.security.error && state.security.activeTab === 'network') {
+  if (state.security.networkError && !state.security.networkBusy) {
     elements.securityNetworkResult.innerHTML = `
       <div class="security-scan-result failed">
-        <strong>Не удалось проверить сеть</strong>
-        <span>${escapeHtml(state.security.error)}</span>
+        <span><strong>Не удалось проверить сеть</strong><small>${escapeHtml(readableSecurityError(state.security.networkError))}</small></span>
       </div>
     `;
     if (!state.security.networkCenter) renderNetworkCollections({});
@@ -1391,15 +1532,14 @@ function renderNetworkResult() {
   if (state.security.networkBusy && !state.security.networkCenter) {
     elements.securityNetworkResult.innerHTML = `
       <div class="security-scan-result pending">
-        <strong>Проверяем сеть</strong>
-        <span>Собираем подключения, открытые порты, DNS и состояние брандмауэра.</span>
+        <span><strong>Проверяем сеть</strong><small>Собираем подключения, открытые порты, DNS и состояние брандмауэра.</small></span>
       </div>
     `;
     return;
   }
   const result = state.security.networkCenter;
   if (!result) {
-    elements.securityNetworkResult.innerHTML = '<div class="security-list-empty"><strong>Сеть готова к проверке</strong><span>Нажми «Обновить», чтобы увидеть текущие подключения.</span></div>';
+    elements.securityNetworkResult.innerHTML = '<div class="security-list-empty"><strong>Сеть ещё не проверена</strong><span>Нажми «Обновить», чтобы увидеть текущие подключения.</span></div>';
     renderNetworkCollections({});
     return;
   }
@@ -1407,22 +1547,23 @@ function renderNetworkResult() {
   const summary = payload.summary && typeof payload.summary === 'object' ? payload.summary : {};
   elements.securityNetworkResult.innerHTML = `
     <div class="security-scan-result ${result.ok === false ? 'failed' : Number(summary.high_attention || 0) ? 'pending' : 'active'}">
-      <strong>${escapeHtml(result.ok === false ? 'Состояние сети недоступно' : Number(summary.high_attention || 0) ? 'Сеть требует внимания' : 'Критических сетевых сигналов нет')}</strong>
-      <span>${escapeHtml(result.ok === false ? (result.summary || 'Не удалось собрать данные.') : `${Number(summary.active_connections || 0)} подключений · ${Number(summary.listeners || 0)} слушающих портов`)}</span>
+      <span><strong>${escapeHtml(result.ok === false ? 'Состояние сети недоступно' : Number(summary.high_attention || 0) ? 'Сеть требует внимания' : 'Критических сетевых сигналов нет')}</strong>
+      <small>${escapeHtml(result.ok === false ? readableSecurityError(result.summary || 'Не удалось собрать данные.') : `${Number(summary.active_connections || 0)} подключений · ${Number(summary.listeners || 0)} слушающих портов`)}</small></span>
     </div>
   `;
   renderNetworkCollections(payload);
 }
 
 function renderNetworkCollections(payload) {
-  const summary = payload.summary && typeof payload.summary === 'object' ? payload.summary : {};
+  const summary = payload.summary && typeof payload.summary === 'object' ? payload.summary : null;
   if (elements.securityNetworkMetrics) {
+    // Before the first answer the counts are unknown, not zero.
     elements.securityNetworkMetrics.innerHTML = [
-      ['Подключения', summary.active_connections || 0],
-      ['Порты', summary.listeners || 0],
-      ['Профили', summary.profiles || 0],
-      ['Требуют внимания', summary.high_attention || 0],
-    ].map(([label, value]) => `<div><b>${escapeHtml(value)}</b><span>${escapeHtml(label)}</span></div>`).join('');
+      ['Подключения', summary?.active_connections],
+      ['Порты', summary?.listeners],
+      ['Профили', summary?.profiles],
+      ['Требуют внимания', summary?.high_attention],
+    ].map(([label, value]) => `<div><b>${escapeHtml(summary ? value || 0 : '—')}</b><span>${escapeHtml(label)}</span></div>`).join('');
   }
   const profiles = Array.isArray(payload.profiles) ? payload.profiles : [];
   renderNetworkList(elements.securityNetworkProfiles, profiles, (profile) => `
@@ -1432,11 +1573,11 @@ function renderNetworkCollections(payload) {
     </div>
   `, 'Профили сети не обнаружены.');
   const connections = Array.isArray(payload.connections) ? payload.connections : [];
-  renderNetworkList(elements.securityNetworkConnections, connections.slice(0, 20), (item) => networkEventRow(item, true), 'Активных подключений нет.');
+  renderNetworkList(elements.securityNetworkConnections, connections, (item) => networkEventRow(item, true), 'Активных подключений нет.');
   const listeners = Array.isArray(payload.listeners) ? payload.listeners : [];
-  renderNetworkList(elements.securityNetworkListeners, listeners.slice(0, 20), (item) => networkEventRow(item, false), 'Слушающие порты не обнаружены.');
+  renderNetworkList(elements.securityNetworkListeners, listeners, (item) => networkEventRow(item, false), 'Слушающие порты не обнаружены.');
   const history = Array.isArray(payload.history) ? payload.history : [];
-  renderNetworkList(elements.securityNetworkHistory, history.slice(0, 20), (item) => `
+  renderNetworkList(elements.securityNetworkHistory, history, (item) => `
     <div class="security-network-row compact"><span><strong>${escapeHtml(item.subject || item.kind || 'Наблюдение')}</strong><small>${escapeHtml(item.process_name || item.remote_domain || item.kind || '')}</small></span><time>${escapeHtml(formatSecurityTime(item.observed_at))}</time></div>
   `, 'История появится после работы фоновой защиты.');
   renderResponseActions();
@@ -1444,21 +1585,25 @@ function renderNetworkCollections(payload) {
 
 function renderResponseActions() {
   const service = readSecurityPayload(state.security.responseServiceStatus) || {};
+  const cleanupPending = service.integrity_ok === true && (service.status === 'degraded' || readNumber(service.pending_actions, 0) > 0);
   if (elements.securityResponseService) {
-    elements.securityResponseService.textContent = service.running === true
-      ? `Исполнитель работает · активных правил ${readNumber(service.active_actions, 0)}`
-      : service.integrity_ok === false
-        ? 'Heartbeat исполнителя не прошёл проверку целостности'
-        : 'Исполнитель не запущен · автоматические действия недоступны';
+    elements.securityResponseService.textContent = service.integrity_ok === false
+      ? 'Состояние исполнителя не прошло проверку целостности'
+      : cleanupPending
+        ? `Снятие ограничений ещё не подтверждено · незавершённых действий ${readNumber(service.pending_actions, 0)}`
+        : service.running === true
+          ? `Исполнитель работает · активных правил ${readNumber(service.active_actions, 0)}`
+          : 'Исполнитель недоступен · состояние ограничений требует проверки';
   }
   const payload = readSecurityPayload(state.security.responseActions) || {};
   const actions = Array.isArray(payload.actions) ? payload.actions : [];
-  renderNetworkList(elements.securityResponseActions, actions.slice(0, 20), (item) => `
+  renderNetworkList(elements.securityResponseActions, actions, (item) => `
     <div class="security-network-row compact">
       <span><strong>${escapeHtml(localizeResponseAction(item.action))}</strong><small>${escapeHtml(responseActionDetails(item))}</small></span>
       <b class="security-action-state ${escapeHtml(item.status || 'failed')}">${escapeHtml(localizeResponseStatus(item.status))}</b>
     </div>
-  `, service.running === true ? 'Активных ограничений нет.' : 'Исполнитель не запущен; правила не применяются.');
+  `, cleanupPending ? 'Снятие ограничений ещё не подтверждено.' : service.running === true && service.integrity_ok !== false
+    ? 'Активных ограничений нет.' : 'Состояние ограничений пока не подтверждено.');
 }
 
 function localizeResponseAction(action) {
@@ -1466,7 +1611,7 @@ function localizeResponseAction(action) {
 }
 
 function localizeResponseStatus(status) {
-  return ({ pending: 'подготовка', active: 'активно', rolled_back: 'отменено', failed: 'ошибка' })[status] || String(status || 'неизвестно');
+  return ({ pending: 'не завершено', active: 'активно', rolled_back: 'отменено', failed: 'ошибка' })[status] || String(status || 'неизвестно');
 }
 
 function responseActionDetails(item) {
@@ -1477,7 +1622,7 @@ function responseActionDetails(item) {
 
 function renderNetworkList(element, items, renderer, emptyText) {
   if (!element) return;
-  element.innerHTML = items.length ? items.map(renderer).join('') : `<div class="security-list-empty">${escapeHtml(emptyText)}</div>`;
+  renderPagedList(element, items, renderer, emptyText);
 }
 
 function networkEventRow(item, remote) {
@@ -1485,7 +1630,7 @@ function networkEventRow(item, remote) {
   const endpoint = remote
     ? `${facts.remote_domain || facts.remote_address || item.subject || '—'}${facts.remote_port ? `:${facts.remote_port}` : ''}`
     : `${facts.local_address || '—'}:${facts.local_port || '—'}`;
-  return `<div class="security-network-row compact"><span><strong>${escapeHtml(endpoint)}</strong><small>${escapeHtml(facts.process_name || 'Системный процесс')}</small></span><b class="risk-${escapeHtml(riskTone(Math.min(800, Number(item.risk_score || 0) * 4)))}">${escapeHtml(item.risk_score || 0)}</b></div>`;
+  return `<div class="security-network-row compact"><span><strong>${escapeHtml(endpoint)}</strong><small>${escapeHtml(facts.process_name || 'Системный процесс')}</small></span>${severityMeter(Math.min(800, Number(item.risk_score || 0) * 4))}</div>`;
 }
 
 function renderQuarantine() {
@@ -1498,6 +1643,10 @@ function renderQuarantine() {
     return;
   }
   const records = readSecurityQuarantine();
+  if (!state.security.quarantine) {
+    elements.securityQuarantineList.innerHTML = '<div class="security-list-empty"><strong>Список изоляции ещё не загружен</strong><span>Нажми «Обновить», чтобы проверить изолированные файлы.</span></div>';
+    return;
+  }
   if (!records.length) {
     elements.securityQuarantineList.innerHTML = `
       <div class="security-list-empty">
@@ -1507,7 +1656,7 @@ function renderQuarantine() {
     `;
     return;
   }
-  elements.securityQuarantineList.innerHTML = records.map((record) => `
+  renderPagedList(elements.securityQuarantineList, records, (record) => `
     <div class="security-quarantine-row">
       <span>
         <strong>${escapeHtml(securityPathName(record.original_path))}</strong>
@@ -1516,7 +1665,7 @@ function renderQuarantine() {
       </span>
       <button type="button" class="claude-ghost-btn" data-security-restore-id="${escapeHtml(record.quarantine_id || '')}">Восстановить</button>
     </div>
-  `).join('');
+  `, 'Карантин пуст.');
 }
 
 function renderSecurityPin() {
@@ -1565,24 +1714,93 @@ function readOneTimeRecoveryCodes(result) {
     : [];
 }
 
-function setSecurityTab(tabId) {
-  state.security.activeTab = ['overview', 'incidents', 'network', 'quarantine', 'settings'].includes(tabId)
-    ? tabId
-    : 'overview';
+function initCoverageDisclosure(selector = '#security-coverage') {
+  const details = document.querySelector(selector);
+  const summary = details?.querySelector('summary');
+  if (!summary || details.dataset.motionBound) return;
+  details.dataset.motionBound = 'true';
+  let expanded = details.open, animation = null;
+  summary.setAttribute('aria-expanded', String(expanded));
+  summary.addEventListener('click', event => {
+    event.preventDefault();
+    const from = details.getBoundingClientRect().height;
+    expanded = !expanded; animation?.cancel();
+    summary.setAttribute('aria-expanded', String(expanded));
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || !details.animate) {
+      details.open = expanded; details.style.overflow = ''; return;
+    }
+    details.open = true; details.style.overflow = 'hidden';
+    const to = expanded ? details.scrollHeight + 2 : summary.getBoundingClientRect().height + 2;
+    const current = details.animate([{ height: `${from}px` }, { height: `${to}px` }], { duration: 220, easing: 'cubic-bezier(.2,.8,.2,1)' });
+    animation = current;
+    current.onfinish = () => { if (animation === current) { details.open = expanded; details.style.overflow = ''; animation = null; } };
+  });
 }
 
-function renderSecurityTabs() {
+function syncAgentSecurityModeWarning() {
+  if (!elements.securityAgentOffWarning) return;
+  elements.securityAgentOffWarning.hidden = elements.securityModelConfirmation?.value !== 'off';
+}
+
+function setSecurityTab(tabId) {
+  state.security.activeTab = SECURITY_TAB_ORDER.includes(tabId) ? tabId : 'overview';
+}
+
+const SECURITY_TAB_ORDER = ['overview', 'incidents', 'network', 'quarantine', 'settings'];
+
+function openSecurityTab(nextTab, appRenderCallback) {
+  const tab = elements.securityTabs.find((item) => item.dataset.securityTab === nextTab);
+  const direction = SECURITY_TAB_ORDER.indexOf(nextTab) >= SECURITY_TAB_ORDER.indexOf(state.security.activeTab || 'overview') ? 1 : -1;
+  // The indicator travels at once; the content follows through one surface swap.
+  setSecurityTab(nextTab);
+  renderSecurityTabs({ panels: false });
+  void swapUiSurface(document.querySelector('.security-page-content'), () => {
+    renderSecurity();
+    resetSecurityViewport(tab);
+  }, { direction });
+  if (nextTab === 'incidents') void loadSecurityIncidents(appRenderCallback);
+  if (nextTab === 'quarantine') {
+    void loadSecurityQuarantine(appRenderCallback);
+    void loadSecurityPinStatus(appRenderCallback);
+  }
+  if (nextTab === 'network') void loadSecurityNetworkCenter(appRenderCallback);
+  if (nextTab === 'settings') void renderSecurityPolicyPane();
+}
+
+function renderSecurityTabs({ panels = true } = {}) {
   const activeTab = state.security.activeTab || 'overview';
+  document.querySelector('#security-section')?.setAttribute('data-security-tab', activeTab);
   let activeTabButton = null;
   for (const tab of elements.securityTabs) {
     const selected = tab.dataset.securityTab === activeTab;
     tab.setAttribute('aria-selected', String(selected));
+    tab.tabIndex = selected ? 0 : -1;
     if (selected) activeTabButton = tab;
   }
-  for (const [panelId, panel] of Object.entries(elements.securityPanels)) {
-    if (panel) panel.hidden = panelId !== activeTab;
+  if (panels) {
+    for (const [panelId, panel] of Object.entries(elements.securityPanels)) {
+      if (panel) panel.hidden = panelId !== activeTab;
+    }
   }
   keepSecurityTabVisible(activeTabButton);
+  placeSecurityTabIndicator(true);
+}
+
+let placedTabIndicator = false;
+function placeSecurityTabIndicator(animate) {
+  const tab = elements.securityTabs.find((item) => item.getAttribute?.('aria-selected') === 'true');
+  const list = tab?.parentElement;
+  const indicator = list?.querySelector?.('.security-tab-indicator');
+  if (!indicator || !tab.offsetWidth) return;
+  // The first placement (and resizes) must not slide in from the left edge.
+  if (!animate || !placedTabIndicator) indicator.style.transition = 'none';
+  list.style.setProperty('--sec-tab-x', `${tab.offsetLeft + 10}px`);
+  list.style.setProperty('--sec-tab-w', `${Math.max(12, tab.offsetWidth - 20)}px`);
+  if (indicator.style.transition) {
+    void indicator.offsetWidth;
+    indicator.style.transition = '';
+  }
+  placedTabIndicator = true;
 }
 
 function resetSecurityViewport(tab) {
@@ -1611,8 +1829,16 @@ function renderProtectionOverview() {
     || readSecurityPayload(state.security.lastResult);
   const protectionState = readProtectionState(payload);
   const states = {
+    recovery_required: {
+      title: 'Состояние защиты повреждено',
+      copy: 'Запуск остановлен: сохранённые настройки не удалось проверить. Нужно восстановление состояния Security; повторное включение не исправит эту ошибку.',
+    },
+    unavailable: {
+      title: 'Состояние защиты недоступно',
+      copy: 'Не удалось получить актуальные данные. Повтори проверку состояния.',
+    },
     protected: {
-      title: 'Компьютер защищён',
+      title: 'Защита работает',
       copy: 'Monarch наблюдает за системой и сообщит, если понадобится твоё решение.',
     },
     starting: {
@@ -1629,16 +1855,147 @@ function renderProtectionOverview() {
     },
     stopped: {
       title: 'Защита приостановлена',
-      copy: 'Фоновое наблюдение выключено. Ручная проверка файлов остаётся доступной.',
+      copy: 'Включи наблюдение за системой. Защита продолжит работать после закрытия окна.',
     },
+    stopping: { title: 'Защита останавливается', copy: 'Завершаем текущие проверки. Новые проверки уже не запускаются.' },
     loading: {
       title: 'Состояние защиты загружается',
       copy: 'Проверяем, всё ли работает.',
     },
   };
   const current = states[protectionState] || states.loading;
+  document.querySelector('#security-section')?.setAttribute('data-protection-state', protectionState);
   elements.securityProtectionTitle.textContent = current.title;
   elements.securityProtectionCopy.textContent = current.copy;
+  const retry = document.querySelector('#security-overview-retry');
+  if (retry) {
+    retry.hidden = protectionState !== 'unavailable';
+    retry.disabled = Boolean(state.security.statusBusy);
+  }
+}
+
+function renderProtectionHealth() {
+  const target = document.querySelector('#security-health-grid');
+  const payload = readSecurityPayload(state.security.status);
+  const heartbeat = payload?.heartbeat || {};
+  const health = heartbeat.sensor_health || {};
+  const running = payload?.running === true;
+  const stale = Boolean(state.security.statusError || payload?.heartbeat_stale
+    || (running && payload?.telemetry_verified !== true)
+    || (state.security.statusUpdatedAt && Date.now() - state.security.statusUpdatedAt > 20000));
+  const labels = {
+    process_sensor: ['Процессы', 'Новые приложения и подозрительные команды'],
+    file_watch_sensor: ['Файлы', 'Изменения в папках наблюдения'],
+    network_sensor: ['Сеть', 'Подключения и открытые порты'],
+    persistence_sensor: ['Автозапуск', 'Изменения запускаемых программ'],
+    posture_sensor: ['Защита Windows', 'Defender и брандмауэр'],
+    device_sensor: ['Устройства', 'Подключение внешних устройств'],
+    install_sensor: ['Программы', 'Установки и обновления'],
+    tamper_sensor: ['Целостность', 'Изменения компонентов защиты'],
+  };
+  const stateLabels = { healthy: 'Работает', starting: 'Первичная проверка', failed: 'Ошибка проверки', stalled: 'Нет ответа', overdue: 'Проверка задерживается', limited: 'Неполное наблюдение', stopped: 'Приостановлено', unavailable: 'Нет свежих данных', disabled: 'Не включено' };
+  if (target) target.innerHTML = Object.entries(labels).map(([name, [label, copy]]) => {
+    const item = health[name];
+    const sensorState = stale || !payload ? 'unavailable' : !running ? 'stopped' : !item ? 'disabled' : item.state;
+    const detail = sensorState === 'limited' && item?.limitation === 'process-command-line-and-lineage-unavailable'
+      ? 'Видны приложения, но недоступны команды и связь между процессами'
+      : sensorState === 'limited' && item?.observation?.reasons?.includes('inventory-page-pending')
+        ? 'Проверена часть объектов · продолжаем обход'
+      : sensorState === 'limited' ? 'Часть данных недоступна · наблюдение продолжается'
+      : sensorState === 'failed' && item?.observation?.status === 'unavailable'
+        ? 'Не удалось получить данные · прежние результаты сохранены'
+      : item?.last_success_at ? `Проверено в ${formatSecurityTime(item.last_success_at * 1000)}` : copy;
+    return `<article class="security-health-card" data-sensor-state="${escapeHtml(sensorState)}"><span class="security-health-indicator" aria-hidden="true"></span><div><strong>${escapeHtml(label)}</strong><small>${escapeHtml(detail)}</small></div><span>${escapeHtml(stateLabels[sensorState] || 'Проверка')}</span></article>`;
+  }).join('');
+  const fresh = document.querySelector('#security-freshness');
+  if (fresh) fresh.textContent = state.security.statusError ? 'Связь с защитой потеряна · повторяем проверку' : state.security.statusUpdatedAt ? `Обновлено в ${formatSecurityTime(state.security.statusUpdatedAt)} · автоматически` : 'Подключаемся к защите';
+  const background = payload?.background || {};
+  const coverageSummary = document.querySelector('#security-coverage-summary');
+  const healthyCount = Object.values(health).filter(item => item.state === 'healthy').length;
+  const enabledCount = Object.keys(health).length;
+  const problemCount = Object.values(health).filter(item => ['failed', 'stalled', 'overdue', 'limited'].includes(item.state)).length;
+  const queued = Number(heartbeat.sensor_backlog?.queued || 0);
+  const incompleteFiles = Number(heartbeat.sensor_backlog?.incomplete_files || 0);
+  const queuedEvents = Number(heartbeat.sensor_backlog?.queued_events ?? queued);
+  const inspectionRecovery = heartbeat.inspection_recovery || {};
+  const recovering = ['queued', 'running'].includes(inspectionRecovery.status);
+  const inspectionRetry = document.querySelector('#security-inspection-retry');
+  if (inspectionRetry) {
+    inspectionRetry.hidden = !(incompleteFiles > 0 || recovering);
+    inspectionRetry.disabled = Boolean(state.security.busy || stale || !payload || payload.telemetry_verified !== true || !running || recovering);
+    inspectionRetry.textContent = inspectionRecovery.status === 'queued' ? 'Повторная проверка ожидает запуска'
+      : recovering ? 'Повторная проверка выполняется' : 'Повторить проверку наблюдаемых папок';
+  }
+  const recoveryFeedback = document.querySelector('#security-inspection-recovery-feedback');
+  if (recoveryFeedback) {
+    recoveryFeedback.hidden = stale || !payload || !inspectionRecovery.status || inspectionRecovery.status === 'idle';
+    recoveryFeedback.textContent = inspectionRecovery.status === 'complete' ? `Повторная проверка завершена · файлов: ${Number(inspectionRecovery.checked_files || 0)}`
+      : inspectionRecovery.status === 'incomplete' ? (inspectionRecovery.reason === 'inspection-inventory-unstable'
+        ? 'Папки продолжают меняться. Полноту проверки подтвердить не удалось; незавершённые результаты сохранены.'
+        : 'Некоторые файлы или папки недоступны для проверки. Незавершённые результаты сохранены.')
+        : inspectionRecovery.status === 'queued' ? 'Запрос сохранён и ожидает фонового процесса.' : 'Идёт повторная проверка наблюдаемых папок.';
+  }
+  if (coverageSummary) coverageSummary.textContent = stale || !payload ? 'Нет свежих данных'
+    : !running ? 'Наблюдение приостановлено' : recovering ? `Повторная проверка · проверено файлов: ${Number(inspectionRecovery.checked_files || 0)}`
+      : incompleteFiles > 0 ? `Не завершена проверка файлов: ${incompleteFiles} · ${queuedEvents} событий в очереди`
+      : problemCount ? `${problemCount} требуют внимания · ${healthyCount} работают`
+      : queuedEvents > 0 ? `${queuedEvents} событий ждут проверки` : healthyCount ? `${healthyCount} из ${enabledCount} работают` : 'Проверяем подключение';
+  const primaryDetail = document.querySelector('#security-primary-detail');
+  if (primaryDetail) primaryDetail.textContent = running
+    ? background.enabled && background.host_running ? 'Работает после закрытия окна' : 'Автозапуск не настроен'
+    : 'С автозапуском Windows';
+  const backgroundCopy = document.querySelector('#security-background-copy');
+  if (backgroundCopy) backgroundCopy.textContent = background.recovery_required ? 'Сначала восстанови повреждённое состояние Security. Автозапуск не может продолжить работу с непроверенными настройками.' : background.enabled
+    ? background.host_running
+      ? background.requested ? 'Запускается при входе в Windows. Работает после закрытия Monarch и восстанавливается после сбоя.' : 'Автозапуск настроен. Ты приостановил наблюдение — включи защиту, когда будешь готов.'
+      : 'Автозапуск настроен, но фоновый процесс не отвечает. Нажми «Восстановить фон».'
+    : 'Включи постоянную защиту: запуск при входе в Windows и работа после закрытия Monarch.';
+  const enable = document.querySelector('#security-background-enable');
+  if (enable) { enable.hidden = background.enabled && background.host_running; enable.disabled = Boolean(state.security.busy || !payload || background.recovery_required); enable.textContent = background.enabled ? 'Восстановить фон' : 'Включить автозапуск'; }
+  const disable = document.querySelector('#security-background-disable');
+  if (disable) { disable.hidden = !background.enabled; disable.disabled = Boolean(state.security.busy); }
+  const feedback = document.querySelector('#security-action-feedback');
+  if (feedback) {
+    feedback.hidden = !state.security.error;
+    const text = document.querySelector('#security-action-feedback-text');
+    if (text) text.textContent = state.security.error ? readableSecurityError(state.security.error) : '';
+  }
+  renderCoverageRing(payload, { stale, running, health });
+}
+
+const RING_SENSORS = ['process_sensor', 'file_watch_sensor', 'network_sensor', 'persistence_sensor', 'posture_sensor', 'device_sensor', 'install_sensor', 'tamper_sensor'];
+
+/** Eight protected areas as one ring: each segment is one sensor, filled by its state. */
+function renderCoverageRing(payload, { stale, running, health }) {
+  const ring = document.querySelector('#security-coverage-ring');
+  if (!ring) return;
+  const states = RING_SENSORS.map((name) => !payload ? null
+    : stale ? 'unavailable' : !running ? 'stopped' : health[name]?.state || 'disabled');
+  ring.querySelectorAll?.('.security-ring-seg').forEach((segment, index) => {
+    if (states[index]) segment.setAttribute('data-state', states[index]);
+    else segment.removeAttribute('data-state');
+  });
+  const active = states.filter((item) => item === 'healthy').length;
+  const count = document.querySelector('#security-ring-count');
+  const caption = document.querySelector('#security-ring-caption');
+  if (count) count.textContent = payload ? String(active) : '—';
+  if (caption) caption.textContent = payload ? `из ${RING_SENSORS.length} областей` : 'области';
+  ring.setAttribute('aria-label', !payload ? 'Области защиты загружаются'
+    : `Под наблюдением ${active} из ${RING_SENSORS.length} областей защиты`);
+}
+
+/** Security reports come from a separate process and are often technical
+ * English; the person sees what happened in plain words. Russian text from
+ * Monarch itself is already written for people and passes through. */
+export function readableSecurityError(message) {
+  const text = String(message || '').trim();
+  if (!text) return '';
+  if (/[а-яё]/iu.test(text)) return text;
+  if (/timed out|timeout/iu.test(text)) return 'Security не ответил вовремя. Повтори через минуту.';
+  if (/failed to fetch|fetch failed|networkerror|econnrefused|load failed/iu.test(text)) return 'Нет связи с Monarch. Проверь, что приложение запущено, и повтори.';
+  if (/pin/iu.test(text)) return 'Security PIN не подошёл или временно заблокирован.';
+  if (/command exited with|traceback|exception|error/iu.test(text)) return 'Компонент Security завершился с ошибкой. Повтори позже; подробности — в «Настройки → Диагностика».';
+  return 'Security не смог выполнить действие. Повтори позже.';
 }
 
 function renderScanLab() {
@@ -1647,11 +2004,11 @@ function renderScanLab() {
     if (!feedback) {
       elements.securityScanFeedback.innerHTML = '';
     } else {
-      const tone = feedback.pending ? 'pending' : feedback.ok ? 'active' : 'failed';
+    const tone = feedback.cancelled ? 'cancelled' : feedback.pending || feedback.incomplete ? 'pending' : feedback.ok ? 'active' : 'failed';
       const score = Number.isFinite(feedback.score) ? ` · риск ${feedback.score}/800` : '';
       elements.securityScanFeedback.innerHTML = `
         <div class="security-scan-result ${escapeHtml(tone)}">
-          <span><strong>${escapeHtml(feedback.pending ? 'Проверка выполняется' : feedback.ok ? 'Проверка завершена' : 'Проверка не выполнена')}</strong><small>${escapeHtml(feedback.summary || '')}${escapeHtml(score)}</small></span>
+          <span><strong>${escapeHtml(feedback.pending ? 'Проверка выполняется' : feedback.cancelled ? 'Проверка отменена' : feedback.ok ? 'Проверка завершена' : 'Проверка не выполнена')}</strong><small>${escapeHtml(feedback.summary || '')}${escapeHtml(score)}</small></span>
           ${!feedback.pending && feedback.ok && feedback.path && Number(feedback.score || 0) >= 250
             ? `<button type="button" class="claude-ghost-btn" data-security-isolate-path="${escapeHtml(feedback.path)}">Изолировать</button>`
             : ''}
@@ -1662,6 +2019,8 @@ function renderScanLab() {
 
   const scans = Array.isArray(state.security.recentScans) ? state.security.recentScans : [];
   if (elements.securityRecentCount) elements.securityRecentCount.textContent = String(scans.length);
+  const recentSection = document.querySelector('#security-recent-section');
+  if (recentSection) recentSection.hidden = scans.length === 0;
   if (!elements.securityRecentScans) return;
   if (!scans.length) {
     elements.securityRecentScans.innerHTML = `
@@ -1678,7 +2037,7 @@ function renderScanLab() {
         <strong>${escapeHtml(scan.name || securityPathName(scan.path))}</strong>
         <small>${escapeHtml(formatSecurityTime(scan.scannedAt))}</small>
       </span>
-      <b class="risk-${escapeHtml(riskTone(scan.score))}">${escapeHtml(scan.score ? `${scan.score}/800` : 'чисто')}</b>
+      <b class="risk-${escapeHtml(riskTone(scan.score))}">${escapeHtml(scan.incomplete ? 'неполная' : scan.score ? `${scan.score}/800` : 'нет признаков')}</b>
     </div>
   `).join('');
 }
@@ -1687,30 +2046,36 @@ function renderIncidentWorkspace() {
   const incidents = readSecurityIncidents();
   const openIncidents = incidents.filter((incident) => !['resolved', 'dismissed'].includes(incident.status));
   const decisions = openIncidents.filter((incident) => incident.decision_required);
-  const visibleIncidents = filteredSecurityIncidents(incidents);
+  const matchingIncidents = filteredSecurityIncidents(incidents);
+  const visibleIncidents = collectionPage(elements.securityIncidentList, matchingIncidents).items;
   const selectedIncidentId = visibleIncidents.some((incident) => incident.incident_id === state.security.selectedIncidentId)
     ? state.security.selectedIncidentId
     : visibleIncidents[0]?.incident_id || null;
   state.security.selectedIncidentId = selectedIncidentId;
   if (elements.securityIncidentActiveCount) {
-    elements.securityIncidentActiveCount.textContent = String(openIncidents.length);
+    elements.securityIncidentActiveCount.textContent = state.security.incidents ? String(openIncidents.length) : '—';
   }
   if (elements.securityIncidentAllCount) {
-    elements.securityIncidentAllCount.textContent = String(incidents.length);
+    elements.securityIncidentAllCount.textContent = state.security.incidents ? String(incidents.length) : '—';
   }
   for (const filter of elements.securityIncidentFilters) {
     const selected = filter.dataset.securityIncidentFilter === (state.security.incidentFilter === 'all' ? 'all' : 'active');
     filter.setAttribute('aria-pressed', String(selected));
   }
   if (elements.securityIncidentSummaryCount) {
-    elements.securityIncidentSummaryCount.textContent = String(decisions.length);
+    elements.securityIncidentSummaryCount.textContent = state.security.incidents ? String(decisions.length) : '—';
   }
   if (elements.securityIncidentTabCount) {
     elements.securityIncidentTabCount.textContent = decisions.length ? String(decisions.length) : '';
   }
+  const summaryTitle = document.querySelector('#security-incident-summary-title');
+  if (summaryTitle) summaryTitle.textContent = decisions.length ? 'Нужно твоё решение' : 'События';
+  elements.securityOpenIncidents?.setAttribute?.('data-tone', decisions.length ? 'attention' : 'calm');
   if (elements.securityIncidentSummaryCopy) {
     elements.securityIncidentSummaryCopy.textContent = state.security.incidentsBusy
       ? 'Обновляем очередь решений'
+      : !state.security.incidents
+        ? 'Очередь решений ещё не загружена'
       : decisions.length
         ? decisions.length === 1
           ? '1 событие ждёт твоего решения'
@@ -1721,6 +2086,8 @@ function renderIncidentWorkspace() {
   if (elements.securityIncidentList) {
     if (state.security.incidentsBusy && !incidents.length) {
       elements.securityIncidentList.innerHTML = '<div class="security-list-empty">Загружаем инциденты...</div>';
+    } else if (!state.security.incidents) {
+      elements.securityIncidentList.innerHTML = '<div class="security-list-empty"><strong>События ещё не загружены</strong><span>Нажми «Обновить», чтобы получить очередь событий.</span></div>';
     } else if (!incidents.length) {
       elements.securityIncidentList.innerHTML = `
         <div class="security-list-empty">
@@ -1736,20 +2103,22 @@ function renderIncidentWorkspace() {
         </div>
       `;
     } else {
-      elements.securityIncidentList.innerHTML = visibleIncidents.map((incident) => `
-        <button type="button" class="security-incident-row ${incident.incident_id === selectedIncidentId ? 'selected' : ''}" data-security-incident-id="${escapeHtml(incident.incident_id || '')}">
-          <b class="risk-${escapeHtml(riskTone(incident.risk_score))}">${escapeHtml(incident.risk_score || 0)}<small>/800</small></b>
+      renderPagedList(elements.securityIncidentList, matchingIncidents, (incident) => `
+        <button type="button" class="security-incident-row ${incident.incident_id === selectedIncidentId ? 'selected' : ''}" data-security-incident-id="${escapeHtml(incident.incident_id || '')}" aria-pressed="${incident.incident_id === selectedIncidentId}">
+          ${severityMeter(incident.risk_score)}
           <span>
             <strong>${escapeHtml(localizeIncidentTitle(incident.title))}</strong>
-            <small>${escapeHtml(incident.primary_subject || 'Неизвестный объект')}</small>
+            <small title="${escapeHtml(incident.primary_subject || '')}">${escapeHtml(shortSecuritySubject(incident.primary_subject))}</small>
           </span>
           <time>${escapeHtml(formatSecurityTime(incident.updated_at))}</time>
         </button>
-      `).join('');
+      `, '', { onPage: () => { state.security.selectedIncidentId = null; renderIncidentWorkspace(); } });
       for (const row of elements.securityIncidentList.querySelectorAll('[data-security-incident-id]')) {
         row.addEventListener('click', () => {
+          if (state.security.selectedIncidentId === row.dataset.securityIncidentId) return;
           state.security.selectedIncidentId = row.dataset.securityIncidentId;
-          renderIncidentWorkspace();
+          // The detail is replaced in place, entering from the list side.
+          void swapUiSurface(elements.securityIncidentDetail, renderIncidentWorkspace, { direction: -1 });
         });
       }
     }
@@ -1773,15 +2142,34 @@ function renderIncidentWorkspace() {
   const responseService = readSecurityPayload(state.security.responseServiceStatus) || {};
   const pendingResponse = state.security.pendingResponse?.incidentId === selected.incident_id
     ? state.security.pendingResponse : null;
+  const detail = elements.securityIncidentDetail;
+  const sameIncident = detail.getAttribute?.('data-incident') === selected.incident_id;
+  const observationsOpen = sameIncident && detail.querySelector?.('#security-incident-observations')?.open;
+  const technicalOpen = sameIncident && detail.querySelector?.('#security-incident-technical')?.open;
+  detail.setAttribute?.('data-incident', selected.incident_id);
+  detail.setAttribute?.('data-level', String(riskLevel(selected.risk_score)));
+  const decisionOpen = ['open', 'acknowledged'].includes(selected.status);
   elements.securityIncidentDetail.innerHTML = `
-    <header>
+    <header class="security-incident-head">
+      ${severityMeter(selected.risk_score, true)}
       <span>
-        <small>${escapeHtml(riskLabel(selected.risk_score))}</small>
-        <strong>${escapeHtml(localizeIncidentTitle(selected.title))}</strong>
+        <small class="security-incident-kicker">${escapeHtml(riskLabel(selected.risk_score))}</small>
+        <h3>${escapeHtml(localizeIncidentTitle(selected.title))}</h3>
+        <small class="security-incident-meta">Риск ${escapeHtml(selected.risk_score || 0)} / 800 · ${escapeHtml(formatSecurityTime(selected.updated_at))}</small>
       </span>
-      <b class="risk-${escapeHtml(riskTone(selected.risk_score))}">${escapeHtml(selected.risk_score || 0)} / 800</b>
     </header>
     <p>${escapeHtml(incidentExplanation(selected))}</p>
+    ${selected.primary_subject ? `<div class="security-incident-subject"><small>Объект</small><code>${escapeHtml(selected.primary_subject)}</code></div>` : ''}
+    ${decisionOpen ? `
+      <div class="security-incident-actions">
+        <button type="button" class="claude-primary-btn" data-security-incident-status="dismissed" data-security-incident-id="${escapeHtml(selected.incident_id || '')}">Событие безопасно</button>
+        ${selected.status === 'open' ? `<button type="button" class="claude-ghost-btn" data-security-incident-status="acknowledged" data-security-incident-id="${escapeHtml(selected.incident_id || '')}">Я увидел, разберусь позже</button>` : ''}
+      </div>
+    ` : `
+      <div class="security-incident-resolution">Событие закрыто: ${escapeHtml(localizeIncidentResolution(selected))}</div>
+    `}
+    <details id="security-incident-observations" class="security-technical-details" ${observationsOpen ? 'open' : ''}>
+    <summary>Наблюдения и связи (${evidence.length})</summary>
     ${renderAttackChain(selected)}
     <div class="security-evidence-list">
       ${evidence.slice(-6).map((item) => `
@@ -1791,13 +2179,14 @@ function renderIncidentWorkspace() {
         </div>
       `).join('') || '<div class="security-list-empty">Доказательства ещё не загружены.</div>'}
     </div>
+    </details>
     <div class="security-recommendations">
-      <strong>Что можно сделать</strong>
-      <div>${actions.map((action) => `<span>${escapeHtml(localizeRecommendation(action))}</span>`).join('') || '<span>Продолжить наблюдение</span>'}</div>
+      <strong>Что советует Monarch</strong>
+      <ul>${actions.map((action) => `<li>${escapeHtml(localizeRecommendation(action))}</li>`).join('') || '<li>Продолжить наблюдение</li>'}</ul>
     </div>
     ${actions.includes('block_network') && networkScope ? `
       <section class="security-containment-card">
-        <span><strong>Временная сетевая изоляция</strong><small>${escapeHtml(networkScope.remote_address)}:${escapeHtml(networkScope.remote_port)} · максимум 15 минут · автоматический откат</small></span>
+        <span><strong>Временно отключить от сети</strong><small>${escapeHtml(networkScope.remote_address)}:${escapeHtml(networkScope.remote_port)} · максимум 15 минут · связь восстановится автоматически</small></span>
         ${responseService.running !== true ? `
           <button type="button" class="claude-ghost-btn" disabled>Исполнитель не запущен</button>
         ` : pendingResponse ? `
@@ -1809,15 +2198,7 @@ function renderIncidentWorkspace() {
         <small class="security-response-feedback">${escapeHtml(state.security.responseFeedback || '')}</small>
       </section>
     ` : ''}
-    ${['open', 'acknowledged'].includes(selected.status) ? `
-      <div class="security-incident-actions">
-        ${selected.status === 'open' ? `<button type="button" class="claude-ghost-btn" data-security-incident-status="acknowledged" data-security-incident-id="${escapeHtml(selected.incident_id || '')}">Я увидел</button>` : ''}
-        <button type="button" class="claude-ghost-btn" data-security-incident-status="dismissed" data-security-incident-id="${escapeHtml(selected.incident_id || '')}">Событие безопасно</button>
-      </div>
-    ` : `
-      <div class="security-incident-resolution">Событие закрыто: ${escapeHtml(selected.resolution?.reason || selected.status || '')}</div>
-    `}
-    <details class="security-technical-details">
+    <details id="security-incident-technical" class="security-technical-details" ${technicalOpen ? 'open' : ''}>
       <summary>Технические детали</summary>
       <dl>
         <div><dt>ID</dt><dd>${escapeHtml(selected.incident_id || '')}</dd></div>
@@ -1826,6 +2207,8 @@ function renderIncidentWorkspace() {
       </dl>
     </details>
   `;
+  initCoverageDisclosure('#security-incident-observations');
+  initCoverageDisclosure('#security-incident-technical');
 }
 
 function renderAttackChain(incident) {
@@ -1865,7 +2248,7 @@ function localizeChainRelation(relation) {
   return {
     shared_process: 'тот же процесс',
     shared_file: 'тот же файл',
-    shared_endpoint: 'тот же endpoint',
+    shared_endpoint: 'тот же адрес',
     shared_entity: 'общий объект',
   }[relation] || 'связь через другой сигнал';
 }
@@ -1884,50 +2267,6 @@ function networkResponseScope(incident) {
     }
   }
   return null;
-}
-
-function renderSecurityPills() {
-  if (!elements.securityStatusPills) return;
-  const statusPayload = readSecurityPayload(state.security.status);
-  const lastPayload = readSecurityPayload(state.security.lastResult);
-  const payload = statusPayload || lastPayload;
-
-  if (state.security.statusBusy && !payload) {
-    elements.securityStatusPills.innerHTML = statusPill('Security проверяется', 'amber');
-    return;
-  }
-
-  if (state.security.error) {
-    elements.securityStatusPills.innerHTML = statusPill('Security ошибка', 'red');
-    return;
-  }
-
-  if (!payload) {
-    elements.securityStatusPills.innerHTML = statusPill('Security ожидает', 'amber');
-    return;
-  }
-
-  const protectionState = readProtectionState(payload);
-  const sensors = readSensorCoverage(payload);
-  const incidents = readIncidentSummary(payload);
-  const stateTone = ['protected'].includes(protectionState)
-    ? 'green'
-    : ['degraded', 'attention_required'].includes(protectionState)
-      ? 'red'
-      : 'amber';
-  elements.securityStatusPills.innerHTML = [
-    statusPill(
-      sensors.total
-        ? `${sensors.active} из ${sensors.total} областей под наблюдением`
-        : protectionState === 'stopped'
-          ? 'наблюдение выключено'
-          : 'датчики подключаются',
-      stateTone
-    ),
-    incidents.decisionRequired
-      ? statusPill(`${incidents.decisionRequired} требует решения`, 'amber')
-      : statusPill('решений не требуется', 'green'),
-  ].join('');
 }
 
 function renderSecuritySummary() {
@@ -2095,9 +2434,9 @@ function renderSecurityRuntime() {
     <div class="key-value-list">
       ${keyValueRow('PID', payload.pid || 'нет')}
       ${payload.launch_pid ? keyValueRow('Launch PID', payload.launch_pid) : ''}
-      ${keyValueRow('Пульс', payload.heartbeat_stale ? 'устарел' : payload.heartbeat ? 'активен' : 'нет')}
+      ${keyValueRow('Связь с защитой', payload.heartbeat_stale ? 'устарел' : payload.heartbeat ? 'активен' : 'нет')}
       ${payload.reason ? keyValueRow('Причина', payload.reason) : ''}
-      ${payload.log_path ? keyValueRow('Лог запуска', payload.log_path) : ''}
+      ${payload.log_path ? keyValueRow('Журнал запуска', payload.log_path) : ''}
       ${keyValueRow('Журнал', payload.audit_log_path || metadata.configPath || 'неизвестно')}
       ${keyValueRow('Agent Guard', `${guard.checks} проверок · ${guard.blocked} блокировок`)}
       ${keyValueRow('Последнее решение', guard.lastStatus || 'ещё не проверял')}
@@ -2120,9 +2459,9 @@ function renderSecurityAudit() {
 
   elements.securityAuditLabel.textContent = `${records.length} строк`;
   elements.securityAuditLabel.className = records.length ? 'status-text active' : 'status-text pending';
-  elements.securityAuditOutput.innerHTML = records.length
-    ? `<pre class="audit-output">${escapeHtml(records.slice(-12).map((record) => JSON.stringify(record)).join('\n'))}</pre>`
-    : '<div class="empty-state">Журнал аудита пуст или ещё не создан.</div>';
+  renderPagedList(elements.securityAuditOutput, [...records].reverse(), record =>
+    `<details class="security-technical-details"><summary>${escapeHtml(record.type || record.event_type || 'Запись аудита')}</summary><pre class="audit-output">${escapeHtml(JSON.stringify(record, null, 2))}</pre></details>`,
+    'Журнал аудита пуст или ещё не создан.');
 }
 
 function readSecurityPayload(result) {
@@ -2144,41 +2483,16 @@ function readProtectionRunning(payload) {
 }
 
 function readProtectionState(payload) {
-  if (!payload) return state.security.statusBusy ? 'loading' : 'stopped';
+  if (state.security.statusError) return 'unavailable';
+  if (state.security.statusUpdatedAt && Date.now() - state.security.statusUpdatedAt > 20000) return 'unavailable';
+  if (!payload) return 'loading';
   const explicit = payload?.runtime?.protection_state ?? payload?.protection_state;
-  if (typeof explicit === 'string' && explicit) return explicit;
-  if (payload?.heartbeat_stale) return 'degraded';
-  return readProtectionRunning(payload) === true ? 'protected' : 'stopped';
-}
-
-function readSensorCoverage(payload) {
-  const sensors = Array.isArray(payload?.heartbeat?.sensors)
-    ? payload.heartbeat.sensors
-    : Array.isArray(payload?.runtime?.heartbeat?.sensors)
-      ? payload.runtime.heartbeat.sensors
-      : [];
-  const total = readNumber(
-    payload?.heartbeat?.sensor_count,
-    readNumber(payload?.runtime?.heartbeat?.sensor_count, sensors.length)
-  );
-  return {
-    active: readProtectionRunning(payload) === true ? total : 0,
-    total,
-  };
-}
-
-function readIncidentSummary(payload) {
-  const summary = payload?.incidents && typeof payload.incidents === 'object'
-    ? payload.incidents
-    : payload?.runtime?.incidents && typeof payload.runtime.incidents === 'object'
-      ? payload.runtime.incidents
-      : {};
-  return {
-    open: readNumber(summary.open, 0),
-    decisionRequired: readNumber(summary.decision_required, 0),
-    emergency: readNumber(summary.emergency, 0),
-    highestRisk: readNumber(summary.highest_risk, 0),
-  };
+  if (explicit === 'recovery_required' || explicit === 'attention_required') return explicit;
+  const runtime = payload?.runtime || payload;
+  if (runtime?.heartbeat_stale || (runtime?.running === true && runtime?.telemetry_verified === false)) return 'degraded';
+  if (explicit === 'protected' && runtime?.telemetry_verified !== true) return 'degraded';
+  if (['protected', 'starting', 'degraded', 'stopped', 'stopping', 'unavailable'].includes(explicit)) return explicit;
+  return readProtectionRunning(payload) === true ? 'degraded' : 'stopped';
 }
 
 function readSecurityIncidents() {
@@ -2277,6 +2591,32 @@ function localizeRecommendation(value) {
     block_network: 'Предложить блокировку сети',
     suspend_process: 'Предложить приостановку процесса',
   }[String(value || '').toLowerCase()] || String(value || 'Продолжить наблюдение');
+}
+
+function localizeIncidentResolution(incident) {
+  const status = { dismissed: 'отмечено как безопасное', resolved: 'решено', acknowledged: 'просмотрено' }[incident?.status];
+  const reason = String(incident?.resolution?.reason || '').trim();
+  return reason && /[а-яё]/iu.test(reason) ? reason : status || 'закрыто';
+}
+
+/** 0…5 by the same bands as riskTone; drives the five-cell severity meter. */
+function riskLevel(score) {
+  return ['clean', 'guarded', 'suspicious', 'high', 'critical', 'emergency'].indexOf(riskTone(score));
+}
+
+function severityMeter(score, large = false) {
+  const level = riskLevel(score);
+  const value = escapeHtml(readNumber(score, 0));
+  return `<span class="security-severity${large ? ' large' : ''}" data-level="${level}" role="img" aria-label="${escapeHtml(riskLabel(score))} · риск ${value} / 800" title="Риск ${value} / 800"><i></i><i></i><i></i><i></i><i></i></span>`;
+}
+
+/** A registry key or a path is read by its last meaningful parts; the full value stays in the detail. */
+function shortSecuritySubject(value) {
+  const text = String(value || '').trim();
+  if (!text) return 'Неизвестный объект';
+  const parts = text.split(/[\\/]/u).filter(Boolean);
+  if (parts.length < 3) return text;
+  return `…\\${parts.slice(-2).join('\\')}`;
 }
 
 function incidentExplanation(incident) {

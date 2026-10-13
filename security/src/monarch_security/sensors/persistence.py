@@ -10,6 +10,7 @@ import sys
 
 from monarch_security.config import PersistenceConfig
 from monarch_security.events import SecurityEvent
+from monarch_security.observation import ObservedSensor, ObservationUnavailable, parse_query_json
 
 if sys.platform == "win32":
     import winreg
@@ -27,7 +28,7 @@ RUN_KEYS = [
 ]
 
 
-class PersistenceSensor:
+class PersistenceSensor(ObservedSensor):
     def __init__(
         self,
         config: PersistenceConfig,
@@ -79,6 +80,7 @@ class PersistenceSensor:
         self._cycle_seen = {str(item) for item in value["cycle_seen"]}
 
     def snapshot(self) -> list[dict[str, Any]]:
+        self.begin_observation()
         self.last_error = None
         items: list[dict[str, Any]] = []
         items.extend(self._startup_folder_items())
@@ -130,6 +132,7 @@ class PersistenceSensor:
         return [self._event_from_item(item) for item in enriched]
 
     def _snapshot_page(self) -> list[dict[str, Any]]:
+        self.begin_observation()
         self.last_error = None
         items: list[dict[str, Any]] = []
         items.extend(self._startup_folder_items())
@@ -143,6 +146,8 @@ class PersistenceSensor:
             return []
         items.extend(scheduled)
         self._overflow = has_more
+        if has_more:
+            self.limit_observation('inventory-page-pending')
         self._cursor = self._cursor + len(scheduled) if has_more else 0
         return [_with_signature(item) for item in items]
 
@@ -153,19 +158,19 @@ class PersistenceSensor:
         ]
         items: list[dict[str, Any]] = []
         for root in roots:
-            if not root.exists():
-                continue
             try:
                 entries = list(root.iterdir())
-            except OSError:
+            except FileNotFoundError:
                 continue
+            except OSError as exc:
+                raise ObservationUnavailable('startup-folder-unavailable') from exc
             for path in entries:
                 if path.name.lower() == "desktop.ini":
                     continue
                 try:
                     file_stat = path.stat()
-                except OSError:
-                    continue
+                except OSError as exc:
+                    raise ObservationUnavailable('startup-file-unavailable') from exc
                 if not stat_module.S_ISREG(file_stat.st_mode):
                     continue
                 items.append(
@@ -183,7 +188,7 @@ class PersistenceSensor:
 
     def _run_key_items(self) -> list[dict[str, Any]]:
         if winreg is None:
-            return []
+            raise ObservationUnavailable('registry-backend-unavailable')
         items: list[dict[str, Any]] = []
         for hive_name, key_path in RUN_KEYS:
             hive = winreg.HKEY_CURRENT_USER if hive_name == "HKCU" else winreg.HKEY_LOCAL_MACHINE
@@ -193,8 +198,8 @@ class PersistenceSensor:
                     for index in range(value_count):
                         try:
                             name, value, value_type = winreg.EnumValue(key, index)
-                        except OSError:
-                            continue
+                        except OSError as exc:
+                            raise ObservationUnavailable('registry-enumeration-incomplete') from exc
                         items.append(
                             {
                                 "kind": "run_key",
@@ -206,8 +211,10 @@ class PersistenceSensor:
                                 "value_type": int(value_type),
                             }
                         )
-            except OSError:
+            except FileNotFoundError:
                 continue
+            except OSError as exc:
+                raise ObservationUnavailable('registry-read-unavailable') from exc
         return items
 
     def _scheduled_task_items(
@@ -223,7 +230,8 @@ class PersistenceSensor:
                 f"-First {max(1, int(limit)) + 1} |"
             )
         command = rf"""
-Get-ScheduledTask -ErrorAction SilentlyContinue |
+$ErrorActionPreference = 'Stop'
+Get-ScheduledTask -ErrorAction Stop |
 Where-Object {{ $_.TaskPath -notlike '\Microsoft\*' }} |
 Sort-Object TaskPath,TaskName |
 {selection}
@@ -246,8 +254,10 @@ ForEach-Object {{
         if isinstance(parsed, dict):
             parsed = [parsed]
         if not isinstance(parsed, list):
-            return [], False
+            raise ObservationUnavailable('scheduled-task-query-invalid')
         items = [item for item in parsed if isinstance(item, dict)]
+        if len(items) != len(parsed) or any(item.get('kind') != 'scheduled_task' or not item.get('subject') for item in items):
+            raise ObservationUnavailable('scheduled-task-query-invalid')
         if limit is None:
             return items, False
         page_size = max(1, int(limit))
@@ -293,9 +303,9 @@ def _run_powershell_json(command: str, timeout: int = 30) -> tuple[Any, str | No
     if not output:
         return [], None
     try:
-        return json.loads(output), None
-    except json.JSONDecodeError as exc:
-        return None, f"persistence PowerShell returned invalid JSON: {exc}"
+        return parse_query_json(output), None
+    except ObservationUnavailable:
+        return None, 'persistence-query-json-invalid'
 
 
 def _with_signature(item: dict[str, Any]) -> dict[str, Any]:

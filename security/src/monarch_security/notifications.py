@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-import os
 import platform
-import subprocess
 import time
 
 from .config import NotificationConfig
@@ -52,7 +50,7 @@ class NotificationManager:
         if self.config.windows_toast and platform.system().lower() == "windows":
             if _show_windows_balloon(title, body, self.config.balloon_seconds):
                 sent = True
-                reason = "windows balloon"
+                reason = "windows notification queued"
             elif not sent:
                 reason = "windows notification failed"
 
@@ -92,44 +90,8 @@ def format_notification(
 
 
 def _show_windows_balloon(title: str, body: str, seconds: float) -> bool:
-    env = os.environ.copy()
-    env["MONARCH_NOTIFY_TITLE"] = title
-    env["MONARCH_NOTIFY_BODY"] = body
-    env["MONARCH_NOTIFY_MS"] = str(max(1000, int(seconds * 1000)))
-    script = r"""
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$n = New-Object System.Windows.Forms.NotifyIcon
-$n.Icon = [System.Drawing.SystemIcons]::Warning
-$n.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Warning
-$n.BalloonTipTitle = $env:MONARCH_NOTIFY_TITLE
-$n.BalloonTipText = $env:MONARCH_NOTIFY_BODY
-$n.Visible = $true
-$n.ShowBalloonTip([int]$env:MONARCH_NOTIFY_MS)
-Start-Sleep -Milliseconds ([int]$env:MONARCH_NOTIFY_MS + 500)
-$n.Dispose()
-"""
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    try:
-        subprocess.Popen(
-            [
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                script,
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=env,
-            creationflags=creationflags,
-        )
-    except OSError:
-        return False
-    return True
+    from .windows_notifications import channel
+    return channel.submit(title, body, seconds)
 
 
 def _shorten(value: Any, limit: int) -> str:

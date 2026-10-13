@@ -3,9 +3,9 @@ param(
   [string]$BuildRuntimeRoot = "",
   [string]$RuntimeDependenciesRoot = "",
   [string]$OutputDirectory = "",
-  [string]$AppVersion = "0.2.5.0",
-  [string]$RuntimeVersion = "2026.07.7",
-  [string]$BackendEnvironment = "backend-0.1.5-offline8",
+  [string]$AppVersion = "0.3.0.97",
+  [string]$RuntimeVersion = "2026.10.1",
+  [string]$BackendEnvironment = "backend-0.1.6-offline1",
   [switch]$Force
 )
 
@@ -32,6 +32,8 @@ $output = if ($OutputDirectory) {
 } else {
   Join-Path $root "installer\offline-payload"
 }
+. (Join-Path $PSScriptRoot "code-signing.ps1")
+$signingConfig = Get-MonarchSigningConfig
 $markerName = ".monarch-offline-payload"
 $markerPath = Join-Path $output $markerName
 $payloadVersionContractPath = Join-Path $PSScriptRoot "payload-version-contract.json"
@@ -422,6 +424,19 @@ $canvasPackageRoot = Join-Path $buildRoot "node_modules\canvas"
 if (-not (Test-Path -LiteralPath (Join-Path $canvasPackageRoot "build\Release\canvas.node") -PathType Leaf)) {
   throw "Native canvas runtime is missing. Run npm ci on the build machine."
 }
+$voiceNodePackages = @('sherpa-onnx-node', 'sherpa-onnx-win-x64')
+$sourcePackage = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
+$expectedSherpaVersion = [string]$sourcePackage.optionalDependencies.'sherpa-onnx-node'
+foreach ($voicePackage in $voiceNodePackages) {
+  $voicePackageJson = Join-Path $buildRoot "node_modules\$voicePackage\package.json"
+  if (-not (Test-Path -LiteralPath $voicePackageJson -PathType Leaf)) {
+    throw "Native Voice runtime missing: $voicePackage. Install the pinned optional Windows dependencies before packaging."
+  }
+  $voiceDescriptor = Get-Content -LiteralPath $voicePackageJson -Raw | ConvertFrom-Json
+  if ([string]$voiceDescriptor.version -cne $expectedSherpaVersion) {
+    throw "Native Voice version mismatch: $voicePackage. Expected $expectedSherpaVersion."
+  }
+}
 if (-not (Test-Path -LiteralPath (Join-Path $root "Monarch.exe") -PathType Leaf)) {
   throw "Build Monarch.exe before assembling the offline payload."
 }
@@ -548,11 +563,28 @@ try {
   Copy-FilteredTree `
     -Source (Join-Path $buildRoot "node_modules\electron\dist") `
     -Destination (Join-Path $runtimeOutput "electron")
+  # Fuses turn off running the Monarch executable as plain Node.js, NODE_OPTIONS
+  # preloads and --inspect debugging (Monarch Security F-06). Applied before hashing.
+  Write-Host "[offline] Applying Electron fuses"
+  Push-Location -LiteralPath $buildRoot
+  try {
+    & $node (Join-Path $root "scripts\electron-fuses.mjs") (Join-Path $runtimeOutput "electron\electron.exe")
+    Assert-NativeSuccess "Electron fuses"
+  } finally {
+    Pop-Location
+  }
 
   Write-Host "[offline] Copying native Node runtime dependencies"
   Copy-FilteredTree `
     -Source $canvasPackageRoot `
     -Destination (Join-Path $appOutput "node_modules\canvas")
+  foreach ($voicePackage in $voiceNodePackages) {
+    Copy-FilteredTree -Source (Join-Path $buildRoot "node_modules\$voicePackage") `
+      -Destination (Join-Path $appOutput "node_modules\$voicePackage")
+  }
+  $voiceProbe = "const s=require(process.argv[1]);if(typeof s.OnlineRecognizer!=='function')throw Error('sherpa-native-unavailable');console.log('voice-native-runtime-ok');"
+  & (Join-Path $runtimeOutput 'node\node.exe') -e $voiceProbe (Join-Path $appOutput 'node_modules\sherpa-onnx-node')
+  Assert-NativeSuccess 'Packaged native Voice runtime validation'
 
   Write-Host "[offline] Copying portable Python 3.11 standard runtime"
   $python = Find-Python311
@@ -703,8 +735,14 @@ try {
   Remove-PythonBytecode -Path $runtimeOutput
   Remove-PythonBytecode -Path $environmentOutput
 
+  # The launcher is the user-facing entry point, so it is signed before its
+  # hash is recorded. Runtime/environment trees stay byte-identical to the
+  # immutable payload contract; see installer/CODE_SIGNING.md.
+  $launcherPath = Join-Path $output "Monarch.exe"
+  Copy-Item -LiteralPath (Join-Path $root "Monarch.exe") -Destination $launcherPath -Force
+  Invoke-MonarchSignFile -Config $signingConfig -Path $launcherPath
+
   Write-Host "[offline] Hashing exact payload trees"
-  $launcherPath = Join-Path $root "Monarch.exe"
   $launcherFile = Get-Item -LiteralPath $launcherPath
   $manifest = [ordered]@{
     schemaVersion = 1
@@ -749,7 +787,6 @@ try {
     ($manifest | ConvertTo-Json -Depth 8),
     (New-Object System.Text.UTF8Encoding($false))
   )
-  Copy-Item -LiteralPath $launcherPath -Destination (Join-Path $output "Monarch.exe")
 
   $totalBytes = (
     Get-ChildItem -LiteralPath $output -Recurse -Force -File |

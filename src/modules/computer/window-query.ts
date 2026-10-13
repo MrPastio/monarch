@@ -16,12 +16,13 @@ export function rankComputerWindowQueryMatches(
   const queries = normalizedComputerWindowQueryVariants(queryValue);
   if (queries.length === 0) return [];
   return windows
+    .filter(window => !isBrowserQuery(queryValue) || isBrowserProcess(window.processName))
     .map((window, index) => {
       const title = normalizeComputerWindowQuery(window.title);
       const process = normalizeComputerWindowQuery(window.processName);
       const combined = `${title} ${process}`.trim();
       const candidateTokens = combined.split(' ').filter(Boolean);
-      const score = Math.max(0, ...queries.map((query) => {
+      const score = isBrowserQuery(queryValue) ? 1_000 : Math.max(0, ...queries.map((query) => {
         const queryTokens = query.split(' ').filter(Boolean);
         if (title === query || process === query) return 1_000;
         if (title.includes(query) || process.includes(query)) return 900;
@@ -50,6 +51,7 @@ export function computerWindowMatchesQuery(
   window: Pick<ComputerWindowSummary, 'title' | 'processName'>,
   queryValue: unknown,
 ): boolean {
+  if (isBrowserQuery(queryValue)) return isBrowserProcess(window.processName);
   const queries = normalizedComputerWindowQueryVariants(queryValue);
   if (queries.length === 0) return false;
   const title = normalizeComputerWindowQuery(window.title);
@@ -81,8 +83,19 @@ function normalizedComputerWindowQueryVariants(value: unknown): string[] {
   const aliases: Record<string, string[]> = {
     calculator: ['kalkulyator'],
     kalkulyator: ['calculator'],
+    tg: ['telegram'],
   };
   return [...new Set([normalized, ...(aliases[normalized] || [])])];
+}
+
+// A role query matches native browser processes, never a document/window title
+// that merely mentions a browser. Keep multiple matches for ambiguity handling.
+function isBrowserQuery(value: unknown): boolean {
+  return ['browser', 'brauzer'].includes(normalizeComputerWindowQuery(value));
+}
+
+function isBrowserProcess(value: string): boolean {
+  return ['chrome', 'msedge', 'firefox', 'brave', 'opera', 'vivaldi', 'browser'].includes(String(value).toLowerCase().replace(/\.exe$/u, ''));
 }
 
 function windowTokenMatches(query: string, candidate: string): boolean {

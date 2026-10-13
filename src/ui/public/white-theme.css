@@ -1,0 +1,170 @@
+/* White redesign (2026-09-26). The last theme layer: true white surfaces,
+   hairline borders, soft neutral shadows and one warm accent. Components keep
+   their geometry and motion owners; this file changes only material. The
+   earlier cream palette lives on in themes.css as the fallback it overrides. */
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --bg-elevated: #ffffff;
+  --surface: rgba(255, 255, 255, .92);
+  --surface-strong: #ffffff;
+  --surface-soft: rgba(24, 22, 18, .03);
+  --surface-hover: rgba(24, 22, 18, .05);
+  --line: rgba(24, 22, 18, .09);
+  --line-strong: rgba(24, 22, 18, .16);
+  --text: #1a1916;
+  --text-soft: #4f4c46;
+  --muted: #76726a;
+  --accent: #c25f06;
+  --accent-2: #e2700d;
+  --accent-soft: rgba(242, 138, 30, .09);
+  --accent-line: rgba(226, 112, 13, .34);
+  --success: #1f8a4c;
+  --danger: #c0352b;
+  --warning: #a35800;
+  --glass-surface: rgba(255, 255, 255, .9);
+  --glass-surface-strong: #ffffff;
+  --glass-line: rgba(24, 22, 18, .09);
+  --glass-line-hover: rgba(24, 22, 18, .16);
+  --shadow-glass: 0 1px 2px rgba(24, 22, 18, .04), 0 12px 32px rgba(24, 22, 18, .06);
+  --shadow-card: 0 1px 2px rgba(24, 22, 18, .04), 0 8px 24px rgba(24, 22, 18, .045);
+  --glass-shadow: 0 1px 2px rgba(24, 22, 18, .04), 0 8px 22px rgba(24, 22, 18, .05);
+  --selection-soft: rgba(24, 22, 18, .05);
+  --selection-line: rgba(24, 22, 18, .14);
+  --theme-plane-rgb: 255, 255, 255;
+  --theme-wash-rgb: 24, 22, 18;
+  --theme-line-rgb: 24, 22, 18;
+  --theme-ink-rgb: 26, 25, 22;
+  --theme-ink: #1a1916;
+  --theme-muted: #6f6b63;
+  --theme-text-alpha: .72;
+  --theme-amber-ink: #a65400;
+  --theme-danger-ink: #b3322a;
+  --theme-success-ink: #1f7a45;
+  --theme-info-ink: #2d5fb0;
+  --theme-amber-rgb: 166, 84, 0;
+  --theme-shadow-strength: .18;
+  --coder-panel: #ffffff;
+  --monarch-surface: #ffffff;
+  --monarch-edge: rgba(24, 22, 18, .14);
+  --monarch-highlight: rgba(242, 138, 30, .09);
+  --monarch-focus: #c25f06;
+  --ds-ink: #1a1916;
+  --ds-ink-2: #4f4c46;
+  --ds-ink-3: #76726a;
+  --ds-field: #ffffff;
+  --ds-sheet: #ffffff;
+  --ds-sheet-line: rgba(24, 22, 18, .1);
+  --ds-accent: #f28a1e;
+  --ds-accent-ink: #a65400;
+  --ds-accent-fill: rgba(242, 138, 30, .09);
+  --ds-accent-line: rgba(226, 112, 13, .36);
+  --ds-primary: linear-gradient(180deg, #ffbc45 0%, #f58a1f 100%);
+  --ds-focus: rgba(226, 112, 13, .7);
+  --ds-shadow-sheet: 0 24px 64px rgba(24, 22, 18, .14), 0 2px 6px rgba(24, 22, 18, .05);
+  --ds-shadow-menu: 0 12px 34px rgba(24, 22, 18, .12), 0 1px 3px rgba(24, 22, 18, .05);
+}
+
+/* ---------- canvas & chrome ---------- */
+:root[data-theme="light"] body {
+  background: #ffffff;
+}
+:root[data-theme="light"][data-desktop-titlebar="true"] .desktop-titlebar {
+  background: #f7f7f5;
+  border-bottom: 1px solid rgba(24, 22, 18, .06);
+}
+:root[data-theme="light"] .sidebar {
+  background: #f7f7f5;
+  box-shadow: inset -1px 0 rgba(24, 22, 18, .07);
+}
+:root[data-theme="light"] :is(.topbar, .claude-composer) {
+  background: #ffffff;
+  border-color: rgba(24, 22, 18, .09);
+  box-shadow: 0 1px 2px rgba(24, 22, 18, .03), 0 6px 20px rgba(24, 22, 18, .04);
+  backdrop-filter: none;
+}
+:root[data-theme="light"] .claude-composer {
+  box-shadow: 0 1px 2px rgba(24, 22, 18, .04), 0 12px 32px rgba(24, 22, 18, .07);
+}
+:root[data-theme="light"] .claude-composer:focus-within {
+  border-color: rgba(226, 112, 13, .42);
+  box-shadow: 0 0 0 4px rgba(242, 138, 30, .12), 0 12px 32px rgba(24, 22, 18, .07);
+}
+:root[data-theme="light"] .chat-mode-switch {
+  background: #f3f3f1;
+  border-color: rgba(24, 22, 18, .06);
+  box-shadow: none;
+}
+:root[data-theme="light"] .chat-mode-switch::before {
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(24, 22, 18, .08), 0 2px 8px rgba(24, 22, 18, .06);
+}
+
+/* Navigation: a quiet grey selection, the accent only on the icon. */
+html:root[data-theme="light"] .sidebar .nav-item { color: #4f4c46; }
+html:root[data-theme="light"] .sidebar .nav-item:hover { color: #1a1916; background: rgba(24, 22, 18, .045); }
+html:root[data-theme="light"] .sidebar .nav-item.active {
+  color: #1a1916;
+  border-color: transparent;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(24, 22, 18, .06), 0 0 0 1px rgba(24, 22, 18, .06);
+}
+html:root[data-theme="light"] .sidebar .nav-item.active svg { color: #e2700d; }
+html:root[data-theme="light"] .sidebar .claude-new-chat-btn {
+  color: #1a1916;
+  border-color: rgba(24, 22, 18, .1);
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(24, 22, 18, .05);
+}
+html:root[data-theme="light"] .sidebar .claude-new-chat-btn svg { color: #e2700d; }
+html:root[data-theme="light"] .sidebar .claude-new-chat-btn:hover { border-color: rgba(226, 112, 13, .36); background: #fffaf3; }
+html:root[data-theme="light"] .sidebar .navigation-search-trigger {
+  background: #ffffff;
+  border-color: rgba(24, 22, 18, .09);
+}
+:root[data-theme="light"] .product-stage-badge { color: #a65400; background: rgba(242, 138, 30, .1); border-color: transparent; }
+
+/* ---------- surfaces that carried a cream gradient ---------- */
+:root[data-theme="light"] :is(dialog, .dropdown-popover, .oscar-memory-panel, .sidebar-history) {
+  background: #ffffff;
+  border-color: rgba(24, 22, 18, .1);
+  box-shadow: var(--ds-shadow-menu);
+}
+:root[data-theme="light"] dialog::backdrop { background: rgba(24, 22, 18, .22); }
+:root[data-theme="light"] .monarch-safe-settings { background: #ffffff; }
+:root[data-theme="light"] ::selection { color: #1a1206; background: #ffe0a8; }
+
+/* Monochrome provider marks ship light for dark surfaces. */
+:root[data-theme="light"] img:is([src$="provider-logos/groq.svg"], [src$="provider-logos/openai.svg"], [src$="provider-logos/openrouter.svg"], [src$="provider-logos/xai.svg"]) {
+  filter: brightness(.13);
+}
+
+/* ---------- switches: white knob on a grey track, orange when on ---------- */
+:root[data-theme="light"] input[type="checkbox"]:not(.voice-mode-hidden-input) {
+  border-color: rgba(24, 22, 18, .1);
+  background:
+    radial-gradient(circle closest-side, #ffffff 0 calc(100% - 1px), transparent 100%) no-repeat 3px 50% / 18px 18px,
+    #e3e2df;
+  box-shadow: inset 0 1px 2px rgba(24, 22, 18, .1);
+}
+:root[data-theme="light"] input[type="checkbox"]:not(.voice-mode-hidden-input):checked {
+  border-color: #e2700d;
+  background:
+    radial-gradient(circle closest-side, #ffffff 0 calc(100% - 1px), transparent 100%) no-repeat calc(100% - 3px) 50% / 18px 18px,
+    #f28a1e;
+}
+:root[data-theme="light"] :is(.monarch-switch, .dev-switch span, .dev-toggle-card i) {
+  border-color: rgba(24, 22, 18, .1);
+  background: #e3e2df;
+  box-shadow: inset 0 1px 2px rgba(24, 22, 18, .1);
+}
+:root[data-theme="light"] :is(.monarch-switch, .dev-switch span, .dev-toggle-card i)::after,
+:root[data-theme="light"] :is(.monarch-switch-row input:checked + .monarch-switch, .dev-switch input:checked + span, .dev-toggle-card input:checked + i)::after {
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(24, 22, 18, .22);
+}
+:root[data-theme="light"] :is(.monarch-switch-row input:checked + .monarch-switch, .dev-switch input:checked + span, .dev-toggle-card input:checked + i) {
+  border-color: #e2700d;
+  background: #f28a1e;
+}

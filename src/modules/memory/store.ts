@@ -84,6 +84,7 @@ export class MonarchMemoryStore {
       this.durableFile = new DurableJsonFile(options.filePath, {
         createEmpty: () => ({ version: 3, records: [] }),
         jsonSpace: 0,
+        sensitive: { storeId: 'memory' },
         validate: (value): asserts value is Record<string, unknown> => {
           assertMemorySnapshotDocument(value, options.filePath!);
         },

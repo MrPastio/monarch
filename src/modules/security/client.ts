@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { SecurityScanJobs } from './scan-jobs';
 
 const MAX_AUDIT_TAIL_LINES = 1000;
 const MAX_INCIDENT_LIST_ITEMS = 1000;
@@ -56,6 +57,7 @@ export interface SecurityBenchmarkJobSnapshot {
 
 export class SecurityClient {
   readonly config: SecurityRuntimeConfig;
+  readonly scans: SecurityScanJobs;
   private benchmarkJob: SecurityBenchmarkJobSnapshot | null = null;
   private benchmarkChild: ChildProcessWithoutNullStreams | null = null;
 
@@ -81,6 +83,7 @@ export class SecurityClient {
       pythonPath: resolvePythonPath(projectRoot, options.pythonPath || process.env.MONARCH_SECURITY_PYTHON),
       timeoutMs: options.timeoutMs || readTimeout(),
     };
+    this.scans = new SecurityScanJobs(this.config);
   }
 
   get available(): boolean {
@@ -90,6 +93,24 @@ export class SecurityClient {
 
   async status(): Promise<SecurityCommandResult> {
     return this.run(['status'], { timeoutMs: 8000 });
+  }
+
+  async retryInspection(): Promise<SecurityCommandResult> {
+    return this.run(['inspection-retry'], { timeoutMs: 8000 });
+  }
+
+  async enableBackground(): Promise<SecurityCommandResult> {
+    return this.run(['background-enable', '--confirm'], { timeoutMs: 55000 });
+  }
+
+  async reconcileBackground(): Promise<SecurityCommandResult> {
+    return this.run(['background-reconcile'], { timeoutMs: 55000 });
+  }
+
+  async disableBackground(pin: string): Promise<SecurityCommandResult> {
+    return this.runSensitiveRequest(['background-disable', '--confirm'], {
+      pin, purpose: 'security.protection.stop', request_id: randomUUID(),
+    }, 55000);
   }
 
   async profile(): Promise<SecurityCommandResult> {
@@ -499,6 +520,7 @@ export class SecurityClient {
   }
 
   dispose(): void {
+    this.scans.dispose();
     const running = this.benchmarkJob?.status === 'running' ? this.benchmarkJob.jobId : null;
     if (running) this.cancelBackgroundBenchmark(running);
   }

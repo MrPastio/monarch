@@ -35,6 +35,24 @@ describe('MonarchPermissionGate profiles', () => {
     expect(evaluate(gate, 'write')).toMatchObject({ mode: 'deny', requiresUserConfirmation: false });
     expect(evaluate(gate, 'write', true)).toMatchObject({ mode: 'deny', requiresUserConfirmation: false });
   });
+
+  it('allows only the exact attested Simplified Voice convenience allowlist', () => {
+    const gate = new MonarchPermissionGate({ sandboxMode: 'workspace-write', approvalPolicy: 'on-request' });
+    const request: MonarchExecutionRequest = {
+      id: 'exec_voice', intentId: 'intent_voice', moduleId: 'device', capabilityId: 'device.app.open',
+      input: { app: 'Calculator' }, createdAt: new Date(0).toISOString(),
+      requestedBy: 'ui:voice-simplified', source: 'voice', confirmed: false,
+    };
+    const capability: MonarchCapability = {
+      id: 'device.app.open', moduleId: 'device', title: 'Open app', risk: 'device-control',
+    };
+    expect(gate.evaluate(request, capability)).toMatchObject({ mode: 'allow', requiresUserConfirmation: false });
+    expect(gate.evaluate({ ...request, source: 'api' }, capability).mode).toBe('confirm');
+    expect(gate.evaluate({ ...request, requestedBy: 'model' }, capability).mode).toBe('confirm');
+    expect(gate.evaluate({ ...request, capabilityId: 'device.recycle-bin.empty' }, {
+      ...capability, id: 'device.recycle-bin.empty', risk: 'delete',
+    }).mode).toBe('confirm');
+  });
 });
 
 function evaluate(gate: MonarchPermissionGate, risk: MonarchRisk, confirmed = false) {

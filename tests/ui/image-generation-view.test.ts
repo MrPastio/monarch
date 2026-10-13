@@ -58,7 +58,8 @@ describe('Images workspace', () => {
     expect(paneSource).toContain('thirdPartyTermsAccepted: true');
     expect(paneSource).not.toContain('adultAttested: true,\n        } : null');
     expect(paneSource).toContain('acceptImageProviderAgreement()');
-    expect(indexSource).toContain('</section>\n\n          <dialog class="image-confirm-dialog" id="image-perchance-age-dialog"');
+    // MAX has its own sibling dialog before this one; whitespace/order is not the consent fence.
+    expect(indexSource).toContain('<dialog class="image-confirm-dialog" id="image-perchance-age-dialog"');
     expect(indexSource).toContain('<dialog class="image-confirm-dialog image-provider-consent-dialog"');
     expect(paneSource).toContain('closeImageProvider?.()');
   });
@@ -106,7 +107,7 @@ describe('Images workspace', () => {
     expect(indexSource).toContain('id="monarch-genesis-field"');
     expect(genesisSource).toContain("const ACTIVE_STATES = new Set(['preparing', 'generating'])");
     expect(genesisSource).toContain('requestAnimationFrame');
-    expect(genesisSource).toContain("prefers-reduced-motion: reduce");
+    expect(genesisSource).toContain('reducedUiMotion.matches');
     expect(genesisSource).toContain('detectLowPerformance()');
     expect(genesisSource).not.toMatch(/progress(?:bar|Percent)|Math\.round\([^)]*100/iu);
   });

@@ -106,10 +106,7 @@ function scoreCapability(capability: MonarchCapability, terms: string[]): number
     capability.title,
     capability.description || '',
     capability.risk,
-    ...(capability.routing?.aliases || []),
-    ...(capability.routing?.keywords || []),
-    ...(capability.routing?.examples || []),
-    ...(capability.routing?.intentKinds || []),
+    ...(capability.agent?.tags || []),
   ].join(' ').toLowerCase();
 
   return terms.reduce((score, term) => score + (haystack.includes(term) ? 1 : 0), 0);

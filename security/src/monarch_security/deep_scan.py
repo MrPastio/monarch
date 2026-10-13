@@ -80,7 +80,17 @@ def deep_scan_file(
         )
 
     decision = policy.local_decision(assessment) if no_llm else router.decide(assessment)
+    limitations = []
+    parser_status = facts.get("content_parser_status")
+    if parser_status and parser_status != "ok":
+        limitations.append("content-" + str(parser_status))
+    if facts.get("authenticode_status") == "Unavailable":
+        limitations.append("signature-unavailable")
+    if defender and (facts.get("defender_scan") or {}).get("status") != "completed":
+        limitations.append("defender-unavailable")
     return {
+        "complete": not limitations,
+        "limitations": limitations,
         "assessment": assessment.to_dict(),
         "decision": decision.to_dict(),
         "deep_scan": {

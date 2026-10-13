@@ -33,7 +33,7 @@ describe('Sherpa T-one STT setup', () => {
     expect(script).toContain("Join-Path $stagedModelDirectory 'tokens.txt'");
     expect(script).toContain("$manifestName = 'monarch-model.json'");
     expect(packageJson.scripts['voice:stt:setup']).toBe(
-      'powershell -NoProfile -ExecutionPolicy Bypass -File tools/setup-sherpa-t-one-stt.ps1',
+      'powershell -NoProfile -ExecutionPolicy Bypass -File tools/setup-voice-stt.ps1',
     );
   });
 

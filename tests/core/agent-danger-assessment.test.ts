@@ -66,10 +66,10 @@ describe('AgentDangerAssessmentV1', () => {
   it.each([
     ['guard', 0, 'allow'], ['guard', 39, 'allow'],
     ['guard', 40, 'enhanced-readback'], ['guard', 69, 'enhanced-readback'],
-    ['guard', 70, 'confirm'], ['guard', 89, 'confirm'], ['guard', 90, 'block'], ['guard', 100, 'block'],
+    ['guard', 70, 'confirm'], ['guard', 89, 'confirm'], ['guard', 90, 'confirm'], ['guard', 100, 'confirm'],
     ['strict', 0, 'allow'], ['strict', 19, 'allow'],
     ['strict', 20, 'enhanced-readback'], ['strict', 49, 'enhanced-readback'],
-    ['strict', 50, 'confirm'], ['strict', 79, 'confirm'], ['strict', 80, 'block'], ['strict', 100, 'block'],
+    ['strict', 50, 'confirm'], ['strict', 79, 'confirm'], ['strict', 80, 'confirm'], ['strict', 100, 'confirm'],
     ['off', 100, 'allow'], ['observe', 100, 'observe'],
   ] as const)('maps %s score %i to %s at exact boundaries', (mode, score, response) => {
     expect(dangerResponseForMode(mode, score)).toBe(response);

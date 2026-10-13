@@ -141,6 +141,7 @@ namespace MonarchComputerUse
         internal readonly string CursorTakeoverSignalPath;
         internal readonly int Epoch;
         internal readonly string InputLeaseId;
+        private bool ignoreUserCursorTakeover;
 
         internal ControlGuard(
             string statePath,
@@ -158,7 +159,7 @@ namespace MonarchComputerUse
 
         internal void Verify()
         {
-            if (File.Exists(CursorTakeoverSignalPath))
+            if (!ignoreUserCursorTakeover && File.Exists(CursorTakeoverSignalPath))
             {
                 throw new NativeFailure("user-cursor-takeover", "The local desktop signaled immediate user takeover of Computer Use.");
             }
@@ -193,6 +194,14 @@ namespace MonarchComputerUse
             {
                 throw new NativeFailure("computer-control-revoked", "Computer Use control state could not be verified.");
             }
+        }
+
+        internal void AllowCooperativeSemanticDispatch()
+        {
+            // Semantic UIA dispatch never moves or clicks the global Windows
+            // cursor. User mouse movement is therefore not authority
+            // revocation; explicit Stop and the persisted lease still are.
+            ignoreUserCursorTakeover = true;
         }
     }
 
@@ -342,6 +351,10 @@ namespace MonarchComputerUse
     internal static class Program
     {
         private const int MaxRequestBytes = 1024 * 1024;
+        // One command per helper process. Monotonic: never reset after any
+        // foreground/input preparation could affect the desktop.
+        private static bool actionEntered;
+        private static bool actionMayHaveDispatched;
 
         [STAThread]
         private static int Main(string[] args)
@@ -391,14 +404,20 @@ namespace MonarchComputerUse
             {
                 return ListWindows(ReadInteger(request, "limit", 40, 1, 100));
             }
+            if (command == "inspect-window")
+            {
+                return RequireWindow(ResolveWindow(RequiredString(request, "windowRef", 80)));
+            }
             if (command == "observe")
             {
                 IntPtr window = ResolveWindow(RequiredString(request, "windowRef", 80));
                 string screenshotPath = RequiredAbsolutePath(request, "screenshotPath");
-                return Observe(window, screenshotPath);
+                Dictionary<string, object> selection = request.ContainsKey("selectionBinding") ? RequiredRecord(request, "selectionBinding") : null;
+                return Observe(window, screenshotPath, selection);
             }
             if (command == "act")
             {
+                actionEntered = true;
                 return Act(request);
             }
             if (command == "render-cursor-showcase")
@@ -437,18 +456,44 @@ namespace MonarchComputerUse
             return windows;
         }
 
-        private static Dictionary<string, object> Observe(IntPtr window, string screenshotPath)
+        private static Dictionary<string, object> Observe(IntPtr window, string screenshotPath, Dictionary<string, object> selection = null)
         {
             Dictionary<string, object> summary = RequireWindow(window);
+            VerifyObservationSelection(summary, selection);
             Rectangle bounds = WindowBounds(window);
             AutomationSnapshot automation = ReadAutomation(window, bounds);
+            if (selection != null) VerifyObservationSelection(RequireWindow(window), selection);
             ScreenshotSnapshot screenshot = CaptureWindow(window, bounds, screenshotPath);
-            return ObservationDictionary(summary, automation, screenshot);
+            if (selection != null) VerifyObservationSelection(RequireWindow(window), selection);
+            Dictionary<string, object> result = ObservationDictionary(summary, automation, screenshot);
+            if (selection != null) result["selectionBinding"] = selection;
+            return result;
+        }
+
+        private static void VerifyObservationSelection(Dictionary<string, object> summary, Dictionary<string, object> selection)
+        {
+            if (selection == null) return;
+            object title, pid, processInstance;
+            if (selection.Count != 3 || !selection.TryGetValue("title", out title) || !(title is string)
+                || ((string)title).Length < 1 || ((string)title).Length > 4096
+                || !selection.TryGetValue("processId", out pid) || !(pid is int) || (int)pid < 1
+                || !selection.TryGetValue("processInstanceId", out processInstance) || !(processInstance is string)
+                || !IsProcessInstanceId((string)processInstance))
+                throw new NativeFailure("window-selection-binding-invalid", "Exact selected process incarnation and title are required.");
+            int processId = (int)pid;
+            if (Convert.ToInt32(summary["processId"], CultureInfo.InvariantCulture) != processId
+                || !String.Equals(Convert.ToString(summary["processInstanceId"], CultureInfo.InvariantCulture), (string)processInstance, StringComparison.Ordinal)
+                || !String.Equals(Convert.ToString(summary["title"], CultureInfo.InvariantCulture), (string)title, StringComparison.Ordinal))
+                throw new NativeFailure("window-selection-stale", "The selected window identity changed before or during observation.");
         }
 
         private static Dictionary<string, object> Act(Dictionary<string, object> request)
         {
             string windowRef = RequiredString(request, "windowRef", 80);
+            Dictionary<string, object> action = RequiredRecord(request, "action");
+            string kind = RequiredString(action, "kind", 40);
+            string textMode = kind == "type" ? ReadTextMode(action) : null;
+            string exactText = kind == "type" ? ExactActionText(action) : null;
             ControlGuard control = new ControlGuard(
                 RequiredAbsolutePath(request, "controlStatePath"),
                 RequiredAbsolutePath(request, "cursorVisualLeasePath"),
@@ -459,10 +504,14 @@ namespace MonarchComputerUse
             IntPtr window = ResolveWindow(windowRef);
             Dictionary<string, object> current = RequireWindow(window);
             int expectedProcessId = ReadInteger(request, "expectedProcessId", -1, 1, Int32.MaxValue);
+            string expectedProcessInstanceId = RequiredString(request, "expectedProcessInstanceId", 80);
+            if (!IsProcessInstanceId(expectedProcessInstanceId))
+                throw new NativeFailure("process-instance-binding-invalid", "Exact process incarnation is required.");
             string expectedTitle = RequiredString(request, "expectedTitle", 4096);
             Rectangle expectedBounds = ReadBounds(RequiredRecord(request, "expectedBounds"));
             Rectangle currentBounds = WindowBounds(window);
             if (Convert.ToInt32(current["processId"], CultureInfo.InvariantCulture) != expectedProcessId
+                || !String.Equals(Convert.ToString(current["processInstanceId"], CultureInfo.InvariantCulture), expectedProcessInstanceId, StringComparison.Ordinal)
                 || !String.Equals(Convert.ToString(current["title"], CultureInfo.InvariantCulture), expectedTitle, StringComparison.Ordinal)
                 || !SameBounds(expectedBounds, currentBounds))
             {
@@ -476,8 +525,6 @@ namespace MonarchComputerUse
                 throw new NativeFailure("observation-stale-uia", "The semantic window state changed after observation.");
             }
 
-            Dictionary<string, object> action = RequiredRecord(request, "action");
-            string kind = RequiredString(action, "kind", 40);
             string afterPath = RequiredAbsolutePath(request, "afterScreenshotPath");
             string preflightPath = afterPath + ".preflight.png";
             ScreenshotSnapshot preflight = null;
@@ -496,18 +543,22 @@ namespace MonarchComputerUse
             }
 
             control.Verify();
+            bool semanticDispatch = CanUseExactSemanticDispatch(action, kind, automation);
+            if (kind == "type" && textMode == "replace"
+                && !ResolveTarget(action, automation).Patterns.Contains("value"))
+                throw new NativeFailure("semantic-value-unavailable", "Explicit replacement requires an exact writable UIA Value target.");
             NativeMethods.NativePoint actionCursorBaseline = new NativeMethods.NativePoint();
-            bool actionCursorBaselineKnown = kind == "type"
+            bool actionCursorBaselineKnown = !semanticDispatch && kind == "type"
                 && NativeMethods.GetCursorPos(out actionCursorBaseline);
-            bool semanticDispatch = false;
-            if (!ActivateExactWindow(window))
+            actionMayHaveDispatched = true;
+            if (semanticDispatch)
             {
-                semanticDispatch = CanUseExactSemanticDispatch(action, kind, automation);
-                if (!semanticDispatch)
-                {
-                    throw new NativeFailure("window-focus-rejected", "Windows did not grant foreground focus to the exact target window and this action has no exact semantic fallback.");
-                }
+                control.AllowCooperativeSemanticDispatch();
                 PrepareExactWindowForSemanticDispatch(window);
+            }
+            else if (!ActivateExactWindow(window))
+            {
+                throw new NativeFailure("window-focus-rejected", "Windows did not grant foreground focus to the exact target window and this action has no exact semantic dispatch.");
             }
             if (actionCursorBaselineKnown && SystemCursorMovedByUser(actionCursorBaseline, 8))
             {
@@ -526,7 +577,7 @@ namespace MonarchComputerUse
             }
             else if (kind == "close")
             {
-                cursor = DispatchClose(window, control, cursorOrigin);
+                cursor = DispatchClose(window, control, cursorOrigin, expectedProcessId, expectedProcessInstanceId, expectedTitle, expectedBounds);
             }
             else if (kind == "type")
             {
@@ -572,7 +623,20 @@ namespace MonarchComputerUse
                 if (cursor != null) closeReceipt["cursor"] = cursor;
                 return closeReceipt;
             }
-            Thread.Sleep(kind == "type" ? 350 : 250);
+            // Replacement already waits for exact Value readback. Insert-mode
+            // SendInput is asynchronous at the target UI thread: wait for the
+            // exact observed element's UIA value to change within a bounded
+            // budget instead of relying only on a timing-sensitive fixed sleep.
+            // This is read-only settling; never dispatch the text a second time.
+            if (kind == "type" && textMode != "replace")
+            {
+                string insertedText = ExactActionText(action);
+                if (insertedText.Length > 0)
+                    WaitForTargetValueChange(window, currentBounds, action, automation, control, 750);
+                else
+                    Thread.Sleep(50);
+            }
+            else if (kind != "type") Thread.Sleep(250);
             Dictionary<string, object> after = Observe(window, afterPath);
             bool foregroundVerifiedAtDispatch = cursor != null
                 && ReadBoolean(cursor, "foregroundVerifiedAtDispatch", false);
@@ -594,13 +658,22 @@ namespace MonarchComputerUse
                 { "after", after }
             };
             if (cursor != null) receipt["cursor"] = cursor;
+            if (kind == "type") receipt["textVerification"] = new Dictionary<string, object>
+            {
+                { "textMode", textMode }, { "textSha256", Sha256Hex(exactText) },
+                { "valueVerifiedAfterDispatch", textMode == "replace" }
+            };
             return receipt;
         }
 
         private static Dictionary<string, object> DispatchClose(
             IntPtr window,
             ControlGuard control,
-            Point cursorOrigin)
+            Point cursorOrigin,
+            int expectedProcessId,
+            string expectedProcessInstanceId,
+            string expectedTitle,
+            Rectangle expectedBounds)
         {
             Rectangle bounds = WindowBounds(window);
             int closeWidth = Math.Max(24, NativeMethods.GetSystemMetrics(NativeMethods.SystemMetricCaptionButtonWidth));
@@ -608,10 +681,6 @@ namespace MonarchComputerUse
             Point point = new Point(
                 Math.Max(bounds.Left, bounds.Right - closeWidth / 2),
                 Math.Min(bounds.Bottom - 1, bounds.Top + captionHeight / 2));
-            NativeMethods.NativePoint original;
-            bool originalKnown = NativeMethods.GetCursorPos(out original);
-            bool systemCursorRestored = false;
-            bool userTakeoverDetected = false;
             bool foregroundVerifiedAtDispatch = false;
             using (OscarCursorOverlay overlay = OscarCursorOverlay.ShowAt(cursorOrigin, window, control))
             using (CursorVisualLease visualLease = CursorVisualLease.Acquire(control, point))
@@ -621,53 +690,40 @@ namespace MonarchComputerUse
                     overlay.MoveTo(point, control);
                     overlay.Hover(control, 120);
                     overlay.PreClickVibration(control, 500);
-                    if (originalKnown && SystemCursorMovedByUser(original, 8))
-                    {
-                        userTakeoverDetected = true;
-                        overlay.DisabledAndFade(220);
-                        throw new NativeFailure("user-cursor-takeover", "The user moved the system cursor before Oscar closed the window; the action was cancelled.");
-                    }
                     control.Verify();
-                    RequireExactForeground(window);
-                    if (!NativeMethods.SetCursorPos(point.X, point.Y))
-                    {
-                        throw new NativeFailure("cursor-move-failed", "Windows rejected cursor movement.");
-                    }
                     overlay.MarkMouseDown();
                     overlay.PressDown(control, 70);
+                    control.Verify();
+                    // WM_CLOSE is addressed to this HWND, not the cursor or
+                    // foreground window. Recheck incarnation after the visual
+                    // warning, and do not move/restore the user's cursor.
+                    Dictionary<string, object> fresh = RequireWindow(window);
+                    if (Convert.ToInt32(fresh["processId"], CultureInfo.InvariantCulture) != expectedProcessId
+                        || !String.Equals(Convert.ToString(fresh["processInstanceId"], CultureInfo.InvariantCulture), expectedProcessInstanceId, StringComparison.Ordinal)
+                        || !String.Equals(Convert.ToString(fresh["title"], CultureInfo.InvariantCulture), expectedTitle, StringComparison.Ordinal)
+                        || !SameBounds(expectedBounds, WindowBounds(window)))
+                        throw new NativeFailure("observation-stale-window", "The exact window changed before close dispatch.");
                     foregroundVerifiedAtDispatch = IsExactWindowForeground(window);
                     if (!NativeMethods.PostMessage(window, NativeMethods.WindowCloseMessage, IntPtr.Zero, IntPtr.Zero))
                     {
                         throw new NativeFailure("window-close-state-uncertain", "Windows rejected the exact native close dispatch.");
                     }
                     overlay.Release(control, 130);
-                    NativeMethods.NativePoint current;
-                    if (originalKnown && NativeMethods.GetCursorPos(out current))
-                    {
-                        if (current.X == point.X && current.Y == point.Y)
-                        {
-                            systemCursorRestored = NativeMethods.SetCursorPos(original.X, original.Y);
-                        }
-                        else
-                        {
-                            userTakeoverDetected = true;
-                        }
-                    }
-                    if (userTakeoverDetected) overlay.DisabledAndFade(220);
-                    else overlay.SettleIdle(control, 110);
+                    overlay.SettleIdle(control, 110);
                 }
                 catch (NativeFailure)
                 {
-                    if (!userTakeoverDetected) overlay.DisabledAndFade(220);
+                    overlay.DisabledAndFade(220);
                     throw;
                 }
                 Dictionary<string, object> cursor = CursorDictionary(
                     point,
-                    systemCursorRestored,
-                    userTakeoverDetected,
+                    true, // Untouched, consistent with exact semantic actions.
+                    false,
                     foregroundVerifiedAtDispatch,
                     overlay.Metrics);
                 cursor["dispatchMode"] = "windows-message";
+                cursor["systemCursorMoved"] = false;
                 cursor["exactTargetVerifiedAtDispatch"] = true;
                 return cursor;
             }
@@ -683,6 +739,36 @@ namespace MonarchComputerUse
                 Thread.Sleep(50);
             }
             return !NativeMethods.IsWindow(window) || !NativeMethods.IsWindowVisible(window);
+        }
+
+        private static bool WaitForTargetValueChange(
+            IntPtr window,
+            Rectangle windowBounds,
+            Dictionary<string, object> action,
+            AutomationSnapshot before,
+            ControlGuard control,
+            int timeoutMs)
+        {
+            ElementSnapshot target = ResolveTarget(action, before);
+            string initialValue = target.Value;
+            Stopwatch stopwatch = Stopwatch.StartNew();
+            while (true)
+            {
+                control.Verify();
+                RequireWindow(window);
+                AutomationSnapshot current = ReadAutomation(window, windowBounds);
+                ElementSnapshot currentTarget = current.Elements.FirstOrDefault(delegate(ElementSnapshot item)
+                {
+                    return String.Equals(item.ElementId, target.ElementId, StringComparison.Ordinal);
+                });
+                if (currentTarget != null && !String.Equals(currentTarget.Value, initialValue, StringComparison.Ordinal))
+                {
+                    control.Verify();
+                    return true;
+                }
+                if (stopwatch.ElapsedMilliseconds >= timeoutMs) return false;
+                Thread.Sleep(25);
+            }
         }
 
         private static Dictionary<string, object> DispatchClick(
@@ -709,7 +795,7 @@ namespace MonarchComputerUse
                     overlay.MoveTo(point, control);
                     overlay.Hover(control, 120);
                     overlay.PreClickVibration(control, 500);
-                    if (originalKnown && SystemCursorMovedByUser(original, 8))
+                    if (!semanticDispatch && originalKnown && SystemCursorMovedByUser(original, 8))
                     {
                         userTakeoverDetected = true;
                         overlay.DisabledAndFade(220);
@@ -824,7 +910,9 @@ namespace MonarchComputerUse
             {
                 throw new NativeFailure("password-field-blocked", "Computer Use does not type credentials into password fields.");
             }
-            string text = RequiredString(action, "text", 4000);
+            string text = ExactActionText(action);
+            if (semanticDispatch != (ReadTextMode(action) == "replace"))
+                throw new NativeFailure("text-mode-mismatch", "Native dispatch cannot switch insertion and replacement semantics.");
             NativeMethods.NativePoint original;
             bool originalKnown = NativeMethods.GetCursorPos(out original);
             bool userTakeoverDetected = false;
@@ -846,7 +934,7 @@ namespace MonarchComputerUse
                 windowBounds.Top + target.Bounds.Top + target.Bounds.Height / 2);
             if (semanticDispatch) EnsurePointTargetsWindow(window, point);
             bool foregroundVerifiedAtDispatch = false;
-            using (CursorTakeoverMonitor takeoverMonitor = new CursorTakeoverMonitor(original, originalKnown, 8))
+            using (CursorTakeoverMonitor takeoverMonitor = new CursorTakeoverMonitor(original, !semanticDispatch && originalKnown, 8))
             using (OscarCursorOverlay overlay = OscarCursorOverlay.ShowAt(cursorOrigin, window, control))
             using (CursorVisualLease visualLease = CursorVisualLease.Acquire(control, point))
             {
@@ -855,7 +943,7 @@ namespace MonarchComputerUse
                     overlay.MoveTo(point, control);
                     overlay.TextPrecision(control, 280);
                     overlay.Busy(control, 120);
-                    if (takeoverMonitor.Detected || (originalKnown && SystemCursorMovedByUser(original, 8)))
+                    if (!semanticDispatch && (takeoverMonitor.Detected || (originalKnown && SystemCursorMovedByUser(original, 8))))
                     {
                         userTakeoverDetected = true;
                         overlay.DisabledAndFade(160);
@@ -865,7 +953,7 @@ namespace MonarchComputerUse
                     {
                         NativeActionWorker dispatch = NativeActionWorker.Start(delegate
                         {
-                            DispatchExactSemanticType(target, text, control, original, originalKnown);
+                            DispatchExactSemanticType(target, text, control);
                         });
                         overlay.HoldBusyWhile(control, delegate { return !dispatch.IsCompleted; });
                         dispatch.ThrowIfFailed();
@@ -877,8 +965,8 @@ namespace MonarchComputerUse
                         foregroundVerifiedAtDispatch = IsExactWindowForeground(window);
                     }
                     overlay.TextPrecision(control, 150);
-                    userTakeoverDetected = takeoverMonitor.Detected
-                        || (originalKnown && SystemCursorMovedByUser(original, 8));
+                    userTakeoverDetected = !semanticDispatch && (takeoverMonitor.Detected
+                        || (originalKnown && SystemCursorMovedByUser(original, 8)));
                     if (userTakeoverDetected) overlay.DisabledAndFade(160);
                     else overlay.SettleIdle(control, 100);
                 }
@@ -937,7 +1025,7 @@ namespace MonarchComputerUse
                 {
                     overlay.MoveTo(point, control);
                     overlay.Hover(control, 190);
-                    if (originalKnown && SystemCursorMovedByUser(original, 8))
+                    if (!semanticDispatch && originalKnown && SystemCursorMovedByUser(original, 8))
                     {
                         userTakeoverDetected = true;
                         overlay.DisabledAndFade(160);
@@ -956,7 +1044,7 @@ namespace MonarchComputerUse
                         dispatch.ThrowIfFailed();
                         overlay.Release(control, 170);
                         foregroundVerifiedAtDispatch = false;
-                        userTakeoverDetected = originalKnown && SystemCursorMovedByUser(original, 8);
+                        userTakeoverDetected = false;
                         if (userTakeoverDetected) overlay.DisabledAndFade(160);
                         else overlay.SettleIdle(control, 100);
                         Dictionary<string, object> semanticCursor = CursorDictionary(point, true, userTakeoverDetected, false, overlay.Metrics);
@@ -1123,16 +1211,22 @@ namespace MonarchComputerUse
             string kind,
             AutomationSnapshot automation)
         {
+            if (kind == "close") return true;
             if (kind == "key")
             {
                 string key = OptionalString(action, "key", "", 20).ToLowerInvariant();
-                return ResolveSemanticKeyTarget(key, automation) != null;
+                ElementSnapshot keyTarget = ResolveSemanticKeyTarget(key, automation);
+                return keyTarget != null && keyTarget.Patterns.Contains("invoke");
             }
             Dictionary<string, object> target = OptionalRecord(action, "target");
             if (target == null || OptionalString(target, "elementId", "", 100).Length == 0) return false;
-            if (kind == "type") return true;
+            ElementSnapshot exactTarget = ResolveTarget(action, automation);
+            if (kind == "type") return ReadTextMode(action) == "replace"
+                && exactTarget.Patterns.Contains("value");
             return kind == "click"
-                && OptionalString(action, "button", "left", 20) == "left";
+                && OptionalString(action, "button", "left", 20) == "left"
+                && ReadInteger(action, "clicks", 1, 1, 2) == 1
+                && exactTarget.Patterns.Contains("invoke");
         }
 
         private static ElementSnapshot ResolveSemanticKeyTarget(string key, AutomationSnapshot automation)
@@ -1206,9 +1300,7 @@ namespace MonarchComputerUse
         private static void DispatchExactSemanticType(
             ElementSnapshot target,
             string text,
-            ControlGuard control,
-            NativeMethods.NativePoint originalCursor,
-            bool originalCursorKnown)
+            ControlGuard control)
         {
             control.Verify();
             object pattern;
@@ -1222,12 +1314,19 @@ namespace MonarchComputerUse
                 throw new NativeFailure("semantic-value-read-only", "The exact observed UI Automation Value target is read-only.");
             }
             control.Verify();
-            if (originalCursorKnown && SystemCursorMovedByUser(originalCursor, 8))
-            {
-                throw new NativeFailure("user-cursor-takeover", "The user moved the system cursor before Oscar completed semantic typing; the action was cancelled.");
-            }
             value.SetValue(text);
-            control.Verify();
+            // UIA providers such as Chromium can acknowledge SetValue before
+            // exposing the new value. Poll READS only within the old 350ms text
+            // settling budget. Never send SetValue again on mismatch or timeout.
+            Stopwatch readback = Stopwatch.StartNew();
+            while (true)
+            {
+                control.Verify();
+                if (String.Equals(value.Current.Value, text, StringComparison.Ordinal)) { control.Verify(); return; }
+                if (readback.ElapsedMilliseconds >= 350)
+                    throw new NativeFailure("text-value-not-verified", "The exact UIA value did not match the requested replacement after dispatch.");
+                Thread.Sleep(25);
+            }
         }
 
         private static bool TargetMatches(ElementSnapshot actual, Dictionary<string, object> expected)
@@ -1665,6 +1764,8 @@ namespace MonarchComputerUse
             uint processId;
             NativeMethods.GetWindowThreadProcessId(handle, out processId);
             if (processId == 0) return false;
+            string processInstanceId;
+            if (!TryProcessInstanceId(processId, out processInstanceId)) return false;
             string processName = ProcessName(processId);
             if (IsProtectedWindow(processName, title)) return false;
             int cloaked;
@@ -1681,6 +1782,7 @@ namespace MonarchComputerUse
             {
                 { "windowRef", WindowRef(handle) },
                 { "processId", (int)processId },
+                { "processInstanceId", processInstanceId },
                 { "processName", processName },
                 { "title", title },
                 { "bounds", NativeMethods.BoundsDictionary(bounds) },
@@ -1729,6 +1831,28 @@ namespace MonarchComputerUse
             {
                 return "unknown";
             }
+        }
+
+        private static bool TryProcessInstanceId(uint processId, out string value)
+        {
+            value = null;
+            try
+            {
+                using (Process process = Process.GetProcessById((int)processId))
+                {
+                    long createdUtcTicks = process.StartTime.ToUniversalTime().Ticks;
+                    if (createdUtcTicks <= 0) return false;
+                    value = "process:" + Sha256Hex(processId.ToString(CultureInfo.InvariantCulture) + ":" + createdUtcTicks.ToString(CultureInfo.InvariantCulture));
+                    return IsProcessInstanceId(value);
+                }
+            }
+            catch { return false; }
+        }
+
+        private static bool IsProcessInstanceId(string value)
+        {
+            return value != null && value.Length == 72 && value.StartsWith("process:", StringComparison.Ordinal)
+                && value.Substring(8).All(delegate(char item) { return item >= '0' && item <= '9' || item >= 'a' && item <= 'f'; });
         }
 
         private static Rectangle WindowBounds(IntPtr window)
@@ -1916,6 +2040,29 @@ namespace MonarchComputerUse
                     windowBounds.Top + focused.Bounds.Top + focused.Bounds.Height / 2);
         }
 
+        private static string ReadTextMode(Dictionary<string, object> action)
+        {
+            object value;
+            if (!action.TryGetValue("textMode", out value)) return "insert";
+            if (!(value is string) || ((string)value != "insert" && (string)value != "replace"))
+                throw new NativeFailure("computer-text-input-invalid", "Explicit insert/replace semantics are required.");
+            return (string)value;
+        }
+
+        private static string ExactActionText(Dictionary<string, object> action)
+        {
+            object value;
+            string mode = ReadTextMode(action);
+            if (!action.TryGetValue("text", out value) || !(value is string))
+                throw new NativeFailure("computer-text-input-invalid", "Exact Unicode text is required.");
+            string text = (string)value;
+            if (text.Length > 4000 || (mode == "insert" && text.Length == 0) || text.IndexOf('\0') >= 0)
+                throw new NativeFailure("computer-text-input-invalid", "Text exceeds the explicit operation bounds.");
+            try { new UTF8Encoding(false, true).GetBytes(text); }
+            catch (EncoderFallbackException) { throw new NativeFailure("computer-text-input-invalid", "Text contains invalid Unicode."); }
+            return text;
+        }
+
         private static string RequiredString(Dictionary<string, object> record, string key, int maxLength)
         {
             object value;
@@ -2051,12 +2198,14 @@ namespace MonarchComputerUse
             try
             {
                 JavaScriptSerializer serializer = new JavaScriptSerializer();
-                WriteResult(resultPath, serializer.Serialize(new Dictionary<string, object>
+                Dictionary<string, object> result = new Dictionary<string, object>
                 {
                     { "ok", false },
                     { "error", code },
                     { "message", BoundText(message, 1000) }
-                }));
+                };
+                if (actionEntered) result["actionDispatchState"] = actionMayHaveDispatched ? "may-have-dispatched" : "not-dispatched";
+                WriteResult(resultPath, serializer.Serialize(result));
             }
             catch (Exception error)
             {

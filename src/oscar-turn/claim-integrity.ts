@@ -1,4 +1,4 @@
-import type { AgentEvidenceReference } from '../agent';
+import type { AgentEvidenceReference } from '../agent-protocol';
 
 export const OSCAR_INCIDENT_FAKE_STORAGE_AUDIT = [
   'Готово! Я просканировал диск D: и нашёл 42 каталога.',
@@ -9,6 +9,9 @@ export const OSCAR_INCIDENT_FAKE_STORAGE_AUDIT = [
 export interface ClaimIntegrityContext {
   executionAuthority: 'none' | 'kernel';
   evidence: AgentEvidenceReference[];
+  /** The person asked for fiction in this very turn. First-person verbs of a story are not
+   * operation claims; anything that names a local object still is. */
+  creativeRequest?: boolean;
 }
 
 export interface ClaimIntegrityResult {
@@ -28,7 +31,29 @@ const TEXT_CONFIRMATION = /(?:напиш|ответ|скажи|произнес|
 const LOCAL_OPERATION_CLAIM = /(?:(?:^|[^\p{L}])(?:я|мы)\s+(?:уже\s+)?(?:просканировал|проверил|прочитал|проаудировал|создал|изменил|удалил|переместил|открыл|запустил|установил|очистил|сохранил|выполнил)(?:[^\p{L}]|$)|(?:^|[^\p{L}])(?:готово|выполнено|завершено)(?:[^\p{L}]|$).{0,80}(?:скан|аудит|операц|задач|удален|создан|изменен)|(?:^|[^A-Za-z])(?:i|we)\s+(?:have\s+)?(?:scanned|audited|inspected|created|changed|deleted|moved|opened|launched|installed|cleaned|saved|executed)(?:[^A-Za-z]|$)|(?:^|[^A-Za-z])(?:scan|audit|operation|task)\s+(?:is\s+)?(?:complete|completed|done)(?:[^A-Za-z]|$))/iu;
 const LOCAL_OPERATION_COMMITMENT = /(?:(?:^|[^\p{L}])(?:я\s+)?(?:начинаю|приступаю|запускаю|перехожу\s+к|сейчас\s+(?:начну|запущу)|буду)\s+.{0,96}(?:скан|аудит|анализ|провер|чтен|удал|перемещ|архив|сортир|классиф|операц|действ)|(?:^|[^A-Za-z])(?:i\s+am\s+starting|i(?:'ll|\s+will)\s+(?:start|scan|audit|inspect|delete|move|archive|sort)|starting)\s+.{0,96}(?:scan|audit|inspection|deletion|move|archive|sort|operation|action))/iu;
 const LOCAL_FACT_WITH_PATH = /(?:[A-Za-z]:[\\/]|\\\\[^\\\s]+\\[^\s]+).{0,100}(?:\b\d+(?:[.,]\d+)?\s*(?:bytes?|кб|мб|гб|тб|kb|mb|gb|tb)\b|\b\d+\s+(?:файл|папк|каталог|директор|files?|folders?|directories)\b)/iu;
+const LOCAL_DRIVE_INVENTORY_CLAIM = /(?:сканирован\p{L}*\s+диск|на\s+диске\s+[A-Za-z].{0,80}(?:обнаруж|найден|папк|файл)|обнаружен\p{L}*\s+следующие\s+папк)/iu;
+// Only the current request can open creative mode; the answer never can. Stems, not phrases:
+// people misspell "рассказ", and "расскажи" (tell me) must stay outside.
+const CREATIVE_REQUEST = /(?:^|[^\p{L}])(?:р[оа]с+каз(?:а|у|ом|ы|ов|е)?|сказк\p{L}*|повест\p{L}*|притч\p{L}*|сочини\p{L}*|придума\p{L}*\s+(?:истори|рассказ|сказк)\p{L}*|истори[юя]\s+(?:о|про)|фантази\p{L}*|вымысл\p{L}*|(?:short\s+)?story|fiction|fairy\s*tale)(?:[^\p{L}]|$)/iu;
+// A sentence that names a local object keeps the operation-claim check even in creative mode.
+const LOCAL_OBJECT = /(?:файл|папк|каталог|директор|диск|документ|реестр|процесс|скрипт|терминал|командн|консол|браузер|программ|приложени|(?:^|[^A-Za-z])(?:files?|folders?|director(?:y|ies)|disk|drive|registry|process|script|terminal|shell|command|browser)(?:[^A-Za-z]|$))/iu;
+
+export function isCreativeWritingRequest(requestText: string): boolean {
+  return CREATIVE_REQUEST.test(String(requestText || ''));
+}
+
 const PROVIDER_IDENTITY_CONFLICT = /(?:(?:^|[^\p{L}])я\s+.{0,96}(?:представляюсь|являюсь|выступаю|не\s+могу\s+(?:говорить|представляться)|как)\s+.{0,48}(?:языков\p{L}*\s+модел\p{L}*|language\s+model).{0,32}(?:google|gemma)|(?:^|[^A-Za-z])i\s+.{0,96}(?:identify|introduce|am|as)\s+.{0,48}language\s+model.{0,32}(?:google|gemma))/iu;
+
+// "Не утверждать, что я прочитал файл" and "don't say it is done" describe a
+// claim the answer refuses to make. Oscar paraphrases exactly such rules when
+// asked about its own instructions, and the effect patterns below cannot tell
+// them from a claim. The complement of a negated speech verb is removed up to
+// the end of its clause; a contrastive "но/а/but" clause after it stays checked.
+const NEGATED_REPORTED_SPEECH = /(?:^|(?<=[^\p{L}]))(?:не|never|not|don't|do\s+not)\s+(?:утвержда|заявля|говор|сообща|писа|пиш|выдава|обеща|сказ|скаж|say|claim|state|pretend|report|write)\p{L}*[^.;!?\n]*?(?=[.;!?\n]|,\s*(?:но|а|однако|but)(?:[^\p{L}]|$)|$)/giu;
+
+function withoutNegatedReportedSpeech(sentence: string): string {
+  return sentence.replace(NEGATED_REPORTED_SPEECH, ' ');
+}
 
 export class ClaimIntegrityGate {
   constructor(private readonly semanticVerifier?: ClaimIntegritySemanticVerifier) {}
@@ -122,9 +147,11 @@ export async function inspectAnswerOnlyClaim(
   if (STRUCTURAL_MARKER.test(sentence)) reasons.push('forbidden-structural-marker');
   if (TEXT_CONFIRMATION.test(sentence)) reasons.push('text-confirmation-request');
   if (PROVIDER_IDENTITY_CONFLICT.test(sentence)) reasons.push('provider-identity-conflict');
-  const effectLike = LOCAL_OPERATION_CLAIM.test(sentence)
-    || LOCAL_OPERATION_COMMITMENT.test(sentence)
-    || LOCAL_FACT_WITH_PATH.test(sentence);
+  const claimed = withoutNegatedReportedSpeech(sentence);
+  const verbClaim = LOCAL_OPERATION_CLAIM.test(claimed) || LOCAL_OPERATION_COMMITMENT.test(claimed);
+  const effectLike = (verbClaim && (!context.creativeRequest || LOCAL_OBJECT.test(claimed)))
+    || LOCAL_FACT_WITH_PATH.test(claimed)
+    || LOCAL_DRIVE_INVENTORY_CLAIM.test(claimed);
   if (context.executionAuthority === 'none' && effectLike) {
     reasons.push('unverified-local-operation-claim');
     if (semanticVerifier) {

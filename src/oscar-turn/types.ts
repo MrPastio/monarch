@@ -1,5 +1,7 @@
-import type { AgentEvidenceReference, AgentTaskExecutionProfile } from '../agent';
+import type { AgentEvidenceReference, AgentTaskExecutionProfile, AgentTaskSource } from '../agent-protocol';
+import type { AstraAgentTaskSpecification } from '../agent-v3/agent-task-contract';
 import type { MonarchPersonalityContextV2 } from '../settings';
+import type { OscarAstraBinding } from './astra-contract';
 import type {
   ImageContentRatingV1,
   ImageGenerationCapabilitySnapshotV1,
@@ -21,6 +23,7 @@ export type OscarTurnStatus =
   | 'running'
   | 'waiting-for-user'
   | 'waiting-for-approval'
+  | 'waiting-for-runtime'
   | 'succeeded'
   | 'blocked'
   | 'failed'
@@ -66,6 +69,13 @@ export interface OscarTurnModifiers {
 }
 
 export interface OscarTurnRequestSnapshot {
+  /** Internal authenticated transport identity; not accepted from public Turn bodies. */
+  telegramActor?: AgentTaskSource['telegram'];
+  /** Durable authenticated principal for an ordinary V3 agent binding. Public
+   * JSON cannot supply it; the owning transport derives it from its credential. */
+  authenticatedAgentActor?: import('../app/astra-task-facade').AstraAuthenticatedHttpActor;
+  /** Durable executor choice. Absent means legacy; never fallback when present. */
+  astra?: OscarAstraBinding;
   text: string;
   attachmentIds: string[];
   modifiers: OscarTurnModifiers;
@@ -74,6 +84,9 @@ export interface OscarTurnRequestSnapshot {
   continuations?: Array<{ messageId: string; content: string; createdAt: string }>;
   /** Trusted local surface binding; never accepted from the public Turn HTTP body. */
   executionProfile?: AgentTaskExecutionProfile;
+  /** Trusted explicit Agent Task API contract. It selects the Agent lane, not
+   * any capability or execution authority. */
+  explicitAgentTask?: AstraAgentTaskSpecification;
 }
 
 export interface OscarTurnV1 {
@@ -90,6 +103,9 @@ export interface OscarTurnV1 {
   outputMessageId?: string;
   taskId?: string;
   activeApprovalId?: string;
+  astraControl?: { sequence: number; desired: 'pause' | 'resume' | 'cancel' };
+  /** Bounded explicit recovery intents; retries retain their original request ID. */
+  astraRecoveryRequests?: string[];
   outcome?: OscarTurnOutcome;
   supersedesTurnId?: string;
   retryOf?: string;
@@ -107,6 +123,7 @@ export type OscarTurnEventType =
   | 'task.linked'
   | 'approval.required'
   | 'user.input.required'
+  | 'runtime.waiting'
   | 'non-authoritative-confirmation'
   | 'turn.outcome'
   | 'turn.failed';
@@ -158,8 +175,9 @@ export interface MessageProvenanceV1 {
 export type OscarTurnOutboxKind =
   | 'persist-message'
   | 'create-agent-task'
-  | 'send-agent-message'
-  | 'reconcile-turn';
+  | 'astra-input'
+  | 'astra-control'
+  | 'astra-wake';
 export interface OscarTurnOutboxDraft {
   id: string;
   turnId: string;
@@ -193,6 +211,8 @@ export interface OscarTurnCreateOptions {
 }
 
 export interface OscarTurnCancellationReservation {
+  /** Server-bound Astra actor; legacy reservations have no Astra authority. */
+  astraActorId?: string;
   clientRequestId: string;
   source: OscarTurnSource;
   privacyMode: OscarPrivacyMode;
@@ -200,6 +220,10 @@ export interface OscarTurnCancellationReservation {
 }
 
 export interface OscarTurnSaveOptions extends OscarTurnCreateOptions {
+  expectedRevision: number;
+}
+
+export interface OscarTurnAgentBindingOptions {
   expectedRevision: number;
 }
 
@@ -218,12 +242,23 @@ export interface OscarTurnStore {
   hasClientCancellation(reservation: Omit<OscarTurnCancellationReservation, 'expiresAt'>, now?: Date): Promise<boolean>;
   clearClientCancellation(reservation: Omit<OscarTurnCancellationReservation, 'expiresAt'>): Promise<void>;
   listTurns(): Promise<OscarTurnV1[]>;
+  /** Turns still in the live document; archived Turns are settled by definition. */
+  listLiveTurns?(): Promise<OscarTurnV1[]>;
   deleteTurn(turnId: string): Promise<boolean>;
+  /** One-way executor enrichment after the semantic router selected the agent
+   * lane. This is deliberately separate from saveTurn so request identity
+   * cannot become generally mutable. */
+  bindOrdinaryAgent(
+    turnId: string,
+    binding: OscarAstraBinding,
+    options: OscarTurnAgentBindingOptions,
+  ): Promise<OscarTurnStoreCommit>;
   saveTurn(turn: OscarTurnV1, options: OscarTurnSaveOptions): Promise<OscarTurnStoreCommit>;
   ensureTerminalMessage(turnId: string, repair: OscarTerminalMessageRepair): Promise<OscarTurnStoreCommit>;
   listPendingOutbox(now?: Date): Promise<OscarTurnOutboxItem[]>;
+  readOutboxItem(outboxId: string): Promise<OscarTurnOutboxItem | null>;
   markOutboxSucceeded(outboxId: string): Promise<void>;
-  markOutboxSuperseded(outboxId: string): Promise<void>;
+  markOutboxSuperseded(outboxId: string, abandonedReason?: string): Promise<void>;
   markOutboxFailed(outboxId: string, error: string, nextAttemptAt: string): Promise<void>;
   subscribe(turnId: string | '*', listener: OscarTurnStoreListener): () => void;
 }

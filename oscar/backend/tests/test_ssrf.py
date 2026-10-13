@@ -58,6 +58,16 @@ def test_is_safe_ip_loopback():
     assert not is_safe_ip("::1")
 
 
+def test_search_planner_drops_where_to_look_and_detects_recency():
+    from oscar_agent.search import has_recency_signal
+    query = "Найди в интернете последние новости о запусках SpaceX"
+    assert plan_search_queries(query)[0].startswith("последние новости")
+    assert has_recency_signal(query) is True
+    assert has_recency_signal("latest SpaceX news") is True
+    assert has_recency_signal("Newsletter design basics") is False
+    assert has_recency_signal("Кто написал Войну и мир?") is False
+
+
 def test_search_planner_prefers_official_source_for_openai_product():
     queries = plan_search_queries("Найди и расскажи информацию про GPT 5.6")
 
@@ -645,3 +655,139 @@ def test_tracking_params_are_removed_for_normalization_and_dedupe():
     cleaned = normalize_result_url("https://example.com/page?utm_source=x&id=42&fbclid=abc#section")
     assert cleaned == "https://example.com/page?id=42"
     assert canonical_url_key("https://example.com/page?id=42&utm_campaign=x") == canonical_url_key("https://example.com/page?utm_medium=y&id=42")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deep, count", [(False, 1), (True, 3)])
+async def test_external_model_context_never_ingests_and_deduplicates(deep, count):
+    memory = MagicMock()
+    service = WebSearchService(Settings(), memory, search_provider=StaticSearchProvider([]))
+    service._collect_safe_results = AsyncMock(return_value=[
+        RawSearchResult(title="Weather", url="https://example.com/weather", snippet="21 C"),
+    ])
+    fetched = []
+
+    async def fetch(_client, result, focus, budget):
+        fetched.append((focus, budget))
+        return result
+
+    service._fetch_evidence = fetch
+    results = await service.search_context("сколько градусов в варне сейчас", deep)
+    assert len(results) == 1
+    assert service._collect_safe_results.await_count == count
+    assert len(fetched) == 1
+    memory.upsert_document.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_context_sources_interleave_branches_and_keep_the_page_date():
+    service = WebSearchService(Settings(), MagicMock(), search_provider=StaticSearchProvider([]))
+    branches = {
+        "first": [RawSearchResult(title=f"A{i}", url=f"https://a.example/{i}", snippet="a") for i in range(5)],
+        "second": [RawSearchResult(title="B0", url="https://b.example/0", snippet="b", published="2026-10-01")],
+    }
+    service._collect_safe_results = AsyncMock(side_effect=lambda query, _limit: branches[query])
+
+    async def fetch(_client, result, _focus, _budget):
+        return result
+
+    service._fetch_evidence = fetch
+    results = await service.search_context("question", False, ["first", "second"])
+    # The second branch is not buried under the first one's five results.
+    assert [result.url for result in results[:2]] == ["https://a.example/0", "https://b.example/0"]
+    assert results[1].published == "2026-10-01"
+
+
+def test_conversational_weather_query_is_expanded_for_search():
+    assert "weather now temperature" in plan_search_queries("сколько градусов в варне сейчас")[0]
+
+
+@pytest.mark.asyncio
+async def test_context_endpoint_uses_transient_service(monkeypatch):
+    from oscar_agent.schemas import SearchContextRequest
+    search = AsyncMock(return_value=[SearchResult(title="Public", url="https://example.com", snippet="Evidence")])
+    monkeypatch.setattr(main_module.search_service, "search_context", search)
+    request = MagicMock(is_disconnected=AsyncMock(return_value=False))
+    payload = await main_module.search_context(SearchContextRequest(query="public query", deep=True), request)
+    assert len(payload["sources"]) == 1
+    search.assert_awaited_once_with("public query", True, [])
+
+
+@pytest.mark.asyncio
+async def test_context_endpoint_searches_the_planned_queries_not_the_message():
+    service = WebSearchService(Settings(), MagicMock(), search_provider=StaticSearchProvider([]))
+    service._collect_safe_results = AsyncMock(return_value=[
+        RawSearchResult(title="Weather", url="https://example.com/weather", snippet="21 C"),
+    ])
+
+    async def fetch(_client, result, _focus, _budget):
+        return result
+
+    service._fetch_evidence = fetch
+    message = "какая погода на ближайшие дни в Варне? И запомни, я живу в Варне в Болгарии"
+    await service.search_context(message, False, ["погода Варна Болгария прогноз"])
+    assert [call.args[0] for call in service._collect_safe_results.await_args_list] == ["погода Варна Болгария прогноз"]
+    service._collect_safe_results.reset_mock()
+    await service.search_context(message, True, ["погода Варна Болгария прогноз"])
+    searched = [call.args[0] for call in service._collect_safe_results.await_args_list]
+    assert searched[0] == "погода Варна Болгария прогноз"
+    assert len(searched) <= 5
+
+
+def test_planned_web_queries_parse_and_fall_back():
+    from oscar_agent.research import parse_planned_web_queries, web_query_planner_prompt
+    assert parse_planned_web_queries('{"queries":["погода Варна", "Погода Варна", "BTC"]}', "x y") == ["погода Варна", "BTC"]
+    assert parse_planned_web_queries("not json", "погода в Варне?") == ["погода в Варне?"]
+    prompt = web_query_planner_prompt("а завтра там?", [{"role": "user", "content": "погода в Варне"}], "2026-09-27")
+    assert "requests to remember something" in prompt
+    assert "2026-09-27" in prompt and "\u003c" not in prompt.split("<search_input>")[0]
+
+
+@pytest.mark.asyncio
+async def test_context_endpoint_disconnect_cancels_search(monkeypatch):
+    import asyncio
+    from fastapi import HTTPException
+    from oscar_agent.schemas import SearchContextRequest
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+    async def search(*args):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+    async def disconnected():
+        await started.wait()
+        return True
+    monkeypatch.setattr(main_module.search_service, "search_context", search)
+    with pytest.raises(HTTPException) as failure:
+        await main_module.search_context(SearchContextRequest(query="public query"), MagicMock(is_disconnected=disconnected))
+    assert failure.value.status_code == 499
+    assert stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_forecast_service_data_is_not_replaced_by_its_page():
+    # The forecast link points at the service documentation; fetching it used to
+    # replace the forecast with that page, and the answer said no forecast was found.
+    provider = StaticSearchProvider([
+        RawSearchResult(title="Other", url="https://safe-public.com/page", snippet="page snippet"),
+    ])
+    service = WebSearchService(Settings(), MagicMock(), search_provider=provider)
+    forecast = RawSearchResult(title="Прогноз погоды: Варна", url="https://safe-public.com/forecast#latitude=43.2",
+                               snippet="Прогноз Open-Meteo для: Варна, Болгария. завтра: от 14 до 22°C", service_data=True)
+    fetched: list[str] = []
+
+    async def fake_fetch(_client, result):
+        fetched.append(result.url)
+        result.snippet = "documentation page"
+        return result
+
+    with patch("socket.getaddrinfo", side_effect=mock_getaddrinfo), \
+         patch("oscar_agent.search.weather_forecast_result", AsyncMock(return_value=forecast)), \
+         patch.object(service, "_fetch_voice_excerpt", side_effect=fake_fetch):
+        results = await service.search_context("какая погода в Варне завтра?")
+
+    by_url = {result.url: result for result in results}
+    assert "Варна, Болгария" in by_url["https://safe-public.com/forecast#latitude=43.2"].snippet
+    assert "https://safe-public.com/forecast#latitude=43.2" not in fetched

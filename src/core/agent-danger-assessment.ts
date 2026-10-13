@@ -102,13 +102,26 @@ export function dangerResponseForMode(
   if (mode === 'guard') {
     if (score <= 39) return 'allow';
     if (score <= 69) return 'enhanced-readback';
-    if (score <= 89) return 'confirm';
-    return 'block';
+    return 'confirm';
   }
   if (score <= 19) return 'allow';
   if (score <= 49) return 'enhanced-readback';
-  if (score <= 79) return 'confirm';
-  return 'block';
+  return 'confirm';
+}
+
+export interface MonarchDangerScaleSegment { from: number; to: number; response: MonarchAgentDangerResponse }
+
+/** The response bands of one mode over 0..100%, read from `dangerResponseForMode`
+ * itself so the Security screen never carries its own copy of the thresholds. */
+export function dangerScaleForMode(mode: MonarchAgentSecurityMode): MonarchDangerScaleSegment[] {
+  const segments: MonarchDangerScaleSegment[] = [];
+  for (let score = 0; score <= 100; score += 1) {
+    const response = dangerResponseForMode(mode, score);
+    const last = segments.at(-1);
+    if (last && last.response === response) last.to = score;
+    else segments.push({ from: score, to: score, response });
+  }
+  return segments;
 }
 
 export function dangerBand(scoreInput: number): MonarchAgentDangerBand {

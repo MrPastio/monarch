@@ -430,7 +430,8 @@ class IncidentIntegrationTests(unittest.TestCase):
             supervisor._write_heartbeat("running")
 
             heartbeat = json.loads(config.runtime.heartbeat_path.read_text(encoding="utf-8"))
-            self.assertEqual(heartbeat["protection_state"], "protected")
+            # An observed incident does not prove that every scheduled sensor has polled.
+            self.assertEqual(heartbeat["protection_state"], "starting")
             self.assertEqual(heartbeat["incidents"]["open"], 1)
             self.assertGreaterEqual(heartbeat["incidents"]["highest_risk"], 250)
             self.assertTrue(config.runtime.incident_log_path.exists())

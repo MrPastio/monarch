@@ -1,35 +1,54 @@
-import { MonarchStartup } from '/startup/monarch-startup.js';
-import { mountMonarchLogo3D } from '/startup/monarch-logo-3d.js';
+import { initReminders } from './modules/reminders-pane.js';
+import { reducedUiMotion, setUiMotionPreference } from './modules/ui-motion.js';
+import { initSharedSelects } from './modules/ui-select.js';
+import { initCompactLayout } from './modules/compact-layout.js';
+import { renderMaxModeButton } from './modules/max-identity.js';
+import { initUiNavigation } from './modules/ui-navigation.js';
 import { state, updateState, subscribeState } from './modules/state.js';
 import { executeCapability, fetchState, revokeCapabilityLease, rollbackAction, updateAutonomyMode } from './modules/api.js';
 import './modules/test-suite.js';
-import { readErrorMessage, readOscarModelStatus, renderError } from './modules/utils.js';
+import { escapeHtml, readErrorMessage, readOscarModelStatus, renderError } from './modules/utils.js';
 import { formatOscarContextTokenCount, resolveOscarContextMeterState } from './modules/oscar-context-meter.js';
 import { cancelIntentJobAction, initChatPane, renderChatPane, submitIntentAction, renderThread } from './modules/chat-pane.js';
 import { initOscarPane, loadOscarConversations, loadOscarStatus, renderOscar, startNewOscarConversation } from './modules/oscar-pane.js';
 import { initSecurityPane, loadSecurityStatus, renderSecurity, renderSecurityPolicyControls } from './modules/security-pane.js';
 import { initModelManager, renderModelManager } from './modules/model-manager.js';
 import { initModelOnboarding, renderModelOnboarding } from './modules/model-onboarding.js';
+import { initSettingsExtras, renderSettingsExtras } from './modules/settings-extras.js';
+import { initServiceSwitcher } from './modules/service-switcher.js';
+import { initPaperPixel } from './modules/paper-pixel.js';
+import { customModelLabel, initCustomModelsPane, isReadyCustomModel, renderCustomModelsPane, syncComposerCustomModels } from './modules/custom-models-pane.js';
 import { initModelSetupWelcome, renderModelSetupWelcome } from './modules/model-setup-welcome.js';
 import { initSharingPane, renderSharingPane } from './modules/sharing-pane.js';
-import { initMascotInteraction, syncMascotFromRuntime } from './modules/mascot-controller.js';
+import { deriveOscarMascotRuntime, initMascotInteraction, syncMascotFromRuntime } from './modules/mascot-controller.js';
 import { initSettingsPane } from './modules/settings-pane.js';
 import { initUpdatePane } from './modules/update-pane.js';
 import { initVoiceInput } from './modules/voice-input.js';
 import { initOscarVoiceMode } from './modules/oscar-voice-mode.js';
+import { initVoiceWakeService } from './modules/voice-wake-service.js';
 import { installOscarSnakeEasterEgg } from './modules/oscar-snake-game.js';
 import { installMonarchBrandEasterEgg } from './modules/brand-easter-egg.js';
 import { initCoderPane } from './modules/coder-pane.js';
-import { initStudioPane, setStudioActive } from './modules/studio-pane.js';
 import { initImageGenerationPane, renderImageGenerationPane } from './modules/image-generation-pane.js';
-import { normalizeUiPreferences, serializeUiPreferences } from './modules/ui-preferences.js';
+import { msUntilThemeBoundary, normalizeUiPreferences, resolveTheme, serializeUiPreferences } from './modules/ui-preferences.js';
 import { initComputerUseControl, syncComputerUsePermissionProfile } from './modules/computer-use-control.js';
+import { closeOscarComposerMenu, initOscarPlusMenu } from './modules/oscar-plus-menu.js';
 import { installComposerTypeToFocus } from './modules/composer-type-to-focus.js';
 import { copyTextToClipboard } from './modules/clipboard.js';
+import { initAstraMaxSetup } from './modules/astra-max-setup.js';
+import { renderAccessMatrix } from './modules/access-matrix.js';
+import { initAwaySummary } from './modules/away-summary.js';
+import { renderSystemMap } from './modules/system-map.js';
+import { initHelpPanel } from './modules/help-panel.js';
+import { createLanguagePicker, detectUiLanguage, setUiLanguage } from './modules/ui-i18n.js';
+import { initEarlyAccessNotices, mountSecurityDevelopmentBanner } from './modules/early-access-notice.js';
 import {
-  filterSelectableOscarModelScale,
   resolveSelectableOscarModelAvailability,
 } from './modules/oscar-model-availability.js';
+
+// Auto theme: Windows' scheme and the clock timer (applyTheme owns both).
+const systemDarkQuery = window.matchMedia?.('(prefers-color-scheme: dark)') || null;
+let autoThemeTimer;
 
 // Elements
 const elements = {
@@ -39,6 +58,8 @@ const elements = {
   thread: document.querySelector('#thread'),
   shell: document.querySelector('#app-shell'),
   densitySelect: document.querySelector('#density-select'),
+  themeSelect: document.querySelector('#theme-select'),
+  motionSelect: document.querySelector('#motion-select'),
   inspectorDefaultSelect: document.querySelector('#inspector-default-select'),
   startupAnimationSelect: document.querySelector('#startup-animation-select'),
   startupAnimationPreview: document.querySelector('#startup-animation-preview'),
@@ -49,6 +70,8 @@ const elements = {
   modelPopover: document.querySelector('#model-popover'),
   autonomyModeSelect: document.querySelector('#autonomy-mode-select'),
   permissionProfileNote: document.querySelector('#permission-profile-note'),
+  accessMatrix: document.querySelector('#access-matrix'),
+  systemMap: document.querySelector('#system-map'),
   authorityStatusCard: document.querySelector('#authority-status-card'),
   authorityTier: document.querySelector('#authority-tier'),
   authorityDetail: document.querySelector('#authority-detail'),
@@ -60,8 +83,8 @@ const elements = {
 const MODEL_LABELS = Object.freeze({
   auto: 'Авто',
   none: 'Авто',
-  'gemma4-fast': 'Basic 2B',
-  'gemma4-balanced': 'Basic 12B',
+  'gemma4-fast': 'Fast 2B',
+  'gemma4-balanced': 'Balanced 12B',
   'qwen3.8-27b-pro': 'Pro 27B',
   'gemma4-deepthinking': 'Pro 27B',
   'gemma4-31b': 'Pro 27B',
@@ -94,28 +117,32 @@ async function copyOscarCodeBlock(button) {
   }, 1400));
 }
 
+const DEFAULT_STARTUP_TYPE = 'assembly';
 const STARTUP_TYPE_LABELS = Object.freeze({
-  classic: 'Классическая',
   generated: 'Generated 3D',
-  model: 'Полная 3D-модель',
-  test: 'Системная',
+  assembly: 'Сборка знака',
   disabled: 'Отключена',
 });
 const STARTUP_DURATIONS = Object.freeze({
-  classic: 2380,
   generated: 2700,
-  model: 3040,
 });
 const startupMotionTemplate = document.querySelector('#startup-motion')?.cloneNode(true) || null;
 let activeStartupPreviewCleanup = null;
 
 const preferences = readPreferences();
-const reducedMotionMedia = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+// The interface language paints before the rest of the shell settles.
+void setUiLanguage(preferences.language || detectUiLanguage());
+mountSettingsLanguagePicker();
+let astraMaxMode = null;
+state.oscar = state.oscar || {};
+state.oscar.reasoningEffort = preferences.reasoningEffort;
+const reducedMotionMedia = reducedUiMotion;
 const animatedMotionKeys = new Set();
 let typingTimer = 0;
 let safeLaunchFeedbackTimer = 0;
 let securityStatusRequested = false;
 let componentStateTimer = 0;
+let astraProductPilotActive = false;
 
 // Render Coordinator
 function render() {
@@ -124,6 +151,8 @@ function render() {
   renderModelSetupWelcome();
   scheduleComponentStateRefresh(state.data?.components);
   renderModelManager();
+  renderCustomModelsPane();
+  renderSettingsExtras();
   renderActiveView(readActiveViewId());
   renderMascot();
 }
@@ -131,7 +160,7 @@ function render() {
 function renderActiveView(activeView) {
   if (activeView === 'oscar-section') {
     syncOscarModelDropdowns();
-    renderOscar();
+    if (!astraProductPilotActive) renderOscar();
     return;
   }
   if (activeView === 'security-section') {
@@ -254,40 +283,26 @@ document.addEventListener('click', (event) => {
 
   const oscarModelDropdownTrigger = event.target.closest('#oscar-model-dropdown-btn');
   if (oscarModelDropdownTrigger) {
+    closeOscarComposerMenu({ immediate: true });
     const popover = document.querySelector('#oscar-model-popover');
     toggleDropdown(popover);
     closeOtherDropdowns(popover);
     return;
   }
 
-  const oscarIntelligenceToggle = event.target.closest('#oscar-intelligence-toggle');
-  if (oscarIntelligenceToggle) {
+  const oscarWebToggleButton = event.target.closest('#oscar-web-toggle');
+  if (oscarWebToggleButton) {
     state.oscar = state.oscar || {};
-    state.oscar.intelligenceEnabled = state.oscar.intelligenceEnabled !== true;
-    syncOscarModelDropdowns();
-    renderOscar();
-    const popover = document.querySelector('#oscar-model-popover');
-    if (state.oscar.intelligenceEnabled) {
-      document.querySelector('#oscar-composer-menu')?.removeAttribute('open');
-      openDropdown(popover);
-      closeOtherDropdowns(popover);
-    }
-    return;
-  }
-
-  const oscarContextMeterToggle = event.target.closest('#oscar-context-meter-toggle');
-  if (oscarContextMeterToggle) {
-    preferences.contextMeterVisible = preferences.contextMeterVisible === false;
-    savePreferences();
+    if (state.data?.ownerDev?.internetEnabled === false) return;
+    state.oscar.web = state.oscar.web !== true;
     syncOscarModelDropdowns();
     return;
   }
 
-  const oscarResearchDropdownTrigger = event.target.closest('#oscar-research-dropdown-btn');
-  if (oscarResearchDropdownTrigger) {
-    const popover = document.querySelector('#oscar-research-popover');
-    toggleDropdown(popover);
-    closeOtherDropdowns(popover);
+  const oscarEffortChoice = event.target.closest('#oscar-model-popover [data-effort]');
+  if (oscarEffortChoice) {
+    if (oscarEffortChoice.getAttribute('aria-disabled') === 'true') return;
+    setOscarReasoningEffort(oscarEffortChoice.getAttribute('data-effort'));
     return;
   }
 
@@ -306,26 +321,19 @@ document.addEventListener('click', (event) => {
   if (oscarModelDropdownItem?.closest('.dropdown-popover') === oscarModelPopover) {
     if (oscarModelDropdownItem.getAttribute('aria-disabled') === 'true') return;
     state.oscar = state.oscar || {};
-    const currentSelection = state.oscar.modelSelection || 'none';
-    let nextSelection = oscarModelDropdownItem.getAttribute('data-value') || 'none';
-    if (nextSelection === 'none' && currentSelection === 'none') {
-      nextSelection = resolveOscarManualModelSelection(state.oscar.lastManualModelSelection);
-    } else if (nextSelection === 'none' && currentSelection !== 'none') {
-      state.oscar.lastManualModelSelection = currentSelection;
-    }
-    state.oscar.modelSelection = nextSelection;
-    if (nextSelection !== 'none') state.oscar.lastManualModelSelection = nextSelection;
+    state.oscar.modelSelection = oscarModelDropdownItem.getAttribute('data-value') || 'none';
+    window.dispatchEvent(new CustomEvent('monarch-local-model-selected'));
     syncOscarModelDropdowns();
+    closeDropdown(oscarModelPopover);
     import('./modules/oscar-pane.js').then(m => m.renderOscar && m.renderOscar());
     return;
   }
 
-  const oscarResearchDropdownItem = event.target.closest('#oscar-research-popover .dropdown-item');
-  if (oscarResearchDropdownItem) {
+  const oscarResearchChoice = event.target.closest('#oscar-model-popover [data-research]');
+  if (oscarResearchChoice) {
     state.oscar = state.oscar || {};
-    state.oscar.researchMode = oscarResearchDropdownItem.getAttribute('data-value') || 'auto';
+    state.oscar.researchMode = oscarResearchChoice.getAttribute('data-research') || 'auto';
     syncOscarModelDropdowns();
-    closeDropdown(document.querySelector('#oscar-research-popover'));
     import('./modules/oscar-pane.js').then(m => m.renderOscar && m.renderOscar());
     return;
   }
@@ -397,10 +405,19 @@ window.addEventListener('monarch:navigate', (event) => {
   if (!targetId) return;
   const navItem = [...document.querySelectorAll('.nav-item')]
     .find((item) => item.getAttribute('data-scroll-target') === targetId);
-  if (navItem) activatePrimaryView(navItem);
+  if (navItem) activatePrimaryView(navItem, { subview: event.detail?.subview, focusContent: event.detail?.focusContent });
 });
 
-function activatePrimaryView(navItem) {
+window.addEventListener('monarch:settings-selection', event => {
+  if (document.querySelector('#settings-section')?.classList.contains('view-hidden')) return;
+  const selector = event.detail?.tab === 'memory'
+    ? '.nav-item[data-settings-open="memory"]'
+    : '.nav-item[data-scroll-target="settings-section"]:not([data-settings-open])';
+  const item = document.querySelector(selector);
+  if (item) setActiveNavItem(item);
+});
+
+function activatePrimaryView(navItem, { subview, focusContent = false } = {}) {
   const targetId = navItem.getAttribute('data-scroll-target') || '';
   const target = document.getElementById(targetId);
   if (!target) return;
@@ -414,7 +431,6 @@ function activatePrimaryView(navItem) {
       'oscar-section',
       'security-section',
       'images-section',
-      'modules-section',
       'sharing-section',
       'logs-section',
       'settings-section'
@@ -424,14 +440,21 @@ function activatePrimaryView(navItem) {
       if (element) element.classList.add('view-hidden');
     });
     target.classList.remove('view-hidden');
-    elements.shell?.classList.toggle('modules-active', targetId === 'modules-section');
-    setStudioActive(targetId === 'modules-section');
     resetViewScroll(target);
     renderActiveView(targetId);
     window.dispatchEvent(new CustomEvent('monarch:view-change', { detail: { view: targetId } }));
-    const settingsTab = navItem.getAttribute('data-settings-open');
+    const settingsTab = subview || navItem.getAttribute('data-settings-open');
     if (targetId === 'settings-section') {
-      window.dispatchEvent(new CustomEvent('monarch:settings-tab', { detail: { tab: settingsTab || 'general' } }));
+      window.dispatchEvent(new CustomEvent('monarch:settings-tab', { detail: { tab: settingsTab || 'models' } }));
+    }
+    if (subview && targetId !== 'settings-section') {
+      const attribute = { 'security-section': 'data-security-tab', 'images-section': 'data-images-tab' }[targetId];
+      const tab = attribute && [...target.querySelectorAll(`[${attribute}]`)].find(button => button.getAttribute(attribute) === subview && !button.hidden && !button.disabled);
+      tab?.click();
+    }
+    if (focusContent) {
+      target.tabIndex = -1;
+      target.focus({ preventScroll: true });
     }
     if ((targetId === 'security-section' || targetId === 'settings-section') && !securityStatusRequested) {
       securityStatusRequested = true;
@@ -441,7 +464,7 @@ function activatePrimaryView(navItem) {
     window.scrollTo(0, 0);
   };
 
-  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+  const reduceMotion = reducedUiMotion.matches === true;
   if (!reduceMotion && typeof document.startViewTransition === 'function') {
     document.startViewTransition(applyViewChange);
   } else {
@@ -515,8 +538,11 @@ function toggleMascotVisibility() {
 }
 
 function closeComposerOptions() {
-  const details = document.querySelector('.composer-options[open]');
-  details?.removeAttribute('open');
+  closeOscarComposerMenu();
+  document.querySelectorAll('.composer-options[open]').forEach((details) => {
+    if (details.id === 'oscar-composer-menu') return;
+    details.removeAttribute('open');
+  });
 }
 
 function resetViewScroll(target) {
@@ -527,25 +553,6 @@ function resetViewScroll(target) {
     node.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   }
 }
-
-document.addEventListener('input', (event) => {
-  const range = event.target instanceof Element
-    ? event.target.closest('#oscar-intelligence-range')
-    : null;
-  if (!(range instanceof HTMLInputElement)) return;
-  const availableScale = readAvailableOscarModelScale();
-  const modelSelection = availableScale[Number(range.value)] || availableScale[0] || 'none';
-  const available = readSelectableOscarModelAvailability();
-  if (available?.[modelSelection] === false) {
-    syncOscarModelDropdowns();
-    return;
-  }
-  state.oscar = state.oscar || {};
-  state.oscar.modelSelection = modelSelection;
-  state.oscar.lastManualModelSelection = modelSelection;
-  syncOscarModelDropdowns();
-  renderOscar();
-});
 
 document.addEventListener('keydown', (event) => {
   if (!(event.target instanceof Element)) return;
@@ -617,7 +624,9 @@ document.addEventListener('keydown', (event) => {
 });
 
 for (const [select, key] of [
+  [elements.themeSelect, 'theme'],
   [elements.densitySelect, 'density'],
+  [elements.motionSelect, 'motion'],
   [elements.inspectorDefaultSelect, 'inspector'],
 ]) {
   if (select) {
@@ -628,6 +637,30 @@ for (const [select, key] of [
     });
   }
 }
+
+// Settings (custom models) and first setup pick a chat model through here, so
+// the composer, MAX switch and model button stay one owner's state.
+window.addEventListener('monarch:select-model', (event) => {
+  const model = String(event.detail?.model || 'none');
+  state.oscar = state.oscar || {};
+  state.oscar.modelSelection = model;
+  window.dispatchEvent(new CustomEvent('monarch-local-model-selected'));
+  syncOscarModelDropdowns();
+});
+
+// One owner for interface preferences: other surfaces (first setup, the
+// theme cards in Settings) ask here instead of writing storage themselves.
+window.addEventListener('monarch:set-ui-preference', (event) => {
+  const { key, value } = event.detail || {};
+  if (!['design', 'theme', 'autoTheme', 'density', 'motion', 'language'].includes(key)) return;
+  const next = normalizeUiPreferences({ ...serializeUiPreferences(preferences), [key]: value });
+  if (next[key] !== value) return;
+  preferences[key] = value;
+  savePreferences();
+  if (key === 'language') void setUiLanguage(value);
+  else applyPreferences();
+  window.dispatchEvent(new CustomEvent('monarch:ui-preferences-applied', { detail: { ...preferences } }));
+});
 
 elements.autonomyModeSelect?.addEventListener('change', () => {
   void savePermissionProfile();
@@ -682,7 +715,7 @@ async function loadState() {
 }
 
 // Initialization Flow
-function init() {
+async function init() {
   initStartupMotion();
   initMotionSystem();
   applyPreferences();
@@ -695,22 +728,58 @@ function init() {
   initModelManager();
   initModelOnboarding();
   initModelSetupWelcome();
-  initOscarPane(render);
+  initReminders();
+  initCustomModelsPane();
+  initSettingsExtras();
+  initServiceSwitcher();
+  initPaperPixel();
+  initEarlyAccessNotices();
+  mountSecurityDevelopmentBanner();
+  astraMaxMode = initAstraMaxSetup();
+  applyOscarReasoningEffortToMax();
+  initHelpPanel(document.querySelector('#monarch-help'), {
+    escapeHtml,
+    navigate: (view, subview) => window.dispatchEvent(new CustomEvent('monarch:navigate', { detail: { view, ...(subview ? { subview } : {}) } })),
+    checkOscar: async () => { await loadOscarStatus(render); return !state.oscar.error && Boolean(state.oscar.status); },
+    openLogs: typeof window.monarchDesktop?.openLogs === 'function' ? () => window.monarchDesktop.openLogs() : undefined,
+  });
+  initAwaySummary({ openSecurity: () => window.dispatchEvent(new CustomEvent('monarch:navigate', { detail: { view: 'security-section' } })) });
+  initSharedSelects();
+  let astraBridge = null;
+  try {
+    const { createAstraProductBridge } = await import('./modules/astra-product-bridge.js');
+    astraBridge = await createAstraProductBridge();
+  } catch (error) {
+    console.error('Astra product pilot bootstrap failed closed.', error);
+    const thread = document.querySelector('#oscar-thread');
+    if (thread) thread.innerHTML = renderError('Astra product pilot не запущен: ' + readErrorMessage(error));
+    return;
+  }
+  astraProductPilotActive = Boolean(astraBridge && astraBridge.surface === 'composer');
+  if (astraProductPilotActive) await initOscarPane(render, { astra: { deployment: 'isolated-validation', bridge: astraBridge, maxMode: astraMaxMode } });
+  else {
+    await initOscarPane(render, { nativeAstra: astraBridge, maxMode: astraMaxMode });
+  }
   initComputerUseControl();
+  initOscarPlusMenu();
   initCoderPane();
   initSecurityPane(render);
   initSharingPane();
   initSettingsPane();
-  initStudioPane();
+  initCompactLayout();
+  initUiNavigation();
   initImageGenerationPane();
   initUpdatePane();
   initMascotInteraction();
-  initVoiceInput();
-  initOscarVoiceMode();
-  installComposerTypeToFocus();
-  installOscarSnakeEasterEgg({
-    isConversationEmpty: () => state.oscar.messages.length === 0,
-  });
+  if (!astraProductPilotActive) {
+    initVoiceInput();
+    const voiceMode = initOscarVoiceMode();
+    initVoiceWakeService({ voiceMode });
+    installComposerTypeToFocus();
+    installOscarSnakeEasterEgg({
+      isConversationEmpty: () => state.oscar.messages.length === 0,
+    });
+  }
   installMonarchBrandEasterEgg();
 
   // Subscribe render to reactive state changes
@@ -719,13 +788,15 @@ function init() {
 
   // Initial queries
   void loadState().then(() => {
-    void loadOscarStatus(render);
-    void loadOscarConversations();
+    if (!astraProductPilotActive) {
+      void loadOscarStatus(render);
+      void loadOscarConversations();
+    }
   });
 }
 
 // Start Monarch Web Shell
-init();
+void init();
 
 function initStartupMotion() {
   const startupType = readStartupType();
@@ -747,18 +818,18 @@ function initStartupMotion() {
     return;
   }
 
-  if (startupType === 'classic' || startupType === 'generated' || startupType === 'model') {
+  if (startupType === 'generated') {
     playDomStartupMotion(originalDOM, startupType, {
       completeShell: true,
     });
     return;
   }
 
-  if (startupType === 'test') {
-    if (originalDOM) originalDOM.remove();
-    playSystemStartupMotion({
+  if (startupType === 'assembly') {
+    playAssemblyStartupMotion(originalDOM, {
       completeShell: true,
     });
+    return;
   }
 }
 
@@ -775,8 +846,7 @@ function scheduleComponentStateRefresh(components) {
 }
 
 function normalizeStartupType(value) {
-  if (value === 'original') return 'generated';
-  return Object.hasOwn(STARTUP_TYPE_LABELS, value) ? value : 'generated';
+  return Object.hasOwn(STARTUP_TYPE_LABELS, value) ? value : DEFAULT_STARTUP_TYPE;
 }
 
 function readStartupType() {
@@ -827,9 +897,6 @@ function playDomStartupMotion(root, startupType, options = {}) {
   root.dataset.startupVariant = startupType;
   root.classList.remove('is-exiting');
 
-  const logo3D = startupType === 'model'
-    ? mountMonarchLogo3D(root.querySelector('[data-monarch-logo-3d]'))
-    : null;
   const duration = reducedMotionMedia?.matches
     ? 240
     : STARTUP_DURATIONS[startupType];
@@ -844,7 +911,6 @@ function playDomStartupMotion(root, startupType, options = {}) {
   timers.push(window.setTimeout(() => {
     if (finished) return;
     finished = true;
-    logo3D?.dispose();
     root.remove();
     options.onComplete?.();
   }, duration + exitDelay));
@@ -853,43 +919,143 @@ function playDomStartupMotion(root, startupType, options = {}) {
     if (finished) return;
     finished = true;
     timers.forEach((timer) => window.clearTimeout(timer));
-    logo3D?.dispose();
     root.remove();
   };
 }
 
-function playSystemStartupMotion(options = {}) {
-  const startup = new MonarchStartup({
-    title: 'MONARCH',
-    subtitle: 'Local Intelligence Environment',
-    initialStatus: 'Пробуждение системы',
-    minimumVisibleTime: reducedMotionMedia?.matches ? 500 : 1800,
-  });
+// Crown and shield assemble, the name rises, then the mark flies into the sidebar brand
+// while the app opens behind it. Every moving part is a Web Animation with one owner;
+// cleanup cancels them all, so a preview can be interrupted at any moment.
+function playAssemblyStartupMotion(root, options = {}) {
+  if (!(root instanceof HTMLElement)) return () => {};
+  root.dataset.startupVariant = 'assembly';
+  root.classList.remove('is-exiting', 'is-static');
+
+  const part = (name) => root.querySelector(`[data-sa="${name}"]`);
+  const mark = part('mark');
+  const shield = part('shield');
+  const crown = part('crown');
+  const word = part('word');
+  const glow = part('glow');
+  const backdrop = root.querySelector('.startup-assembly-backdrop');
+  const letters = [...root.querySelectorAll('[data-sa="letter"]')];
   const timers = [];
+  const animations = [];
   let finished = false;
-  startup.mount();
 
-  timers.push(window.setTimeout(() => {
-    startup.setStatus('Запуск Oscar');
-    startup.setProgress(0.45);
-  }, 600));
-  timers.push(window.setTimeout(() => {
-    startup.setStatus('Проверка Security');
-    startup.setProgress(0.8);
-  }, 1200));
-  timers.push(window.setTimeout(async () => {
-    await startup.complete('Система готова');
-    if (finished) return;
-    finished = true;
-    if (options.completeShell) elements.shell?.classList.add('startup-complete');
-    options.onComplete?.();
-  }, 1800));
-
-  return () => {
+  const finish = (complete) => {
     if (finished) return;
     finished = true;
     timers.forEach((timer) => window.clearTimeout(timer));
-    startup.destroy();
+    animations.forEach((animation) => animation.cancel());
+    root.remove();
+    if (complete) options.onComplete?.();
+  };
+
+  if (!mark || !shield || !crown || !word || !glow || !backdrop) {
+    // Markup is incomplete: leave the app usable instead of a stuck overlay.
+    elements.shell?.classList.add('startup-complete');
+    finish(true);
+    return () => {};
+  }
+
+  if (reducedMotionMedia?.matches) {
+    // No movement: show the finished lockup briefly, then fade like the other variants.
+    root.classList.add('is-static');
+    timers.push(window.setTimeout(() => {
+      root.classList.add('is-exiting');
+      if (options.completeShell) elements.shell?.classList.add('startup-complete');
+    }, 240));
+    timers.push(window.setTimeout(() => finish(true), 360));
+    return () => finish(false);
+  }
+
+  const OUT = 'cubic-bezier(.2,.8,.2,1)';
+  const SPRING = 'cubic-bezier(.16,1,.3,1)';
+  const HANDOFF = 3400;
+  const FLIGHT = 900;
+  const play = (element, keyframes, timing) => {
+    const animation = element.animate(keyframes, { fill: 'both', easing: OUT, ...timing });
+    animations.push(animation);
+    return animation;
+  };
+
+  play(glow, [{ opacity: 0 }, { opacity: 1 }], { duration: 1800 });
+  play(shield, [
+    { opacity: 0, transform: 'translateY(14%)' },
+    { opacity: 1, transform: 'none' },
+  ], { delay: 250, duration: 750, easing: SPRING });
+  play(crown, [
+    { opacity: 0, transform: 'translateY(-33%)', offset: 0, easing: 'cubic-bezier(.5,0,.9,.6)' },
+    { opacity: 1, transform: 'translateY(-16%)', offset: .3, easing: 'cubic-bezier(.5,0,.9,.6)' },
+    { opacity: 1, transform: 'translateY(2%)', offset: .72, easing: OUT },
+    { opacity: 1, transform: 'none', offset: 1 },
+  ], { delay: 950, duration: 900, easing: 'linear' });
+  letters.forEach((letter, index) => {
+    play(letter, [
+      { opacity: 0, transform: 'translateY(112%)' },
+      { opacity: 1, transform: 'none' },
+    ], { delay: 1900 + index * 60, duration: 600, easing: SPRING });
+  });
+
+  timers.push(window.setTimeout(() => {
+    // Measure before the shell starts to settle: it is still scaled while blurred.
+    const flight = measureBrandFlight(mark);
+    root.classList.add('is-exiting');
+    if (options.completeShell) elements.shell?.classList.add('startup-complete');
+
+    play(word, [
+      { opacity: 1, transform: 'none' },
+      { opacity: 0, transform: 'translateY(10px)' },
+    ], { duration: 420 });
+    play(backdrop, [{ opacity: 1 }, { opacity: 0 }], { duration: 420 });
+    if (flight) {
+      play(mark, [
+        { transform: 'none' },
+        { transform: `translate(${flight.x}px, ${flight.y}px) scale(${flight.scale})` },
+      ], { duration: FLIGHT, easing: SPRING });
+      play(mark, [
+        { opacity: 1 },
+        { opacity: 1, offset: .6 },
+        { opacity: 0 },
+      ], { duration: FLIGHT, easing: 'linear' });
+    } else {
+      // No sidebar brand on screen (narrow window): the mark simply settles away.
+      play(mark, [{ opacity: 1 }, { opacity: 0 }], { duration: 420 });
+    }
+  }, HANDOFF));
+  timers.push(window.setTimeout(() => finish(true), HANDOFF + FLIGHT + 60));
+
+  return () => finish(false);
+}
+
+// Where the mark lands: the start of the sidebar brand name. Returns the translation and
+// scale that carry the centred mark box there, or null when the brand is not visible.
+function measureBrandFlight(mark) {
+  const label = document.querySelector('[data-monarch-brand-label]');
+  const shell = elements.shell;
+  if (!(label instanceof HTMLElement) || !(shell instanceof HTMLElement)) return null;
+  const labelRect = label.getBoundingClientRect();
+  if (!labelRect.width || !labelRect.height) return null;
+
+  // The shell may still be scaled around its centre; undo that so the target is where
+  // the label will rest once the shell has settled.
+  const transform = getComputedStyle(shell).transform;
+  const shellScale = transform && transform !== 'none' ? new DOMMatrixReadOnly(transform).a || 1 : 1;
+  const shellRect = shell.getBoundingClientRect();
+  const centreX = shellRect.left + shellRect.width / 2;
+  const centreY = shellRect.top + shellRect.height / 2;
+  const settle = (value, centre) => centre + (value - centre) / shellScale;
+
+  const box = mark.getBoundingClientRect();
+  // The drawn crown and shield span about 44% of the box width and sit 3.7% above its centre.
+  const scale = Math.max(.08, 20 / (box.width * .445));
+  const targetX = settle(labelRect.left + 10, centreX);
+  const targetY = settle(labelRect.top + labelRect.height / 2, centreY);
+  return {
+    scale,
+    x: targetX - (box.left + box.width / 2),
+    y: targetY + box.height * .037 * scale - (box.top + box.height / 2),
   };
 }
 
@@ -902,7 +1068,6 @@ function previewStartupMotion(value) {
 
   activeStartupPreviewCleanup?.();
   document.querySelector('#startup-motion')?.remove();
-  document.querySelector('#monarch-startup')?.remove();
   syncStartupPreferenceControls({ previewing: true });
   if (elements.startupAnimationStatus) {
     elements.startupAnimationStatus.textContent =
@@ -915,15 +1080,13 @@ function previewStartupMotion(value) {
     syncStartupPreferenceControls();
   };
 
-  if (startupType === 'test') {
-    cleanup = playSystemStartupMotion({ onComplete: finish });
-  } else if (startupMotionTemplate instanceof HTMLElement && elements.shell) {
+  if (startupMotionTemplate instanceof HTMLElement && elements.shell) {
     const previewRoot = startupMotionTemplate.cloneNode(true);
     previewRoot.dataset.startupVariant = startupType;
     elements.shell.before(previewRoot);
-    cleanup = playDomStartupMotion(previewRoot, startupType, {
-      onComplete: finish,
-    });
+    cleanup = startupType === 'assembly'
+      ? playAssemblyStartupMotion(previewRoot, { onComplete: finish })
+      : playDomStartupMotion(previewRoot, startupType, { onComplete: finish });
   } else {
     syncStartupPreferenceControls();
     return;
@@ -1006,6 +1169,20 @@ function readPreferences() {
   }
 }
 
+/** Settings → System: the interface language, next to the theme. */
+function mountSettingsLanguagePicker() {
+  const section = document.querySelector('.settings-appearance');
+  if (!section || section.querySelector('.settings-language')) return;
+  const row = document.createElement('div');
+  row.className = 'settings-appearance-row settings-language';
+  const copy = document.createElement('span');
+  copy.innerHTML = '<strong>Язык интерфейса</strong><small>Русский, українська, English или български. Язык ответов Оскара — в «Стиле ответов».</small>';
+  row.append(copy, createLanguagePicker({ onChange: (language) => window.dispatchEvent(new CustomEvent('monarch:set-ui-preference',
+    { detail: { key: 'language', value: language } })) }));
+  const setupRow = section.querySelector('.settings-appearance-row');
+  if (setupRow) setupRow.before(row); else section.append(row);
+}
+
 function savePreferences() {
   try {
     localStorage.setItem('monarch.ui.preferences', JSON.stringify(serializeUiPreferences(preferences)));
@@ -1014,9 +1191,38 @@ function savePreferences() {
   }
 }
 
+/** Paint the resolved theme. "auto" asks the desktop host to follow Windows
+ * (so prefers-color-scheme tells the truth) or re-checks at 07:00 / 20:00. */
+function applyTheme() {
+  const followsSystem = preferences.theme === 'auto' && preferences.autoTheme === 'system';
+  const theme = resolveTheme(preferences, { systemDark: systemDarkQuery?.matches === true });
+  document.documentElement.dataset.design = preferences.design;
+  document.documentElement.dataset.theme = theme;
+  document.body.dataset.theme = theme;
+  document.documentElement.dataset.themePreference = preferences.theme;
+  document.documentElement.dataset.autoTheme = preferences.autoTheme;
+  document.documentElement.style.colorScheme = theme;
+  window.monarchDesktop?.setTheme?.(followsSystem ? 'system' : theme).catch(() => {});
+  clearTimeout(autoThemeTimer);
+  if (preferences.theme === 'auto' && preferences.autoTheme === 'time') {
+    autoThemeTimer = setTimeout(applyTheme, msUntilThemeBoundary());
+  }
+}
+
+systemDarkQuery?.addEventListener?.('change', () => {
+  if (preferences.theme === 'auto' && preferences.autoTheme === 'system') applyTheme();
+});
+// A timer can oversleep with the computer; re-check the clock when Monarch is back.
+window.addEventListener('focus', () => {
+  if (preferences.theme === 'auto' && preferences.autoTheme === 'time') applyTheme();
+});
+
 function applyPreferences() {
-  document.body.dataset.theme = 'dark';
+  applyTheme();
+  if (elements.themeSelect) elements.themeSelect.value = preferences.theme;
   document.body.dataset.density = preferences.density;
+  setUiMotionPreference(preferences.motion);
+  if (elements.motionSelect) elements.motionSelect.value = preferences.motion;
 
   if (elements.shell) {
     const mascotHidden = preferences.inspector === 'closed';
@@ -1086,6 +1292,20 @@ async function savePermissionProfile() {
   }
 }
 
+let systemMapGroup = 'all';
+let renderedSystemMap = '';
+function renderSystemMapPanel() {
+  if (!elements.systemMap || !state.data?.system) return;
+  const html = renderSystemMap(state.data.system, systemMapGroup, escapeHtml);
+  if (html !== renderedSystemMap) { elements.systemMap.innerHTML = html; renderedSystemMap = html; }
+}
+elements.systemMap?.addEventListener('click', (event) => {
+  const button = event.target.closest?.('[data-system-map-group]');
+  if (!button) return;
+  systemMapGroup = button.getAttribute('data-system-map-group') || 'all';
+  renderSystemMapPanel();
+});
+
 function renderPermissionSettings() {
   renderAuthorityStatus();
   const profile = state.data?.permissions;
@@ -1094,16 +1314,18 @@ function renderPermissionSettings() {
     || (profile.sandboxMode === 'read-only' ? 'guided' : profile.sandboxMode === 'danger-full-access' ? 'full-local' : 'workspace-autonomous');
   if (elements.autonomyModeSelect) elements.autonomyModeSelect.value = autonomyMode;
   syncComputerUsePermissionProfile(profile);
+  if (elements.accessMatrix) elements.accessMatrix.innerHTML = renderAccessMatrix(state.data?.permissionMatrix, autonomyMode, escapeHtml);
   if (!elements.permissionProfileNote) return;
   elements.permissionProfileNote.classList.remove('error-text');
   const descriptions = {
-    guided: 'Чтения выполняются свободно; изменения, запуск и сеть требуют точного разового разрешения.',
-    'workspace-autonomous': 'Чтения и обратимые изменения внутри workspace автономны. Удаление, внешние адреса и системные действия остаются под контролем.',
-    'full-local': 'Обычные локальные действия автономны. Необратимые, внешние и security-sensitive операции всё равно проходят hard boundaries.',
+    guided: 'Читает сам. Любое изменение, запуск или выход в интернет — только после твоего разрешения.',
+    'workspace-autonomous': 'Читает и меняет файлы проекта сам. Удаление, интернет и системные действия — только с твоего разрешения.',
+    'full-local': 'Полный доступ открывает диск, куда ты сказал. Красные зоны, Safe, Windows и ключи остаются закрытыми.',
   };
   elements.permissionProfileNote.textContent = descriptions[autonomyMode] || '';
   renderSecurityPolicyControls();
   renderAgencyControls();
+  renderSystemMapPanel();
 }
 
 function renderAuthorityStatus() {
@@ -1170,25 +1392,10 @@ function escapeAttribute(value) {
 }
 
 function renderMascot(activeView = readActiveViewId()) {
-  const execution = state.data?.lastIntent?.execution;
-  const output = execution?.output;
-  const reply = typeof output?.reply === 'string' ? output.reply : '';
-  const backend = state.oscar?.status?.backend;
-  const backendConnected = Boolean(backend?.connected);
-  const backendAttempted = Boolean(backend?.startupAttempted);
-  const backendNeedsAttention = Boolean(backend && !backendConnected && backendAttempted);
-  const detail = backendConnected
-    ? 'Локально · готов'
-    : backendNeedsAttention
-      ? 'Backend не запустился'
-      : 'Backend готов к запуску';
   syncMascotFromRuntime({
     activeView,
-    busy: Boolean(state.busy || state.oscar?.busy),
-    errored: Boolean(execution?.error || state.oscar?.error || backendNeedsAttention),
+    ...deriveOscarMascotRuntime(state.oscar, state.busy),
     securityRunning: Boolean(state.security?.status?.runtime?.running),
-    coding: /```/.test(reply),
-    detail,
   });
   updateInspectorToggleControls(preferences.inspector === 'closed');
 }
@@ -1202,7 +1409,6 @@ function getDropdownPopovers() {
   return [
     elements.modelPopover,
     document.querySelector('#oscar-model-popover'),
-    document.querySelector('#oscar-research-popover'),
   ].filter(Boolean);
 }
 
@@ -1313,9 +1519,9 @@ function syncOscarContextMeter(visible, contextWindow) {
   if (hasTelemetry) {
     meter.setAttribute('aria-valuenow', String(percent));
     meter.setAttribute('aria-valuetext', `${percent}% использовано, осталось ${remainingPercent}%`);
-    meter.setAttribute('aria-label', `Контекстное окно: ${percent}% использовано, ${formatOscarContextTokenCount(used)} из ${formatOscarContextTokenCount(total)} токенов`);
+    meter.setAttribute('aria-label', `Объём текущего диалога: ${percent}% заполнено`);
     if (percentLabel) percentLabel.textContent = `${percent}% использовано · осталось ${remainingPercent}%`;
-    if (tokensLabel) tokensLabel.textContent = `${formatOscarContextTokenCount(used)} / ${formatOscarContextTokenCount(total)} токенов`;
+    if (tokensLabel) tokensLabel.textContent = 'Объём текущего диалога';
     const contextNote = meterState.contextTrimmed
       ? `История сжата${meterState.droppedMessages ? ` · исключено сообщений: ${meterState.droppedMessages}` : ''}`
       : '';
@@ -1351,98 +1557,133 @@ function syncOscarModelDropdowns() {
   if (available && state.oscar?.modelSelection !== 'none' && available[state.oscar.modelSelection] === false) {
     state.oscar.modelSelection = 'none';
   }
-  const intelligenceEnabled = state.oscar?.intelligenceEnabled === true;
-  const contextMeterVisible = preferences.contextMeterVisible !== false;
+  // Model, reasoning depth and Internet sit in the composer itself: one click
+  // to see them, two to change them. No switch in the + menu hides them.
+  const contextMeterVisible = true;
   const contextControls = document.querySelector('#oscar-context-controls');
-  const modelContainer = document.querySelector('#oscar-model-dropdown-container');
-  const intelligenceToggle = document.querySelector('#oscar-intelligence-toggle');
-  const intelligenceState = intelligenceToggle?.querySelector('[data-intelligence-state]');
-  const contextMeterToggle = document.querySelector('#oscar-context-meter-toggle');
-  const contextMeterState = contextMeterToggle?.querySelector('[data-context-meter-state]');
-  if (contextControls) contextControls.hidden = !intelligenceEnabled && !contextMeterVisible;
-  if (modelContainer) modelContainer.hidden = !intelligenceEnabled;
-  elements.oscarComposer?.classList.toggle('intelligence-enabled', intelligenceEnabled);
-  elements.oscarComposer?.classList.toggle('context-meter-enabled', contextMeterVisible);
-  if (intelligenceToggle) {
-    intelligenceToggle.classList.toggle('is-active', intelligenceEnabled);
-    intelligenceToggle.setAttribute('aria-pressed', String(intelligenceEnabled));
+  if (contextControls) contextControls.hidden = false;
+  elements.oscarComposer?.classList.add('context-meter-enabled');
+  const internetAllowed = state.data?.ownerDev?.internetEnabled !== false;
+  const webEnabled = internetAllowed && state.oscar?.web === true;
+  const webToggle = document.querySelector('#oscar-web-toggle');
+  if (webToggle) {
+    webToggle.classList.toggle('is-active', webEnabled);
+    webToggle.setAttribute('aria-pressed', String(webEnabled));
+    webToggle.disabled = !internetAllowed;
+    const webLabel = !internetAllowed ? 'Интернет запрещён в настройках'
+      : webEnabled ? 'Интернет включён: Oscar ищет свежие данные. Нажми, чтобы выключить'
+        : 'Интернет выключен. Нажми, чтобы искать свежие данные';
+    webToggle.title = webLabel;
+    webToggle.setAttribute('aria-label', webLabel);
   }
-  if (intelligenceState) intelligenceState.textContent = intelligenceEnabled ? 'Вкл' : 'Выкл';
-  if (contextMeterToggle) {
-    contextMeterToggle.classList.toggle('is-active', contextMeterVisible);
-    contextMeterToggle.setAttribute('aria-pressed', String(contextMeterVisible));
+  elements.oscarComposer?.classList.toggle('web-enabled', webEnabled);
+  if (String(state.oscar?.modelSelection || '').startsWith('custom-') && !isReadyCustomModel(state.oscar.modelSelection)) {
+    state.oscar.modelSelection = 'none';
   }
-  if (contextMeterState) contextMeterState.textContent = contextMeterVisible ? 'Вкл' : 'Выкл';
-  if (!intelligenceEnabled) closeDropdown(document.querySelector('#oscar-model-popover'));
   const modelValue = (state.oscar && state.oscar.modelSelection) || 'none';
+  syncComposerCustomModels(modelValue);
+  const modelLabels = modelValue.startsWith('custom-')
+    ? { ...MODEL_LABELS, [modelValue]: customModelLabel(modelValue) || 'Своя модель' }
+    : MODEL_LABELS;
   syncDropdown({
-    button: document.querySelector('#oscar-model-dropdown-btn'),
+    button: document.querySelector('[data-astra-max-open]')?.dataset.selected === 'true' ? null : document.querySelector('#oscar-model-dropdown-btn'),
     popover: document.querySelector('#oscar-model-popover'),
     value: modelValue,
     prefix: 'Модель',
     separator: ' · ',
     displayPrefix: false,
     labelPrefix: 'Выбрать модель Oscar',
-    labels: MODEL_LABELS,
+    labels: modelLabels,
   });
-  syncDropdown({
-    button: document.querySelector('#oscar-research-dropdown-btn'),
-    popover: document.querySelector('#oscar-research-popover'),
-    value: (state.oscar && state.oscar.researchMode) || 'auto',
-    prefix: 'Исследование',
-    separator: ' · ',
-    labelPrefix: 'Выбрать исследование Oscar',
-    labels: {
-      auto: 'Авто',
-      off: 'выкл',
-      deep: 'Глубокое',
-    },
-  });
+  syncOscarResearchControl();
 
   const modelButton = document.querySelector('#oscar-model-dropdown-btn');
-  const modelLabel = MODEL_LABELS[modelValue] || modelValue;
-  if (modelButton) {
-    modelButton.textContent = modelLabel;
-    modelButton.dataset.modelPower = modelValue === 'qwen3.8-27b-pro' ? 'max' : 'standard';
-    const accessibleLabel = `Настроить модель Oscar: ${modelLabel}`;
-    modelButton.setAttribute('aria-label', accessibleLabel);
-    modelButton.title = accessibleLabel;
-  }
-  const modelCaption = document.querySelector('[data-intelligence-model-caption]');
-  if (modelCaption) {
-    const descriptions = {
-      none: 'Oscar подбирает под задачу',
-      'gemma4-fast': 'Быстрые ответы и простые команды',
-      'gemma4-balanced': 'Баланс скорости и качества',
-      'qwen3.8-27b-pro': 'Сложные задачи и полный Agent',
-    };
-    modelCaption.textContent = descriptions[modelValue] || 'Ручной выбор модели';
-  }
-  const intelligenceScale = document.querySelector('#oscar-intelligence-scale');
-  const availableScale = readAvailableOscarModelScale();
-  if (intelligenceScale) {
-    intelligenceScale.dataset.selection = modelValue;
-    intelligenceScale.dataset.power = String(Math.max(0, OSCAR_MODEL_SCALE.indexOf(modelValue) + 1));
-    intelligenceScale.dataset.availableCount = String(availableScale.length);
-  }
-  const intelligenceRange = document.querySelector('#oscar-intelligence-range');
-  if (intelligenceRange instanceof HTMLInputElement) {
-    const modelIndex = availableScale.indexOf(modelValue);
-    const rangeIndex = modelIndex >= 0 ? modelIndex : Math.max(0, Math.floor((availableScale.length - 1) / 2));
-    const progress = availableScale.length > 1 ? (rangeIndex / (availableScale.length - 1)) * 100 : 50;
-    intelligenceRange.max = String(Math.max(0, availableScale.length - 1));
-    intelligenceRange.disabled = availableScale.length <= 1;
-    intelligenceRange.value = String(rangeIndex);
-    intelligenceRange.closest('.oscar-intelligence-range-shell')?.style.setProperty('--intelligence-progress', `${progress}%`);
-    intelligenceRange.dataset.auto = String(modelIndex < 0);
-    intelligenceRange.setAttribute('aria-valuetext', modelLabel);
-    intelligenceRange.title = `Модель: ${modelLabel}`;
-  }
+  const modelLabel = modelLabels[modelValue] || modelValue;
+  const maxEntry = document.querySelector('[data-astra-max-open]');
+  const maxSelection = astraMaxMode?.selected() || null;
+  const effort = syncOscarEffortControl(maxSelection);
+  const effortSuffix = effort.applies && effort.value !== 'auto' ? ' · ' + OSCAR_EFFORT_LABELS[effort.value].toLowerCase() : '';
+  renderMaxModeButton(modelButton, maxEntry?.dataset.selected === 'true', modelLabel + effortSuffix,
+    maxSelection ? maxSelection.providerName + effortSuffix : '');
+  if (modelButton) modelButton.dataset.modelPower = modelValue === 'qwen3.8-27b-pro' ? 'max' : 'standard';
   const conversationId = String(state.oscar?.conversationId || '').trim();
   const contextWindow = conversationId
     ? state.oscar?.contextWindows?.[conversationId] || null
     : null;
   syncOscarContextMeter(contextMeterVisible, contextWindow);
+}
+
+// Arrow keys move within the depth and research groups, as in any radio group.
+document.addEventListener('keydown', (event) => {
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  const current = event.target instanceof Element ? event.target.closest('#oscar-model-popover [data-effort], #oscar-model-popover [data-research]') : null;
+  if (!current) return;
+  const options = [...current.parentElement.querySelectorAll('[role="radio"]')].filter((node) => node.getAttribute('aria-disabled') !== 'true');
+  if (options.length < 2) return;
+  event.preventDefault();
+  const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
+  const next = options[(options.indexOf(current) + step + options.length) % options.length];
+  next.click();
+  next.focus();
+});
+
+/** Research sits in plain sight next to depth; it only runs with Internet on. */
+function syncOscarResearchControl() {
+  const value = ['auto', 'off', 'deep'].includes(state.oscar?.researchMode) ? state.oscar.researchMode : 'auto';
+  const group = document.querySelector('#oscar-research-control');
+  if (!group) return;
+  group.querySelectorAll('[data-research]').forEach((option) => {
+    const checked = option.getAttribute('data-research') === value;
+    option.setAttribute('aria-checked', String(checked));
+    option.tabIndex = checked ? 0 : -1;
+  });
+  const webOn = state.oscar?.web === true;
+  group.dataset.web = String(webOn);
+  const caption = group.querySelector('[data-research-caption]');
+  if (caption) caption.textContent = !webOn ? 'Работает, когда включён Интернет'
+    : { auto: 'Oscar сам распознаёт сложное исследование', off: 'Ответ без автоматического исследования',
+      deep: 'План, несколько веток поиска и проверка' }[value];
+}
+
+const OSCAR_EFFORT_LABELS = Object.freeze({ auto: 'Авто', low: 'Быстро', medium: 'Обычно', high: 'Глубоко' });
+
+function setOscarReasoningEffort(value) {
+  const next = Object.hasOwn(OSCAR_EFFORT_LABELS, value) ? value : 'auto';
+  state.oscar = state.oscar || {};
+  state.oscar.reasoningEffort = next;
+  preferences.reasoningEffort = next;
+  savePreferences();
+  applyOscarReasoningEffortToMax();
+  syncOscarModelDropdowns();
+}
+
+/** MAX agent decisions run in the main process; the choice reaches them there. */
+function applyOscarReasoningEffortToMax() {
+  const value = state.oscar?.reasoningEffort || 'auto';
+  void window.monarchDesktop?.astraMax?.setReasoningEffort?.(value === 'auto' ? null : value)?.catch?.(() => {});
+}
+
+function syncOscarEffortControl(maxSelection) {
+  const value = state.oscar?.reasoningEffort || 'auto';
+  // Each connected service takes depth in its own API form; a model that has
+  // no such setting says so instead of pretending to change.
+  const applies = !maxSelection || maxSelection.effortTunable === true;
+  const group = document.querySelector('#oscar-effort-control');
+  if (!group) return { value, applies };
+  group.dataset.disabled = String(!applies);
+  group.querySelectorAll('[data-effort]').forEach((option) => {
+    const checked = option.getAttribute('data-effort') === value;
+    option.setAttribute('aria-checked', String(checked));
+    option.setAttribute('aria-disabled', String(!applies));
+    option.tabIndex = checked && applies ? 0 : -1;
+  });
+  const caption = group.querySelector('[data-effort-caption]');
+  if (caption) {
+    caption.textContent = !applies ? 'Не настраивается у этой модели'
+      : { auto: 'Глубина под модель', low: 'Думает коротко, отвечает быстрее', medium: 'Баланс скорости и тщательности',
+        high: 'Дольше думает над сложным' }[value];
+  }
+  return { value, applies };
 }
 
 function syncModelAvailability(popover, available, hideUnavailable = false) {
@@ -1466,16 +1707,6 @@ function syncModelAvailability(popover, available, hideUnavailable = false) {
 
 function readSelectableOscarModelAvailability() {
   return resolveSelectableOscarModelAvailability(state.data, OSCAR_MODEL_SCALE);
-}
-
-function readAvailableOscarModelScale() {
-  return filterSelectableOscarModelScale(OSCAR_MODEL_SCALE, readSelectableOscarModelAvailability());
-}
-
-function resolveOscarManualModelSelection(preferredModel = '') {
-  const availableScale = readAvailableOscarModelScale();
-  if (preferredModel && availableScale.includes(preferredModel)) return preferredModel;
-  return availableScale[Math.max(0, Math.floor((availableScale.length - 1) / 2))] || 'none';
 }
 
 function setActiveNavItem(activeItem) {

@@ -37,6 +37,7 @@ export class MonarchProfileStore {
       this.durableFile = new DurableJsonFile(options.filePath, {
         createEmpty: () => ({ ...createDefaultProfile() }),
         validate: assertProfileDocument,
+        sensitive: { storeId: 'profile' },
       });
     }
   }

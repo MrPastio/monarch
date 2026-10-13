@@ -76,10 +76,41 @@ describe('Oscar history reconciliation', () => {
       .toEqual([hydratedUser, failure]);
   });
 
+  it('keeps an unpersisted reply to an agent question that shares the Turn with the request', () => {
+    const question = { id: 'question-local', role: 'assistant', content: 'Уточни папку?', turnId: 'turn-1', outcome: 'waiting-for-user' };
+    const reply = { id: 'reply-local', role: 'user', content: 'Рабочий стол', turnId: 'turn-1' };
+    const answer = { ...failure, id: 'answer-local', content: 'Готово', outcome: 'verified', error: false };
+    const hydratedUser = { ...user, id: 'sqlite-user', clientMessageId: user.id };
+    const hydratedQuestion = { ...question, id: 'sqlite-question', clientMessageId: 'agent_question_1', outcome: '' };
+    expect(appendUnhydratedLocalAssistant([user, question, reply, answer], [hydratedUser, hydratedQuestion]))
+      .toEqual([hydratedUser, hydratedQuestion, reply, answer]);
+  });
+
   it('uses the hydrated terminal exactly once after persistence catches up', () => {
     const hydratedFailure = { ...failure, id: 'assistant-durable', error: false };
     expect(appendUnhydratedLocalAssistant([user, failure], [user, hydratedFailure]))
       .toEqual([user, hydratedFailure]);
+  });
+
+  it('keeps the newest local answer when history has an earlier assistant message from the same turn', () => {
+    const earlierAssistant = {
+      ...failure,
+      id: 'assistant-clarification',
+      content: 'Нужно уточнение.',
+      outcome: 'waiting-for-user',
+    };
+    const latestAssistant = {
+      ...failure,
+      id: 'assistant-latest',
+      content: 'Вот результат.',
+      outcome: 'answered',
+      error: false,
+    };
+
+    expect(appendUnhydratedLocalAssistant(
+      [user, earlierAssistant, latestAssistant],
+      [user, earlierAssistant],
+    )).toEqual([user, earlierAssistant, latestAssistant]);
   });
 
   it('does not append a stale local terminal to an unrelated hydrated turn', () => {

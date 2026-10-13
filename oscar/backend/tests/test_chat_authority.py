@@ -3,7 +3,6 @@ from pydantic import ValidationError
 
 from oscar_agent.main import replace_unexecuted_tool_promise
 from oscar_agent.schemas import (
-    ChatCapabilityContext,
     ChatMessage,
     ChatRequest,
     ChatResponse,
@@ -34,16 +33,13 @@ def test_chat_response_distinguishes_answer_from_verified_completion():
 
 
 def test_answer_only_request_rejects_capability_authority():
-    capability = ChatCapabilityContext(
-        id="workspace.storage.audit",
-        module="workspace",
-        system="workspace",
-        title="Audit storage",
-        description="Read local directories",
-        risk="read",
-    )
-    with pytest.raises(ValidationError, match="answer-only chat"):
-        answer_request(capabilities=[capability])
+    with pytest.raises(ValidationError, match="capabilities"):
+        answer_request(capabilities=[{"id": "workspace.storage.audit"}])
+
+
+def test_legacy_agent_controller_authority_is_rejected():
+    with pytest.raises(ValidationError, match="execution_authority"):
+        answer_request(execution_authority="agent-controller")
 
 
 def test_coordinator_owned_chat_requires_durable_turn_binding():

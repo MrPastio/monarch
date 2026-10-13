@@ -1,17 +1,19 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { readDurableJson, writeDurableJson } from '../../core/durable-json';
+import { readDurableJson, renameWithWindowsRetrySync, writeDurableJson } from '../../core/durable-json';
+import { storeProtection } from '../../core/store-protection';
 import type {
   CoderContextSummary,
+  CoderAstraTaskProjection,
   CoderModelId,
   CoderRun,
   CoderRunEvent,
   CoderRunEventKind,
   CoderRunStatus,
 } from './types';
+import { isCoderModelId } from './types';
 import type { MonarchPersonalityContextV2 } from '../../settings';
-import type { AgentTaskCheckpoint, AgentTaskEvent } from '../../agent';
 
 const DEFAULT_CONTEXT_BUDGET = 16_384;
 const DEFAULT_RESERVED_OUTPUT = 4_096;
@@ -24,6 +26,8 @@ const DEFAULT_MAX_ITERATIONS = 64;
 
 export interface CoderRunStoreOptions {
   monarchRoot: string;
+  runsRoot?: string;
+  legacyRunsRoot?: string;
   budgetTokens?: number;
   reservedOutputTokens?: number;
   maxIterations?: number;
@@ -38,32 +42,74 @@ export interface CoderPromptProjection {
 
 export class CoderRunStore {
   readonly runsRoot: string;
+  private readonly legacyRunsRoot: string | null;
   private readonly budgetTokens: number;
   private readonly reservedOutputTokens: number;
   private readonly maxIterations: number;
   private readonly writeRun: (filePath: string, run: CoderRun) => void;
   private readonly runs = new Map<string, CoderRun>();
+  private readonly listeners = new Set<(run: CoderRun) => void>();
 
   constructor(options: CoderRunStoreOptions) {
-    this.runsRoot = path.resolve(options.monarchRoot, 'runtime', 'coder', 'runs');
+    this.runsRoot = path.resolve(options.runsRoot || path.resolve(options.monarchRoot, 'runtime', 'coder', 'runs'));
+    const legacyRunsRoot = options.legacyRunsRoot ? path.resolve(options.legacyRunsRoot) : null;
+    this.legacyRunsRoot = legacyRunsRoot && legacyRunsRoot.toLowerCase() !== this.runsRoot.toLowerCase()
+      ? legacyRunsRoot
+      : null;
     this.budgetTokens = clamp(options.budgetTokens || DEFAULT_CONTEXT_BUDGET, 8_192, 131_072);
     this.reservedOutputTokens = clamp(options.reservedOutputTokens || DEFAULT_RESERVED_OUTPUT, 1_024, 16_384);
     this.maxIterations = clamp(options.maxIterations || DEFAULT_MAX_ITERATIONS, 8, 128);
-    this.writeRun = options.writeRun || writeDurableJson;
+    this.writeRun = options.writeRun
+      || ((file, run) => writeDurableJson(file, run, { sensitive: { storeId: 'coder-runs' } }));
     this.restore();
+    this.sealArchivedRuns();
   }
 
-  list(projectId?: string): CoderRun[] {
+  /** Owner decision: no plain original stays once sealing is on. Archived runs
+   * are never read again, so they are resealed once here, in the background. */
+  private sealArchivedRuns(): void {
+    if (storeProtection().mode !== 'sealed') return;
+    const archive = path.join(this.runsRoot, 'archive');
+    setImmediate(() => {
+      let names: string[] = [];
+      try { names = readdirSync(archive).filter((name) => name.endsWith('.json')); } catch { return; }
+      for (const name of names) {
+        try { readDurableJson<unknown>(path.join(archive, name), { sensitive: { storeId: 'coder-runs' } }); }
+        catch { /* an unreadable archived run stays as it is */ }
+      }
+    });
+  }
+
+  list(projectId?: string, limit = 60): CoderRun[] {
     return Array.from(this.runs.values())
       .filter((run) => !projectId || run.projectId === projectId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .slice(0, 60)
+      .slice(0, limit)
       .map(cloneRun);
   }
 
   get(runId: string): CoderRun | null {
     const run = this.runs.get(runId);
     return run ? cloneRun(run) : null;
+  }
+
+  findRequest(clientRequestId: string): CoderRun | null {
+    const run = Array.from(this.runs.values()).find(entry => entry.clientRequestId === clientRequestId);
+    return run ? cloneRun(run) : null;
+  }
+
+  /** Runs of one conversation, oldest first. A legacy run is its own session. */
+  sessionRuns(sessionId: string): CoderRun[] {
+    return Array.from(this.runs.values())
+      .filter(run => coderRunSessionId(run) === sessionId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map(cloneRun);
+  }
+
+  /** Every durable change of a run, after it is written. */
+  subscribe(listener: (run: CoderRun) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
   }
 
   delete(runId: string): CoderRun {
@@ -91,15 +137,19 @@ export class CoderRunStore {
     prompt: string,
     model: CoderModelId = 'qwen3-coder-30b-a3b-instruct',
     projectIdentity?: { name: string; root: string },
+    clientRequestId?: string,
+    sessionId?: string,
   ): CoderRun {
+    if (sessionId !== undefined && !isCoderSessionId(sessionId)) throw new Error('Invalid Coder session id.');
     const now = new Date().toISOString();
     const run: CoderRun = {
       id: `coder_run_${randomUUID()}`,
       projectId,
+      sessionId: sessionId ?? `coder_session_${randomUUID()}`,
+      ...(clientRequestId ? { clientRequestId } : {}),
       ...(projectIdentity ? { projectName: projectIdentity.name, projectRoot: path.resolve(projectIdentity.root) } : {}),
       prompt: prompt.trim(),
       model,
-      fallbackModel: 'deepseek-coder-v2-lite-instruct',
       status: 'queued',
       createdAt: now,
       updatedAt: now,
@@ -165,74 +215,81 @@ export class CoderRunStore {
         throw new Error('Coder run is already bound to another Oscar Turn.');
       }
       run.oscarTurnId = turnId;
+      run.agentRuntimeVersion = 'v3';
       run.updatedAt = new Date().toISOString();
     });
   }
 
-  projectAgentCheckpoint(runId: string, checkpoint: AgentTaskCheckpoint): CoderRun {
+  projectAstraTask(runId: string, projection: CoderAstraTaskProjection): CoderRun {
     return this.mutateRun(runId, (run) => {
-      if (run.agentTaskId && run.agentTaskId !== checkpoint.task.id) {
+      if (run.agentTaskId && run.agentTaskId !== projection.taskId) {
         throw new Error('Coder run is already bound to another Agent Task.');
       }
-      run.agentTaskId = checkpoint.task.id;
-      const previousAgentSequence = run.agentEventSequence || 0;
-      for (const event of checkpoint.events.filter((entry) => entry.sequence > previousAgentSequence)) {
-        const projected = projectAgentEvent(event, checkpoint);
-        if (projected) this.appendRunEvent(run, projected.kind, projected.title, projected.detail, projected.extra);
+      const previousStatus = run.status;
+      run.agentTaskId = projection.taskId;
+      run.agentRuntimeVersion = 'v3';
+      if (projection.runtimeStatus) run.runtimeStatus = projection.runtimeStatus;
+      else delete run.runtimeStatus;
+      if (projection.completionEvidence) run.completionEvidence = projection.completionEvidence;
+      else delete run.completionEvidence;
+      const activityStates = { ...(run.astraActivityStates ?? {}) };
+      // Only the newest 16 rounds keep a state. An older round missing from
+      // the window was already journaled; replaying it would duplicate steps.
+      const retained = Object.keys(activityStates).map(Number);
+      const windowFloor = retained.length >= 16 ? Math.min(...retained) : -1;
+      for (const activity of [...projection.activities].sort((a, b) => a.round - b.round)) {
+        const key = String(activity.round), previous = activityStates[key];
+        if (!previous && activity.round < windowFloor) continue;
+        if (!previous && activity.thought) this.appendRunEvent(run, 'assistant', 'План следующего шага', activity.thought);
+        if (!previous) this.appendRunEvent(run, 'tool-start', `Run ${activity.capabilityId}`,
+          activity.reason || 'Astra V3 dispatched a project-bound Kernel capability.', { capabilityId: activity.capabilityId });
+        if (activity.state !== 'proposed' && previous !== activity.state) this.appendRunEvent(run, 'tool-result',
+          `${activity.ok ? 'Completed' : 'Failed'} ${activity.capabilityId}`,
+          activity.summary || (activity.ok ? 'Kernel receipt recorded.' : 'Capability did not complete.'), {
+            capabilityId: activity.capabilityId, ok: activity.ok === true,
+            ...(activity.output !== undefined ? { output: structuredClone(activity.output) } : {}),
+            ...(activity.state === 'failed' && activity.summary ? { error: activity.summary } : {}),
+          });
+        activityStates[key] = activity.state;
+        run.astraActivityRound = Math.max(run.astraActivityRound ?? -1, activity.round);
       }
-      run.agentEventSequence = checkpoint.task.eventSequence;
-      run.iteration = Math.min(run.maxIterations, checkpoint.task.usage.modelTurns);
-      run.context.modelCalls = checkpoint.task.usage.modelTurns;
-      const activeApproval = checkpoint.task.activeApprovalId
-        ? checkpoint.approvals.find((entry) => entry.id === checkpoint.task.activeApprovalId && entry.status === 'pending')
-        : undefined;
-      if (activeApproval) {
-        run.agentApproval = {
-          id: activeApproval.id,
-          capabilityId: activeApproval.capabilityId,
-          canonicalProposalHash: activeApproval.canonicalProposalHash,
-          reason: activeApproval.reason || 'Требуется подтверждение точного действия.',
-          ...(activeApproval.expiresAt ? { expiresAt: activeApproval.expiresAt } : {}),
-          ...(activeApproval.purpose ? { purpose: activeApproval.purpose } : {}),
-          proposal: structuredClone(activeApproval.proposal),
-        };
-      } else {
-        delete run.agentApproval;
+      run.astraActivityStates = Object.fromEntries(Object.entries(activityStates)
+        .sort(([left], [right]) => Number(left) - Number(right)).slice(-16));
+      if (projection.modelTurns > run.context.modelCalls) {
+        this.appendRunEvent(run, 'model', 'Astra V3 agent cycle',
+          `Model turns: ${projection.modelTurns}. Kernel capability calls: ${projection.capabilityCalls}.`);
       }
-      const now = checkpoint.task.updatedAt || new Date().toISOString();
-      run.updatedAt = now;
-      run.cancelled = checkpoint.task.cancellationRequested === true || checkpoint.task.status === 'cancelled';
-      const resultMessage = [...checkpoint.task.messages].reverse().find((entry) => (
-        entry.role === 'assistant' && entry.kind === 'result' && typeof entry.content === 'string'
-      ));
-      if (checkpoint.task.status === 'completed') {
-        run.status = 'completed';
-        run.answer = String(resultMessage?.content || checkpoint.task.terminalReason?.summary || '').trim();
+      run.iteration = Math.min(run.maxIterations, projection.modelTurns);
+      run.context.modelCalls = projection.modelTurns;
+      if (projection.approval) run.agentApproval = structuredClone(projection.approval);
+      else delete run.agentApproval;
+      if (projection.question) run.agentQuestion = structuredClone(projection.question);
+      else delete run.agentQuestion;
+      const now = new Date().toISOString(); run.updatedAt = now;
+      run.cancelled = projection.status === 'cancelled';
+      if (projection.status === 'completed') {
+        run.status = 'completed'; run.answer = String(projection.answer || '').trim(); run.error = '';
         run.summary.lastAssistantSummary = compactText(run.answer, 2_000);
-        run.error = '';
-        run.finishedAt = checkpoint.task.completedAt || now;
-      } else if (checkpoint.task.status === 'failed') {
-        run.status = 'failed';
-        run.error = compactText(checkpoint.task.terminalReason?.summary || 'Agent Task failed.', 4_000);
-        run.finishedAt = checkpoint.task.completedAt || now;
-      } else if (checkpoint.task.status === 'cancelled') {
-        run.status = 'cancelled';
-        run.error = '';
-        run.finishedAt = checkpoint.task.completedAt || now;
-      } else if (checkpoint.task.status === 'interrupted') {
-        run.status = 'interrupted';
-        run.finishedAt = null;
+        if (previousStatus !== 'completed') {
+          if (run.answer) this.appendRunEvent(run, 'assistant', 'Coder completed', run.answer, { ok: true });
+          this.applyRunStatus(run, 'completed', 'Astra V3 task completed and its receipt-backed result was persisted.');
+        } else run.finishedAt ||= now;
+      } else if (projection.status === 'failed') {
+        run.status = 'failed'; run.error = compactText(projection.error || 'Astra V3 Agent Task failed.', 4_000);
+        if (previousStatus !== 'failed') this.applyRunStatus(run, 'failed', run.error);
+        else run.finishedAt ||= now;
+      } else if (projection.status === 'cancelled') {
+        run.status = 'cancelled'; run.error = '';
+        if (previousStatus !== 'cancelled') this.applyRunStatus(run, 'cancelled', 'Astra V3 task was cancelled.');
+        else run.finishedAt ||= now;
+      } else if (projection.status === 'interrupted') {
+        run.status = 'interrupted'; run.error = ''; run.finishedAt = null;
+        if (previousStatus !== 'interrupted') this.applyRunStatus(run, 'interrupted', 'Astra V3 task is paused and can be resumed explicitly.');
       } else {
-        run.status = 'running';
-        run.startedAt ||= checkpoint.task.createdAt;
-        run.finishedAt = null;
+        run.status = 'running'; run.startedAt ||= now; run.finishedAt = null; run.error = '';
+        if (previousStatus !== 'running') this.applyRunStatus(run, 'running', 'Astra V3 task is running.');
       }
-      run.summary.pending = checkpoint.task.plan?.steps
-        .filter((step) => step.status !== 'completed' && step.status !== 'skipped')
-        .map((step) => compactText(step.title, 800))
-        .slice(-40) || [];
-      this.refreshContextMetrics(run);
-      return cloneRun(run);
+      this.refreshContextMetrics(run); return cloneRun(run);
     });
   }
 
@@ -351,6 +408,15 @@ export class CoderRunStore {
     const previous = cloneRun(run);
     try {
       const result = mutation(run);
+      // A pass that changed nothing but the clock is not an update. Startup
+      // re-projects every bound run; stamping each one moved finished
+      // conversations to the top of the list and rewrote every file.
+      if (JSON.stringify({ ...run, updatedAt: previous.updatedAt }) === JSON.stringify(previous)) {
+        run.updatedAt = previous.updatedAt;
+        const copy = result as { id?: unknown; updatedAt?: unknown } | null;
+        if (copy && typeof copy === 'object' && copy.id === run.id) copy.updatedAt = previous.updatedAt;
+        return result;
+      }
       this.persist(run);
       return result;
     } catch (error) {
@@ -402,35 +468,66 @@ export class CoderRunStore {
     });
   }
 
+  /** Moves an unreadable journal to `quarantine/` unchanged. If even the move
+   * fails the file stays where it is and is simply skipped this time. */
+  private quarantine(file: string, reason: string): void {
+    const target = path.join(this.runsRoot, 'quarantine',
+      `${path.basename(file)}.${new Date().toISOString().replace(/[:.]/gu, '-')}.${reason}`);
+    let moved = false;
+    try {
+      mkdirSync(path.dirname(target), { recursive: true });
+      renameWithWindowsRetrySync(file, target);
+      moved = true;
+    } catch { /* skipped below */ }
+    console.error(JSON.stringify({ diagnostic: 'coder-run-quarantined', file: path.basename(file), reason, moved }));
+  }
+
   private restore(): void {
-    if (!existsSync(this.runsRoot)) return;
-    const files = readdirSync(this.runsRoot, { withFileTypes: true })
+    const primaryExists = existsSync(this.runsRoot);
+    const sourceRoot = primaryExists
+      ? this.runsRoot
+      : this.legacyRunsRoot && existsSync(this.legacyRunsRoot) ? this.legacyRunsRoot : null;
+    if (!sourceRoot) return;
+    const migratingLegacyState = sourceRoot !== this.runsRoot;
+    const files = readdirSync(sourceRoot, { withFileTypes: true })
       .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-      .map((entry) => path.join(this.runsRoot, entry.name));
+      .map((entry) => path.join(sourceRoot, entry.name));
     for (const file of files) {
-      const run = readDurableJson<unknown>(file);
+      // One damaged journal used to stop the whole Coder module from loading
+      // (every project and conversation gone until someone fixed the file by
+      // hand). It is set aside byte for byte instead and the rest loads.
+      let run: unknown;
+      try { run = readDurableJson<unknown>(file, { sensitive: { storeId: 'coder-runs' } }); }
+      catch { this.quarantine(file, 'invalid-json'); continue; }
       if (run === null) continue;
-      if (!isValidRun(run)) {
-        throw new Error(`Coder run journal ${file} has an invalid schema and was not modified.`);
-      }
-      if (path.basename(file) !== `${run.id}.json`) {
-        throw new Error(`Coder run journal ${file} does not match its run id and was not modified.`);
-      }
-      if (this.runs.has(run.id)) {
-        throw new Error(`Coder run journal ${file} duplicates run id ${run.id} and was not modified.`);
-      }
+      if (!isValidRun(run)) { this.quarantine(file, 'invalid-schema'); continue; }
+      if (path.basename(file) !== `${run.id}.json`) { this.quarantine(file, 'id-mismatch'); continue; }
+      if (this.runs.has(run.id)) { this.quarantine(file, 'duplicate-id'); continue; }
       let changed = false;
       if (run.status === 'running' || run.status === 'queued') {
-        run.status = 'interrupted';
         run.error = '';
         run.finishedAt = null;
         run.cancelled = false;
-        this.appendRunEvent(
-          run,
-          'status',
-          'Task interrupted',
-          'The previous Monarch process stopped. Verified receipts and checkpoints were preserved; the run can be resumed explicitly.',
-        );
+        if (run.oscarTurnId) {
+          // Oscar Turn + Astra V3 journal are the execution authority. A
+          // process exit is not a pause command and must not turn autonomous
+          // work into a user-resume wall. The controller rebinds this durable
+          // Turn, including the narrow gap before agentTaskId was projected.
+          this.appendRunEvent(
+            run,
+            'status',
+            'Task recovery pending',
+            'The durable Oscar/Astra V3 task will continue automatically after Monarch restores its exact Turn binding.',
+          );
+        } else {
+          run.status = 'interrupted';
+          this.appendRunEvent(
+            run,
+            'status',
+            'Task interrupted',
+            'The previous Monarch process stopped. Verified receipts and checkpoints were preserved; this legacy run can be resumed only when an authoritative task binding exists.',
+          );
+        }
         changed = true;
       }
       for (const key of ['modelCalls', 'modelInputTokens', 'modelOutputTokens', 'modelTotalTokens'] as const) {
@@ -439,7 +536,7 @@ export class CoderRunStore {
           changed = true;
         }
       }
-      if (changed) this.persist(run);
+      if (changed || migratingLegacyState) this.persist(run);
       this.runs.set(run.id, run);
     }
     this.pruneRuns();
@@ -457,8 +554,9 @@ export class CoderRunStore {
       const executable = typeof output?.executable === 'string' ? output.executable : event.title.replace(/^Run\s+/i, '');
       const args = Array.isArray(output?.args) ? output.args.map(String).join(' ') : '';
       pushUnique(run.summary.commands, compactText(`${executable}${args ? ` ${args}` : ''}`, 500), 50);
-      if (/\b(test|pytest|vitest|jest|typecheck|lint|build|verify)\b/i.test(`${event.title} ${event.detail}`)) {
-        pushUnique(run.summary.tests, `${event.ok ? 'PASS' : 'FAIL'}: ${compactText(event.title, 500)}`, 50);
+      const command = `${executable} ${args}`.trim();
+      if (/\b(test|pytest|vitest|jest|typecheck|lint|build|verify)\b/i.test(command)) {
+        pushUnique(run.summary.tests, `${event.ok ? 'PASS' : 'FAIL'}: ${compactText(command, 500)}`, 50);
       }
     }
     if (capabilityId === 'coder.skills.create' && event.ok) {
@@ -504,11 +602,29 @@ export class CoderRunStore {
 
   private persist(run: CoderRun): void {
     this.writeRun(path.join(this.runsRoot, `${run.id}.json`), run);
+    if (!this.listeners.size) return;
+    const snapshot = cloneRun(run);
+    for (const listener of this.listeners) {
+      try { listener(snapshot); } catch { /* a viewer never breaks the journal */ }
+    }
   }
 
+  /** Keeps the newest MAX_RUNS in memory. A finished run beyond that moves to
+   * runs/archive/ (kept, never loaded): its file used to stay beside the live
+   * ones and be read again on every start, so startup slowed with history. A
+   * run that is not finished is never pruned. */
   private pruneRuns(): void {
     const sorted = Array.from(this.runs.values()).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-    for (const run of sorted.slice(MAX_RUNS)) this.runs.delete(run.id);
+    for (const run of sorted.slice(MAX_RUNS)) {
+      if (!['completed', 'failed', 'cancelled'].includes(run.status)) continue;
+      this.runs.delete(run.id);
+      const file = path.join(this.runsRoot, `${run.id}.json`);
+      if (!existsSync(file)) continue;
+      try {
+        mkdirSync(path.join(this.runsRoot, 'archive'), { recursive: true });
+        renameWithWindowsRetrySync(file, path.join(this.runsRoot, 'archive', `${run.id}.json`));
+      } catch { /* Stays live and is pruned from memory again next start. */ }
+    }
   }
 }
 
@@ -554,6 +670,15 @@ function promptSummary(summary: CoderContextSummary): CoderContextSummary {
   };
 }
 
+export function isCoderSessionId(value: unknown): value is string {
+  return typeof value === 'string'
+    && /^coder_(session|run)_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+}
+
+export function coderRunSessionId(run: Pick<CoderRun, 'id' | 'sessionId'>): string {
+  return run.sessionId ?? run.id;
+}
+
 function isValidRun(value: unknown): value is CoderRun {
   if (!isRecord(value) || !isRecord(value.summary) || !isRecord(value.context)) return false;
   const summary = value.summary;
@@ -562,14 +687,21 @@ function isValidRun(value: unknown): value is CoderRun {
     && /^coder_run_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.id)
     && typeof value.projectId === 'string'
     && value.projectId.length > 0
+    && (value.sessionId === undefined || isCoderSessionId(value.sessionId))
     && (value.projectName === undefined || typeof value.projectName === 'string')
     && (value.projectRoot === undefined || typeof value.projectRoot === 'string')
     && (value.oscarTurnId === undefined || typeof value.oscarTurnId === 'string')
     && (value.agentTaskId === undefined || typeof value.agentTaskId === 'string')
+    && (value.agentRuntimeVersion === undefined || value.agentRuntimeVersion === 'v2' || value.agentRuntimeVersion === 'v3')
     && (value.agentEventSequence === undefined || isNonNegativeInteger(value.agentEventSequence))
+    && (value.astraActivityRound === undefined || typeof value.astraActivityRound === 'number'
+      && Number.isSafeInteger(value.astraActivityRound) && value.astraActivityRound >= -1)
+    && (value.astraActivityStates === undefined || isRecord(value.astraActivityStates)
+      && Object.keys(value.astraActivityStates).length <= 16
+      && Object.entries(value.astraActivityStates).every(([key, state]) => /^\d{1,6}$/u.test(key)
+        && ['proposed', 'observed', 'failed'].includes(String(state))))
     && typeof value.prompt === 'string'
-    && isCoderModel(value.model)
-    && isCoderModel(value.fallbackModel)
+    && isCoderModelId(value.model)
     && isCoderStatus(value.status)
     && typeof value.createdAt === 'string'
     && typeof value.updatedAt === 'string'
@@ -581,6 +713,7 @@ function isValidRun(value: unknown): value is CoderRun {
     && isNonNegativeInteger(value.maxIterations)
     && typeof value.cancelled === 'boolean'
     && (value.agentApproval === undefined || isValidAgentApproval(value.agentApproval))
+    && (value.agentQuestion === undefined || isValidAgentQuestion(value.agentQuestion))
     && isValidRunEvents(value.events)
     && typeof summary.goal === 'string'
     && isStringArray(summary.decisions)
@@ -615,84 +748,18 @@ function isValidAgentApproval(value: unknown): boolean {
     && isRecord(value.proposal);
 }
 
-function projectAgentEvent(
-  event: AgentTaskEvent,
-  checkpoint: AgentTaskCheckpoint,
-): {
-  kind: CoderRunEventKind;
-  title: string;
-  detail: string;
-  extra: Partial<Omit<CoderRunEvent, 'id' | 'sequence' | 'kind' | 'title' | 'detail' | 'createdAt'>>;
-} | null {
-  const payload = event.payload || {};
-  const capabilityId = typeof payload.capabilityId === 'string' ? payload.capabilityId : undefined;
-  switch (event.type) {
-  case 'model.started':
-    return { kind: 'model', title: 'Agent decision', detail: 'Общий Agent Runtime выбирает следующий проверяемый шаг.', extra: {} };
-  case 'resolver.discovery.requested':
-    return { kind: 'status', title: 'Capability discovery', detail: String(payload.query || 'Расширяю окно подходящих инструментов.'), extra: {} };
-  case 'plan.revised':
-    return { kind: 'status', title: 'Plan updated', detail: String(payload.reason || 'План адаптирован по новым наблюдениям.'), extra: {} };
-  case 'tool.started':
-    return {
-      kind: 'tool-start',
-      title: `Run ${capabilityId || 'capability'}`,
-      detail: formatAgentActivity(payload.activity, capabilityId || 'Kernel dispatch started.'),
-      extra: { ...(capabilityId ? { capabilityId } : {}) },
-    };
-  case 'tool.completed': {
-    const ok = payload.ok === true;
-    const actionAttemptId = typeof payload.actionAttemptId === 'string' ? payload.actionAttemptId : '';
-    const observation = actionAttemptId ? findAgentObservationForAttempt(checkpoint, actionAttemptId) : undefined;
-    const structuredData = isRecord(observation?.structuredData) ? observation.structuredData : undefined;
-    const output = structuredData?.output;
-    return {
-      kind: 'tool-result',
-      title: `${ok ? 'Completed' : 'Failed'} ${capabilityId || 'capability'}`,
-      detail: observation?.summary || (ok ? 'Kernel receipt recorded.' : String(payload.error || 'Capability failed.')),
-      extra: {
-        ...(capabilityId ? { capabilityId } : {}),
-        ok,
-        ...(output !== undefined ? { output: structuredClone(output) } : {}),
-        ...(payload.error ? { error: String(payload.error) } : {}),
-      },
-    };
-  }
-  case 'approval.required':
-    return {
-      kind: 'status',
-      title: 'Exact action-card required',
-      detail: `${capabilityId || 'Действие'} ожидает локального подтверждения точного capability/hash binding.`,
-      extra: { ...(capabilityId ? { capabilityId } : {}) },
-    };
-  case 'task.completed':
-    return { kind: 'assistant', title: 'Coder completed', detail: String(payload.summary || checkpoint.task.terminalReason?.summary || 'Task completed.'), extra: { ok: true } };
-  case 'task.failed':
-    return { kind: 'error', title: 'Task failed', detail: String(payload.summary || checkpoint.task.terminalReason?.summary || 'Agent Task failed.'), extra: { ok: false } };
-  case 'task.cancelled':
-    return { kind: 'status', title: 'Task cancelled', detail: String(payload.summary || 'Task cancelled.'), extra: { ok: false } };
-  default:
-    return null;
-  }
-}
-
-function formatAgentActivity(value: unknown, fallback: string): string {
-  if (!isRecord(value)) return typeof value === 'string' && value.trim() ? value : fallback;
-  const operation = typeof value.operation === 'string' ? value.operation.trim() : '';
-  const subject = typeof value.subject === 'string' ? value.subject.trim() : '';
-  const domain = typeof value.domain === 'string' ? value.domain.trim() : '';
-  return [operation, subject || domain].filter(Boolean).join(': ') || fallback;
-}
-
-function findAgentObservationForAttempt(
-  checkpoint: AgentTaskCheckpoint,
-  actionAttemptId: string,
-): AgentTaskCheckpoint['observations'][number] | undefined {
-  return [...checkpoint.observations].reverse().find((observation) => {
-    const structuredData = isRecord(observation.structuredData) ? observation.structuredData : undefined;
-    const provenance = isRecord(structuredData?.provenance) ? structuredData.provenance : undefined;
-    return provenance?.actionAttemptId === actionAttemptId;
-  });
+function isValidAgentQuestion(value: unknown): boolean {
+  return isRecord(value)
+    && Object.keys(value).every((key) => ['id', 'digest', 'text', 'predecessorMessageId', 'expiresAt'].includes(key))
+    && typeof value.id === 'string'
+    && typeof value.digest === 'string'
+    && /^sha256:[a-f0-9]{64}$/u.test(value.digest)
+    && typeof value.text === 'string'
+    && value.text.trim().length > 0
+    && Buffer.byteLength(value.text) <= 4096
+    && typeof value.predecessorMessageId === 'string'
+    && typeof value.expiresAt === 'string'
+    && Number.isFinite(Date.parse(value.expiresAt));
 }
 
 function isValidRunEvents(value: unknown): value is CoderRunEvent[] {
@@ -714,10 +781,6 @@ function isValidRunEvents(value: unknown): value is CoderRunEvent[] {
     previousSequence = event.sequence;
   }
   return true;
-}
-
-function isCoderModel(value: unknown): value is CoderModelId {
-  return value === 'qwen3-coder-30b-a3b-instruct' || value === 'deepseek-coder-v2-lite-instruct';
 }
 
 function isCoderStatus(value: unknown): value is CoderRunStatus {

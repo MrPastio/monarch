@@ -1,11 +1,18 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, openSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { renameWithWindowsRetrySync } from '../../core/durable-json';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
+import type { AstraModelHostBinding } from '../../agent-v3/model-host-provider';
 import { resolveMonarchRuntimePaths, stableStringify } from '../../core';
+import { securityPolicyFilePath } from '../../settings/security-policy';
+import { oscarStorageEnvironment } from '../../core/store-protection';
 import { hasWorkingNvidiaRuntime } from './runtime-profile';
+import { CUSTOM_MODELS_DIRECTORY } from '../models/custom-models';
+import { MONARCH_CODER_MODEL_COMPONENTS, MONARCH_OPTIONAL_BALANCED_MODEL,
+  MONARCH_REQUIRED_FAST_MODEL } from '../models/component-manager';
 import type {
   MonarchSettingsCommandRequestV1,
   MonarchSettingsReadRequestV1,
@@ -15,6 +22,9 @@ import type {
 
 const DEFAULT_OSCAR_API_TIMEOUT_MS = 30000;
 const DEFAULT_OSCAR_CHAT_TIMEOUT_MS = 300000;
+/** Silence allowed between two chunks of a local answer stream, and its hard cap. */
+const OSCAR_STREAM_IDLE_MS = 120_000;
+const OSCAR_STREAM_TOTAL_MS = 30 * 60_000;
 const DEFAULT_OSCAR_DEEP_RESEARCH_TIMEOUT_MS = 1800000;
 const MAX_OSCAR_NEW_TOKENS = 65_536;
 
@@ -31,21 +41,6 @@ export interface OscarAgentSkillContext {
   instructions: string;
   source: string;
   explicit: boolean;
-}
-
-export interface OscarCapabilityContext {
-  id: string;
-  module: string;
-  system: string;
-  title: string;
-  description: string;
-  risk: string;
-  inputSchema?: unknown;
-}
-
-export interface OscarAccessContext {
-  sandboxMode: 'read-only' | 'workspace-write' | 'danger-full-access';
-  approvalPolicy: 'on-request' | 'never';
 }
 
 export interface OscarChatRequest {
@@ -66,10 +61,8 @@ export interface OscarChatRequest {
   top_p: number;
   route?: OscarRouteHint;
   skills?: OscarAgentSkillContext[];
-  capabilities?: OscarCapabilityContext[];
-  access?: OscarAccessContext;
   inference_lane?: 'interactive' | 'agent' | 'coder' | 'background';
-  execution_authority: 'none' | 'agent-controller';
+  execution_authority: 'none';
   persistence_owner: 'backend' | 'coordinator';
   turn_id?: string;
   client_message_id?: string;
@@ -219,6 +212,7 @@ export interface OscarConversationMessageAppendResult {
 export interface OscarConversationMessageAppendInput {
   role: 'user' | 'assistant';
   content: string;
+  content_mode?: 'exact';
   token_count?: number;
   elapsed_ms?: number;
   model_tier?: string;
@@ -228,8 +222,12 @@ export interface OscarConversationMessageAppendInput {
   provenance?: Record<string, unknown>;
   outcome?: string;
   integrity_warning?: string;
+  /** MAX did not answer and the local model did; why, as a failure code. */
+  max_fallback_code?: string;
+  research_steps?: Array<{ kind: 'plan' | 'search' | 'read' | 'verify' | 'write'; detail: string }>;
   create_conversation_if_missing?: boolean;
   required_previous_message_id?: string;
+  causal_parent_id?: string;
   attachments?: Array<Record<string, unknown>>;
   sources?: Array<Record<string, unknown>>;
 }
@@ -259,13 +257,64 @@ export class OscarBackendHttpError extends Error {
 
 export class OscarClient {
   readonly config: OscarBridgeConfig;
+  private readonly astraHostProcesses = new Map<string, { pid: number; child: ChildProcess }>();
+
+  astraHostExited(binding: AstraModelHostBinding): boolean {
+    const owned = this.astraHostProcesses.get(binding.hostGeneration);
+    return !!owned && owned.pid === binding.hostPid && observedManagedBackendExits.has(owned.child);
+  }
+
+  /** Discover only our existing authenticated local owner. No model load. */
+  async astraLocalModelHost() {
+    if (process.env.MONARCH_ASTRA_V3_MODEL_MODE !== 'managed-local'
+      || process.env.MONARCH_ASTRA_V3_PILOT !== 'runtime-same-owner-v1') throw Error('astra-local-host-not-enabled');
+    const endpoint = new URL(this.config.apiBase);
+    if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' || endpoint.pathname !== '/'
+      || !endpoint.port || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+      throw Error('astra-local-host-loopback-required');
+    }
+    await this.ensureBackendAvailable();
+    const descriptorChild = managedBackendProcess;
+    const raw = await this.getJson('/internal/astra/v3/model-descriptor') as Record<string, unknown>;
+    const allowed = [MONARCH_REQUIRED_FAST_MODEL, ...(MONARCH_REQUIRED_FAST_MODEL.acceptedExistingVariants ?? [])];
+    const modelDigests = raw.modelDigests as Record<string, unknown> | undefined;
+    const localSpecs = [MONARCH_REQUIRED_FAST_MODEL, MONARCH_OPTIONAL_BALANCED_MODEL, ...MONARCH_CODER_MODEL_COMPONENTS];
+    const localKeys: string[] = localSpecs.map(spec => spec.role);
+    const advertisedKeys = modelDigests ? Object.keys(modelDigests) : [];
+    const digestMatchesCatalog = (role: string, digest: unknown) => localSpecs.some(spec => spec.role === role
+      && [spec, ...(spec.acceptedExistingVariants ?? [])].some(variant => digest === 'sha256:' + variant.sha256));
+    if (!raw || raw.schemaVersion !== 1 || raw.configurationOnly !== true || raw.authority !== 'none'
+      || raw.memoryGuard !== 'chat-validity-v1' || typeof raw.hostGeneration !== 'string'
+      || !/^[A-Za-z0-9_-]{1,96}$/u.test(raw.hostGeneration)
+      || !allowed.some(variant => 'sha256:' + variant.sha256 === raw.modelDigest)
+      || !modelDigests || advertisedKeys.length < 1 || advertisedKeys.length > localKeys.length
+      || advertisedKeys.some(key => !localKeys.includes(key) || !digestMatchesCatalog(key, modelDigests[key]))
+      || modelDigests['gemma4-fast'] !== raw.modelDigest
+      || new Set(Object.values(modelDigests)).size !== advertisedKeys.length) throw Error('astra-local-host-descriptor');
+    if (raw.hostPid !== undefined && (!Number.isSafeInteger(raw.hostPid) || Number(raw.hostPid) < 1))
+      throw Error('astra-local-host-pid');
+    const child = managedBackendProcess;
+    if (child && child === descriptorChild && !observedManagedBackendExits.has(child)
+      && child.pid === raw.hostPid && !this.astraHostProcesses.has(raw.hostGeneration)) {
+      if (this.astraHostProcesses.size >= 256) throw Error('astra-local-host-history-budget');
+      this.astraHostProcesses.set(raw.hostGeneration, { pid: child.pid!, child });
+    }
+    return { endpoint: endpoint.origin, bearerToken: this.config.apiToken,
+      ...(typeof raw.hostPid === 'number' ? { hostPid: raw.hostPid } : {}),
+      hostGeneration: raw.hostGeneration, modelDigest: raw.modelDigest as string,
+      modelDigests: modelDigests as { 'gemma4-fast': string; 'gemma4-balanced'?: string;
+        'qwen3-coder-30b-a3b-instruct'?: string; 'deepseek-coder-v2-lite-instruct'?: string } };
+  }
 
   constructor(options: OscarClientOptions = {}) {
     const configuredApiBase = options.apiBase || process.env.OSCAR_API_BASE;
     const projectRoot = path.resolve(options.projectRoot || process.env.OSCAR_PROJECT_ROOT || defaultOscarProjectRoot());
     const workspaceRoot = path.resolve(options.workspaceRoot || path.dirname(projectRoot));
     const runtimePaths = resolveMonarchRuntimePaths(workspaceRoot);
-    const apiToken = getOrCreateOscarToken(path.resolve(options.secretsRoot || runtimePaths.secretsRoot));
+    // Desktop owns the key as an encrypted record and passes it in; only a
+    // standalone runtime falls back to the legacy secrets file.
+    const apiToken = process.env.OSCAR_API_TOKEN?.trim()
+      || getOrCreateOscarToken(path.resolve(options.secretsRoot || runtimePaths.secretsRoot));
 
     this.config = {
       apiBase: normalizeApiBase(configuredApiBase || 'http://127.0.0.1:7861'),
@@ -337,34 +386,33 @@ export class OscarClient {
   async chat(request: OscarChatRequest, signal?: AbortSignal): Promise<unknown> {
     await this.ensureBackendAvailable();
     let response: unknown;
+    const send = () => this.postJson('/api/chat', request,
+      this.chatTimeoutForRequest(request), signal);
     try {
-      response = await this.postJson(
-        '/api/chat',
-        request,
-        this.chatTimeoutForRequest(request),
-        signal,
-      );
+      response = await send();
     } catch (error) {
-      if (isCoderChatRequest(request) && isLocalApiBase(this.config.apiBase)) {
-        await this.releaseFailedCoderGeneration();
-      }
-      throw error;
-    }
-    if (this.config.autoStart && isLocalApiBase(this.config.apiBase)
-      && isCoderChatRequest(request) && isTerminalCoderResponse(response)) {
-      await stopManagedOscarBackend();
+      // A declined model swap generated nothing, so replaying against a fresh
+      // process repeats no work and claims no result.
+      if (!isOscarTierRecycleRefusal(error)) throw error;
+      if (!(await recycleManagedOscarBackend(this.config))) throw error;
+      response = await send();
     }
     return response;
   }
 
   async completeRaw(request: OscarRawChatCompletionRequest, signal?: AbortSignal): Promise<unknown> {
     await this.ensureBackendAvailable();
-    return this.postJson(
-      '/v1/chat/completions',
-      request,
-      this.config.chatTimeoutMs,
-      signal,
-    );
+    const send = () => this.postJson('/v1/chat/completions', request,
+      this.config.chatTimeoutMs, signal);
+    try {
+      return await send();
+    } catch (error) {
+      // The backend declined a model swap rather than aborting on it. Nothing
+      // was generated, so replaying against a fresh process repeats no work.
+      if (!isOscarTierRecycleRefusal(error)) throw error;
+      if (!(await recycleManagedOscarBackend(this.config))) throw error;
+      return await send();
+    }
   }
 
   async previewChatRoute(request: OscarChatRequest): Promise<OscarChatRoutePreview> {
@@ -372,7 +420,36 @@ export class OscarClient {
     return this.postJson('/api/chat/route', request, this.config.timeoutMs) as Promise<OscarChatRoutePreview>;
   }
 
+  /** Retries exactly once when the backend declines a model swap.
+   *
+   * A CUDA process that already holds one tier cannot load another: ggml turns
+   * the CUDA error into abort() and the process dies mid-request, leaving the
+   * user with no answer. The backend now declines instead, and the only way to
+   * honour the request is a fresh process — which the swap was going to cost
+   * anyway. Nothing has been generated at that point, so replaying the request
+   * repeats no work and claims no result.
+   */
   async *streamChat(request: OscarChatRequest, signal?: AbortSignal): AsyncGenerator<any, void, unknown> {
+    let declined = false;
+    for await (const event of this.streamChatOnce(request, signal)) {
+      if (event?.type === 'error' && event?.data?.code === OSCAR_TIER_RECYCLE_REQUIRED_CODE) {
+        declined = true;
+        continue;
+      }
+      if (declined && event?.type === 'done') continue;
+      yield event;
+    }
+    if (!declined) return;
+    if (!(await recycleManagedOscarBackend(this.config))) {
+      yield { type: 'error', data: { code: OSCAR_TIER_RECYCLE_REQUIRED_CODE,
+        message: 'Нужна другая модель, но перезапустить локальный runtime не удалось. Повтори запрос.' } };
+      yield { type: 'done', data: { ok: false } };
+      return;
+    }
+    yield* this.streamChatOnce(request, signal);
+  }
+
+  private async *streamChatOnce(request: OscarChatRequest, signal?: AbortSignal): AsyncGenerator<any, void, unknown> {
     await this.ensureBackendAvailable();
     const url = new URL('/api/chat/stream', this.config.apiBase);
     
@@ -390,9 +467,14 @@ export class OscarClient {
     } else {
       signal?.addEventListener('abort', abortFromCaller, { once: true });
     }
-    const timeout = setTimeout(() => {
-      controller.abort();
-    }, this.chatTimeoutForRequest(request));
+    // Bounded by silence, not by length: one 300 s timer cut every local answer
+    // that streamed longer (live: a 5-minute answer ended at exactly 300 s and
+    // showed as "cancelled"). The first byte keeps the configured window, each
+    // chunk re-arms an idle window, and a total cap still ends a stuck stream.
+    const timedOut = () => controller.abort(Object.assign(new Error('oscar-chat-timeout'), { name: 'TimeoutError' }));
+    let timeout = setTimeout(timedOut, this.chatTimeoutForRequest(request));
+    const rearm = () => { clearTimeout(timeout); timeout = setTimeout(timedOut, OSCAR_STREAM_IDLE_MS); };
+    const totalCap = setTimeout(timedOut, Math.max(OSCAR_STREAM_TOTAL_MS, this.chatTimeoutForRequest(request)));
     let receivedDoneEvent = false;
 
     try {
@@ -433,6 +515,7 @@ export class OscarClient {
             break;
           }
 
+          rearm();
           buffer += decoder.decode(value, { stream: true });
           const drained = drainOscarSseBuffer(buffer);
           buffer = drained.buffer;
@@ -468,6 +551,11 @@ export class OscarClient {
         return;
       }
       const normalized = error instanceof Error ? error : new Error(String(error));
+      if (normalized.message === 'oscar-chat-timeout') {
+        yield { type: 'error', data: { code: 'local-timeout',
+          message: 'Локальная модель слишком долго не присылала ответ, и он остановлен. Повтори запрос или выбери более быструю модель.' } };
+        return;
+      }
       if (isAbortLikeError(normalized)) {
         throw normalized;
       }
@@ -491,6 +579,7 @@ export class OscarClient {
       };
     } finally {
       clearTimeout(timeout);
+      clearTimeout(totalCap);
       signal?.removeEventListener('abort', abortFromCaller);
       if (!receivedDoneEvent) {
         controller.abort();
@@ -562,9 +651,37 @@ export class OscarClient {
     return this.deleteJson(`/api/memory/items/${encodeURIComponent(itemId)}`);
   }
 
-  async listConversations(): Promise<unknown> {
+  /** Episodes/capsules Memory V4 captured on its own from past turns — the
+   * automatic counterpart to listMemoryItems, which only covers explicit
+   * memory. Chat scope only: this backs the owner-facing "Из памяти" review,
+   * not the coder-project corpus. */
+  async listDerivedMemory(): Promise<unknown> {
     await this.ensureBackendAvailable();
-    return this.getJson('/api/conversations');
+    return this.getJson('/api/memory/episodes?scopeType=chat');
+  }
+
+  async forgetMemoryEpisode(episodeId: string): Promise<unknown> {
+    await this.ensureBackendAvailable();
+    return this.deleteJson(`/api/memory/episodes/${encodeURIComponent(episodeId)}?scopeType=chat`);
+  }
+
+  async forgetMemoryCapsule(capsuleId: string): Promise<unknown> {
+    await this.ensureBackendAvailable();
+    return this.deleteJson(`/api/memory/capsules/${encodeURIComponent(capsuleId)}?scopeType=chat`);
+  }
+
+  async forgetAllDerivedMemory(): Promise<unknown> {
+    await this.ensureBackendAvailable();
+    return this.deleteJson('/api/memory/episodes?scopeType=chat');
+  }
+
+  async listConversations(options: { includeArchived?: boolean; limit?: number } = {}): Promise<unknown> {
+    await this.ensureBackendAvailable();
+    const query = new URLSearchParams();
+    if (options.includeArchived) query.set('include_archived', 'true');
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    const suffix = query.size ? '?' + query.toString() : '';
+    return this.getJson('/api/conversations' + suffix);
   }
 
   async readSettingsContext(request: MonarchSettingsReadRequestV1): Promise<MonarchSettingsReadResultV1> {
@@ -592,6 +709,30 @@ export class OscarClient {
     return this.postJson('/api/memory/context', { schemaVersion: 1, ...input });
   }
 
+  /** Agent preparation: exact local chat scope, bounded/cancellable, no startup.
+   * Ordinary interactive retrieval above keeps its existing lifecycle behavior. */
+  async retrieveAgentMemoryContext(query: string, signal: AbortSignal): Promise<unknown> {
+    if (typeof query !== 'string' || !query.trim() || Buffer.byteLength(query) > 8192) {
+      throw new Error('oscar-agent-memory-query');
+    }
+    return this.postJson('/api/memory/context', { schemaVersion: 1, query, scope: { type: 'chat' } }, 2_000, signal);
+  }
+
+  /** MAX answer preparation: chat scope without the chat being answered,
+   * bounded and cancellable, no backend startup. Consent is checked by the caller. */
+  async retrieveMaxMemoryContext(query: string, conversationId: string | undefined, signal: AbortSignal): Promise<unknown> {
+    if (typeof query !== 'string' || !query.trim() || Buffer.byteLength(query) > 8192) {
+      throw new Error('oscar-max-memory-query');
+    }
+    return this.postJson('/api/memory/context', { schemaVersion: 1, query, scope: { type: 'chat' },
+      ...(conversationId ? { excludeConversationId: conversationId } : {}) }, 2_000, signal);
+  }
+
+  /** Live metadata only. Never starts a backend or initiates a memory search. */
+  async readMemoryContextValidity(scope: { type: 'chat' } | { type: 'coder-project'; projectId: string }, signal?: AbortSignal): Promise<unknown> {
+    return this.postJson('/api/memory/context/validity', { schemaVersion: 1, scope }, 2_000, signal);
+  }
+
   async clearConversations(): Promise<unknown> {
     await this.ensureBackendAvailable();
     return this.deleteJson('/api/conversations');
@@ -614,7 +755,7 @@ export class OscarClient {
     return this.getJson(`/api/conversations/${encodeURIComponent(conversationId)}${query}`);
   }
 
-  async updateConversation(conversationId: string, input: { title?: string; archived?: boolean }): Promise<unknown> {
+  async updateConversation(conversationId: string, input: { title?: string; archived?: boolean; local_only?: boolean }): Promise<unknown> {
     await this.ensureBackendAvailable();
     return this.patchJson(`/api/conversations/${encodeURIComponent(conversationId)}`, input);
   }
@@ -650,6 +791,13 @@ export class OscarClient {
     return this.postJson('/api/search', input);
   }
 
+  async searchContext(input: { query: string; deep: boolean; queries?: string[] }, signal?: AbortSignal): Promise<unknown> {
+    signal?.throwIfAborted();
+    await this.ensureBackendAvailable();
+    signal?.throwIfAborted();
+    return this.postJson('/api/search/context', input, 85_000, signal);
+  }
+
   async unloadModel(): Promise<unknown> {
     await this.ensureBackendAvailable();
     return this.postJson('/api/model/unload', {});
@@ -657,7 +805,16 @@ export class OscarClient {
 
   async stopBackend(): Promise<unknown> {
     await this.ensureBackendAvailable();
-    return this.postJson('/api/backend/stop', {});
+    const correlation = crypto.randomUUID().replace(/-/gu, '');
+    const value = await this.fetchJson('/api/backend/stop', { method: 'POST', headers: {
+      'Content-Type': 'application/json', 'X-Monarch-Stop-Correlation': correlation }, body: '{}' });
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('oscar-stop-receipt');
+    const receipt = value as Record<string, unknown>;
+    if (receipt.ok !== true || receipt.stopping !== true || receipt.correlation !== correlation
+      || !Number.isSafeInteger(receipt.pid) || Number(receipt.pid) < 1
+      || !Number.isSafeInteger(receipt.activeInferenceSlots) || Number(receipt.activeInferenceSlots) < 0
+      || receipt.tokenSource !== 'authenticated-header') throw Error('oscar-stop-receipt');
+    return receipt;
   }
 
   async shutdownManagedBackend(): Promise<void> {
@@ -669,39 +826,67 @@ export class OscarClient {
     return this.postJson('/api/generation/cancel', {});
   }
 
-  private async releaseFailedCoderGeneration(): Promise<void> {
-    try {
-      await this.cancelGeneration();
-    } catch {
-      // Preserve the original chat failure even if the backend is already gone.
-    }
-    if (this.config.autoStart && managedBackendProcess) {
-      await stopManagedOscarBackend();
-      return;
-    }
-    try {
-      await this.unloadModel();
-    } catch {
-      // Cleanup is best-effort; the caller still receives the original failure.
-    }
-  }
-
   private async ensureBackendAvailable(): Promise<void> {
     if (!this.config.autoStart || !isLocalApiBase(this.config.apiBase)) {
       return;
     }
-    if (await this.isBackendReachable()) {
+    const reachable = await this.backendHealth();
+    if (reachable) {
+      await this.restartUnderOtherProtection(reachable);
       return;
     }
     await startManagedOscarBackend(this.config);
   }
 
+  private protectionChecked = false;
+
+  /** An Oscar started earlier (another runtime, an older Monarch) may run under
+   * other storage protection, e.g. on a plain database while sealing is on. It
+   * is restarted once so the database follows the person's choice. */
+  private async restartUnderOtherProtection(health: Record<string, unknown>): Promise<void> {
+    if (this.protectionChecked) return;
+    this.protectionChecked = true;
+    const expected = oscarStorageEnvironment().OSCAR_STORE_PROTECTION;
+    const actual = typeof health.storage_protection === 'string' ? health.storage_protection : 'plain';
+    if (!expected || actual === expected) return;
+    await this.stopBackend().catch(() => undefined);
+    for (let attempt = 0; attempt < 50 && await this.isBackendReachable(); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    await startManagedOscarBackend(this.config);
+  }
+
+  private async backendHealth(): Promise<Record<string, unknown> | null> {
+    try {
+      const value = await fetchJsonWithTimeout(`${this.config.apiBase}/api/health`, 5000);
+      return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    } catch {
+      return null;
+    }
+  }
+
   private async isBackendReachable(): Promise<boolean> {
     try {
-      await this.fetchJson('/api/health', { method: 'GET' }, 5000);
+      // The public health reply is readiness only. Sending the owner token
+      // requests the full diagnostic status (including model directory scans),
+      // which must not block discovery or every ordinary backend request.
+      await fetchJsonWithTimeout(`${this.config.apiBase}/api/health`, 5000);
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /** The local tier resident in the backend right now, or null when none is
+   * loaded or the backend is not up. Never starts the backend: routing asks
+   * this to avoid a swap, not to cause a load. */
+  async residentTier(): Promise<string | null> {
+    try {
+      const status = await this.getJson('/api/model/status') as { loaded?: unknown; fallback_active?: unknown; active_tier?: unknown };
+      return status?.loaded === true && status.fallback_active !== true && typeof status.active_tier === 'string'
+        ? status.active_tier : null;
+    } catch {
+      return null;
     }
   }
 
@@ -836,13 +1021,20 @@ function conversationMessageAppendResult(
   )) {
     throw new Error('Oscar backend returned an invalid conversation message append receipt.');
   }
+  if (input.content_mode === 'exact' && disposition !== 'superseded'
+    && (record.content_mode !== 'exact' || record.content_sha256 !== crypto.createHash('sha256').update(input.content, 'utf8').digest('hex'))) {
+    throw new Error('Oscar backend did not confirm exact conversation message content.');
+  }
+  if (input.causal_parent_id && record.causal_parent_id !== input.causal_parent_id)
+    throw new Error('Oscar backend did not confirm the causal conversation message binding.');
   if (disposition === 'created') {
     const created = message as Record<string, unknown>;
     const exactBindings = created.conversation_id === conversationId
       && created.role === input.role
-      && created.content === input.content.trim()
+      && created.content === (input.content_mode === 'exact' ? input.content : input.content.trim())
       && optionalReceiptBinding(created.client_message_id, input.client_message_id)
       && optionalReceiptBinding(created.turn_id, input.turn_id)
+      && optionalReceiptBinding(created.causal_parent_id, input.causal_parent_id)
       && optionalReceiptBinding(created.task_id, input.task_id)
       && optionalReceiptBinding(created.outcome, input.outcome)
       && (input.provenance === undefined || stableStringify(created.provenance) === stableStringify(input.provenance));
@@ -883,21 +1075,20 @@ export function createDefaultOscarChatRequest(
   const route = readRouteInput(input);
   const deepThinkingConsent = readStringInput(input, 'deep_thinking_consent');
   const inferenceLane = readStringInput(input, 'inference_lane');
-  const requestedAuthority = readStringInput(input, 'execution_authority');
   const persistenceOwner = readStringInput(input, 'persistence_owner');
   const turnId = readStringInput(input, 'turn_id');
   const clientMessageId = readStringInput(input, 'client_message_id');
   const devMode = readRecordInput(input, 'dev_mode');
   const contextProfile = readStringInput(input, 'context_profile');
-  const coderAuthority = messages.some((message) => (
-    message.role === 'system' && message.content.includes('<monarch_coder_mode>')
-  ));
-  const executionAuthority = requestedAuthority === 'agent-controller' || coderAuthority
-    ? 'agent-controller'
-    : 'none';
-  const effectiveMessages = executionAuthority === 'none'
-    ? [{ role: 'system' as const, content: '<monarch_answer_only_authority version="1" />' }, ...messages]
-    : messages;
+  // Compatibility chat is answer-only. Agent execution belongs exclusively to
+  // Oscar Turn + Astra V3 and cannot be activated by a message marker or input.
+  const executionAuthority = 'none' as const;
+  const effectiveMessages = [
+    { role: 'system' as const, content: '<monarch_answer_only_authority version="1" />' },
+    ...messages.filter((message) => !(message.role === 'system'
+      && message.content.trim().startsWith('<monarch_coder_mode>')
+      && message.content.trim().endsWith('</monarch_coder_mode>'))),
+  ];
   const request: OscarChatRequest = {
     messages: effectiveMessages,
     use_memory: readBooleanInput(input, 'use_memory', true),
@@ -1220,10 +1411,15 @@ function isAbortLikeError(error: Error): boolean {
 }
 
 let managedBackendProcess: ChildProcess | null = null;
+const observedManagedBackendExits = new WeakSet<ChildProcess>();
 let managedBackendStart: Promise<void> | null = null;
+const hostStoppedManagedBackendPids = new Set<number>();
 
 function cleanupManagedBackendOnExit() {
   if (managedBackendProcess) {
+    if (managedBackendProcess.pid) {
+      hostStoppedManagedBackendPids.add(managedBackendProcess.pid);
+    }
     killProcessTree(managedBackendProcess.pid);
   }
 }
@@ -1272,6 +1468,12 @@ async function doStartManagedOscarBackend(config: OscarBridgeConfig): Promise<vo
   const packagedEnvironment = resolvePackagedOscarEnvironment(projectRoot);
 
   const port = readApiPort(config.apiBase);
+  const astraEnvironment = prepareOscarAstraEnvironment(process.env, path.dirname(projectRoot));
+  // Appended on every start and never rotated; one previous generation is kept.
+  for (const name of ['monarch-managed-backend.out.log', 'monarch-managed-backend.err.log', 'monarch-managed-backend.lifecycle.log']) {
+    const logPath = path.join(runtimeDir, name);
+    try { if (statSync(logPath).size > 8 * 1024 * 1024) renameWithWindowsRetrySync(logPath, logPath + '.1'); } catch { /* keep appending */ }
+  }
   const out = openSync(path.join(runtimeDir, 'monarch-managed-backend.out.log'), 'a');
   const err = openSync(path.join(runtimeDir, 'monarch-managed-backend.err.log'), 'a');
 
@@ -1281,11 +1483,21 @@ async function doStartManagedOscarBackend(config: OscarBridgeConfig): Promise<vo
     {
       cwd: projectRoot,
       env: {
-        ...process.env,
+        ...astraEnvironment,
         ...packagedEnvironment,
         PYTORCH_CUDA_ALLOC_CONF: process.env.PYTORCH_CUDA_ALLOC_CONF || 'expandable_segments:True,max_split_size_mb:128',
         TOKENIZERS_PARALLELISM: process.env.TOKENIZERS_PARALLELISM || 'false',
         OSCAR_API_TOKEN: config.apiToken,
+        // Monarch Security storage protection for Oscar's database (stage 3c).
+        ...oscarStorageEnvironment(),
+        // Oscar reads its own Monarch Security levels (search query cleaning) from here.
+        OSCAR_SECURITY_POLICY_PATH: securityPolicyFilePath(
+          resolveMonarchRuntimePaths(path.dirname(projectRoot), process.env).stateRoot),
+        // Owner-added GGUF models: the same registry the host writes.
+        OSCAR_CUSTOM_MODELS_DIR: path.join(
+          resolveMonarchRuntimePaths(path.dirname(projectRoot), process.env).modelsRoot,
+          CUSTOM_MODELS_DIRECTORY,
+        ),
       },
       detached: false,
       windowsHide: true,
@@ -1295,10 +1507,67 @@ async function doStartManagedOscarBackend(config: OscarBridgeConfig): Promise<vo
   closeSync(out);
   closeSync(err);
   managedBackendProcess = child;
-  child.once('exit', () => {
-    managedBackendProcess = null;
+  const startedAt = Date.now();
+  const childPid = child.pid;
+  child.once('exit', (code, signal) => {
+    observedManagedBackendExits.add(child);
+    const hostStopRequested = childPid ? hostStoppedManagedBackendPids.delete(childPid) : false;
+    try {
+      appendFileSync(path.join(runtimeDir, 'monarch-managed-backend.lifecycle.log'), `${JSON.stringify({
+        at: new Date().toISOString(),
+        event: 'managed-backend-exit',
+        pid: childPid ?? null,
+        code,
+        signal,
+        hostStopRequested,
+        uptimeMs: Date.now() - startedAt,
+      })}\n`, 'utf8');
+    } catch {
+      // Lifecycle evidence must never prevent recovery from a dead backend.
+    }
+    if (managedBackendProcess === child) {
+      managedBackendProcess = null;
+    }
+  });
+  // A Python that cannot be started (missing, blocked by antivirus) emits
+  // 'error' instead of 'exit'. Without a listener that is an uncaught
+  // exception and the whole Monarch server ended with it.
+  child.on('error', (error) => {
+    observedManagedBackendExits.add(child);
+    try {
+      appendFileSync(path.join(runtimeDir, 'monarch-managed-backend.lifecycle.log'), `${JSON.stringify({
+        at: new Date().toISOString(), event: 'managed-backend-spawn-error', pid: childPid ?? null,
+        code: (error as NodeJS.ErrnoException).code ?? error.name,
+      })}\n`, 'utf8');
+    } catch { /* The health wait below reports the failure. */ }
+    if (managedBackendProcess === child) managedBackendProcess = null;
   });
   await waitForOscarHealth(config.apiBase, 15000);
+}
+
+export const OSCAR_TIER_RECYCLE_REQUIRED_CODE = 'model-tier-recycle-required';
+/** The OpenAI-compatible lane spells its codes snake_case. */
+export const OSCAR_TIER_RECYCLE_REQUIRED_CODE_OPENAI = 'model_tier_recycle_required';
+
+export function isOscarTierRecycleRefusal(error: unknown): boolean {
+  const code = (error as OscarBackendHttpError | undefined)?.code;
+  return code === OSCAR_TIER_RECYCLE_REQUIRED_CODE
+    || code === OSCAR_TIER_RECYCLE_REQUIRED_CODE_OPENAI;
+}
+
+/** Stop the host-managed backend and bring a fresh one up.
+ *
+ * Returns false when this host does not own the process, in which case the
+ * caller must surface the refusal instead of silently retrying into it. */
+async function recycleManagedOscarBackend(config: OscarBridgeConfig): Promise<boolean> {
+  if (!managedBackendProcess) return false;
+  await stopManagedOscarBackend();
+  try {
+    await startManagedOscarBackend(config);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function stopManagedOscarBackend(): Promise<void> {
@@ -1308,6 +1577,9 @@ async function stopManagedOscarBackend(): Promise<void> {
     return;
   }
 
+  if (child.pid) {
+    hostStoppedManagedBackendPids.add(child.pid);
+  }
   killProcessTree(child.pid);
   await sleep(500);
 }
@@ -1330,6 +1602,39 @@ function killProcessTree(pid: number | undefined): void {
   } catch {
     // Process already exited.
   }
+}
+
+/** Authored from the shipped component catalog, never renderer/model input. */
+export function prepareOscarAstraEnvironment(environment: NodeJS.ProcessEnv, workspaceRoot: string): NodeJS.ProcessEnv {
+  const next = { ...environment };
+  delete next.OSCAR_ASTRA_LOCAL_COMPONENT;
+  if (environment.MONARCH_ASTRA_V3_MODEL_MODE === 'managed-local'
+    && environment.MONARCH_ASTRA_V3_PILOT === 'runtime-same-owner-v1') {
+    const runtimePaths = resolveMonarchRuntimePaths(workspaceRoot, environment);
+    const specs = [MONARCH_REQUIRED_FAST_MODEL, MONARCH_OPTIONAL_BALANCED_MODEL, ...MONARCH_CODER_MODEL_COMPONENTS];
+    next.OSCAR_ASTRA_LOCAL_COMPONENT = JSON.stringify({ version: 2, root: runtimePaths.modelsRoot,
+      components: specs.map(spec => ({
+        relativePath: runtimePaths.mode === 'installed' && spec.role.includes('coder')
+          ? path.join('coder', spec.role, spec.remoteFile) : spec.relativePath,
+        tier: spec.role,
+        variants: [spec, ...(spec.acceptedExistingVariants ?? [])]
+          .map(variant => ({ size: variant.expectedBytes, digest: 'sha256:' + variant.sha256 })),
+      })) });
+    // A process-local prepared host must outlive ordinary chat completions.
+    // Keep ONE shared resident; explicit unload, Stop and application shutdown
+    // still belong to the existing runtime owner. No second process/cache.
+    next.OSCAR_AUTO_UNLOAD_AFTER_GENERATION = 'false';
+    next.OSCAR_RECYCLE_BACKEND_AFTER_GENERATION = 'false';
+    // Native MTP speculative decoding is not stable when llama.cpp also owns
+    // the exact JSON grammar sampler used by prepared Agent turns. One resident
+    // model is slower but keeps long multi-call work inside a single live host.
+    next.OSCAR_GEMMA_SPECULATIVE_DECODING = 'false';
+    // Thirty 12B layers leave too little transient CUDA headroom on the tested
+    // 8 GiB device and can fast-fail the native process during grammar sampling.
+    // Twenty layers retain acceleration while keeping Agent turns repeatable.
+    next.OSCAR_GEMMA4_BALANCED_GPU_LAYERS = '20';
+  }
+  return next;
 }
 
 function resolveOscarPython(projectRoot: string): string {
@@ -1390,20 +1695,6 @@ function isLocalApiBase(apiBase: string): boolean {
   } catch {
     return false;
   }
-}
-
-function isCoderChatRequest(request: OscarChatRequest): boolean {
-  return request.messages.some((message) => message.role === 'system'
-    && message.content.trim().startsWith('<monarch_coder_mode>')
-    && message.content.trim().endsWith('</monarch_coder_mode>'));
-}
-
-function isTerminalCoderResponse(response: unknown): boolean {
-  if (!response || typeof response !== 'object' || Array.isArray(response)) {
-    return true;
-  }
-  const proposals = (response as Record<string, unknown>).action_proposals;
-  return !Array.isArray(proposals) || proposals.length === 0;
 }
 
 async function waitForOscarHealth(apiBase: string, timeoutMs: number): Promise<void> {

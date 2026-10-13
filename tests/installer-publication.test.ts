@@ -249,6 +249,8 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(builder).toContain('node_modules\\electron\\dist');
     expect(builder).toContain('node_modules\\canvas');
     expect(builder).toContain('build\\Release\\canvas.node');
+    expect(builder).toContain("'sherpa-onnx-node', 'sherpa-onnx-win-x64'");
+    expect(builder).toContain('Packaged native Voice runtime validation');
     expect(builder).toContain('verify-relative-import-graph.mjs');
     expect(builder).toContain('Packaged relative import graph verification');
     expect(builder).toContain('profiles\\cpu');
@@ -259,11 +261,8 @@ describe('Windows installer and public snapshot boundary', () => {
     );
     expect(builder).toContain("'^python3\\.exe$'");
     expect(builder).toContain('Offline Oscar CPU runtime validation');
-    const computerUseAcceptance = read('scripts/computer-use-model-acceptance.ts');
-    expect(computerUseAcceptance).toContain(
-      "path.join(MONARCH_ROOT, 'scripts', 'fixtures', 'MonarchComputerUseQaTarget.cs')",
-    );
-    expect(computerUseAcceptance).toContain('availableTiers[MODEL_ROLE] === true');
+    expect(existsSync(path.join(root, 'scripts', 'computer-use-model-acceptance.ts'))).toBe(false);
+    expect(builder).not.toContain('computer-use-model-acceptance.ts');
     expect(read('scripts/fixtures/MonarchComputerUseQaTarget.cs')).toBe(
       read('tests/fixtures/MonarchComputerUseQaTarget.cs'),
     );
@@ -294,10 +293,10 @@ describe('Windows installer and public snapshot boundary', () => {
       environment: { version: string; sha256: string };
     };
     expect(payloadContract.schemaVersion).toBe(1);
-    expect(payloadContract.runtime.version).toBe('2026.07.7');
+    expect(payloadContract.runtime.version).toBe('2026.10.1');
     expect(payloadContract.runtime.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(payloadContract.environment.version).toBe(
-      'backend-0.1.5-offline8',
+      'backend-0.1.6-offline1',
     );
     expect(payloadContract.environment.sha256).toMatch(/^[a-f0-9]{64}$/);
 
@@ -394,6 +393,8 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(exporter).toContain("public-source-policy.ps1");
     for (const privatePath of [
       'AI_HANDOFF|agent_notes|ORIGINAL_REQUEST',
+      'GROK_ONBOARDING',
+      '^docs/architecture/ASTRA_V3_AUDIT_',
       '^\\.agents($|/)',
       '^\\.codex($|/)',
       '^scratch($|/)',
@@ -433,7 +434,7 @@ describe('Windows installer and public snapshot boundary', () => {
       reviewedBinary: true,
       reviewedBinaryHash: true,
       alteredReviewedBinaryHash: false,
-      reviewedBinaryCount: 47,
+      reviewedBinaryCount: 46,
       reviewedBinaryFailures: 0,
       reviewedBinaryOverLimit: 0,
       csharpText: true,
@@ -474,6 +475,9 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(policy).toContain('\\bhf_');
     expect(policy).toContain('\\bnpm_');
     expect(policy).toContain("\\bsk-[A-Za-z0-9_-]{20,}\\b");
+    expect(policy).toContain("('C:' + '\\\\Users\\\\' + 'anton')");
+    expect(policy).not.toContain("('E:' + '\\\\' + 'Monarch')");
+    expect(policy).not.toContain("('E:' + '/' + 'Monarch')");
     expect(policy).toContain('ls-tree -r -z --full-tree');
     expect(policy).toContain('Git tree contains a path that is not strict UTF-8');
     expect(policy).toContain('NUL bytes are forbidden in public text source');
@@ -1133,7 +1137,7 @@ describe('Windows installer and public snapshot boundary', () => {
     const definition = read('installer/Monarch.iss');
     const packageVersion = JSON.parse(read('package.json')).version as string;
     expect(definition).toContain(`#define AppVersion "${packageVersion}"`);
-    expect(definition).toContain('#define RuntimeVersion "2026.07.7"');
+    expect(definition).toContain('#define RuntimeVersion "2026.10.1"');
     expect(definition).toContain('WizardStyle=modern');
     expect(definition).toContain('PrivilegesRequired=lowest');
     expect(definition).toContain('ArchitecturesInstallIn64BitMode=x64compatible');

@@ -3,43 +3,30 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import math
 import re
 import socket
 import ipaddress
 from dataclasses import dataclass
 from typing import Protocol
-from urllib.parse import parse_qs, parse_qsl, quote_plus, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, parse_qsl, quote, quote_plus, urlencode, urljoin, urlparse
 
 import httpx
-from bs4 import BeautifulSoup
-
-try:
-    import trafilatura
-except Exception:  # pragma: no cover - optional runtime dependency
-    trafilatura = None
 
 from .config import Settings
 from .memory import MemoryStore, normalize_text
-from .research import has_freshness_signal, resolve_research_decision
+from .research import has_freshness_signal, has_live_weather_signal, resolve_research_decision, fallback_research_queries
 from .schemas import SearchResult
+from .network_policy import is_public_address, public_async_transport
+from .search_privacy import engine_query
+from .web_engines import EngineRouter
 
 MAX_SEARCH_QUERY_CHARS = 2048
 MAX_SEARCH_URL_CHARS = 4096
 
 
 def is_safe_ip(ip_str: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(ip_str)
-        return not (
-            ip.is_loopback or
-            ip.is_private or
-            ip.is_link_local or
-            ip.is_unspecified or
-            ip.is_multicast or
-            ip.is_reserved
-        )
-    except ValueError:
-        return False
+    return is_public_address(ip_str)
 
 def is_safe_url(url: str) -> bool:
     try:
@@ -87,6 +74,15 @@ logger = logging.getLogger(__name__)
 
 MAX_PROVIDER_RESULTS = 10
 FETCH_CONCURRENCY = 5
+# Characters of relevant page passages one source contributes to an answer.
+STANDARD_SOURCE_CHARS = 4000
+DEEP_SOURCE_CHARS = 2400
+ZERO_RETENTION_SOURCE_CHARS = 1800
+MAX_DEEP_CONTEXT_SOURCES = 14
+PASSAGE_CHARS = 420
+EVIDENCE_PAGE_DEADLINE_SECONDS = 8.0
+# Wikimedia refuses clients without a contact link (403, robot policy).
+WIKIPEDIA_USER_AGENT = "Monarch/0.3 (https://github.com/MrPastio/monarch-releases) Oscar search fallback"
 TRANSIENT_HTTP_ERRORS = (
     httpx.ReadTimeout,
     httpx.ConnectError,
@@ -144,11 +140,20 @@ class RawSearchResult:
     title: str
     url: str
     snippet: str = ""
+    # Data from a service (a forecast), complete as it is. Its link is for the
+    # reader; fetching it would replace the data with that page.
+    service_data: bool = False
+    published: str = ""
+    origin: str = "engine"
 
 
 class SearchProvider(Protocol):
     async def search(self, query: str, max_results: int) -> list[RawSearchResult]:
         ...
+
+
+# One router for the process: which engines are resting is learnt across requests.
+WEB_ENGINES = EngineRouter(timeout=5.0)
 
 
 class DuckDuckGoProvider:
@@ -165,6 +170,30 @@ class DuckDuckGoProvider:
         }
 
     async def search(self, query: str, max_results: int) -> list[RawSearchResult]:
+        # Every engine query leaves through here: shortened and without identifiers
+        # unless the person turned cleaning off in Monarch Security.
+        query = engine_query(query)
+        if not query:
+            return []
+        # "Latest news" asked of a general web index returned encyclopedia pages
+        # instead of news. Recency questions go to the dated news index first,
+        # then to web results limited to the last month.
+        if has_recency_signal(query):
+            try:
+                # The Russian news index answered "новости SpaceX" with Kia and
+                # Latvia: a story that names nothing from the request is dropped.
+                results = [item for item in await asyncio.to_thread(self._news_sync, query, max_results)
+                           if mentions_subject(item, query)]
+                if len(results) >= 2:
+                    return results
+            except Exception as exc:
+                logger.warning("DDGS news search failed; using recent web results: %s", type(exc).__name__)
+            try:
+                results = await asyncio.to_thread(self._search_sync, query, max_results, "auto", "m")
+                if results:
+                    return results
+            except Exception as exc:
+                logger.warning("DDGS recent web search failed: %s", type(exc).__name__)
         try:
             results = await asyncio.to_thread(self._search_sync, query, max_results)
             if results:
@@ -172,10 +201,50 @@ class DuckDuckGoProvider:
         except Exception as exc:
             logger.warning("DDGS search failed; falling back to DuckDuckGo HTML: %s", type(exc).__name__)
 
-        return await asyncio.to_thread(self._duckduckgo_html, query, max_results)
+        results = await asyncio.to_thread(self._duckduckgo_html, query, max_results)
+        if results:
+            return results
+        # Every engine refused. Wikipedia's own search is open to everyone and
+        # rarely refuses; the answer then says it rests on Wikipedia alone.
+        results = await asyncio.to_thread(self._wikipedia_sync, query, max_results)
+        if results:
+            WEB_ENGINES.confirm_refusals()
+        return results
+
+    def _wikipedia_sync(self, query: str, max_results: int) -> list[RawSearchResult]:
+        language = "ru" if re.search(r"[А-Яа-яЁё]", query) else "en"
+        try:
+            with httpx.Client(timeout=self.timeout_seconds, follow_redirects=False, trust_env=False) as client:
+                response = client.get(
+                    f"https://{language}.wikipedia.org/w/api.php",
+                    params={"action": "query", "list": "search", "srsearch": query, "srlimit": max(1, min(max_results, 5)),
+                            "format": "json", "utf8": 1},
+                    headers={"User-Agent": WIKIPEDIA_USER_AGENT, "Accept": "application/json"},
+                )
+                response.raise_for_status()
+                rows = response.json().get("query", {}).get("search", [])
+        except Exception as exc:
+            logger.warning("Wikipedia search failed: %s", type(exc).__name__)
+            return []
+        results: list[RawSearchResult] = []
+        for row in rows:
+            title = str(row.get("title") or "").strip()
+            if not title:
+                continue
+            snippet = normalize_text(_soup(str(row.get("snippet") or ""), "html.parser").get_text(" "))
+            results.append(RawSearchResult(
+                title=clean_title(title),
+                url=f"https://{language}.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}",
+                snippet=snippet,
+                origin="wikipedia",
+            ))
+        return results[:max_results]
 
     async def search_voice_officeholder(self, query: str, max_results: int) -> list[RawSearchResult]:
         """Use DDGS' focused Wikipedia backend for a bounded current-role fact."""
+        query = engine_query(query)
+        if not query:
+            return []
         return await asyncio.to_thread(
             self._search_sync,
             query,
@@ -183,24 +252,47 @@ class DuckDuckGoProvider:
             "wikipedia",
         )
 
+    def _news_sync(self, query: str, max_results: int) -> list[RawSearchResult]:
+        # A week is often too short outside English; the month is a second window.
+        rows: list[dict] = []
+        for timelimit in ("w", "m"):
+            rows.extend(WEB_ENGINES.search("news", query, max_results=max_results, timelimit=timelimit))
+            if len(rows) >= 3:
+                break
+        results: list[RawSearchResult] = []
+        for row in sorted(rows, key=lambda item: iso_date(item.get("date")), reverse=True):
+            url = normalize_result_url(row.get("url") or row.get("href") or "")
+            if not url:
+                continue
+            date = iso_date(row.get("date"))
+            source = normalize_text(str(row.get("source") or ""))
+            prefix = " · ".join(part for part in (date, source) if part)
+            snippet = normalize_text(row.get("body") or "")
+            results.append(RawSearchResult(
+                title=clean_title(row.get("title") or readable_domain(url)),
+                url=url,
+                snippet=f"[{prefix}] {snippet}" if prefix else snippet,
+                published=date,
+            ))
+        return unique_results(results)[:max_results]
+
     def _search_sync(
         self,
         query: str,
         max_results: int,
         backend: str = "auto",
+        timelimit: str | None = None,
     ) -> list[RawSearchResult]:
-        from ddgs import DDGS
+        if backend == "auto":
+            rows = WEB_ENGINES.search("text", query, max_results=max_results, timelimit=timelimit)
+        else:
+            from ddgs import DDGS
 
-        timeout = max(2, min(5, int(self.timeout_seconds)))
-        region = "ru-ru" if re.search(r"[А-Яа-яЁё]", query) else "us-en"
-        with DDGS(timeout=timeout) as ddgs:
-            rows = list(ddgs.text(
-                query,
-                max_results=max_results,
-                safesearch="moderate",
-                region=region,
-                backend=backend,
-            ))
+            timeout = max(2, min(5, int(self.timeout_seconds)))
+            region = "ru-ru" if re.search(r"[А-Яа-яЁё]", query) else "us-en"
+            with DDGS(timeout=timeout) as ddgs:
+                rows = list(ddgs.text(query, max_results=max_results, safesearch="moderate", region=region,
+                                      backend=backend, **({"timelimit": timelimit} if timelimit else {})))
 
         results: list[RawSearchResult] = []
         for row in rows:
@@ -227,7 +319,7 @@ class DuckDuckGoProvider:
             logger.warning("DuckDuckGo HTML search failed: %s", type(exc).__name__)
             return []
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        soup = _soup(response.text, "html.parser")
         results: list[RawSearchResult] = []
 
         for result in soup.select(".result, .web-result"):
@@ -264,7 +356,9 @@ class WebSearchService:
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36 OscarLocalAgent/0.1"
+                "Chrome/120.0.0.0 Safari/537.36 OscarLocalAgent/0.1 "
+                # Wikimedia answers 403 to clients without a contact link.
+                "(+https://github.com/MrPastio/monarch-releases)"
             ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.8",
@@ -276,14 +370,21 @@ class WebSearchService:
         max_results: int | None = None,
         fetch_pages: bool = True,
         persist: bool = True,
+        subject: str = "",
     ) -> list[SearchResult]:
+        """``subject``: the question a research branch serves; results that name
+        none of its subjects are dropped before anything is fetched or kept."""
         query = normalize_search_query(query)
         if not query:
             return []
 
         limit = clamp_result_limit(max_results or self.settings.search_top_k)
         safe_raw_results = await self._collect_safe_results(query, limit)
-        results = [SearchResult(title=item.title, url=item.url, snippet=item.snippet) for item in safe_raw_results]
+        if subject:
+            safe_raw_results = on_subject(safe_raw_results, subject)
+        results = [SearchResult(title=item.title, url=item.url, snippet=item.snippet, published=item.published,
+                                origin=item.origin) for item in safe_raw_results]
+        service_urls = {item.url for item in safe_raw_results if item.service_data}
 
         if not persist:
             for result in results:
@@ -295,13 +396,14 @@ class WebSearchService:
             limits = httpx.Limits(max_connections=FETCH_CONCURRENCY, max_keepalive_connections=FETCH_CONCURRENCY)
             async with httpx.AsyncClient(
                 timeout=timeout,
-                limits=limits,
+                transport=public_async_transport(limits=limits),
                 follow_redirects=False,
                 headers=self.client_headers,
                 trust_env=False,
             ) as client:
                 return await asyncio.gather(*(
-                    self._fetch_voice_excerpt(client, result)
+                    self._service_result(result) if result.url in service_urls
+                    else self._fetch_evidence(client, result, query, ZERO_RETENTION_SOURCE_CHARS)
                     for result in results
                 ))
 
@@ -314,13 +416,152 @@ class WebSearchService:
         limits = httpx.Limits(max_connections=FETCH_CONCURRENCY, max_keepalive_connections=FETCH_CONCURRENCY)
         async with httpx.AsyncClient(
             timeout=timeout,
-            limits=limits,
+            transport=public_async_transport(limits=limits),
             follow_redirects=False,
             headers=self.client_headers,
             trust_env=False,
         ) as client:
-            tasks = [self._fetch_and_ingest(client, result) for result in results]
+            tasks = [
+                self._service_result(result) if result.url in service_urls
+                else self._fetch_and_ingest(client, result)
+                for result in results
+            ]
             return await asyncio.gather(*tasks)
+
+    async def _service_result(self, result: SearchResult) -> SearchResult:
+        result.status_detail = "service-data"
+        return result
+
+    async def search_context(
+        self,
+        query: str,
+        deep: bool = False,
+        planned: list[str] | None = None,
+    ) -> list[SearchResult]:
+        """Bounded public evidence for an external answer model; never write memory.
+
+        Each page contributes the passages that match the question, not its
+        first lines: a 900-character page head left the model answering from
+        menus, cookie notices and search snippets.
+        """
+        planned = [item for item in (planned or []) if normalize_text(item)][:3]
+        decision = resolve_research_decision(query, "deep" if deep else "auto")
+        if deep:
+            queries = list(dict.fromkeys([*planned, *fallback_research_queries(query, decision)]))[:5]
+        else:
+            queries = planned or [query]
+        per_query = 6 if deep else 5
+
+        async def collect(item: str) -> list[RawSearchResult]:
+            try:
+                return await self._collect_safe_results(normalize_search_query(item), per_query)
+            except Exception:
+                logger.warning("Search branch failed; continuing with the other branches")
+                return []
+
+        batches = await asyncio.gather(*(collect(item) for item in queries))
+        # Round-robin over the branches, so every part of the request keeps
+        # sources even when the first branch alone fills the limit.
+        limit = MAX_DEEP_CONTEXT_SOURCES if deep else 8 if len(queries) > 1 else 6
+        candidates: list[RawSearchResult] = []
+        seen: set[str] = set()
+        for rank in range(per_query):
+            for batch in batches:
+                if rank < len(batch):
+                    key = canonical_url_key(batch[rank].url)
+                    if key and key not in seen:
+                        seen.add(key)
+                        candidates.append(batch[rank])
+        candidates = on_subject(candidates, query)[:limit]
+        if not candidates:
+            # The engines found nothing (or refused): pages read earlier, each
+            # with the date it was saved, are better than an unchecked answer.
+            return self.saved_pages(" ".join([query, *planned]), limit=6 if deep else 4)
+
+        focus = " ".join([query, *planned])
+        budget = DEEP_SOURCE_CHARS if deep else STANDARD_SOURCE_CHARS
+        timeout = httpx.Timeout(self.settings.fetch_timeout_seconds)
+        limits = httpx.Limits(max_connections=FETCH_CONCURRENCY, max_keepalive_connections=FETCH_CONCURRENCY)
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            transport=public_async_transport(limits=limits),
+            follow_redirects=False,
+            headers=self.client_headers,
+            trust_env=False,
+        ) as client:
+            results = await asyncio.gather(*(
+                self._service_result(self._context_result(item)) if item.service_data
+                else self._fetch_evidence(client, self._context_result(item), focus, budget)
+                for item in candidates
+            ))
+        return [result for result in results if result.snippet.strip()]
+
+    def saved_pages(self, query: str, limit: int = 4) -> list[SearchResult]:
+        try:
+            found = self.memory.search_saved_pages(query, limit=limit)
+        except Exception:
+            logger.warning("Saved page lookup failed")
+            return []
+        return [
+            SearchResult(
+                title=hit.title,
+                url=hit.url or "",
+                snippet=hit.text[:STANDARD_SOURCE_CHARS],
+                ingestion_status="skipped",
+                status_detail="saved-page",
+                origin="saved",
+                saved_at=saved_at,
+            )
+            for hit, saved_at in found
+            if hit.url
+        ]
+
+    @staticmethod
+    def _context_result(item: RawSearchResult) -> SearchResult:
+        return SearchResult(
+            title=item.title,
+            url=item.url,
+            snippet=item.snippet,
+            ingestion_status="skipped",
+            status_detail="provider-snippet",
+            published=item.published,
+            origin=item.origin,
+        )
+
+    async def _fetch_evidence(
+        self,
+        client: httpx.AsyncClient,
+        result: SearchResult,
+        focus: str,
+        budget: int,
+    ) -> SearchResult:
+        """Replace the provider snippet with the page passages relevant to ``focus``."""
+        if not is_fetchable_page_url(result.url):
+            result.status_detail = "download-url"
+            return result
+        async with self.semaphore:
+            try:
+                # One slow site held the whole answer for 39 s: three attempts
+                # of the full fetch timeout each. A page gets one bounded window.
+                async with asyncio.timeout(EVIDENCE_PAGE_DEADLINE_SECONDS):
+                    response = await self._safe_get(client, result.url)
+                content_type = response.headers.get("content-type", "").lower()
+                if response.status_code >= 400 or (content_type and not is_html_content_type(content_type)):
+                    return result
+                title, text, published = extract_page(response.text, result.url)
+                passages = select_passages(text, focus, budget)
+                if passages and len(passages) > len(normalize_text(result.snippet)):
+                    result.title = title or result.title
+                    result.snippet = passages
+                    result.chars = len(text)
+                    result.status_detail = "page-passages"
+                if published and not result.published:
+                    result.published = published
+            except (UnsafeFetchError, FetchSizeLimitError, httpx.HTTPError, ValueError, TimeoutError):
+                logger.info("Evidence page fetch failed; keeping the provider snippet")
+            except Exception:
+                logger.warning("Evidence page extraction failed; keeping the provider snippet")
+        return result
 
     async def search_voice_context(
         self,
@@ -352,7 +593,7 @@ class WebSearchService:
         limits = httpx.Limits(max_connections=3, max_keepalive_connections=3)
         async with httpx.AsyncClient(
             timeout=timeout,
-            limits=limits,
+            transport=public_async_transport(limits=limits),
             follow_redirects=False,
             headers=self.client_headers,
             trust_env=False,
@@ -408,6 +649,17 @@ class WebSearchService:
 
         provider_limit = max(0, limit - len(direct_results))
         provider_results: list[RawSearchResult] = []
+        forecast_results: list[RawSearchResult] = []
+        # A weather question about a named place is answered from a forecast
+        # service, not from whichever regional weather page a web index ranks
+        # first ("погода в Варне" returned a Russian city).
+        if has_live_weather_signal(query) or re.search(r"погод|прогноз|weather|forecast", query, re.IGNORECASE):
+            try:
+                forecast = await weather_forecast_result(query)
+                if forecast:
+                    forecast_results.append(forecast)
+            except Exception:
+                logger.info("Forecast lookup failed; continuing with web results")
         for planned_query in plan_search_queries(query):
             if not provider_limit:
                 break
@@ -417,7 +669,7 @@ class WebSearchService:
                 logger.warning("Search provider failed; continuing without that branch")
         ranked_results = rank_search_results(unique_results(provider_results), query)
         candidate_limit = min(MAX_PROVIDER_RESULTS, max(limit, limit * 3))
-        raw_results = unique_results([*direct_results, *ranked_results])[:candidate_limit]
+        raw_results = unique_results([*direct_results, *forecast_results, *ranked_results])[:candidate_limit]
         safe_results = await self._filter_safe_results(raw_results)
         return safe_results[:limit]
 
@@ -480,7 +732,7 @@ class WebSearchService:
     async def _fetch_and_ingest(self, client: httpx.AsyncClient, result: SearchResult) -> SearchResult:
         async with self.semaphore:
             if not is_fetchable_page_url(result.url):
-                logger.info("Skipping downloadable search result without fetching: %s", result.url)
+                logger.info("Skipping downloadable search result without fetching: %s", readable_domain(result.url))
                 result.ingestion_status = "skipped"
                 result.status_detail = "download-url"
                 return result
@@ -489,12 +741,12 @@ class WebSearchService:
                 content_type = response.headers.get("content-type", "").lower()
 
                 if response.status_code >= 400:
-                    logger.info("Skipping %s: HTTP %s", result.url, response.status_code)
+                    logger.info("Skipping %s: HTTP %s", readable_domain(result.url), response.status_code)
                     self._ingest_snippet(result, "http-error")
                     return result
 
                 if content_type and not is_html_content_type(content_type):
-                    logger.info("Skipping %s: unsupported content type %s", result.url, content_type)
+                    logger.info("Skipping %s: unsupported content type %s", readable_domain(result.url), content_type)
                     self._ingest_snippet(result, "unsupported-content")
                     return result
 
@@ -512,17 +764,17 @@ class WebSearchService:
                 result.ingestion_status = "page"
                 result.status_detail = "page-ingested"
             except UnsafeFetchError as exc:
-                logger.warning("Fetch blocked for %s: %s", result.url, exc)
+                logger.warning("Fetch blocked for %s: %s", readable_domain(result.url), type(exc).__name__)
                 result.ingestion_status = "blocked"
                 result.status_detail = "unsafe-url"
             except ValueError as exc:
-                logger.warning("Fetch failed for %s: %s", result.url, exc)
+                logger.warning("Fetch failed for %s: %s", readable_domain(result.url), type(exc).__name__)
                 self._ingest_snippet(result, "fetch-size-limit" if isinstance(exc, FetchSizeLimitError) else "fetch-failed")
             except httpx.HTTPError as exc:
-                logger.warning("Failed to fetch %s: %s", result.url, exc)
+                logger.warning("Failed to fetch %s: %s", readable_domain(result.url), type(exc).__name__)
                 self._ingest_snippet(result, "fetch-failed")
-            except Exception:
-                logger.exception("Failed to ingest %s", result.url)
+            except Exception as exc:
+                logger.warning("Failed to ingest %s: %s", readable_domain(result.url), type(exc).__name__)
                 self._ingest_snippet(result, "fetch-failed")
 
             return result
@@ -591,15 +843,58 @@ class WebSearchService:
             result.chars = len(result.snippet)
             result.ingestion_status = "snippet"
             result.status_detail = reason
-        except Exception:
-            logger.exception("Failed to ingest snippet for %s", result.url)
+        except Exception as exc:
+            logger.warning("Failed to ingest snippet for %s: %s", readable_domain(result.url), type(exc).__name__)
             result.ingestion_status = "failed"
             result.status_detail = "memory-write-failed"
 
 
 def extract_page_text(raw_html: str, url: str) -> tuple[str, str]:
+    title, text, _published = extract_page(raw_html, url)
+    return title, text
+
+
+# Page parsing libraries are imported on first use: trafilatura (with
+# dateparser/htmldate) and bs4 were ~0.85 s of the backend's ~2.2 s import and
+# delayed every Monarch start, while only a search or a page read needs them.
+# warm_page_parsers() loads them in the background once the backend is up.
+_TRAFILATURA_UNSET = object()
+_trafilatura_module: object = _TRAFILATURA_UNSET
+
+
+def _trafilatura():
+    global _trafilatura_module
+    if _trafilatura_module is _TRAFILATURA_UNSET:
+        try:
+            import trafilatura
+        except Exception:  # pragma: no cover - optional runtime dependency
+            trafilatura = None
+        _trafilatura_module = trafilatura
+    return _trafilatura_module
+
+
+def _soup(markup: str, parser: str):
+    from bs4 import BeautifulSoup
+
+    return BeautifulSoup(markup, parser)
+
+
+def warm_page_parsers() -> None:
+    try:
+        import bs4  # noqa: F401
+    except Exception:  # pragma: no cover - a missing parser surfaces on first use
+        pass
+    _trafilatura()
+
+
+def extract_page(raw_html: str, url: str) -> tuple[str, str, str]:
+    """Title, main text and publication date (YYYY-MM-DD or empty) of a page."""
+    published = ""
+    trafilatura = _trafilatura()
     if trafilatura is not None:
         try:
+            metadata = trafilatura.extract_metadata(raw_html)
+            published = iso_date(getattr(metadata, "date", "") if metadata else "")
             extracted = trafilatura.extract(
                 raw_html,
                 url=url,
@@ -608,13 +903,17 @@ def extract_page_text(raw_html: str, url: str) -> tuple[str, str]:
                 include_formatting=False,
             )
             if extracted:
-                metadata = trafilatura.extract_metadata(raw_html)
                 title = metadata.title if metadata and metadata.title else ""
-                return clean_title(title or readable_domain(url)), normalize_text(extracted)
+                return clean_title(title or readable_domain(url)), normalize_text(extracted), published
         except Exception:
-            logger.debug("Trafilatura extraction failed for %s", url, exc_info=True)
+            logger.debug("Trafilatura extraction failed for %s", readable_domain(url))
+    title, text = _soup_page_text(raw_html, url)
+    return title, text, published
 
-    soup = BeautifulSoup(raw_html, "html.parser")
+
+def _soup_page_text(raw_html: str, url: str) -> tuple[str, str]:
+
+    soup = _soup(raw_html, "html.parser")
     for node in soup(["script", "style", "noscript", "svg", "canvas", "header", "footer", "nav", "form"]):
         node.decompose()
 
@@ -633,6 +932,105 @@ def extract_page_text(raw_html: str, url: str) -> tuple[str, str]:
     text = normalize_text(html.unescape(" ".join(parts)))
     text = re.sub(r"(\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}\b\s*){12,}", " ", text)
     return title or readable_domain(url), normalize_text(text)
+
+
+_ISO_DATE = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})")
+_PASSAGE_WORD = re.compile(r"[^\W_]{3,}", re.UNICODE)
+_PASSAGE_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "what", "how", "who", "are", "was", "from", "about",
+    "как", "что", "это", "для", "или", "все", "так", "его", "она", "они", "при", "про", "где", "кто",
+    "когда", "какой", "какая", "какие", "сейчас", "найди", "поищи", "расскажи", "скажи",
+}
+
+
+def iso_date(value: object) -> str:
+    """YYYY-MM-DD from an ISO-like value; anything else ("Opinion4 h") is unknown."""
+    match = _ISO_DATE.match(str(value or ""))
+    if not match:
+        return ""
+    year, month, day = (int(part) for part in match.groups())
+    if not (1990 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31):
+        return ""
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _passage_stem(word: str) -> str:
+    # A crude stem keeps Russian forms together ("курса", "курсе" -> "курс").
+    word = word.casefold()
+    return word[:6] if len(word) > 6 else word
+
+
+def _passage_terms(text: str) -> set[str]:
+    return {_passage_stem(word) for word in _PASSAGE_WORD.findall(text) if word.casefold() not in _PASSAGE_STOPWORDS}
+
+
+def split_passages(text: str, size: int = PASSAGE_CHARS) -> list[str]:
+    passages: list[str] = []
+    current = ""
+    for sentence in re.split(r"(?<=[.!?…])\s+", text):
+        pieces = [sentence]
+        if len(sentence) > size * 2:
+            pieces = re.findall(r".{1,%d}(?:\s|$)" % size, sentence + " ") or [sentence]
+        for piece in pieces:
+            piece = piece.strip()
+            if not piece:
+                continue
+            if current and len(current) + len(piece) + 1 > size:
+                passages.append(current)
+                current = piece
+            else:
+                current = f"{current} {piece}".strip()
+    if current:
+        passages.append(current)
+    return passages
+
+
+def select_passages(text: str, focus: str, budget: int) -> str:
+    """The parts of ``text`` most relevant to ``focus``, in page order, within ``budget``.
+
+    Passages are scored by the question terms they contain, rarer terms on the
+    page weighing more. The opening passage keeps a small bonus: on news and
+    reference pages it usually carries the main fact and its date.
+    """
+    text = normalize_text(text)
+    if len(text) <= budget:
+        return text
+    terms = _passage_terms(focus)
+    passages = split_passages(text)
+    passage_terms = [_passage_terms(passage) for passage in passages]
+    total = len(passages)
+    frequency = {term: sum(1 for found in passage_terms if term in found) for term in terms}
+
+    def score(index: int) -> float:
+        value = sum(math.log(1 + total / frequency[term]) for term in terms
+                    if frequency[term] and term in passage_terms[index])
+        if value and re.search(r"\d", passages[index]):
+            value += 0.3
+        if index == 0:
+            value += 0.5
+        return value
+
+    scores = [score(index) for index in range(total)]
+    picked: set[int] = set()
+    used = 0
+    for index in sorted(range(total), key=lambda item: (-scores[item], item)):
+        if scores[index] <= 0 and picked:
+            break
+        cost = len(passages[index]) + 3
+        if used + cost > budget:
+            continue
+        picked.add(index)
+        used += cost
+    if not picked:
+        return text[:budget]
+    parts: list[str] = []
+    previous = -2
+    for index in sorted(picked):
+        if parts and index != previous + 1:
+            parts.append("…")
+        parts.append(passages[index])
+        previous = index
+    return " ".join(parts)
 
 
 def normalize_search_query(value: str, *, max_chars: int = MAX_SEARCH_QUERY_CHARS) -> str:
@@ -689,9 +1087,22 @@ def normalize_result_url(raw_url: str) -> str:
 
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return ""
+    if is_ad_redirect(parsed.netloc, parsed.path):
+        return ""
 
     query = strip_tracking_params(parsed.query)
     return parsed._replace(fragment="", query=query).geturl()
+
+
+def is_ad_redirect(netloc: str, path: str) -> bool:
+    """Paid placements that search engines mix into results ("bing.com/aclick?...")."""
+    host = netloc.casefold().split(":")[0].removeprefix("www.")
+    return (
+        (host.endswith("bing.com") and path.startswith("/aclick"))
+        or (host.endswith("duckduckgo.com") and path.startswith("/y.js"))
+        or (host.endswith("googleadservices.com"))
+        or (host.endswith("doubleclick.net"))
+    )
 
 
 def extract_query_url_results(query: str, limit: int) -> list[RawSearchResult]:
@@ -732,6 +1143,80 @@ def should_auto_search(query: str) -> tuple[bool, str]:
     return False, "not-needed"
 
 
+_NEWS_SIGNAL = re.compile(
+    r"(?:новост|сейчас\s+происходит|что\s+(?:произошло|случилось)|\b(?:news|headlines|breaking)\b)",
+    re.IGNORECASE,
+)
+_RECENT_EVENTS_SIGNAL = re.compile(
+    r"(?:последн|вчера|на\s+этой\s+неделе|недавн|\b(?:latest|recent|yesterday|this\s+week)\b)",
+    re.IGNORECASE,
+)
+# A current value ("курс евро сегодня", "weather today") is a page that shows it,
+# not an article about it: the news index answered a rate question with
+# articles about another currency.
+_LIVE_VALUE_SIGNAL = re.compile(
+    r"(?:курс|цен[аы]|стоимост|погод|температур|прогноз|расписан|котировк|"
+    r"\b(?:rate|price|cost|weather|temperature|forecast|schedule|quote)\b)",
+    re.IGNORECASE,
+)
+
+
+_SUBJECT_NOISE = {
+    "новост", "последн", "свежие", "сегодн", "вчера", "недавн", "найди", "поищи", "расска", "интерн",
+    "news", "latest", "recent", "today", "yesterday", "headli", "breaki",
+}
+
+
+def mentions_subject(result: RawSearchResult, query: str) -> bool:
+    """True when the result names at least one subject term of the query."""
+    subject = {term for term in _passage_terms(query) if term not in _SUBJECT_NOISE}
+    if not subject:
+        return True
+    return bool(subject & _passage_terms(f"{result.title} {result.snippet}"))
+
+
+_NAME_WORD = re.compile(r"(?<![\w-])([A-Za-z][\w.-]{2,}|[А-ЯЁ][а-яё]{2,}|\w*\d\w*)", re.UNICODE)
+
+
+def named_subjects(question: str) -> set[str]:
+    """Names in the question: Latin-script words, numbers and capitalised words
+    after the first one ("Starship", "SpaceX", "RTX 5090", "Варна")."""
+    words = _NAME_WORD.findall(question or "")
+    first = (question or "").strip().split(" ", 1)[0]
+    return {
+        _passage_stem(word)
+        for word in words
+        if word != first and len(word) >= 3 and word.casefold() not in _PASSAGE_STOPWORDS
+    }
+
+
+def on_subject(results: list, question: str) -> list:
+    """Results that name a subject of the question.
+
+    A planned branch without the subject ("критические замечания") brought
+    pages about criticism in general into a Starship answer. When the question
+    names something, a page that names none of it is dropped; when nothing
+    remains (another script, another spelling), the results stay as they are.
+    """
+    names = named_subjects(question)
+    if not names:
+        return list(results)
+    kept = [
+        result for result in results
+        if getattr(result, "service_data", False)
+        or names & _passage_terms(f"{result.title} {result.snippet} {result.url}")
+    ]
+    return kept or list(results)
+
+
+def has_recency_signal(query: str) -> bool:
+    """True when the request is about news or recent events, served from the dated news index."""
+    text = query or ""
+    if _NEWS_SIGNAL.search(text):
+        return True
+    return bool(_RECENT_EVENTS_SIGNAL.search(text) and not _LIVE_VALUE_SIGNAL.search(text))
+
+
 def plan_search_queries(query: str) -> list[str]:
     original = normalize_text(query)
     if not original:
@@ -749,10 +1234,13 @@ def plan_search_queries(query: str) -> list[str]:
         core,
         flags=re.IGNORECASE,
     ).strip(" .?!")
+    # Where to look is not what to look for: "в интернете" only polluted results.
+    core = re.sub(r"\s*\b(?:в\s+интернете|в\s+сети|онлайн|в\s+гугле|on\s+the\s+(?:internet|web)|online)\b\s*", " ", core,
+                  flags=re.IGNORECASE).strip(" .?!")
     core = core or original
 
     queries: list[str] = []
-    if re.search(r"(?:\b(?:weather|forecast)\b|погод|прогноз)", core, re.IGNORECASE):
+    if has_live_weather_signal(core) or re.search(r"(?:\b(?:weather|forecast)\b|погод|прогноз)", core, re.IGNORECASE):
         queries.append(f"{core} weather now temperature")
     if re.search(r"\b(?:openai|chatgpt|gpt[- ]?\d)\b", core, re.IGNORECASE):
         queries.append(f"site:openai.com {core}")
@@ -785,6 +1273,8 @@ def rank_search_results(results: list[RawSearchResult], query: str) -> list[RawS
         )
     ]
 
+    recency = has_recency_signal(query)
+
     def score(result: RawSearchResult) -> tuple[int, int]:
         haystack = f"{result.title} {result.snippet}".casefold()
         overlap = sum(1 for term in query_terms if term in haystack)
@@ -792,13 +1282,21 @@ def rank_search_results(results: list[RawSearchResult], query: str) -> list[RawS
         normalized_title = re.sub(r"[-\s]+", "", result.title.casefold())
         exact_product = 20 if any(product in normalized_title for product in versioned_products) else 0
         official = 0
-        if re.search(r"\b(?:openai|chatgpt|gpt)\b", query, re.IGNORECASE) and host.endswith("openai.com"):
+        if recency:
+            # News about a company comes from the press; its own site ranked
+            # first only because of the name.
+            pass
+        elif re.search(r"\b(?:openai|chatgpt|gpt)\b", query, re.IGNORECASE) and host.endswith("openai.com"):
             official = 50
         elif re.search(r"\b(?:google|gemini|gemma)\b", query, re.IGNORECASE) and (
             host.endswith("google.com") or host.endswith("google.dev")
         ):
             official = 50
-        return exact_product + official + overlap, len(result.snippet)
+        # A site's front page or a bare section ("openai.com", "openai.com/news/")
+        # lists links, not the answer: "OpenAI news" ranked them above articles.
+        path = (urlparse(result.url).path or "/").strip("/")
+        front_page = -40 if not path or (recency and "/" not in path and len(path) <= 12) else 0
+        return exact_product + official + overlap + front_page, len(result.snippet)
 
     return sorted(results, key=score, reverse=True)
 
@@ -878,3 +1376,39 @@ def readable_domain(url: str) -> str:
         return host or "Web source"
     except Exception:
         return "Web source"
+
+
+async def weather_forecast_result(query: str) -> RawSearchResult | None:
+    from .weather import weather_forecast_text
+
+    forecast = await weather_forecast_text(query)
+    if not forecast:
+        return None
+    title, url, text = forecast
+    return RawSearchResult(title=title, url=url, snippet=text, service_data=True)
+
+
+def search_state(origins: list[str], *, searched: bool) -> str:
+    """ok | wikipedia | saved | unavailable | empty, from where the sources came."""
+    if not searched:
+        return "ok"
+    if "engine" in origins:
+        return "ok"
+    if "wikipedia" in origins:
+        return "wikipedia"
+    if "saved" in origins:
+        return "saved"
+    return "unavailable" if WEB_ENGINES.all_resting() else "empty"
+
+
+SEARCH_NOTICES = {
+    "wikipedia": "Поисковики сейчас не отвечают — ответ собран только по Википедии. Свежие новости, цены и курсы туда могли не попасть.",
+    "saved": "Поисковики сейчас не отвечают — ответ собран по страницам, которые Оскар читал раньше (дата сохранения указана у источника). Данные могли устареть.",
+    "unavailable": "Поисковики сейчас не отвечают, а сохранённых страниц по теме нет — ответ не проверен в интернете. Попробуй ещё раз через пару минут.",
+    "empty": "Поиск ничего не нашёл по этому запросу — ответ не проверен в интернете.",
+}
+
+
+def search_notice(state: str) -> str:
+    """The line shown to the person above an answer whose search was degraded."""
+    return SEARCH_NOTICES.get(state, "")

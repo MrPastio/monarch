@@ -18,44 +18,44 @@
       "basePathDigest": "496ac0ddfb4a5b4100fed2e087bb3b7654176215776d5431d406d3322c3356f8"
     },
     "desktop": {
-      "baseCount": 39,
-      "basePathDigest": "4a196370a3a7cefec7db8258fcf32c1c045e2ce7236e8806683c052b530b7a8a"
+      "baseCount": 52,
+      "basePathDigest": "0296695731975f65044696cc6c025514f5ea6e408a1b725edfc32ab195ccfeb8"
     },
     "docs": {
-      "baseCount": 54,
-      "basePathDigest": "994b9fc88450bbacedf9473638b36cfd87438239918cd60619107fa97ed62aae"
+      "baseCount": 78,
+      "basePathDigest": "bd6eb7520799c32ae0707b09ff649733f438245d780b3afb4dc420e67e04e64a"
     },
     "installer": {
       "baseCount": 9,
       "basePathDigest": "79fcb864aa9b98e19674d2fc2d4f1867ca41e30af20b374d05ce8beb2f96d4af"
     },
     "oscar": {
-      "baseCount": 74,
-      "basePathDigest": "df928618adb78e3bb46f42eefa3a7c41311d8a6e3df3ce694d4b77be3e021eff"
+      "baseCount": 81,
+      "basePathDigest": "ec1b746ebb200593a20cb309ae6ff5cd76162b466a7089be361929a1bef5bfa7"
     },
     "release": {
       "baseCount": 12,
       "basePathDigest": "ba95a0fd3f6aba4b53aa29e399e92e291ce861be38ec5e16f95074a40648012d"
     },
     "scripts": {
-      "baseCount": 11,
-      "basePathDigest": "9f24ec6b5f7938d314d7f45b824078e85b14052d5f553daee55235662f70a01b"
+      "baseCount": 13,
+      "basePathDigest": "455e6d594d2fda4a6703982c6d46ec18bff4771da52cb734b0e34f21e4058064"
     },
     "security": {
-      "baseCount": 85,
-      "basePathDigest": "43fd5b9c9c4d588433c341068cd29858a44d717ded04eb0f0a121698a606cf20"
+      "baseCount": 92,
+      "basePathDigest": "b29d56c99eb82ec057d9bba040fc4cfcc39f5852b54c576a37ee9b67eecb0ba1"
     },
     "shared": {
       "baseCount": 1,
       "basePathDigest": "20dba928733603f0fb653c788a6a7b1d2249615ba901e24d64e47f91a31915d0"
     },
     "src": {
-      "baseCount": 262,
-      "basePathDigest": "a55a39115f4e8107004be2078cb7a96217cbd517c7d47ec49f51e481f2e7ae2d"
+      "baseCount": 288,
+      "basePathDigest": "226567c0da72e6886f86644a118cebf98207a98ebf7434d8ae91f46c80317122"
     },
     "tests": {
-      "baseCount": 161,
-      "basePathDigest": "10f39289c4cd1c657867de36bad5b1e9bdc41de1602fc182fa2f51c5b4c041f0"
+      "baseCount": 189,
+      "basePathDigest": "8130d4105ab6462f31daa25e1d7dc1a41a599248d201d7dd34a3407e8a48e6e4"
     },
     "tools": {
       "baseCount": 10,
@@ -63,13 +63,201 @@
     }
   },
   "additions": {
+    "tests/ui/astra-max-setup.test.ts": {
+      "scope": "tests",
+      "objectId": "413c199ee48d4084fbc0647021666284f6373551"
+    },
+    "tests/fixtures/agent-v3/memory-server.py": {
+      "scope": "tests",
+      "objectId": "14da52800d8b5ebf7d98ee3a0d4534834b18bc97"
+    },
+    "tests/fixtures/agent-v3/max-source-preview-bridge-electron.mjs": {
+      "scope": "tests",
+      "objectId": "643616947bbf86c20248f43305935485af07c736"
+    },
+    "tests/fixtures/agent-v3/max-safe-storage-electron.mjs": {
+      "scope": "tests",
+      "objectId": "646f8edfeae8b15a3c32c0f9704e20da5b7920e9"
+    },
+    "tests/desktop/astra-max-model-server.test.ts": {
+      "scope": "tests",
+      "objectId": "2e914bba4f4a6b0804ad7982f1918d9114248a8c"
+    },
+    "tests/desktop/astra-max-host-loader.test.ts": {
+      "scope": "tests",
+      "objectId": "16bf304f8956ce67b4901537f03d433bc9410508"
+    },
+    "tests/desktop/astra-max-desktop-bridge.test.ts": {
+      "scope": "tests",
+      "objectId": "466051c122df27464bcfad98fd101fd2f2918a20"
+    },
+    "tests/agent-v3/oscar-memory.test.ts": {
+      "scope": "tests",
+      "objectId": "874a66061a5dbf8f29b0fb14d2d167eccc71ff97"
+    },
+    "tests/agent-v3/model-host-config.test.ts": {
+      "scope": "tests",
+      "objectId": "ff66d1a01f30d88a6a9b7c294111227d22b06626"
+    },
+    "tests/agent-v3/memory-recall.test.ts": {
+      "scope": "tests",
+      "objectId": "75254d8cd3cad108605590706217ea2a5fbd5071"
+    },
+    "tests/agent-v3/max-settings-store.test.ts": {
+      "scope": "tests",
+      "objectId": "bee04268746077518f35e293be0524a187776bf6"
+    },
+    "tests/agent-v3/max-prepared-model-host.test.ts": {
+      "scope": "tests",
+      "objectId": "69c42e3fd0add311ee6f01e9f8eac286c8d5f8e2"
+    },
+    "tests/agent-v3/max-model-policy.test.ts": {
+      "scope": "tests",
+      "objectId": "0033b5e1482f5ef43434808981b9c1f4e1b7952a"
+    },
+    "tests/agent-v3/max-host-service.test.ts": {
+      "scope": "tests",
+      "objectId": "08674f12751c738590c116efcf5ac8d426727ecd"
+    },
+    "tests/agent-v3/max-decision-bridge.test.ts": {
+      "scope": "tests",
+      "objectId": "38ad53ba1bce50e1115b541aaf83dcfbe4d33fbc"
+    },
+    "tests/agent-v3/groq-max-provider.test.ts": {
+      "scope": "tests",
+      "objectId": "88d6212f331ed9a335ba3ed2bc37f3b5bd4df70f"
+    },
+    "tests/agent-v3/astra-max-product-pilot.test.ts": {
+      "scope": "tests",
+      "objectId": "44cb42902ef574b71add312ee2460d81aca8fc51"
+    },
+    "src/ui/public/modules/ui-navigation.js": {
+      "scope": "src",
+      "objectId": "ca3df454636522c5bd4896c29f9491592815770a"
+    },
+    "src/ui/public/modules/astra-max-setup.js": {
+      "scope": "src",
+      "objectId": "19ce87f602f94baf6f83192bea4ae8ac559ab978"
+    },
+    "src/core/startup-timing.ts": {
+      "scope": "src",
+      "objectId": "d5c984c908d2ee4a9bcd75841442cc718a775177"
+    },
+    "src/app/astra-oscar-memory.ts": {
+      "scope": "src",
+      "objectId": "7d64e5d2dc2ce64b0d444fca4c60e01d893a701e"
+    },
+    "src/app/astra-model-host-config.ts": {
+      "scope": "src",
+      "objectId": "a15da653086b13296cfe68d878a19441f26cbc11"
+    },
+    "src/agent-v3/model-failure-presentation.ts": {
+      "scope": "src",
+      "objectId": "7234d98064ad1baf68ab05159b3639ea7496e9e5"
+    },
+    "src/agent-v3/memory-recall.ts": {
+      "scope": "src",
+      "objectId": "1dc9ee6e1ff197bcf6ea62ddeee3f8ba8955784d"
+    },
+    "src/agent-v3/memory-recall-admission.ts": {
+      "scope": "src",
+      "objectId": "01a5ca69c0bc5c6048f1fe47a5d4d835844ef89b"
+    },
+    "src/agent-v3/max-settings-store.ts": {
+      "scope": "src",
+      "objectId": "5d40f2083588e7d7bc6855079bbd4316d91a695e"
+    },
+    "src/agent-v3/max-provider-contract.ts": {
+      "scope": "src",
+      "objectId": "ddd9459a5cf9a8423413103740929c663b47ce5d"
+    },
+    "src/agent-v3/max-prepared-model-host.ts": {
+      "scope": "src",
+      "objectId": "aede8ae6ac96484b06510d8590e39a6971bef249"
+    },
+    "src/agent-v3/max-model-policy.ts": {
+      "scope": "src",
+      "objectId": "21480a86a25f6ef6d0bcde747b314a235cf0d1be"
+    },
+    "src/agent-v3/max-host-service.ts": {
+      "scope": "src",
+      "objectId": "9fe4e151a2e266e702d5cf89b2d5294152763d5f"
+    },
+    "src/agent-v3/max-electron-entry.ts": {
+      "scope": "src",
+      "objectId": "a01c670d95026f966925e545ed57c43f48c792b4"
+    },
+    "src/agent-v3/max-decision-bridge.ts": {
+      "scope": "src",
+      "objectId": "1deb4fcc8c5666e4d386fbf4597fb2b406c8acbb"
+    },
+    "src/agent-v3/groq-max-provider.ts": {
+      "scope": "src",
+      "objectId": "f9612fd3bace0468889d4123880a02040d7bf3cd"
+    },
+    "scripts/build-astra-max-preview.mjs": {
+      "scope": "scripts",
+      "objectId": "b447338daca400dfd969470e3eb7e9b595bc6a85"
+    },
+    "oscar/backend/tests/test_astra_residency.py": {
+      "scope": "oscar",
+      "objectId": "a7c956b0d8a7c83e2bdf68aa368f41604096f53d"
+    },
+    "oscar/backend/tests/test_astra_memory_guard.py": {
+      "scope": "oscar",
+      "objectId": "4a86546fb1211c2a24cdc7c6c9ca3ad7c12469d9"
+    },
+    "oscar/backend/tests/test_astra_local_service.py": {
+      "scope": "oscar",
+      "objectId": "46111f66186f61f8f2a73bd8b13b0ffee58131fd"
+    },
+    "oscar/backend/tests/test_astra_asset_pin.py": {
+      "scope": "oscar",
+      "objectId": "7125b196d14d8c53c4b32e98b1afb6fb6499a96d"
+    },
+    "oscar/backend/oscar_agent/astra_memory_guard.py": {
+      "scope": "oscar",
+      "objectId": "a9edd7eddc41977202ba8754d45ba8146526c3f0"
+    },
+    "oscar/backend/oscar_agent/astra_local_service.py": {
+      "scope": "oscar",
+      "objectId": "1f10a4e99413713afc6b34f196daa1031e3eebf7"
+    },
+    "oscar/backend/oscar_agent/astra_asset_pin.py": {
+      "scope": "oscar",
+      "objectId": "7bc8dd339eef0bb9b541c3135953e13810fc0da8"
+    },
+    "docs/architecture/ASTRA_LOCAL_RESIDENCY_INTEGRATION.md": {
+      "scope": "docs",
+      "objectId": "7196eec0f2bc3610befc8656f8f509a531b6a7ca"
+    },
+    "desktop/electron/protected-integration-acl.mjs": {
+      "scope": "desktop",
+      "objectId": "9757119f5be86579977e09e2905a33042ad1fecf"
+    },
+    "desktop/electron/astra-max-model-server.mjs": {
+      "scope": "desktop",
+      "objectId": "1ecd2977edc8cf2c811c36a50c1a1987711e4b6a"
+    },
+    "desktop/electron/astra-max-host-loader.mjs": {
+      "scope": "desktop",
+      "objectId": "f3379a47218ad29d011af952e87a20ab37bd6f5d"
+    },
+    "desktop/electron/astra-max-desktop-bridge.mjs": {
+      "scope": "desktop",
+      "objectId": "5ab8f4fdb077eea2031e3ebb70911d93416f37f9"
+    },
+    "oscar/backend/tests/test_astra_main_mount.py": {
+      "scope": "oscar",
+      "objectId": "08fafa7f8ecf6ec177c5a970f30068b74fc38743"
+    },
     "OWNER_AUTHORITY_V1.md": {
       "scope": "__root__",
       "objectId": "393810e59dd3a226d26a463bdc080f4b4df5b877"
     },
     "SECURITY.md": {
       "scope": "__root__",
-      "objectId": "aa9f8a01e0d2068436cad881d59882edccfaa426"
+      "objectId": "9295df4f9a2169e77289f76803380b6e6a8b2fe1"
     },
     "assets/voice/PROVENANCE.md": {
       "scope": "assets",
@@ -113,15 +301,15 @@
     },
     "desktop/electron/owner-enrollment.mjs": {
       "scope": "desktop",
-      "objectId": "017db557e2c29d0140bec98e6f471311e66b0547"
+      "objectId": "da36dc73c287218d033ec00e7dd30986a0d0c92d"
     },
     "oscar/backend/oscar_agent/context_settings.py": {
       "scope": "oscar",
-      "objectId": "feb12ab7d424feb9a0ac43f8e017a3b57d6c1022"
+      "objectId": "77dc6ac7fe6fa70853944240fd5c80ddee9a2411"
     },
     "oscar/backend/oscar_agent/memory_v4.py": {
       "scope": "oscar",
-      "objectId": "43a0036afcfe3db76b66d42e88a01d17b76c88fe"
+      "objectId": "8429dd62b7537ca4d62ac5781531627045581157"
     },
     "oscar/backend/oscar_agent/semantic_memory.py": {
       "scope": "oscar",
@@ -129,19 +317,19 @@
     },
     "oscar/backend/tests/test_context_settings.py": {
       "scope": "oscar",
-      "objectId": "4fc70824dab07bfe06f45d2ffcfb49b5d7036be9"
+      "objectId": "eeebc2dedec87df75e691997c611afab1cdddde4"
     },
     "oscar/backend/tests/test_chat_authority.py": {
       "scope": "oscar",
-      "objectId": "d85ee4823fa424a6df1c963352ecbded16a425d4"
+      "objectId": "2c1ea2d02d84fe610a5c82af7ba6031b03be3c5f"
     },
     "oscar/backend/tests/test_memory_v4.py": {
       "scope": "oscar",
-      "objectId": "ca0ac95c11e0a972dbedaa2b76b4dde01580c4f0"
+      "objectId": "51bdee0212f1a4c65848bf30117d066cfb02cc92"
     },
     "oscar/backend/tests/test_personality_runtime.py": {
       "scope": "oscar",
-      "objectId": "1c1e5faa3763017d9c61aaac92242ba1610e0ff1"
+      "objectId": "b5e6917071fe9e6b1ec7d688aac0770ed51364c7"
     },
     "oscar/backend/tests/test_sharing_tts_runtime.py": {
       "scope": "oscar",
@@ -161,11 +349,11 @@
     },
     "security/src/monarch_security/file_parser_worker.py": {
       "scope": "security",
-      "objectId": "a01523ffa7359974a792a2848e085120deb3e29a"
+      "objectId": "802ac8beb1fab8bbf91e9d03376433b8f09865f1"
     },
     "security/tests/test_supervisor_backlog.py": {
       "scope": "security",
-      "objectId": "8b8aeaa25022205bc912f44baed0bad886e93963"
+      "objectId": "da08643a38db237786b79c0c8c17864457dbb483"
     },
     "src/authority/owner-authority.ts": {
       "scope": "src",
@@ -173,15 +361,15 @@
     },
     "src/app/oscar-turn-http.ts": {
       "scope": "src",
-      "objectId": "9c461e0cd52d5e8fab178f40217ba193fde2ebbe"
+      "objectId": "99bca94f02eb893a8027677c03750ec6067e736c"
     },
     "src/app/oscar-turn-runtime.ts": {
       "scope": "src",
-      "objectId": "fb274209f7ecff039f2685560e0e59dc64b47ff5"
+      "objectId": "174774574edae171ceb1d99c75f3ee6a53e3f141"
     },
     "src/core/durable-json-file.ts": {
       "scope": "src",
-      "objectId": "bdce64505035abd796b43e7a7944d523b353519f"
+      "objectId": "a55da1404e52535bf8926ad5cc16049ff4ae068b"
     },
     "src/app/product-version.ts": {
       "scope": "src",
@@ -209,7 +397,7 @@
     },
     "src/image-generation/service.ts": {
       "scope": "src",
-      "objectId": "2f9a86e3300228d2dc7b605ca25dfcc31f3b1a2f"
+      "objectId": "2e073f37493e436734e0c5679b88ff8e6f350661"
     },
     "src/modules/workspace/storage-audit.ts": {
       "scope": "src",
@@ -217,15 +405,15 @@
     },
     "src/oscar-turn/attachment-store.ts": {
       "scope": "src",
-      "objectId": "291abe4072dbbcb68a8ba674d8110c0c27ca2126"
+      "objectId": "98fe4157b818e99eaed448837c9d0cc0f3c198b6"
     },
     "src/oscar-turn/claim-integrity.ts": {
       "scope": "src",
-      "objectId": "40c2400b5dd526de6f6fc0b5bd3cd7d5fbb8bbe3"
+      "objectId": "96b5d804e3560744f08c44f7c51f877e517205fd"
     },
     "src/oscar-turn/coordinator.ts": {
       "scope": "src",
-      "objectId": "84b616a6ab8b5094f32daf302e80ae552c884b3c"
+      "objectId": "4f1e16109756b6889d0ea35ad3a88e5d7f82500f"
     },
     "src/oscar-turn/data-egress-consent.ts": {
       "scope": "src",
@@ -233,27 +421,27 @@
     },
     "src/oscar-turn/disposition.ts": {
       "scope": "src",
-      "objectId": "5b55e9b3ca8d5dc7cb37c796282fb16170ecbdf2"
+      "objectId": "c40cbd3182bc7e32a48d216e808d004c70a9da14"
     },
     "src/oscar-turn/index.ts": {
       "scope": "src",
-      "objectId": "377d65daecfaea93e513e40c15051f6e7a1a7556"
+      "objectId": "fb25aea932595ea876cdf6a026d3d2fc4bd2b0b9"
     },
     "src/oscar-turn/turn-store.ts": {
       "scope": "src",
-      "objectId": "5ce4925e4c2baa75d531397ad280e8139e26fea4"
+      "objectId": "59e17f904295da6047a7e81629ae19280c5b4939"
     },
     "src/oscar-turn/types.ts": {
       "scope": "src",
-      "objectId": "972f8389b05ccfa736334ea24fcceda4a2e92064"
+      "objectId": "c4cd36a1869a3ec45b3d722f48b693d09d4a5e5a"
     },
     "src/settings/command-bus.ts": {
       "scope": "src",
-      "objectId": "1a35e9b92acda044499f279925f4cda335a3681d"
+      "objectId": "bbe445bc2a92db5625fedc1862d76e55ba74b7a2"
     },
     "src/settings/contracts.ts": {
       "scope": "src",
-      "objectId": "7fe8fe704ea9b714575a33a0cb29564ce8247d08"
+      "objectId": "802bcb46c730fc4069e114dc66f24c16baf05cd5"
     },
     "src/settings/index.ts": {
       "scope": "src",
@@ -262,6 +450,18 @@
     "src/settings/personality.ts": {
       "scope": "src",
       "objectId": "28d5592a25267b9b2dd070d0bb04cd78151f3677"
+    },
+    "src/ui/public/assets/brand/monarch-assembly-crown.png": {
+      "scope": "src",
+      "objectId": "d9a6777a2a56483784ab776ec23107f267bc8dd6"
+    },
+    "src/ui/public/assets/brand/monarch-assembly-shield.png": {
+      "scope": "src",
+      "objectId": "d512ecc6be415da466bf1d78f51d39e32d322f9e"
+    },
+    "src/ui/public/assets/fonts/MonarchDisplay-Bold.woff2": {
+      "scope": "src",
+      "objectId": "d6427f6c4a557e8565c8dec96ecd8d6a91d5ccdb"
     },
     "src/ui/public/assets/brand/monarch-incognito-hooded.png": {
       "scope": "src",
@@ -273,11 +473,11 @@
     },
     "src/ui/public/modules/image-generation-pane.js": {
       "scope": "src",
-      "objectId": "fadafc8e13c456d8f09e4e6828bc66dace7392ed"
+      "objectId": "7d790187ec7e34386edcd1fe89515c73e6e285c4"
     },
     "src/ui/public/modules/monarch-genesis-field.js": {
       "scope": "src",
-      "objectId": "79782e6b97064c332b2413e754af631f179a77e1"
+      "objectId": "ed35d42fc0246c12271e552417f58952198dbb68"
     },
     "src/ui/public/modules/oscar-ram-pressure.d.ts": {
       "scope": "src",
@@ -285,15 +485,15 @@
     },
     "src/ui/public/modules/oscar-ram-pressure.js": {
       "scope": "src",
-      "objectId": "f0be6e433bd2deacd8ebd0a3258c1930f77b6d0c"
+      "objectId": "a137d833c1dce0080882edd9d22c71bd066490f3"
     },
     "tests/app/oscar-turn-http.test.ts": {
       "scope": "tests",
-      "objectId": "ab9b0cdc1728e68e3d95adf20fec824ed34d5d19"
+      "objectId": "35d2391f49a0233c811a118da57fd69256f9d75a"
     },
     "tests/app/oscar-turn-runtime.test.ts": {
       "scope": "tests",
-      "objectId": "28d221089432f5aca13a22430135dd3509dc07e7"
+      "objectId": "3ed587d1a4208cd703697da27a31f42a58e14b91"
     },
     "tests/app/personality-preview.test.ts": {
       "scope": "tests",
@@ -317,7 +517,7 @@
     },
     "tests/desktop/image-provider-policy.test.ts": {
       "scope": "tests",
-      "objectId": "686408091e5199112fadb8b543d2b85035eccd72"
+      "objectId": "4172443258b7fc7be5e3a66887a069ff7cf27d9a"
     },
     "tests/desktop/owner-enrollment.test.ts": {
       "scope": "tests",
@@ -337,7 +537,7 @@
     },
     "tests/image-generation/service.test.ts": {
       "scope": "tests",
-      "objectId": "076b8aa0ec3efc82e9efd8f3dac4ddcf5871bffe"
+      "objectId": "011eb8f2750eba9ff2a8d8d92398908eb64f58ed"
     },
     "tests/image-generation/prompt-translator.test.ts": {
       "scope": "tests",
@@ -345,7 +545,7 @@
     },
     "tests/oscar/claim-integrity.test.ts": {
       "scope": "tests",
-      "objectId": "f37ac2ea510c5e472c023b0c8fda37d5ebdfc788"
+      "objectId": "9e1e09cd3c848a7e8419760bd063c647cee00514"
     },
     "tests/oscar/data-egress-consent.test.ts": {
       "scope": "tests",
@@ -353,19 +553,19 @@
     },
     "tests/oscar/turn-coordinator.test.ts": {
       "scope": "tests",
-      "objectId": "0e31f36cc22bba80fc1b01780feb5337fdb56f6e"
+      "objectId": "9c263d1bf9c851ebdd3d0ddb6926708f1b775d16"
     },
     "tests/oscar/turn-store.test.ts": {
       "scope": "tests",
-      "objectId": "48f71039050bd86c26ff7cfbc986833baa1d3de9"
+      "objectId": "5aa9dcdbc883ac44b57e4e9574648850bf7e6783"
     },
     "tests/ui/owner-authority-ui.test.ts": {
       "scope": "tests",
-      "objectId": "690fad33a8a7a49e0701075b75b2fb2f599dc59e"
+      "objectId": "01fbf533d2c7546e2f17f38c782358ba53d3b349"
     },
     "tests/ui/image-generation-view.test.ts": {
       "scope": "tests",
-      "objectId": "7762c2aa4e9d58ddf6876df8dc0ba7ce9496c68a"
+      "objectId": "744dde43e13beec83d6a8a6c9e8258ac5978c93e"
     },
     "tests/ui/oscar-ram-pressure.test.ts": {
       "scope": "tests",
@@ -389,7 +589,7 @@
     },
     "tests/settings/settings-command-bus.test.ts": {
       "scope": "tests",
-      "objectId": "4c9fe263dab1ea3258c00e5fbfe9c645781d260f"
+      "objectId": "0464fc37938e018be575654365367f407a1ca73d"
     },
     "tests/voice/test_local_neural_tts.py": {
       "scope": "tests",
@@ -437,19 +637,11 @@
     },
     "oscar/backend/oscar_agent/prompt_catalog.py": {
       "scope": "oscar",
-      "objectId": "8fdf2e5bc43cb82d3e4af4d2218b96d86c9f3ac3"
-    },
-    "scripts/agent-full-task-benchmark.ts": {
-      "scope": "scripts",
-      "objectId": "6bdf72cb1888e882c9213ffc097eb4bdac1bb366"
+      "objectId": "4641c7419607781c2e5ac98d09db933af0f74881"
     },
     "scripts/build-computer-use-native.mjs": {
       "scope": "scripts",
       "objectId": "0d7e248e9a20bc7dd2419f2d60d0ae3954c75e9d"
-    },
-    "scripts/computer-use-model-acceptance.ts": {
-      "scope": "scripts",
-      "objectId": "afeb9bd896a77274a05eb4dd7de779aa44f3a6a9"
     },
     "scripts/capture-computer-use-ui-qa.mjs": {
       "scope": "scripts",
@@ -475,14 +667,6 @@
       "scope": "scripts",
       "objectId": "2cd4ec2d4f8135117ee17c3d878a48d40ef1cde4"
     },
-    "scripts/oscar-live-desktop-agent-acceptance.ts": {
-      "scope": "scripts",
-      "objectId": "f5392bace218aeb66eb9c69432cfaa8906e96422"
-    },
-    "scripts/oscar-live-qwen-pro-acceptance.ts": {
-      "scope": "scripts",
-      "objectId": "a68a8f5f498767bb1ead777a898dd71b834c5be6"
-    },
     "scripts/render-computer-cursor-showcase.ts": {
       "scope": "scripts",
       "objectId": "a87d47a6f6fe871d69ee6dd114e87b7d473fef49"
@@ -491,37 +675,29 @@
       "scope": "scripts",
       "objectId": "8089a9b8865143e0deccabc1ad6d2e36091bdd97"
     },
-    "src/agent/computer-use-goal.ts": {
-      "scope": "src",
-      "objectId": "38d30ef970e7cfedeb3be433b20dcd104c8da1da"
-    },
-    "src/agent/operational-goal-binding.ts": {
-      "scope": "src",
-      "objectId": "97de63bccdad9d15c3fe274a92ac0eb814e95893"
-    },
     "src/core/known-folder-target.ts": {
       "scope": "src",
-      "objectId": "2b3d7ded508c3ab549392b4d75fb81cc3ad8d73f"
+      "objectId": "41b8172a4acbe3e32c1ba5aaad23df8d95ce6b70"
     },
     "src/modules/astra/skill-authoring.ts": {
       "scope": "src",
-      "objectId": "737a3a5f3a6031639f933e93ea78b82ad29708ac"
+      "objectId": "a22b59604b76fe08ca84c03551249b5dc9cc0a71"
     },
     "src/modules/computer/control-plane.ts": {
       "scope": "src",
-      "objectId": "7db6bfcc4b46d8b38401676d1681f75a1a87058f"
+      "objectId": "a64a578180e1a363d3b6a176a563dc29822d97a3"
     },
     "src/modules/computer/index.ts": {
       "scope": "src",
-      "objectId": "bc1fd9c95fac681440aca13fa9b47e64de2f7dc1"
+      "objectId": "b9b3ceeeda5a8866c8d562abf331ea57c2a25e7b"
     },
     "src/modules/computer/manifest.ts": {
       "scope": "src",
-      "objectId": "7168edefb69a0e31afa614d7029f96ed2736a23e"
+      "objectId": "c958d0da6780fb2e31f7a700421ba2a301710df5"
     },
     "src/modules/computer/native-bridge.ts": {
       "scope": "src",
-      "objectId": "4149334befb5b79a5be7f3770e2cf1b651678a9a"
+      "objectId": "a1cd11c4c22182ff08b9ff3396574fb8e68827ae"
     },
     "src/modules/computer/vision-analyzer.ts": {
       "scope": "src",
@@ -529,7 +705,7 @@
     },
     "src/modules/models/component-manager.ts": {
       "scope": "src",
-      "objectId": "33435ff1b47f2ee6da09f0e24933c7305d5811cb"
+      "objectId": "33f78ba967b25ab37fbf20351c1a4fa374971403"
     },
     "src/modules/oscar/runtime-profile.ts": {
       "scope": "src",
@@ -537,7 +713,7 @@
     },
     "src/settings/owner-dev.ts": {
       "scope": "src",
-      "objectId": "1b02ab5d5e2ce3575a52addc9fc63d2651599bf5"
+      "objectId": "493aa1b594726186bf0507e1493b2b6f88b25450"
     },
     "src/ui/public/modules/composer-type-to-focus.js": {
       "scope": "src",
@@ -545,7 +721,7 @@
     },
     "src/ui/public/modules/computer-use-control.js": {
       "scope": "src",
-      "objectId": "d5d3a24c6ec5b05521627dfa4e4b37cd9e84d7cb"
+      "objectId": "96b324a9a7e405bf0292ff6f05332cc75e9da23e"
     },
     "src/ui/public/modules/oscar-functions.js": {
       "scope": "src",
@@ -565,7 +741,7 @@
     },
     "src/ui/public/modules/oscar-history-reconciliation.js": {
       "scope": "src",
-      "objectId": "7c909563b96ddea836a452cbcca5fd331e2472ea"
+      "objectId": "190830e9b7637b7d373292d1f3266f5f471f65e9"
     },
     "src/ui/public/modules/oscar-model-availability.js": {
       "scope": "src",
@@ -573,7 +749,7 @@
     },
     "src/ui/public/modules/model-setup-welcome.js": {
       "scope": "src",
-      "objectId": "fbf773c7f07f4e65ff5028dda554c44d8ff3666d"
+      "objectId": "b5ea730bdd3f626180dafc742d5df1c6c0627cdf"
     },
     "src/ui/public/modules/skill-ux.js": {
       "scope": "src",
@@ -581,39 +757,23 @@
     },
     "src/ui/public/modules/ui-motion.js": {
       "scope": "src",
-      "objectId": "41c35ee325b95823edea9de9daf92050f064f9b2"
+      "objectId": "4f9635fbdb3d0468203b7c3a2d2fec4cb511e3ba"
     },
     "src/ui/public/ui-refresh.css": {
       "scope": "src",
-      "objectId": "1a8dc3ab7131f8a5662061e57960aa70ed64b79a"
-    },
-    "tests/agent/computer-use-decision-binding.test.ts": {
-      "scope": "tests",
-      "objectId": "bf2c3ed5758c4fa2f1834d0f6e897bc85dfde4fc"
-    },
-    "tests/agent/computer-use-goal.test.ts": {
-      "scope": "tests",
-      "objectId": "7f74f7e74b8861ab6a3ef9849a02011d19a59350"
-    },
-    "tests/agent/operational-goal-binding.test.ts": {
-      "scope": "tests",
-      "objectId": "5389b8d34f8e7526ffbe22e5f40b5a1a6220a466"
-    },
-    "tests/agent/plan-manager.test.ts": {
-      "scope": "tests",
-      "objectId": "daedff10a90cbb58ca4b9b7c81bbcf07e7cd6059"
+      "objectId": "ee2eb22f00caa0544d50d98f79947318d6ec35a8"
     },
     "tests/core/durable-json-file.test.ts": {
       "scope": "tests",
-      "objectId": "04e483ec9106b6c4db76e1631f935ba63f273351"
+      "objectId": "ae6171e798e7c288f487bb0fcf5a09d72a2b13cb"
     },
     "tests/core/durable-json.test.ts": {
       "scope": "tests",
-      "objectId": "57af29f56e4a7d8b0323f11d29237b73022b1501"
+      "objectId": "1a2c4794aff793a579cf8d5442621887ea620998"
     },
     "tests/core/known-folder-target.test.ts": {
       "scope": "tests",
-      "objectId": "61f959e882ead65031b9540ba830d5f10c64e8fd"
+      "objectId": "ce3a20bdabb6b0e2ba945d634b5d6d805a1b7ec4"
     },
     "tests/core/mutation-journal-durability.test.ts": {
       "scope": "tests",
@@ -621,7 +781,7 @@
     },
     "tests/desktop/computer-use-emergency-stop.test.ts": {
       "scope": "tests",
-      "objectId": "4a448e7fba09e0ef9fb955b3ef4b5b92210f32a3"
+      "objectId": "22ac41d51561c0315d9c39c6c1157ebde80f64d7"
     },
     "tests/fixtures/agent/deterministic-security-module.ts": {
       "scope": "tests",
@@ -653,19 +813,19 @@
     },
     "tests/modules/coder-run-store-durability.test.ts": {
       "scope": "tests",
-      "objectId": "c1258c7b902807de569ac9faec8ceedab9cdd8f4"
+      "objectId": "472b144893e408c57428d3f2a0afc3ae2ee06b38"
     },
     "tests/modules/computer-use-windows-acceptance.test.ts": {
       "scope": "tests",
-      "objectId": "d173fd3256f6e1e202e35b215c2b967f86f66c42"
+      "objectId": "3a60dae9e58e152590ea34b88cfc1dc87b504765"
     },
     "tests/modules/computer-use.test.ts": {
       "scope": "tests",
-      "objectId": "bcc44e84ad04a7e6a9c822837511fc264baa3399"
+      "objectId": "228ca96e52dd65f1d727b042c09e9696499aa347"
     },
     "tests/modules/model-component-manager.test.ts": {
       "scope": "tests",
-      "objectId": "65429bb598b4eee596f225a87255c860ff2789d9"
+      "objectId": "3b0ecef8d355ba88a0b4db50f12d995ff7911fef"
     },
     "tests/modules/oscar-runtime-profile.test.ts": {
       "scope": "tests",
@@ -673,7 +833,7 @@
     },
     "tests/modules/security-action-reaction.test.ts": {
       "scope": "tests",
-      "objectId": "8e32b1acf9957e0fc861adb0238233946152916a"
+      "objectId": "ba7e4039af29db56a4d7cf763b65f933de695e92"
     },
     "tests/modules/skill-authoring.test.ts": {
       "scope": "tests",
@@ -681,7 +841,7 @@
     },
     "tests/oscar/disposition.test.ts": {
       "scope": "tests",
-      "objectId": "4f5c964512a7d0cc1e531512d86fbe9455545f49"
+      "objectId": "53c37b6167612658f73f6defcc63b139a8d8fbe4"
     },
     "tests/release/static-module-graph.test.ts": {
       "scope": "tests",
@@ -689,11 +849,11 @@
     },
     "tests/settings/owner-dev.test.ts": {
       "scope": "tests",
-      "objectId": "6686fb5225f54b48ccefaa9a74492d46b37588b9"
+      "objectId": "1a64fdbd39243e42a91a796f0e7a5904fcf3ad26"
     },
     "tests/test-runner-policy.test.ts": {
       "scope": "tests",
-      "objectId": "b8db6a25cb566059cc64cf69f5698c86a6fc6699"
+      "objectId": "cae3ac31208ec7cae827eacb56d5da5395f83c14"
     },
     "tests/ui/latest-request-owner.test.ts": {
       "scope": "tests",
@@ -705,7 +865,7 @@
     },
     "tests/ui/oscar-history-reconciliation.test.ts": {
       "scope": "tests",
-      "objectId": "785e93b206b3be65e8dfaf99ff9d9b0b4298ba33"
+      "objectId": "deb5f0d4ee0de1e74bde681b403310690ec8e0a1"
     },
     "tests/ui/oscar-model-availability.test.ts": {
       "scope": "tests",
@@ -717,7 +877,7 @@
     },
     "tests/ui/ui-refresh.test.ts": {
       "scope": "tests",
-      "objectId": "1b9aa90b7c7dcd605c5347aa97acb57b6e2fee06"
+      "objectId": "895d6cc6c013e8e7bf8fe8b60321b86dd67d6782"
     },
     "tools/computer-use/assets/README.md": {
       "scope": "tools",
@@ -725,7 +885,7 @@
     },
     "tools/computer-use/MonarchComputerUse.cs": {
       "scope": "tools",
-      "objectId": "0c80884932127f4278f7518256c2c7a59187fef5"
+      "objectId": "951a4437670a333d12b0bfc29f829584a61b9a71"
     },
     "release/notes/v0.2.5.0.md": {
       "scope": "release",
@@ -762,6 +922,1510 @@
     "tools/computer-use/assets/oscar-cursor-text.png": {
       "scope": "tools",
       "objectId": "45948de75364cc73c82672176153d58f3314aff0"
+    },
+    "desktop/electron/astra-computer-dialog.mjs": {
+      "scope": "desktop",
+      "objectId": "bbf9d255f26f35892d4e17a9059adbb92c67d978"
+    },
+    "desktop/electron/astra-isolated-preload.cjs": {
+      "scope": "desktop",
+      "objectId": "97ca97793082b8dcafd40dd66ce5c7f56703281b"
+    },
+    "desktop/electron/astra-pilot-policy.mjs": {
+      "scope": "desktop",
+      "objectId": "07b060c0f324f24e8852f604bda3433a52eeaa08"
+    },
+    "desktop/electron/astra-product-host.mjs": {
+      "scope": "desktop",
+      "objectId": "adc20b863992d55aeb9693f72c031af6c8db1773"
+    },
+    "desktop/electron/astra-target-dialog.mjs": {
+      "scope": "desktop",
+      "objectId": "8445c904b01ece300fd6169c92ebb25a47091c2c"
+    },
+    "desktop/electron/voice-overlay-preload.cjs": {
+      "scope": "desktop",
+      "objectId": "2501227c06deb5ccf4108397bae189ccc105e091"
+    },
+    "desktop/electron/voice-overlay.css": {
+      "scope": "desktop",
+      "objectId": "83e2c52f3ce559a2ee1cd2252d10d744c6c85a19"
+    },
+    "desktop/electron/voice-overlay.html": {
+      "scope": "desktop",
+      "objectId": "fd8b86e7b8026a6b406bde9e1a34641dca38273b"
+    },
+    "desktop/electron/voice-overlay.js": {
+      "scope": "desktop",
+      "objectId": "66d071896cb44f7fdf355040e19752a92c3948f9"
+    },
+    "docs/architecture/MONARCH_ASTRA_V3_IMPLEMENTATION_STATUS.md": {
+      "scope": "docs",
+      "objectId": "033cd82bcfcaded9342d0fb90f37cdff13c268f1"
+    },
+    "docs/architecture/MONARCH_ASTRA_V3_MODEL_QUALIFICATION_20260831.md": {
+      "scope": "docs",
+      "objectId": "d0397ea897e03c961bac57e69ba9ed337c28bc7e"
+    },
+    "docs/architecture/MONARCH_TELEGRAM_DOCUMENT_ARTIFACT_BOUNDARY_V1.md": {
+      "scope": "docs",
+      "objectId": "561872631db32afd6523067eb34318ee0eaef6bd"
+    },
+    "docs/legal/VOICE_INFORMATION_PROVIDERS_TERMS_RU.md": {
+      "scope": "docs",
+      "objectId": "0b84f7b3b78a36606c8f04e8ef372fa43d163c13"
+    },
+    "oscar/backend/oscar_agent/astra_decision_grammar.py": {
+      "scope": "oscar",
+      "objectId": "33136325fdf901d163418e5883bfa7110f0624de"
+    },
+    "oscar/backend/oscar_agent/astra_model_host.py": {
+      "scope": "oscar",
+      "objectId": "68222de1adb5ce1a7a4aa079e75d1156c3a9b9fa"
+    },
+    "oscar/backend/oscar_agent/astra_model_http.py": {
+      "scope": "oscar",
+      "objectId": "bfb619f9d9b2972c6ff6b64117e896b4333e461e"
+    },
+    "oscar/backend/oscar_agent/astra_prepared_driver.py": {
+      "scope": "oscar",
+      "objectId": "e27c5dfcf2ec669d75bac0b0c791870133309308"
+    },
+    "oscar/backend/oscar_agent/conversation_messages.py": {
+      "scope": "oscar",
+      "objectId": "2b09e46895bd14cf34ef588e2ceda1cc200da120"
+    },
+    "oscar/backend/tests/astra_model_fixture.py": {
+      "scope": "oscar",
+      "objectId": "84bc84d1dc98baf26bc21817c17ee7c48490a7d9"
+    },
+    "oscar/backend/tests/test_astra_context_presentation.py": {
+      "scope": "oscar",
+      "objectId": "4b5fd16047a3e3d59c2bdf3f716c52f87129013f"
+    },
+    "oscar/backend/tests/test_astra_model_host.py": {
+      "scope": "oscar",
+      "objectId": "6a1c893f7ff689907ffe59d2d55a1655ec5033d7"
+    },
+    "oscar/backend/tests/test_astra_owned_model_scope.py": {
+      "scope": "oscar",
+      "objectId": "77305199fe428055ad7eb484e32c6b62f4386966"
+    },
+    "src/agent-v3/computer-action-task-profile.ts": {
+      "scope": "src",
+      "objectId": "53cc98c1d964a20f3d0a12477c9faf38284f2772"
+    },
+    "src/agent-v3/computer-action-work-adapter.ts": {
+      "scope": "src",
+      "objectId": "4d3c0dda7d09c8f5f959a403a51825814a746d28"
+    },
+    "src/agent-v3/computer-observe-task-profile.ts": {
+      "scope": "src",
+      "objectId": "34b451ac07463c1a9614ff951071b3c1dd07e8a5"
+    },
+    "src/agent-v3/computer-observe-work-adapter.ts": {
+      "scope": "src",
+      "objectId": "05330da0ccd3c9b53482295a9315b84f8e1dcd31"
+    },
+    "src/agent-v3/context-engine.ts": {
+      "scope": "src",
+      "objectId": "8e7ca5ec08d534c00b5563cc926d64f2b93d7906"
+    },
+    "src/agent-v3/create-approval.ts": {
+      "scope": "src",
+      "objectId": "34c0a3815c390d919e04204db0f2d1b29016cfdb"
+    },
+    "src/agent-v3/create-decision-gateway.ts": {
+      "scope": "src",
+      "objectId": "8259c15c2084277ba558112e638ecede7a38e9aa"
+    },
+    "src/agent-v3/create-task-certifier.ts": {
+      "scope": "src",
+      "objectId": "293f8b07b0411cb54711fb92fe2616c4ce48324d"
+    },
+    "src/agent-v3/create-task-profile.ts": {
+      "scope": "src",
+      "objectId": "0bfe59c76e34131de8f041b1ee672beb1f9af7e6"
+    },
+    "src/agent-v3/create-work-adapter.ts": {
+      "scope": "src",
+      "objectId": "d4fd74bfb69fd52550ff34f8d516b88fcd6543d7"
+    },
+    "src/agent-v3/decision-json.ts": {
+      "scope": "src",
+      "objectId": "165e9317145dd3de9f09564576938e42935e8a50"
+    },
+    "src/agent-v3/draft-content-acceptance.ts": {
+      "scope": "src",
+      "objectId": "2317d107727fa18cfe0b86c55d7776eaf95178e1"
+    },
+    "src/agent-v3/draft-reference-read.ts": {
+      "scope": "src",
+      "objectId": "f1c8f38081434e4c81581d734dd3f30c70353c20"
+    },
+    "src/agent-v3/journal.ts": {
+      "scope": "src",
+      "objectId": "ce8fb3cb277b34073ceb3416dddb049242217ee8"
+    },
+    "src/agent-v3/model-create-task-certifier.ts": {
+      "scope": "src",
+      "objectId": "407819a7623ad6e135315312e9c0bf7f328b8693"
+    },
+    "src/agent-v3/model-create-task-profile.ts": {
+      "scope": "src",
+      "objectId": "8cde73a2fc3cbd99a8da6ae2ca9f05721a000ecd"
+    },
+    "src/agent-v3/model-create-task-state.ts": {
+      "scope": "src",
+      "objectId": "e9e6c129018c33df21d044ca9a913ae09d91a663"
+    },
+    "src/agent-v3/model-decision-profile.ts": {
+      "scope": "src",
+      "objectId": "95dc6b80595194d3afae5fc7c39823585fc76c2c"
+    },
+    "src/agent-v3/model-read-task-certifier.ts": {
+      "scope": "src",
+      "objectId": "0b0e726c55eaa07e6568d7a58a6a9d57afcd28f4"
+    },
+    "src/agent-v3/model-read-task-profile.ts": {
+      "scope": "src",
+      "objectId": "5ab9c65207c454cc9cb88b2a5fe6bdfff57e08c3"
+    },
+    "src/agent-v3/model-read-task-state.ts": {
+      "scope": "src",
+      "objectId": "c08df70986aa5137ae6f5f370fbed95d2d6e4fa6"
+    },
+    "src/agent-v3/model-work-adapter.ts": {
+      "scope": "src",
+      "objectId": "793ddad396ee42c7d9ab065edc524108943ea311"
+    },
+    "src/agent-v3/prepared-model-client.ts": {
+      "scope": "src",
+      "objectId": "2958e362fa8b4eb1a07112d06b479e32a57c56cf"
+    },
+    "src/agent-v3/read-decision-gateway.ts": {
+      "scope": "src",
+      "objectId": "4c34530310bcef7504e165eb2642bc76748009ed"
+    },
+    "src/agent-v3/read-model-decision.ts": {
+      "scope": "src",
+      "objectId": "7c1bbeabccd99e2778cb0e5d509b1674a5b389bd"
+    },
+    "src/agent-v3/read-runtime.ts": {
+      "scope": "src",
+      "objectId": "7136e34ddb46c08123b542bbc1749bb6a405891b"
+    },
+    "src/agent-v3/read-task-certifier.ts": {
+      "scope": "src",
+      "objectId": "4280e199f6cb78f704babb7d4dc48418ec47370f"
+    },
+    "src/agent-v3/read-task-runtime.ts": {
+      "scope": "src",
+      "objectId": "55f79a5c7d267c620efc561ef2b3cf86220cd79b"
+    },
+    "src/agent-v3/read-work-adapter.ts": {
+      "scope": "src",
+      "objectId": "48f148350641eefecc32e990130ae039124aaf7f"
+    },
+    "src/agent-v3/read-workflow.ts": {
+      "scope": "src",
+      "objectId": "f5125500b1e8c08c5a395867812a3576030cbbba"
+    },
+    "src/agent-v3/required-input-work.ts": {
+      "scope": "src",
+      "objectId": "533b4a3a5ed8afbefc4e5c4daf95b53da24089f4"
+    },
+    "src/agent-v3/source-goal-contract.ts": {
+      "scope": "src",
+      "objectId": "02f54c320f776036bf386ccd96821403368ee3bc"
+    },
+    "src/agent-v3/task-source-admission.ts": {
+      "scope": "src",
+      "objectId": "6d63a72e650c1572235dd11fd2246b1a42b8bee0"
+    },
+    "src/agent-v3/work-scheduler.ts": {
+      "scope": "src",
+      "objectId": "06011a57d8279add17a9b1a6d5562283841868dc"
+    },
+    "src/app/astra-computer-action-plan-store.ts": {
+      "scope": "src",
+      "objectId": "91c7b21b843f2562f7599d32bdd11776a8d30ea3"
+    },
+    "src/app/astra-computer-picker.ts": {
+      "scope": "src",
+      "objectId": "a0ab565da3814fce66f440a074426d5acaf6a8e7"
+    },
+    "src/app/astra-computer-selection-store.ts": {
+      "scope": "src",
+      "objectId": "f3f58caaf8f74714afade8c905fac661ae7716d8"
+    },
+    "src/app/astra-desktop-conversations.ts": {
+      "scope": "src",
+      "objectId": "6abf003af347ece67b4d4bbc5f5c880f5b45f74b"
+    },
+    "src/app/astra-desktop-host.ts": {
+      "scope": "src",
+      "objectId": "91b0885f9418fbb934057c028d40fea45c859e72"
+    },
+    "src/app/astra-desktop-state.ts": {
+      "scope": "src",
+      "objectId": "25c364d1b49302238100222131c32a33fb386e04"
+    },
+    "src/app/astra-oscar-bridge.ts": {
+      "scope": "src",
+      "objectId": "f23185cf1c3fd7ccf070c9dcffce3d106df4dbf9"
+    },
+    "src/app/astra-oscar-http.ts": {
+      "scope": "src",
+      "objectId": "21dee09008423ff962e93c7cff1e70f9842abb21"
+    },
+    "src/app/astra-product-pilot.ts": {
+      "scope": "src",
+      "objectId": "e22287f8c574177b290aa8e42afe1107b2a8ff88"
+    },
+    "src/app/astra-read-task-facade.ts": {
+      "scope": "src",
+      "objectId": "8f38f976a164c39b1ebcf42201b3ce34c2a60681"
+    },
+    "src/app/astra-read-task-http.ts": {
+      "scope": "src",
+      "objectId": "c755b48cb907894ec446bdedaa9640e84b3686c9"
+    },
+    "src/app/astra-source-goal-compiler.ts": {
+      "scope": "src",
+      "objectId": "9fbf90ba59f89e1933cad07f70dfeba75d1bf5ab"
+    },
+    "src/app/astra-target-picker.ts": {
+      "scope": "src",
+      "objectId": "a1ccbc04a1578bc3d7aa379b0663e27819441d81"
+    },
+    "src/app/astra-target-selection-store.ts": {
+      "scope": "src",
+      "objectId": "829597d63d3edd918d88e6b7eeb11adbe696a1e4"
+    },
+    "src/app/astra-task-facade.ts": {
+      "scope": "src",
+      "objectId": "5fd2950096ac4695f248321b684a7655d77cf256"
+    },
+    "src/app/astra-task-host.ts": {
+      "scope": "src",
+      "objectId": "c1eec49f12b936bc49dd9476aec0165a27fade5f"
+    },
+    "src/app/astra-telegram-admission.ts": {
+      "scope": "src",
+      "objectId": "9b8a957f309d0717e479bbba7e887272543174e5"
+    },
+    "src/modules/device/semantic-target-resolver.ts": {
+      "scope": "src",
+      "objectId": "a4a8b7456bf0bde0db117aad4fac6cd026bddfcf"
+    },
+    "src/modules/telegram/agent-command-contract.ts": {
+      "scope": "src",
+      "objectId": "9dc6a33a13e6b8957b090b22ba8e365f2d6d556e"
+    },
+    "src/modules/voice/information-provider.ts": {
+      "scope": "src",
+      "objectId": "4cb4b88a0764bb5977a52075784e1e88fde1ae03"
+    },
+    "src/modules/voice/simplified-command.ts": {
+      "scope": "src",
+      "objectId": "b5cf1d2d4d76ec4ade1532b8e0f8f6344e6f6d86"
+    },
+    "src/oscar-turn/astra-contract.ts": {
+      "scope": "src",
+      "objectId": "89df9dc4092caa0e95628d58a7dd809a809e3e42"
+    },
+    "src/ui/public/modules/astra-desktop-pane.js": {
+      "scope": "src",
+      "objectId": "a3156d4483110121bcda76f280e74270271f9b97"
+    },
+    "src/ui/public/modules/astra-product-bridge.js": {
+      "scope": "src",
+      "objectId": "60c16ac1083269991aeaa6167b7e5ba2433732a1"
+    },
+    "src/ui/public/modules/astra-turn-panel.css": {
+      "scope": "src",
+      "objectId": "4a43332abecc866a02ce732e041a052f600718cf"
+    },
+    "src/ui/public/modules/astra-turn-panel.js": {
+      "scope": "src",
+      "objectId": "70d9d341b81f4c2779f3a863696ce582baf17e91"
+    },
+    "src/ui/public/modules/oscar-astra-composer.js": {
+      "scope": "src",
+      "objectId": "83344067ba1aa1fdac1ec36171bdcece69a301ea"
+    },
+    "src/ui/public/modules/voice-wake-service.js": {
+      "scope": "src",
+      "objectId": "49b2c6dddd4d5227362e8d6b56a828902e0048cb"
+    },
+    "tests/agent-v3/application-create-http.test.ts": {
+      "scope": "tests",
+      "objectId": "250ab564f13a04b58c3b207ee1ebbbca210c4988"
+    },
+    "tests/agent-v3/application-host.test.ts": {
+      "scope": "tests",
+      "objectId": "c7c8b9b71bbca1a7d104f7212645c878bb6c5b19"
+    },
+    "tests/agent-v3/application-http.test.ts": {
+      "scope": "tests",
+      "objectId": "3f6eb220078ef242d0e3111e007ccb5b1f5b1627"
+    },
+    "tests/agent-v3/computer-action-plan-store.test.ts": {
+      "scope": "tests",
+      "objectId": "eceb0292f0a8f8cf01529a58b5fbf40e78a97534"
+    },
+    "tests/agent-v3/computer-action-work.test.ts": {
+      "scope": "tests",
+      "objectId": "2ed3eef0e6de8c7dcf08c6f3872409627bf1bb59"
+    },
+    "tests/agent-v3/computer-observe-work.test.ts": {
+      "scope": "tests",
+      "objectId": "60916817280e5e91a280e52658b47f82534c9901"
+    },
+    "tests/agent-v3/computer-oscar.test.ts": {
+      "scope": "tests",
+      "objectId": "99040274b92eb8513fc8a08d9e20f75cb9174ec9"
+    },
+    "tests/agent-v3/computer-selection-store.test.ts": {
+      "scope": "tests",
+      "objectId": "6e53329c6f080c889410adc8d14c131f7f7f3516"
+    },
+    "tests/agent-v3/context-engine.test.ts": {
+      "scope": "tests",
+      "objectId": "4e90198d9ca84a81d9c6b0734afa5975e55579da"
+    },
+    "tests/agent-v3/conversation-memory.test.ts": {
+      "scope": "tests",
+      "objectId": "91596ebbe699909a2b448c99d711a2ad6e09c02f"
+    },
+    "tests/agent-v3/create-task-profile.test.ts": {
+      "scope": "tests",
+      "objectId": "fd87eae3c71a50ef59ee0abf1e10658c674ecd0f"
+    },
+    "tests/agent-v3/create-work.test.ts": {
+      "scope": "tests",
+      "objectId": "d9bc045dcb8831357686cf2eb24d662154746c7c"
+    },
+    "tests/agent-v3/desktop-conversations.test.ts": {
+      "scope": "tests",
+      "objectId": "025a43d9632c7a9a3253b1774d1688620ec5aa40"
+    },
+    "tests/agent-v3/desktop-host.test.ts": {
+      "scope": "tests",
+      "objectId": "148339046ca07fd6e2e2133a80e2fe42ebec0319"
+    },
+    "tests/agent-v3/desktop-state.test.ts": {
+      "scope": "tests",
+      "objectId": "ed841a6006044bd8f9c4171775cd5e6f1d312b98"
+    },
+    "tests/agent-v3/journal.test.ts": {
+      "scope": "tests",
+      "objectId": "c50e0d6f4cb35fe443f587ad47262bc91ef481d0"
+    },
+    "tests/agent-v3/model-create-task.test.ts": {
+      "scope": "tests",
+      "objectId": "a71cee6ab65a5191ba56fc10ab4bbad67525f845"
+    },
+    "tests/agent-v3/model-read-task.test.ts": {
+      "scope": "tests",
+      "objectId": "33afa1b50652f22e80334f12ce5b761eba0453f3"
+    },
+    "tests/agent-v3/oscar-bridge.test.ts": {
+      "scope": "tests",
+      "objectId": "86d17e9081cdbb79d8b5f5108448e1f62e7f866b"
+    },
+    "tests/agent-v3/oscar-http.test.ts": {
+      "scope": "tests",
+      "objectId": "aa347e3f37639c2d38ae606636c2be4045fdee73"
+    },
+    "tests/agent-v3/prepared-model.test.ts": {
+      "scope": "tests",
+      "objectId": "8d0213f1abda0c3735bb1cc6908e8e240288a4b1"
+    },
+    "tests/agent-v3/product-pilot-bundle.test.ts": {
+      "scope": "tests",
+      "objectId": "07e4909bcf9c1eb132b22c14854f408d7ed6ba75"
+    },
+    "tests/agent-v3/product-pilot-runtime.test.ts": {
+      "scope": "tests",
+      "objectId": "67dd944bd0da5ea4fbf533aed29959b8beb03040"
+    },
+    "tests/agent-v3/progression-fairness.test.ts": {
+      "scope": "tests",
+      "objectId": "1fe074b9426e3bdc6baca4cf9985b0139e69d05d"
+    },
+    "tests/agent-v3/read-decision-gateway.test.ts": {
+      "scope": "tests",
+      "objectId": "05c64fbe67205beda8345ebe7ac503c2044ec3b0"
+    },
+    "tests/agent-v3/read-runtime.test.ts": {
+      "scope": "tests",
+      "objectId": "16663afb13ef56be2e187a8dcd636d692601368e"
+    },
+    "tests/agent-v3/read-task-runtime.test.ts": {
+      "scope": "tests",
+      "objectId": "ca93269bcae8d5aa124b33c03b00ed54f221db04"
+    },
+    "tests/agent-v3/source-goal-compiler.test.ts": {
+      "scope": "tests",
+      "objectId": "4ea4a6b7d813222274331d997c950694412164b2"
+    },
+    "tests/agent-v3/target-picker-runtime.test.ts": {
+      "scope": "tests",
+      "objectId": "9ef6490d9dbf51a8ac1eb7c27ef000437ff7828d"
+    },
+    "tests/agent-v3/target-picker.test.ts": {
+      "scope": "tests",
+      "objectId": "01dd611d05ede0875e73b709acb099bd8eb3c0f0"
+    },
+    "tests/agent-v3/target-selection-runtime.test.ts": {
+      "scope": "tests",
+      "objectId": "48f24194ad73d3bcce2f6cc0d30154112ff6eea5"
+    },
+    "tests/agent-v3/target-selection-store.test.ts": {
+      "scope": "tests",
+      "objectId": "e1f6d6858813b5dd4b08ad774319741f5e609206"
+    },
+    "tests/agent-v3/tsconfig.json": {
+      "scope": "tests",
+      "objectId": "751c561768388615791979944469a59cd806ed14"
+    },
+    "tests/agent-v3/work-scheduler.test.ts": {
+      "scope": "tests",
+      "objectId": "7980917d0ded8d2ecc8b7228e3869f3541a9c339"
+    },
+    "tests/app/astra-telegram-admission.test.ts": {
+      "scope": "tests",
+      "objectId": "14223b58d4fca1b52fa0fd4cc974bc9f98ac07b8"
+    },
+    "tests/app/simplified-voice.test.ts": {
+      "scope": "tests",
+      "objectId": "6dbef36cbe6ce71d3c170dfb642ac0fac08236b2"
+    },
+    "tests/app/telegram-desktop-control.test.ts": {
+      "scope": "tests",
+      "objectId": "e70e6c883b67c44eb4a62cdf93ec7a3e7109e027"
+    },
+    "tests/desktop/astra-pilot-policy.test.ts": {
+      "scope": "tests",
+      "objectId": "155dbf2a0388aea79e747868e6627ec8e150554d"
+    },
+    "tests/desktop/astra-product-host.test.ts": {
+      "scope": "tests",
+      "objectId": "3b4bb9790e341305ffc47373c7eb942e9cc2c84d"
+    },
+    "tests/desktop/astra-product-renderer-live.test.ts": {
+      "scope": "tests",
+      "objectId": "e6bac601a1c478d4326f5fb1cd98c70835d20ed5"
+    },
+    "tests/desktop/astra-telegram-electron-acceptance.test.ts": {
+      "scope": "tests",
+      "objectId": "f0afc05303c35e6b88457fb5dc569e0ecb14e9b7"
+    },
+    "tests/desktop/voice-overlay.test.ts": {
+      "scope": "tests",
+      "objectId": "39a85581d48b202849536e4e5602677237bc25e1"
+    },
+    "tests/fixtures/agent-v3/application-approval-contract.ts": {
+      "scope": "tests",
+      "objectId": "9f31e04c8d784c7f4af8283055701a0ef2427bf4"
+    },
+    "tests/fixtures/agent-v3/application-create-contract.ts": {
+      "scope": "tests",
+      "objectId": "a8aca67f4753f183cd26c328649dd82b094ceb79"
+    },
+    "tests/fixtures/agent-v3/application-create-worker.ts": {
+      "scope": "tests",
+      "objectId": "4b0d0f29ccf2ef79abaf46f587db27a070900896"
+    },
+    "tests/fixtures/agent-v3/application-host-worker.ts": {
+      "scope": "tests",
+      "objectId": "ed5a8c555728c3e62b3d5c5db09f539ac075d288"
+    },
+    "tests/fixtures/agent-v3/application-source-contract.ts": {
+      "scope": "tests",
+      "objectId": "9cad6158d4798006e8170597ae47567ea85ce728"
+    },
+    "tests/fixtures/agent-v3/astra-telegram-electron-acceptance.mjs": {
+      "scope": "tests",
+      "objectId": "06b23f3ab8ddaaf6a0615e7f00d146687978980c"
+    },
+    "tests/fixtures/agent-v3/astra_context_presentation_candidate.py": {
+      "scope": "tests",
+      "objectId": "3403cc5962ba5a0468c9d5a9df34b1545bc979d1"
+    },
+    "tests/fixtures/agent-v3/computer-composer-scenario.mjs": {
+      "scope": "tests",
+      "objectId": "f9510b767482ffbbad60ed6086592cdfc42eee63"
+    },
+    "tests/fixtures/agent-v3/computer-observe-live.ts": {
+      "scope": "tests",
+      "objectId": "7c4e269012cea1f782715fd5df6535d510a0e075"
+    },
+    "tests/fixtures/agent-v3/computer-observe-window.mjs": {
+      "scope": "tests",
+      "objectId": "f9155126fdc0d806dc33e3f11a0a503878fff9e0"
+    },
+    "tests/fixtures/agent-v3/computer-selection-native-check.ps1": {
+      "scope": "tests",
+      "objectId": "f31cfaff080c929e040cf8f8632af226d63d25e7"
+    },
+    "tests/fixtures/agent-v3/computer-selection-native-check.ts": {
+      "scope": "tests",
+      "objectId": "57f665a0adeee1d81a44a50c6dbd43a9665b4138"
+    },
+    "tests/fixtures/agent-v3/computer-source.ts": {
+      "scope": "tests",
+      "objectId": "6a0beec0db9220b03593e9fd64039fd373766b4e"
+    },
+    "tests/fixtures/agent-v3/conversation-memory-host.py": {
+      "scope": "tests",
+      "objectId": "d817c6972209a6d004a91b5bdad8e88d2abbae5e"
+    },
+    "tests/fixtures/agent-v3/conversation-memory-host.ts": {
+      "scope": "tests",
+      "objectId": "cf794000cd850f1253a298eff00d22e31c198e4e"
+    },
+    "tests/fixtures/agent-v3/create-task-worker.ts": {
+      "scope": "tests",
+      "objectId": "b406ea34bfbd13e3d952db876f76b73ffc75b76b"
+    },
+    "tests/fixtures/agent-v3/create-work-worker.ts": {
+      "scope": "tests",
+      "objectId": "1f2c4772e267b7b6bb6ea0e2d0c399442b59212b"
+    },
+    "tests/fixtures/agent-v3/journal-worker.ts": {
+      "scope": "tests",
+      "objectId": "30005295862c8b381a0a5a9e94a56d33f284fc1c"
+    },
+    "tests/fixtures/agent-v3/live-gemma4-e4b-profile.json": {
+      "scope": "tests",
+      "objectId": "f9b97df1fc13ad0844fe0483737191d7f27fe566"
+    },
+    "tests/fixtures/agent-v3/live-http-create.ts": {
+      "scope": "tests",
+      "objectId": "a89f327f55917591c79710a09b609c39a71b46c7"
+    },
+    "tests/fixtures/agent-v3/live-model-profile.json": {
+      "scope": "tests",
+      "objectId": "1f124ccaaf1c8b404022100ef764b8fac24053c6"
+    },
+    "tests/fixtures/agent-v3/live-model-server.py": {
+      "scope": "tests",
+      "objectId": "705d4682878b6610c2912895e7924de799df3385"
+    },
+    "tests/fixtures/agent-v3/live-qwen25-profile.json": {
+      "scope": "tests",
+      "objectId": "e6691b684830aecf1a1dd35ccc98bffed9964d4a"
+    },
+    "tests/fixtures/agent-v3/local-security.ts": {
+      "scope": "tests",
+      "objectId": "1a50e2cd6d94875ab028c040745b39840a5c3247"
+    },
+    "tests/fixtures/agent-v3/model-create-task-worker.ts": {
+      "scope": "tests",
+      "objectId": "71596405f269377e2e7f04bce49d123948f265c0"
+    },
+    "tests/fixtures/agent-v3/model-read-task-worker.ts": {
+      "scope": "tests",
+      "objectId": "67755980ba548fbac9a4e1fe3732206fe9e61bb8"
+    },
+    "tests/fixtures/agent-v3/model-server.py": {
+      "scope": "tests",
+      "objectId": "6f2451806327e9cb4da0d2423a2447a2ba031ac5"
+    },
+    "tests/fixtures/agent-v3/model-work-crash-worker.ts": {
+      "scope": "tests",
+      "objectId": "cb0899c7d4165768e4ecf2a53a5d03b39a00a0b9"
+    },
+    "tests/fixtures/agent-v3/native-desktop-check.mjs": {
+      "scope": "tests",
+      "objectId": "27f7463058546d073102d8aebd90f937ddae5a2e"
+    },
+    "tests/fixtures/agent-v3/native-desktop-host.ts": {
+      "scope": "tests",
+      "objectId": "5ece719bee4aca142ab355b3ac97945e76f58cdd"
+    },
+    "tests/fixtures/agent-v3/native-reference-scenario.mjs": {
+      "scope": "tests",
+      "objectId": "f81d16e1f3d44cb8a01bab01633a2c7ca76c3e77"
+    },
+    "tests/fixtures/agent-v3/native_grammar_conformance.py": {
+      "scope": "tests",
+      "objectId": "61b5197efe9e3f7c65d2ff5870261d5997cadf76"
+    },
+    "tests/fixtures/agent-v3/oscar-bridge-host.ts": {
+      "scope": "tests",
+      "objectId": "3abaf09a459e69ba1c73635bae539b1e3eff9398"
+    },
+    "tests/fixtures/agent-v3/oscar-bridge-worker.ts": {
+      "scope": "tests",
+      "objectId": "0be5fd3959990dbd9690d0b62f924ba3c6778980"
+    },
+    "tests/fixtures/agent-v3/oscar-ui-check.mjs": {
+      "scope": "tests",
+      "objectId": "6ecf416983412603d5d965d95e5ab1f6a6282c93"
+    },
+    "tests/fixtures/agent-v3/oscar-ui-host.ts": {
+      "scope": "tests",
+      "objectId": "4baf94eecb8672347d2dcf93b469f9a5e1599c48"
+    },
+    "tests/fixtures/agent-v3/owned_model_scope.py": {
+      "scope": "tests",
+      "objectId": "31eec8afae3bea890cc53cb45a71d0a0356480eb"
+    },
+    "tests/fixtures/agent-v3/owned_quality_probe.py": {
+      "scope": "tests",
+      "objectId": "5d1af1bf72f786fdfd10341acdbb8f07f82875d1"
+    },
+    "tests/fixtures/agent-v3/product-pilot-renderer-check.mjs": {
+      "scope": "tests",
+      "objectId": "51d53cba1cf8df2c8e5eba6cb2f7805a8bde1013"
+    },
+    "tests/fixtures/agent-v3/reference-cases.json": {
+      "scope": "tests",
+      "objectId": "cba7bfbb7be63512bbc1a820928f1d8d3a9dca95"
+    },
+    "tests/fixtures/agent-v3/scheduler-worker.ts": {
+      "scope": "tests",
+      "objectId": "0df27ae4726ba6e45395960c83823e6c365e4502"
+    },
+    "tests/fixtures/agent-v3/target-selection-worker.ts": {
+      "scope": "tests",
+      "objectId": "69f351caa4c0f36cdc5a9a7d52eb560316ca5777"
+    },
+    "tests/modules/computer-window-selection.test.ts": {
+      "scope": "tests",
+      "objectId": "f61dddac6d755560febd7da79149080c6f456872"
+    },
+    "tests/modules/device-semantic-target-resolver.test.ts": {
+      "scope": "tests",
+      "objectId": "d805cddd3ad24da6d99946920ef947f406a8b11f"
+    },
+    "tests/modules/telegram-agent-command-contract.test.ts": {
+      "scope": "tests",
+      "objectId": "04b87fa939a06db743147e187ae62f170c06e940"
+    },
+    "tests/modules/voice-information-provider.test.ts": {
+      "scope": "tests",
+      "objectId": "1621bd600216c4188732c6f088db550122a95d7e"
+    },
+    "tests/modules/voice-simplified-command.test.ts": {
+      "scope": "tests",
+      "objectId": "a3f3f3639c99f7e2597e2ab919eb74439d5bb8af"
+    },
+    "tests/oscar/attachment-store.test.ts": {
+      "scope": "tests",
+      "objectId": "78e6bee4deb8faf6f8fb9b9d505199e06ee28af1"
+    },
+    "tests/tools/setup-vosk-telegram-stt.test.ts": {
+      "scope": "tests",
+      "objectId": "490dc67a446aa63522551c501d7339dcafa34ef4"
+    },
+    "tests/ui/astra-turn-panel.test.ts": {
+      "scope": "tests",
+      "objectId": "5c0a280b382690a6d50185d90c431e90f8beb350"
+    },
+    "tests/ui/astra-product-bridge.test.ts": {
+      "scope": "tests",
+      "objectId": "9fac8732f8754a7c88640cb4b2ced663513abe92"
+    },
+    "tests/ui/voice-choice-followup.test.ts": {
+      "scope": "tests",
+      "objectId": "e1f70dd9cf1eee5a0b00f176a3228f7c44bddc3a"
+    },
+    "tests/ui/voice-wake-service.test.ts": {
+      "scope": "tests",
+      "objectId": "dff0f92e9446e1ee3aae39309a5dd8990b0abdd7"
+    },
+    "tools/setup-voice-stt.ps1": {
+      "scope": "tools",
+      "objectId": "72d11c8143b75af360272be3fd3d0775357bbaae"
+    },
+    "tools/setup-vosk-telegram-stt.ps1": {
+      "scope": "tools",
+      "objectId": "35ea0961cbc07ec3734f64c316c85b23713c781f"
+    },
+    "src/ui/public/modules/oscar-astra-native.js": {
+      "scope": "src",
+      "objectId": "df40d125fa57b99062c65c393fd418a746da24ff"
+    },
+    "src/ui/public/oscar-astra-native.css": {
+      "scope": "src",
+      "objectId": "ae618dba4c8d36933b3a18b5a07951a62a4e7079"
+    },
+    "tools/import-neural-tts.ps1": {
+      "scope": "tools",
+      "objectId": "cc189451610fb2db265d0e8197dbe6e521097bcb"
+    },
+    "tests/agent-v3/product-create-autonomy.test.ts": {
+      "scope": "tests",
+      "objectId": "5293ca1cf7269017ff691ab49d990681f4f1cc6e"
+    },
+    "tests/oscar/vision-turn.test.ts": {
+      "scope": "tests",
+      "objectId": "3cdf619605e6237933520827cc145f83eccca271"
+    },
+    "tools/import-local-vision-adapter.ps1": {
+      "scope": "tools",
+      "objectId": "8ac20ad6763f83655c2dd267fd8da85fbe61d00c"
+    },
+    "docs/plans/SITE_PARITY_BACKLOG_2026-09-25.md": {
+      "scope": "docs",
+      "objectId": "d554e0d6560d7ce5ef75aec28c37e577fe3e2feb"
+    },
+    "installer/CODE_SIGNING.md": {
+      "scope": "installer",
+      "objectId": "8aa8509f88fc4d718fc0d0a460ef720b3bf5753a"
+    },
+    "installer/code-signing.ps1": {
+      "scope": "installer",
+      "objectId": "f8bf93b2ba617f80d6ae7d13ef616b878d41f632"
+    },
+    "installer/sign-file.ps1": {
+      "scope": "installer",
+      "objectId": "c6f8b83f696574b396237bd80b80c5756da02501"
+    },
+    "oscar/backend/oscar_agent/custom_models.py": {
+      "scope": "oscar",
+      "objectId": "5963e321dfac9216a029d77471e7ed1a3092c22b"
+    },
+    "oscar/backend/oscar_agent/weather.py": {
+      "scope": "oscar",
+      "objectId": "781276abbce81365a449796852300b2be52b4264"
+    },
+    "oscar/backend/tests/test_custom_models.py": {
+      "scope": "oscar",
+      "objectId": "b8ff275fe6ac8a9f5bedc4f26e8b25230619c887"
+    },
+    "oscar/backend/tests/test_weather.py": {
+      "scope": "oscar",
+      "objectId": "ce0f5f1892484c1a278d57c2458b11d93ed8d44e"
+    },
+    "release/notes/v0.3.0.97.md": {
+      "scope": "release",
+      "objectId": "739ddbb6d223c24b34dffc48d9a0722bbb451235"
+    },
+    "src/app/oscar-durable-history.ts": {
+      "scope": "src",
+      "objectId": "8d04394cc4f3f4042b009c3fd04c432b962a7f96"
+    },
+    "src/core/policy-reason.ts": {
+      "scope": "src",
+      "objectId": "ceda905fd85bb8ad321dbe8108b04a17f8eb62b0"
+    },
+    "src/modules/models/custom-model-contract.ts": {
+      "scope": "src",
+      "objectId": "07e8655b10c82ebd67d34468e06c67ef38b5db34"
+    },
+    "src/modules/models/custom-models.ts": {
+      "scope": "src",
+      "objectId": "26fde1d63f90dd149955ad7c1ec2201baf0faed8"
+    },
+    "src/settings/max-memory-consent.ts": {
+      "scope": "src",
+      "objectId": "3f9a0736c79b3c26f1a4dfc5e22e9b726292d6e7"
+    },
+    "src/settings/model-preference.ts": {
+      "scope": "src",
+      "objectId": "9dfa61930a4240ba5ecd6e947182dd54d5b1869b"
+    },
+    "src/ui/public/i18n/bg.json": {
+      "scope": "src",
+      "objectId": "4668ec07aa5949d4b8d323f2441e910b07e1ba1b"
+    },
+    "src/ui/public/i18n/en.json": {
+      "scope": "src",
+      "objectId": "52f20bcd21c147ff11d9e1c03b1468657d292f3a"
+    },
+    "src/ui/public/i18n/uk.json": {
+      "scope": "src",
+      "objectId": "03b392eed769eec7da6cdbd9d68f8f4c9c08dbbd"
+    },
+    "src/ui/public/modules/access-matrix.js": {
+      "scope": "src",
+      "objectId": "11b98628af4fc2b6d934419d3b442fd05fa456dc"
+    },
+    "src/ui/public/modules/away-summary.js": {
+      "scope": "src",
+      "objectId": "093bf790a7f10825f1a8c9c0b02bc53e1c1fc3a4"
+    },
+    "src/ui/public/modules/coder-diff.js": {
+      "scope": "src",
+      "objectId": "d3ab21ad934dc69532d9e56917b3c1fdf5e885e3"
+    },
+    "src/ui/public/modules/custom-models-pane.js": {
+      "scope": "src",
+      "objectId": "b89ce0627218ed0c34d82cafe4210b6024e9043e"
+    },
+    "src/ui/public/modules/early-access-notice.js": {
+      "scope": "src",
+      "objectId": "1e563b39d13f5e65b3b2702a3cca392e1d09201d"
+    },
+    "src/ui/public/modules/help-panel.js": {
+      "scope": "src",
+      "objectId": "1568d2561a5f0fde4c81b181da96d2aa462321f7"
+    },
+    "src/ui/public/modules/oscar-starter-prompts.js": {
+      "scope": "src",
+      "objectId": "1c94efae00fb382925c08880d1f05f7a4f22f759"
+    },
+    "src/ui/public/modules/oscar-task-report.js": {
+      "scope": "src",
+      "objectId": "07ccf2e21d82777ce8f0d2cba9261a540bf9e7de"
+    },
+    "src/ui/public/modules/security-danger-scale.js": {
+      "scope": "src",
+      "objectId": "7d7e7ff0a5c9600e3ad3c2ea1b0cfb9aebd185a1"
+    },
+    "src/ui/public/modules/settings-extras.js": {
+      "scope": "src",
+      "objectId": "72aa88a45145dc79c52c10870a87ceb3f829c250"
+    },
+    "src/ui/public/modules/system-map.js": {
+      "scope": "src",
+      "objectId": "0a220e3100590d4d277ac5c4f9370bd54b61adee"
+    },
+    "src/ui/public/modules/theme-transition.js": {
+      "scope": "src",
+      "objectId": "f6199d448814729300ee8c38cdf06717379aad4d"
+    },
+    "src/ui/public/modules/ui-i18n.js": {
+      "scope": "src",
+      "objectId": "e5258923704a005a793a3464a8725f1aac4ba4dd"
+    },
+    "src/ui/public/modules/whats-new.js": {
+      "scope": "src",
+      "objectId": "09e2308acb32e4a7eb5f853394d50ff9dce28230"
+    },
+    "src/ui/public/monarch-design.css": {
+      "scope": "src",
+      "objectId": "b861bcd39c3a1b525cb5613eb4dfedafe63b21e6"
+    },
+    "src/ui/public/settings-simple.css": {
+      "scope": "src",
+      "objectId": "8ef86c72c96871bbbf505e275b74cbfef33b1c7c"
+    },
+    "src/ui/public/setup-flow.css": {
+      "scope": "src",
+      "objectId": "cc5871251fdcf7f4ed268d1205946e00de5054b0"
+    },
+    "src/ui/public/whats-new.json": {
+      "scope": "src",
+      "objectId": "a2fb51f82c2ec71bb766e2a72d75639cc2759127"
+    },
+    "src/ui/public/white-theme.css": {
+      "scope": "src",
+      "objectId": "0ee4f605255bbd124f3b24883b664ea4b79b2f2c"
+    },
+    "tests/agent-v3/bounded-output-preview.test.ts": {
+      "scope": "tests",
+      "objectId": "4b139f0496bc8a99a7217d207bc224835c49f0d1"
+    },
+    "tests/agent-v3/completion-evidence.test.ts": {
+      "scope": "tests",
+      "objectId": "37fcdee8ad1dcc07990dbb7a3d3ebe2fbd67820c"
+    },
+    "tests/agent-v3/max-cloud-effort.test.ts": {
+      "scope": "tests",
+      "objectId": "ab2d838054d1417a4f47bd17873bc44fb5abb9c4"
+    },
+    "tests/app/application-concurrent-start.test.ts": {
+      "scope": "tests",
+      "objectId": "4258d89249d050b3ab145af17f7417157baabac4"
+    },
+    "tests/app/http-server-file-stream.test.ts": {
+      "scope": "tests",
+      "objectId": "38f9132f1b78c0db3965ba2a5a175ccfe8c71de5"
+    },
+    "tests/app/oscar-durable-history.test.ts": {
+      "scope": "tests",
+      "objectId": "047931a22f200e49f388cd368a57d0e09e25e4ae"
+    },
+    "tests/core/permission-matrix.test.ts": {
+      "scope": "tests",
+      "objectId": "7f7e85d885f00eda1098fb23350ee41037d10302"
+    },
+    "tests/core/policy-reason.test.ts": {
+      "scope": "tests",
+      "objectId": "23aa9c9aa38749ecb6592157faaa4241ec0246bb"
+    },
+    "tests/core/windows-shell-folders.test.ts": {
+      "scope": "tests",
+      "objectId": "de3f17e6bf33203cdbf221063ec9f645902f6c29"
+    },
+    "tests/modules/custom-models.test.ts": {
+      "scope": "tests",
+      "objectId": "41223f80f12ca8c0085166f11cc8907161e4ccff"
+    },
+    "tests/modules/gmail-end-to-end.test.ts": {
+      "scope": "tests",
+      "objectId": "835a5a28492f31488ecb14dce8af9169469f25da"
+    },
+    "tests/modules/telegram-soak.test.ts": {
+      "scope": "tests",
+      "objectId": "7d3c06041740d1a8e0ddac1672936632fb79261a"
+    },
+    "tests/oscar/astra-task-report.test.ts": {
+      "scope": "tests",
+      "objectId": "9e137362c52cb93d57ad37485dcce56290e4f8bb"
+    },
+    "tests/oscar/max-local-fallback.test.ts": {
+      "scope": "tests",
+      "objectId": "0ad725c31263c2fb0fc43227863451f92ec319cc"
+    },
+    "tests/release/code-signing.test.ts": {
+      "scope": "tests",
+      "objectId": "0dcfd2a71f17ec1dca86062071d259213442a98d"
+    },
+    "tests/settings/max-memory-consent.test.ts": {
+      "scope": "tests",
+      "objectId": "791be9cf85237701abaaa9b7931ae1e0acb92d67"
+    },
+    "tests/ui/access-matrix.test.ts": {
+      "scope": "tests",
+      "objectId": "7b4c2811bf71eee0dab60205c0fd2fa7735011f7"
+    },
+    "tests/ui/away-summary.test.ts": {
+      "scope": "tests",
+      "objectId": "8d0803b8149a0e48bc448db339800562219c1c29"
+    },
+    "tests/ui/coder-diff.test.ts": {
+      "scope": "tests",
+      "objectId": "eaa8721516a2e78494e9b601f8b1b396f5ce0dea"
+    },
+    "tests/ui/early-access-notice.test.ts": {
+      "scope": "tests",
+      "objectId": "be451bf2c41a37dbd655ea304d142c5ee24cd318"
+    },
+    "tests/ui/help-panel.test.ts": {
+      "scope": "tests",
+      "objectId": "189b2df86dd0fd4d6af9cef65a829740ac644dd3"
+    },
+    "tests/ui/model-ram-fit.test.ts": {
+      "scope": "tests",
+      "objectId": "0398a8af7627fcd331e85fd2e32310e3fb76a71c"
+    },
+    "tests/ui/motion-preference.test.ts": {
+      "scope": "tests",
+      "objectId": "a65bd68c55ec321edae599814e6a72d0d1f2596c"
+    },
+    "tests/ui/oscar-starter-prompts.test.ts": {
+      "scope": "tests",
+      "objectId": "31c8521a919e7167908ea7e1550096e1b1efe619"
+    },
+    "tests/ui/oscar-task-report.test.ts": {
+      "scope": "tests",
+      "objectId": "ade6b26eeddc24322c55a6dcf0de79e9cf28f57b"
+    },
+    "tests/ui/security-danger-scale.test.ts": {
+      "scope": "tests",
+      "objectId": "6c9cba8b572bac8aaec14adb6ac332b45c8b8ace"
+    },
+    "tests/ui/settings-extras-clicks.test.ts": {
+      "scope": "tests",
+      "objectId": "1897ecaedd05597690b27f2cec360909bd92f4a1"
+    },
+    "tests/ui/setup-free-provider.test.ts": {
+      "scope": "tests",
+      "objectId": "c7e7dff96afa41bc1ddbdaa658b944b03dfd4f34"
+    },
+    "tests/ui/system-map.test.ts": {
+      "scope": "tests",
+      "objectId": "eb9da776c752f2cfbe8eb173a5824b4f141f7d35"
+    },
+    "tests/ui/ui-i18n.test.ts": {
+      "scope": "tests",
+      "objectId": "8d6ecf545652cce3c5b0ffd576832032474e6a67"
+    },
+    "tests/ui/whats-new.test.ts": {
+      "scope": "tests",
+      "objectId": "e54eefdd2365364bedca5a9c4228333ec980bbb2"
+    },
+    "desktop/electron/development-profile.mjs": {
+      "scope": "desktop",
+      "objectId": "fdef0c8143df7430577c17bce483e41c4ed3e80d"
+    },
+    "desktop/electron/development-runtime.mjs": {
+      "scope": "desktop",
+      "objectId": "e7165569d284a66aa9b49c26ce15f58c255d779c"
+    },
+    "desktop/electron/main-diagnostics-log.mjs": {
+      "scope": "desktop",
+      "objectId": "f16a949894e1f638f6428c423618dd14a57a0928"
+    },
+    "desktop/electron/oscar-api-key.mjs": {
+      "scope": "desktop",
+      "objectId": "20ffcf758ea313f9d3ac6500f91b88262843b98a"
+    },
+    "desktop/electron/preload.cjs": {
+      "scope": "desktop",
+      "objectId": "e05a49ff4afaa3340a2226e365147ff4e3e6a129"
+    },
+    "desktop/electron/profile-data-key.mjs": {
+      "scope": "desktop",
+      "objectId": "bfc99507032304fff3bb6db71ad326a8c40d509d"
+    },
+    "desktop/electron/profile-key-recovery.mjs": {
+      "scope": "desktop",
+      "objectId": "4685abe1d54547f3a4b7ede4ef46a4ddc757d847"
+    },
+    "desktop/electron/reminder-delivery.mjs": {
+      "scope": "desktop",
+      "objectId": "6de60d9b8f8dd967eb5fda49e8d12056ebae170c"
+    },
+    "desktop/electron/runtime-recovery-policy.mjs": {
+      "scope": "desktop",
+      "objectId": "9b50c8b0f6e194b07d856a2a39d8a102f36d4531"
+    },
+    "desktop/electron/safe-export.mjs": {
+      "scope": "desktop",
+      "objectId": "325b1b8e272292c977c3be4a828538717b2ea21c"
+    },
+    "desktop/electron/safe-file-authorization.mjs": {
+      "scope": "desktop",
+      "objectId": "b187ad7af83416c8275644afe08c950306b4d533"
+    },
+    "desktop/electron/safe-host-lock.mjs": {
+      "scope": "desktop",
+      "objectId": "96182dcbb69d8ff8ac64f42f342de5fa49700d10"
+    },
+    "desktop/electron/windows-rename.mjs": {
+      "scope": "desktop",
+      "objectId": "12c0f8a50055e6682127804a29e05c6cde816fa0"
+    },
+    "desktop/safe/limits.mjs": {
+      "scope": "desktop",
+      "objectId": "96556e348052f0be95d2dbf344710b5d682a3640"
+    },
+    "desktop/safe/safe-pp.css": {
+      "scope": "desktop",
+      "objectId": "c6695e6d438d63b971acd2009856695a13a4d3de"
+    },
+    "docs/PAPER_PIXEL_DESIGN.md": {
+      "scope": "docs",
+      "objectId": "80663060d37d189c871b40570700a3fc9a84f3dc"
+    },
+    "docs/safe/UI_UX_ACCEPTANCE_20260930.md": {
+      "scope": "docs",
+      "objectId": "1a25da15972a5bd5c470eb8e2ea87369b3d363cb"
+    },
+    "docs/security/EMERGENCY_ACCEPTANCE.md": {
+      "scope": "docs",
+      "objectId": "fae5e1bcb0142d9fedc2528da7c4951a5bdff411"
+    },
+    "oscar/backend/oscar_agent/gguf_chat.py": {
+      "scope": "oscar",
+      "objectId": "abee1a7e1da5887cd2c4592295b938b1dfc1e80e"
+    },
+    "oscar/backend/oscar_agent/network_policy.py": {
+      "scope": "oscar",
+      "objectId": "253c53dffa6ddf2a85bae6d011bf69aad7578265"
+    },
+    "oscar/backend/oscar_agent/search_privacy.py": {
+      "scope": "oscar",
+      "objectId": "84d5f3443a64bbf2ec7876ba11c97aa359cd49dd"
+    },
+    "oscar/backend/oscar_agent/secure_db.py": {
+      "scope": "oscar",
+      "objectId": "88236760e2fe0133b539aa94f608ae449c1ed1c4"
+    },
+    "oscar/backend/oscar_agent/web_engines.py": {
+      "scope": "oscar",
+      "objectId": "6cf2ad48683d141cce64be727d1f177bed6af3e0"
+    },
+    "oscar/backend/tests/test_network_policy.py": {
+      "scope": "oscar",
+      "objectId": "3b64e0e56652e57955c697cfe0650be34c5a0559"
+    },
+    "oscar/backend/tests/test_profile_marker_scan.py": {
+      "scope": "oscar",
+      "objectId": "a555e8f25a773c8d1791121396622ac4b147795d"
+    },
+    "oscar/backend/tests/test_search_degraded.py": {
+      "scope": "oscar",
+      "objectId": "17a5212be0814f47ba5fff450e61c5a7e3295101"
+    },
+    "oscar/backend/tests/test_search_evidence.py": {
+      "scope": "oscar",
+      "objectId": "6a07e10f4ecd2ee588e6fa764b8773e5686d38b1"
+    },
+    "oscar/backend/tests/test_search_privacy.py": {
+      "scope": "oscar",
+      "objectId": "2c3f90362f40fab09e527cfd519ad9885a9b3ae0"
+    },
+    "oscar/backend/tests/test_secure_db.py": {
+      "scope": "oscar",
+      "objectId": "0d8496066c1b520684d4748393a1e5ee4215c7d4"
+    },
+    "oscar/backend/tests/test_web_engines.py": {
+      "scope": "oscar",
+      "objectId": "65ebe93be45595b1ba84e0b4a393fd568003376a"
+    },
+    "scripts/electron-fuses.mjs": {
+      "scope": "scripts",
+      "objectId": "93927146e1e4f17439a9c9f7ab2ab4de80495e9c"
+    },
+    "scripts/repair-security-startup-window.ps1": {
+      "scope": "scripts",
+      "objectId": "382d1ea5bfbd8ed882083cbd9f4ec0a7d092efe7"
+    },
+    "scripts/security/emergency-test.toml": {
+      "scope": "scripts",
+      "objectId": "29b98956776eb3cdd52c9ccaa2fd19b018751226"
+    },
+    "scripts/security/install-response-executor.ps1": {
+      "scope": "scripts",
+      "objectId": "bc847c63955ba10a2f30b3a9e408edd6cfa2aa2e"
+    },
+    "security/src/monarch_security/guarded_protector.py": {
+      "scope": "security",
+      "objectId": "1bd3f29fc28604dc912c08549c367028c29280a8"
+    },
+    "security/src/monarch_security/inspection_queue.py": {
+      "scope": "security",
+      "objectId": "8e717a39b6793d763182e0f8eb74ce10fd031e1f"
+    },
+    "security/src/monarch_security/inspection_recovery.py": {
+      "scope": "security",
+      "objectId": "f75ddccf734397f29b1f363603b0138bc42af563"
+    },
+    "security/src/monarch_security/inspection_worker.py": {
+      "scope": "security",
+      "objectId": "90c84206c3d866459596d6fe34f3689b728ff84b"
+    },
+    "security/src/monarch_security/observation.py": {
+      "scope": "security",
+      "objectId": "c064e3810f0753245c98bff13caa720b78adfc92"
+    },
+    "security/src/monarch_security/owned_process.py": {
+      "scope": "security",
+      "objectId": "f3b2c6eafd553309d9c4b053b3db6dc5092fec80"
+    },
+    "security/src/monarch_security/process_identity.py": {
+      "scope": "security",
+      "objectId": "f278b70c96240440a5297a11138e954888d1f397"
+    },
+    "security/src/monarch_security/runtime_guard.py": {
+      "scope": "security",
+      "objectId": "fc7c782260fbf0bbb0a8e779891f3789919b45e4"
+    },
+    "security/src/monarch_security/runtime_health.py": {
+      "scope": "security",
+      "objectId": "f7dce90e1e40107e7d030a2c72b84d90f6410232"
+    },
+    "security/src/monarch_security/sensor_worker.py": {
+      "scope": "security",
+      "objectId": "6895d4a69550dec0cb9dbb83000c0adea9994a3b"
+    },
+    "security/src/monarch_security/signature_metadata.py": {
+      "scope": "security",
+      "objectId": "e8a47a8128bbd28f017220c3511aac5adc0cd886"
+    },
+    "security/src/monarch_security/telemetry.py": {
+      "scope": "security",
+      "objectId": "46a6c64d64a098531682abd17a5682df6ee4bc40"
+    },
+    "security/src/monarch_security/worker_errors.py": {
+      "scope": "security",
+      "objectId": "d1943165e09090c38dcd430de1bc75e08417f18b"
+    },
+    "security/src/monarch_security/worker_transport.py": {
+      "scope": "security",
+      "objectId": "ef4f9b3ce9684bb010b74e2be80fe1b5ca92d065"
+    },
+    "security/tests/test_file_parser_lifecycle.py": {
+      "scope": "security",
+      "objectId": "6abced4c97fe48f165989ac381940ee0a4ccb650"
+    },
+    "security/tests/test_inspection_native.py": {
+      "scope": "security",
+      "objectId": "daf95d958a90bfb5ff22497dbe3d9da6ac55b008"
+    },
+    "security/tests/test_inspection_queue.py": {
+      "scope": "security",
+      "objectId": "88b4e899734ce6fe7d8f89bf18c7b22f62a1cda3"
+    },
+    "security/tests/test_inspection_recovery.py": {
+      "scope": "security",
+      "objectId": "36acce6ed6c12bdde419826ba409449c28847e04"
+    },
+    "security/tests/test_observation_completeness.py": {
+      "scope": "security",
+      "objectId": "439b7638adcedc08b0ade818efaf51abd1776935"
+    },
+    "security/tests/test_response_lifecycle.py": {
+      "scope": "security",
+      "objectId": "019bf3b187a5897b9fa98951cfb806818f28c2a9"
+    },
+    "security/tests/test_runtime_guard.py": {
+      "scope": "security",
+      "objectId": "625b40bc7d854a51fd5580381c352a6145160a57"
+    },
+    "security/tests/test_runtime_telemetry.py": {
+      "scope": "security",
+      "objectId": "7b644874dbe5f3b657e896aa113ab451b869e449"
+    },
+    "security/tests/test_sensor_workers.py": {
+      "scope": "security",
+      "objectId": "4c9832a94407bd5474dcd007a9cbfaba9af25089"
+    },
+    "security/tests/test_signature_metadata.py": {
+      "scope": "security",
+      "objectId": "c9025fbd1869ee1b53d5ac06d99acda8e6fa3f26"
+    },
+    "security/tests/test_worker_transport.py": {
+      "scope": "security",
+      "objectId": "22fb7cc91033eae5e85d8c64c63d6e4f000cd760"
+    },
+    "src/agent-v3/max-cloud-limits.ts": {
+      "scope": "src",
+      "objectId": "d0a89ee6cfd977bf27e9ef1a91aa3e3dfade235d"
+    },
+    "src/core/action-result-digest.ts": {
+      "scope": "src",
+      "objectId": "14892ccff1e1150499b1d56c11e6b7c8167ec963"
+    },
+    "src/core/background-work.ts": {
+      "scope": "src",
+      "objectId": "2caef16192576c19db731dd988f6bd29d8c692b3"
+    },
+    "src/core/network-address-policy.ts": {
+      "scope": "src",
+      "objectId": "0443f759a39ce9c5f4498680b299337e9d72f44e"
+    },
+    "src/core/sealed-file.ts": {
+      "scope": "src",
+      "objectId": "0771bca5f2f5f631155ee5ef3a67a3306bbd129e"
+    },
+    "src/core/store-protection.ts": {
+      "scope": "src",
+      "objectId": "030582005f1ce5878db83aa850583f8115bdf0c9"
+    },
+    "src/modules/models/gguf-chat.ts": {
+      "scope": "src",
+      "objectId": "bfc07d36dec5f2080182eed6bb37382a75ead33b"
+    },
+    "src/modules/reminders/reminder-store.ts": {
+      "scope": "src",
+      "objectId": "7892076923c5952288d952180ff0c0efc4691a6d"
+    },
+    "src/modules/reminders/reminder-time.ts": {
+      "scope": "src",
+      "objectId": "234e18f52bca31fc1d5848a03a4219536e666ce9"
+    },
+    "src/settings/security-policy.ts": {
+      "scope": "src",
+      "objectId": "9ea2f54ce184706ab05270429fe5c9a8df30a846"
+    },
+    "src/ui/public/assets/fonts/onest/OFL.txt": {
+      "scope": "src",
+      "objectId": "1d466e3f634bcf2ccc12551e863883efe5ca1877"
+    },
+    "src/ui/public/composer-menus.css": {
+      "scope": "src",
+      "objectId": "db36a3b87f515f633b82d8fad06b1555c4562f5c"
+    },
+    "src/ui/public/modules/coder-thread.js": {
+      "scope": "src",
+      "objectId": "d29e142249eb0ed4a7adae0a57260ef313077ee1"
+    },
+    "src/ui/public/modules/coder-view.js": {
+      "scope": "src",
+      "objectId": "2b948d5e32354965a975815170239a0d841174c8"
+    },
+    "src/ui/public/modules/paper-pixel.js": {
+      "scope": "src",
+      "objectId": "d15a8b0dda55c6a1d2539687c92208783fb6d39c"
+    },
+    "src/ui/public/modules/reminders-pane.js": {
+      "scope": "src",
+      "objectId": "d7ccd2f2a07881b41d2adb9a2e0d4c1feae7b41c"
+    },
+    "src/ui/public/modules/security-policy-pane.js": {
+      "scope": "src",
+      "objectId": "83add5308ec35d61e4a3a29ed437e171da9a4fea"
+    },
+    "src/ui/public/modules/service-switcher.js": {
+      "scope": "src",
+      "objectId": "4fda5a8cff98158bab4eb3dc0c00c7b882ee506d"
+    },
+    "src/ui/public/oscar-mode-switch.css": {
+      "scope": "src",
+      "objectId": "a57a052f063f5503e211125c96a63eb4f1d05c34"
+    },
+    "src/ui/public/oscar-research.css": {
+      "scope": "src",
+      "objectId": "929f8bc414ff7ae5c72f983e246f452799c3a078"
+    },
+    "src/ui/public/paper-pixel.css": {
+      "scope": "src",
+      "objectId": "bc7137969a0c2191b363aa816541f9056d0786bb"
+    },
+    "tests/agent-v3/max-cloud-limits.test.ts": {
+      "scope": "tests",
+      "objectId": "847fc322b60102e2e9b2f0aa7a2361c3a6c2ccc4"
+    },
+    "tests/agent-v3/max-egress-baseline.test.ts": {
+      "scope": "tests",
+      "objectId": "3f5a5e911ffb39b1f94807fe6e32aa8597747435"
+    },
+    "tests/app/coder-changes.test.ts": {
+      "scope": "tests",
+      "objectId": "d0bf9b625c04ff544da4acab196889265e4e80a2"
+    },
+    "tests/core/action-result-digest.test.ts": {
+      "scope": "tests",
+      "objectId": "14eddf5f1e6c4e3bd385ffd71a41c326262121a9"
+    },
+    "tests/core/background-work.test.ts": {
+      "scope": "tests",
+      "objectId": "ecad25cfeb14a1cd42816d5cd215d2c410e032ad"
+    },
+    "tests/core/kernel-module-failure.test.ts": {
+      "scope": "tests",
+      "objectId": "6bd718caddbfceecacdb1b6b7a7459afec4053f5"
+    },
+    "tests/core/network-address-policy.test.ts": {
+      "scope": "tests",
+      "objectId": "a257995992a2b5aa41cb1c5384873e1b6b504230"
+    },
+    "tests/core/network-egress-inventory.test.ts": {
+      "scope": "tests",
+      "objectId": "cfe1f746d4db61f0a1aad1d10d494c3433849694"
+    },
+    "tests/core/process-error-listeners.test.ts": {
+      "scope": "tests",
+      "objectId": "53851dc9d971f5930d85a341a8180aa541dbe10f"
+    },
+    "tests/core/sealed-file.test.ts": {
+      "scope": "tests",
+      "objectId": "a2716b1f1590a79a89992534afcdcbd8278b8edd"
+    },
+    "tests/core/source-hygiene.test.ts": {
+      "scope": "tests",
+      "objectId": "b1b42978a16a3d91d862763185d9fca78ed977d3"
+    },
+    "tests/core/store-protection.test.ts": {
+      "scope": "tests",
+      "objectId": "ef92790ee1769b3497d562c600ae4efc91d169a4"
+    },
+    "tests/desktop/content-link-confirmation.test.ts": {
+      "scope": "tests",
+      "objectId": "1bf4c0431556a6f92cd1db5d83608826f8bd098b"
+    },
+    "tests/desktop/development-profile.test.ts": {
+      "scope": "tests",
+      "objectId": "d612054d10121254caa2c692c87c3f0d14f368d9"
+    },
+    "tests/desktop/development-runtime.test.ts": {
+      "scope": "tests",
+      "objectId": "98fb6bbda7b2444ebb61e71e1fabb26fb90cee3b"
+    },
+    "tests/desktop/main-diagnostics-log.test.ts": {
+      "scope": "tests",
+      "objectId": "ec28972ef97496d81789e384f02d59b86ee1525e"
+    },
+    "tests/desktop/oscar-api-key.test.ts": {
+      "scope": "tests",
+      "objectId": "a555a72551a165d28bee9f88e36c4279e3e7e26d"
+    },
+    "tests/desktop/profile-key-recovery.test.ts": {
+      "scope": "tests",
+      "objectId": "52bd76aa12c03800f4e8e97a4fd31633399f8a9d"
+    },
+    "tests/desktop/renderer-sandbox.test.ts": {
+      "scope": "tests",
+      "objectId": "a341471a64cc2476cd4c1577fa13957181cd05cb"
+    },
+    "tests/desktop/runtime-recovery-policy.test.ts": {
+      "scope": "tests",
+      "objectId": "878e7f157cff451410f6c3c8bf6dae062bf4d84b"
+    },
+    "tests/desktop/safe-export.test.ts": {
+      "scope": "tests",
+      "objectId": "10168339b59ccfa9648c530b0bba088d85b0a442"
+    },
+    "tests/desktop/safe-runtime-lock.test.ts": {
+      "scope": "tests",
+      "objectId": "73f3cb2e57f9031b132fcbff4b010cb796900de4"
+    },
+    "tests/desktop/safe-security-hardening.test.ts": {
+      "scope": "tests",
+      "objectId": "b7f6bd7c50127843d5a086bd27367326ae2465df"
+    },
+    "tests/desktop/windows-rename.test.ts": {
+      "scope": "tests",
+      "objectId": "e4d4697c9b1a457e74610d1a9801dc892d499191"
+    },
+    "tests/fixtures/custom-chat-gguf.ts": {
+      "scope": "tests",
+      "objectId": "60d08f11e79eb3504a7803d65d72bb1b39a87945"
+    },
+    "tests/fixtures/network-address-policy.json": {
+      "scope": "tests",
+      "objectId": "25ef04f8e51c5a90ee73b979fce97332cd3375f9"
+    },
+    "tests/fixtures/network-egress-inventory.json": {
+      "scope": "tests",
+      "objectId": "fedecaa34589cb29fe8adc0f00212d8d536d0eb6"
+    },
+    "tests/installer-electron-fuses.test.ts": {
+      "scope": "tests",
+      "objectId": "51f3bc68eeea21883ee5951d3b34c6e6f9d96338"
+    },
+    "tests/modules/coder-command-policy.test.ts": {
+      "scope": "tests",
+      "objectId": "1f3d7c42f3576ce43d07190a158eb13e9846061c"
+    },
+    "tests/modules/model-helper-components.test.ts": {
+      "scope": "tests",
+      "objectId": "79a76bf87c2f36b306d9e4faff722fea5ecea73e"
+    },
+    "tests/modules/reminders.test.ts": {
+      "scope": "tests",
+      "objectId": "16124900991b8f044eb57ba51eccf945a5b524bd"
+    },
+    "tests/modules/security-health-status.test.ts": {
+      "scope": "tests",
+      "objectId": "7a7493b2b1534a8abc145259886d65d649133c99"
+    },
+    "tests/modules/security-inspection-recovery.test.ts": {
+      "scope": "tests",
+      "objectId": "8c2383ec419b7625239b60c7df2285e35a738b33"
+    },
+    "tests/security/profile-canary-scan.test.ts": {
+      "scope": "tests",
+      "objectId": "bf0c8c5362fa0eaa82e2c1c69eb7e1fdba8b094c"
+    },
+    "tests/settings/security-policy.test.ts": {
+      "scope": "tests",
+      "objectId": "6ea870d2a91cf0aab8ad727b0bce5ec339fa0da4"
+    },
+    "tests/ui/coder-question.test.ts": {
+      "scope": "tests",
+      "objectId": "82dd7b0cd2060b54aa477e6b3866ceaa65b652fd"
+    },
+    "tests/ui/max-fallback-reason.test.ts": {
+      "scope": "tests",
+      "objectId": "dcc5df5b88d87c1ebe9dc4868d63aa026b4a5bb7"
+    },
+    "tests/ui/oscar-agent-log.test.ts": {
+      "scope": "tests",
+      "objectId": "0b164b143222b0415bbb757652bc93daece57b18"
+    },
+    "tests/ui/paper-pixel.test.ts": {
+      "scope": "tests",
+      "objectId": "2749c57fd23cd13e5ba70ed5f3e7f65b785d5d4c"
+    },
+    "tests/ui/service-switcher.test.ts": {
+      "scope": "tests",
+      "objectId": "18868b181ea0ef20e06e75d02f73164f7489534d"
+    },
+    "tests/ui/thread-dom-sync.test.ts": {
+      "scope": "tests",
+      "objectId": "465b2671185a5f6835b73469bbf38105f37064fb"
     }
   }
 }

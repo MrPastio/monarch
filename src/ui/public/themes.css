@@ -1,0 +1,113 @@
+/* Theme contract. Components keep their dark fallback values; these semantic
+   roles adapt actual surfaces, text, shadows and animated keyframes together.
+   No inversion filters: user images, video, mascots and previews retain color. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #faf8f4;
+  --bg-elevated: #ffffff;
+  --surface: rgba(255, 255, 255, .78);
+  --surface-strong: rgba(255, 255, 255, .96);
+  --surface-soft: rgba(72, 48, 24, .035);
+  --surface-hover: rgba(72, 48, 24, .07);
+  --line: rgba(67, 47, 27, .13);
+  --line-strong: rgba(67, 47, 27, .24);
+  --text: #26221d;
+  --text-soft: #575149;
+  --muted: #6c645a;
+  --accent: #985000;
+  --accent-2: #b94d13;
+  --accent-soft: rgba(221, 132, 20, .10);
+  --accent-line: rgba(162, 91, 12, .36);
+  --success: #247343;
+  --danger: #b42c26;
+  --warning: #945100;
+  --glass-surface: rgba(255, 255, 255, .76);
+  --glass-surface-strong: rgba(255, 255, 255, .95);
+  --glass-line: rgba(67, 47, 27, .13);
+  --glass-line-hover: rgba(67, 47, 27, .23);
+  --shadow-glass: 0 20px 54px rgba(70, 45, 18, .09), inset 0 1px rgba(255, 255, 255, .95);
+  --shadow-card: 0 12px 32px rgba(70, 45, 18, .065), inset 0 1px rgba(255, 255, 255, .95);
+  --selection-soft: rgba(72, 48, 24, .055);
+  --selection-line: rgba(72, 48, 24, .18);
+  --glass-shadow: 0 10px 32px rgba(70, 45, 18, .07), inset 0 1px rgba(255, 255, 255, .95);
+  --theme-plane-rgb: 255, 253, 249;
+  --theme-wash-rgb: 65, 43, 22;
+  --theme-line-rgb: 65, 43, 22;
+  --theme-ink-rgb: 38, 34, 29;
+  --theme-ink: #26221d;
+  --theme-muted: #686056;
+  --theme-text-alpha: .70;
+  --theme-amber-ink: #915000;
+  --theme-danger-ink: #ad3029;
+  --theme-success-ink: #247343;
+  --theme-info-ink: #315eaa;
+  --theme-amber-rgb: 145, 80, 0;
+  --theme-danger-rgb: 173, 48, 41;
+  --theme-success-rgb: 36, 115, 67;
+  --theme-info-rgb: 49, 94, 170;
+  --theme-shadow-strength: .22;
+  --coder-panel: rgba(255, 255, 255, .82);
+  --coder-line: var(--line);
+  --coder-muted: var(--muted);
+  --monarch-surface: rgba(255, 253, 249, .97);
+  --monarch-edge: rgba(67, 47, 27, .20);
+  --monarch-highlight: rgba(215, 135, 32, .11);
+  --monarch-focus: #a85a10;
+}
+
+.desktop-titlebar { display: none; }
+:root[data-desktop-titlebar="true"] { --desktop-titlebar-height: 32px; }
+:root[data-desktop-titlebar="true"] body { padding-top: var(--desktop-titlebar-height); }
+:root[data-desktop-titlebar="true"] .desktop-titlebar {
+  position: fixed; inset: 0 0 auto; z-index: 2000; display: flex; align-items: center;
+  gap: 7px; height: 32px; padding: 0 150px 0 12px; background: var(--bg); color: var(--text-soft);
+  font-size: 12.5px; user-select: none; -webkit-app-region: drag;
+}
+.desktop-titlebar img { width: 16px; height: 16px; }
+:root[data-desktop-titlebar="true"] .oscar-voice-mode { top: 32px; }
+
+:root[data-theme="light"] body {
+  background: radial-gradient(900px 620px at 62% 18%, rgba(255, 180, 69, .105), transparent 68%),
+    linear-gradient(145deg, #fdfcf9, #faf8f4 58%, #f4f0e9);
+}
+:root[data-theme="light"] .sidebar {
+  background: linear-gradient(165deg, rgba(255, 255, 255, .8), rgba(248, 244, 237, .88));
+  box-shadow: inset -1px 0 rgba(255, 255, 255, .8);
+}
+:root[data-theme="light"] :is(.topbar, .claude-composer, .settings-tabs, .chat-mode-switch) {
+  background: linear-gradient(135deg, rgba(255, 255, 255, .9), rgba(255, 252, 245, .75));
+  border-color: var(--line);
+  box-shadow: var(--glass-shadow);
+}
+:root[data-theme="light"] .claude-composer:focus-within {
+  border-color: var(--accent-line);
+  box-shadow: var(--glass-shadow), 0 0 0 3px rgba(195, 115, 19, .10);
+}
+:root[data-theme="light"] :is(.nav-item.active, .claude-new-chat-btn) {
+  color: #784209;
+  border-color: rgba(172, 102, 18, .27);
+  background: linear-gradient(120deg, rgba(255, 193, 65, .20), rgba(255, 149, 43, .075));
+}
+:root[data-theme="light"] .chat-mode-switch::before {
+  background: linear-gradient(135deg, #fff2d4, #ffd184 48%, #ffad61);
+  box-shadow: 0 3px 10px rgba(157, 85, 10, .14), inset 0 1px #fff9ea;
+}
+:root[data-theme="light"] :is(button, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline-color: #a85a10;
+}
+:root[data-theme="light"] ::selection { color: #382408; background: #ffdb94; }
+:root[data-theme="light"] :is(input, textarea)::placeholder { color: #756d62; opacity: 1; }
+:root[data-theme="light"] :is(dialog, .dropdown-popover, .oscar-memory-panel, .sidebar-history) {
+  box-shadow: var(--shadow-glass);
+}
+:root[data-theme="light"] dialog::backdrop { background: rgba(48, 37, 23, .25); }
+:root[data-theme="light"] .monarch-safe-settings {
+  background: linear-gradient(145deg, rgba(255, 255, 255, .92), rgba(249, 246, 236, .88));
+}
+/* Preserve one owner for geometry/motion. Theme changes only its material.
+   Reduced motion disables the existing surface/keyframe effects as well. */
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme] *, :root[data-theme] *::before, :root[data-theme] *::after {
+    scroll-behavior: auto !important;
+  }
+}

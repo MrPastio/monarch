@@ -4,14 +4,12 @@ import type {
   MonarchExecutionRequest,
   MonarchExecutionControl,
   MonarchExecutionResult,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
   MonarchModuleRecord,
   MonarchPermissionMode,
   MonarchRisk,
-  MonarchRouteDecision,
 } from '../../core';
 import { permissionModeForRisk } from '../../core';
 import { astraManifest } from './manifest';
@@ -36,12 +34,6 @@ interface AstraAgentCard {
   permissionMode: MonarchPermissionMode;
   inputSchema?: unknown;
   outputSchema?: unknown;
-  routingHints: {
-    aliases: string[];
-    keywords: string[];
-    examples: string[];
-    intentKinds: string[];
-  };
   whenToUse: string[];
   constraints: string[];
 }
@@ -63,7 +55,6 @@ interface AstraSlotPreview {
     agentCard: AstraAgentCard;
     inputSchema?: unknown;
     outputSchema?: unknown;
-    routingHints: AstraAgentCard['routingHints'];
     intentText?: string;
   };
 }
@@ -99,103 +90,6 @@ export class AstraModule implements MonarchModule {
     };
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.trim();
-    const lower = text.toLowerCase();
-    if (!mentionsAstra(lower)) {
-      return null;
-    }
-
-    if (mentionsAgentSkillSystem(lower)) {
-      if (/(activate|invoke|use skill|активир|загрузи|используй навык)/i.test(lower)) {
-        return {
-          intentId: intent.id,
-          targetModuleId: this.manifest.id,
-          capabilityId: 'astra.agent-skills.activate',
-          confidence: 0.96,
-          reason: 'User explicitly asks to activate an Agent Skill.',
-          permissionMode: 'allow',
-          input: {
-            skill: extractAgentSkillName(text),
-            prompt: text,
-          },
-        };
-      }
-      if (/(match|radar|suggest|recommend|подбери|радар|какой навык)/i.test(lower)) {
-        return {
-          intentId: intent.id,
-          targetModuleId: this.manifest.id,
-          capabilityId: 'astra.agent-skills.match',
-          confidence: 0.96,
-          reason: 'User asks Skill Radar to match a workflow.',
-          permissionMode: 'allow',
-          input: { query: text, limit: 5 },
-        };
-      }
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'astra.agent-skills.list',
-        confidence: 0.96,
-        reason: 'User asks for discovered Agent Skills.',
-        permissionMode: 'allow',
-        input: {},
-      };
-    }
-
-    if (mentionsAstraBridge(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'astra.oscar.bridge.describe',
-        confidence: 0.94,
-        reason: 'User asks about Astra/Oscar integration.',
-        permissionMode: 'allow',
-        input: {},
-      };
-    }
-
-    if (/(slot|слот|runtime context|контекст)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'astra.slot.preview',
-        confidence: 0.94,
-        reason: 'User asks Astra to preview a skill slot.',
-        permissionMode: 'allow',
-        input: {
-          capabilityId: extractCapabilityId(text) || '',
-          intentText: text,
-        },
-      };
-    }
-
-    if (/(explain|describe|объясн|опиши|карточк)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'astra.skill.explain',
-        confidence: 0.94,
-        reason: 'User asks Astra to explain one skill card.',
-        permissionMode: 'allow',
-        input: {
-          capabilityId: extractCapabilityId(text) || '',
-        },
-      };
-    }
-
-    return {
-      intentId: intent.id,
-      targetModuleId: this.manifest.id,
-      capabilityId: 'astra.skills.index',
-      confidence: 0.95,
-      reason: 'User asks Astra to index available skills.',
-      permissionMode: 'allow',
-      input: {
-        includeSystem: true,
-      },
-    };
-  }
 
   async executeCapability(
     request: MonarchExecutionRequest,
@@ -553,7 +447,6 @@ function createAgentCard(
   moduleRecord: MonarchModuleRecord,
   capability: MonarchCapability
 ): AstraAgentCard {
-  const routing = capability.routing || {};
   const permissionMode = permissionModeForRisk(capability.risk);
 
   return {
@@ -568,12 +461,6 @@ function createAgentCard(
     permissionMode,
     inputSchema: capability.inputSchema,
     outputSchema: capability.outputSchema,
-    routingHints: {
-      aliases: routing.aliases || [],
-      keywords: routing.keywords || [],
-      examples: routing.examples || [],
-      intentKinds: routing.intentKinds || [],
-    },
     whenToUse: createWhenToUse(moduleRecord, capability),
     constraints: createConstraints(capability.risk, permissionMode),
   };
@@ -593,7 +480,6 @@ function createSlotPreview(
     agentCard: card,
     inputSchema: card.inputSchema,
     outputSchema: card.outputSchema,
-    routingHints: card.routingHints,
   };
   if (intentText) {
     contextPack.intentText = intentText;
@@ -657,8 +543,7 @@ function createWhenToUse(
 ): string[] {
   const hints = [
     ...moduleRecord.manifest.owns,
-    ...(capability.routing?.intentKinds || []),
-    ...(capability.routing?.aliases || []),
+    ...(capability.agent?.tags || []),
   ].filter(Boolean);
 
   if (hints.length === 0) {
@@ -699,35 +584,6 @@ function requiredInputKeys(schema: unknown): string[] {
   return Array.isArray(required)
     ? required.filter((value): value is string => typeof value === 'string')
     : [];
-}
-
-function mentionsAstra(text: string): boolean {
-  return /(astra|skill|skills|agent card|slot|bridge|integration|астра|навык|навыки|карточк|слот|интеграц)/i.test(text)
-    || containsRussianBridgeTerm(text);
-}
-
-function mentionsAstraBridge(text: string): boolean {
-  return /\b(?:bridge|integration)\b|интеграц/i.test(text)
-    || containsRussianBridgeTerm(text);
-}
-
-function containsRussianBridgeTerm(text: string): boolean {
-  return /(?:^|[^\p{L}\p{N}_])(?:мост(?:а|ом|у|ы|е|ах|ами)?|связ(?:ь|и|ью|ям|ями|ях)?)(?=$|[^\p{L}\p{N}_])/iu.test(text);
-}
-
-function mentionsAgentSkillSystem(text: string): boolean {
-  return /(agent skills?|skill\.md|codex skills?|claude skills?|skill radar|систем[аыу] навыков|радар навыков|навык skill\.md)/i.test(text);
-}
-
-function extractAgentSkillName(text: string): string {
-  const explicit = text.match(/(?:^|\s)[$/]([a-z0-9][a-z0-9:_-]{0,127})(?=\s|$)/i)?.[1];
-  if (explicit) return explicit;
-  return text.match(/(?:skill|навык)\s+([a-z0-9][a-z0-9:_-]{1,127})/i)?.[1] || '';
-}
-
-function extractCapabilityId(text: string): string {
-  const match = text.match(/\b[a-z][a-z0-9-]*(?:\.[a-z0-9_-]+)+\b/i);
-  return match?.[0] || '';
 }
 
 function readStringInput(input: unknown, key: string): string {

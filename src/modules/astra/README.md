@@ -1,6 +1,12 @@
 # Astra
 
+The isolated Astra V3 Computer effect work adapter is
+`src/agent-v3/computer-action-work-adapter.ts`. This legacy module does not
+register it; product/default/shadow startup remains unchanged.
+
 Astra is the local skill layer inside Monarch for Oscar-facing capability discovery and explicit Agent Skill activation.
+
+Naming boundary: the target next-generation Agent Runtime is called **Astra V3** and belongs to the Monarch `0.3.0` architecture plan. This existing `astra` module remains **Astra Skills 0.1.0**. It is a bounded discovery/context component, not the Astra V3 runtime, and the naming decision grants it no execution, policy, evidence, or completion authority.
 
 It does not execute other modules directly. It creates compact agent cards and slot previews so Oscar can understand what Monarch can do while the kernel keeps routing, permissions, execution, events, and audit.
 

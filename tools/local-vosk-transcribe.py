@@ -62,7 +62,10 @@ class VoskEngine:
 
         started_at = time.perf_counter()
         load_ms = self._ensure_model(model_dir)
-        with tempfile.TemporaryDirectory(prefix="monarch-vosk-decode-") as temp_dir:
+        # Keep decoded PCM inside the exact request directory. The Node owner
+        # removes that directory in `finally` and can reap it after a crash;
+        # using the system TEMP here would escape the runtime data boundary.
+        with tempfile.TemporaryDirectory(prefix="decode-", dir=str(audio_path.parent)) as temp_dir:
             wav_path = Path(temp_dir) / "voice.wav"
             convert_started_at = time.perf_counter()
             convert = convert_audio(ffmpeg, audio_path, wav_path)
@@ -390,7 +393,12 @@ def require_worker_audio_path(value: str) -> Path:
     if not value:
         raise WorkerFailure("voice-stt-audio-invalid", "STT worker audio path is missing.")
     candidate = Path(value).resolve()
-    temp_root = Path(tempfile.gettempdir()).resolve()
+    configured_root = os.environ.get("MONARCH_VOICE_AUDIO_ROOT", "").strip()
+    temp_root = (
+        Path(configured_root).expanduser().resolve()
+        if configured_root
+        else Path(tempfile.gettempdir()).resolve()
+    )
     try:
         candidate.relative_to(temp_root)
     except ValueError as exc:
@@ -436,9 +444,8 @@ def require_model_dir(language_code: str) -> Path:
         return model_dir
     raise WorkerFailure(
         "voice-stt-language-unavailable",
-        f"Локальная Vosk-модель для языка {language_code.upper()} не найдена. "
-        "Положи подходящую модель в runtime/voice/models/ "
-        "или явно укажи MONARCH_VOSK_MODEL_DIR.",
+        f"Распознавание речи для языка {language_code.upper()} ещё не скачано. "
+        "Открой Настройки → Модели → «Распознавание речи».",
     )
 
 

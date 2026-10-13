@@ -24,7 +24,7 @@
 - `device` - узкие Windows-действия с обязательным одноразовым подтверждением.
 - `security` - локальный Security Center, scans, audit и baseline actions.
 - `sharing` - offline OpenAI-compatible API для установленных локальных GGUF-моделей через общий Oscar runtime.
-- `custom-tools` - пользовательские sandboxed tools с сетевыми ограничениями.
+- `custom-tools` - встроенные инструменты хоста с фиксированным риском; сохранённые скриптовые инструменты отключены.
 
 Каталог встроенных packages находится в `src/modules/catalog.ts`.
 

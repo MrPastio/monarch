@@ -1,4 +1,4 @@
-import type { MonarchExecutionRequest, MonarchExecutionResult, MonarchIntent, MonarchKernelContext, MonarchModule, MonarchModulePackage, MonarchRouteDecision } from '../../core';
+import type { MonarchExecutionRequest, MonarchExecutionResult, MonarchKernelContext, MonarchModule, MonarchModulePackage } from '../../core';
 import { safeManifest } from './manifest';
 
 export class SafeModule implements MonarchModule {
@@ -12,10 +12,6 @@ export class SafeModule implements MonarchModule {
     return { ok: true, summary: 'Monarch Safe design contract is registered. The shared kernel does not attest the live state of its separate desktop runtime.' };
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    if (!/(?:monarch\s+safe|монарх\s+safe|изолированн\w*\s+хранилищ)/i.test(intent.text)) return null;
-    return { intentId: intent.id, targetModuleId: 'safe', capabilityId: 'safe.status', confidence: 0.97, reason: 'Explicit Monarch Safe status request.', permissionMode: 'allow', input: {} };
-  }
 
   async executeCapability(request: MonarchExecutionRequest): Promise<MonarchExecutionResult> {
     if (request.capabilityId !== 'safe.status') return { ok: false, summary: 'Unsupported Safe capability.', error: 'unsupported-capability' };

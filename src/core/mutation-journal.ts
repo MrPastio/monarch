@@ -68,6 +68,7 @@ export class MonarchMutationJournal {
   private readonly memoryBackups = new Map<string, Buffer>();
   private readonly persistencePath?: string;
   private readonly backupDirectory?: string;
+  private ownerRedZoneRootsProvider: () => readonly string[] = () => [];
 
   constructor(
     private readonly workspaceRoot: string,
@@ -78,6 +79,10 @@ export class MonarchMutationJournal {
       this.backupDirectory = path.join(storageDirectory, 'backups');
     }
     this.restore();
+  }
+
+  setOwnerRedZoneRootsProvider(provider: () => readonly string[]): void {
+    this.ownerRedZoneRootsProvider = provider;
   }
 
   async capture(
@@ -98,6 +103,7 @@ export class MonarchMutationJournal {
         allowedRoots: [resolvedTarget.boundaryRoot || this.workspaceRoot],
         allowFullDiskAccess: options.allowOutsideWorkspace === true,
         protectWorkspaceInternals: options.ownerUnrestricted !== true,
+        redZoneRoots: [...this.ownerRedZoneRootsProvider()],
         ...(options.ownerUnrestricted === true ? { includeDefaultRedZones: false } : {}),
       });
       if (!filesystemBoundary.allowed) {
@@ -381,7 +387,7 @@ export class MonarchMutationJournal {
 
   private restore(): void {
     if (!this.persistencePath) return;
-    const persisted = readDurableJson<PersistedMutationJournalV1>(this.persistencePath);
+    const persisted = readDurableJson<PersistedMutationJournalV1>(this.persistencePath, { sensitive: { storeId: 'mutation-journal' } });
     if (!persisted || persisted.version !== 1 || !Array.isArray(persisted.entries)) return;
     for (const entry of persisted.entries.slice(-MAX_ENTRIES)) {
       if (!isJournalEntry(entry)) continue;
@@ -417,7 +423,7 @@ export class MonarchMutationJournal {
     writeDurableJson(this.persistencePath, {
       version: 1,
       entries: [...this.entries.values()],
-    } satisfies PersistedMutationJournalV1);
+    } satisfies PersistedMutationJournalV1, { sensitive: { storeId: 'mutation-journal' } });
   }
 }
 

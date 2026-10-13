@@ -1,6 +1,11 @@
 import { state, updateState } from './state.js';
 import { ensureRequiredComponents, fetchState, installModels } from './api.js';
 import {
+  formatManagedBytes,
+  missingOptionalComponents,
+  renderOptionalComponentNote,
+} from './model-components.js';
+import {
   escapeHtml,
   initials,
   formatRuntimeStatus,
@@ -88,6 +93,7 @@ function renderModels() {
   const provisionedModels = state.data.components?.schemaVersion === 2
     ? state.data.components.models || []
     : [];
+  const ramTotalGb = Number(state.data.components?.onboarding?.hardware?.ramTotalGb);
 
   // A. Compact list inside right telemetry inspector drawer
   if (elements.models) {
@@ -132,13 +138,12 @@ function renderModels() {
           <span><strong>${models.length}</strong> всего</span>
           <span><strong>${readyCount}</strong> готовы</span>
           <span><strong>${experimentalCount}</strong> Pro</span>
-          ${provisionedModels.some((model) => !model.complete) ? '<button type="button" class="claude-secondary-btn" data-model-install="gemma4-fast,gemma4-balanced,qwen3.8-27b-pro">Скачать все</button>' : ''}
+          ${provisionedModels.some((model) => !model.installed) ? '<button type="button" class="claude-secondary-btn" data-model-install="gemma4-fast,gemma4-balanced,qwen3.8-27b-pro">Скачать все</button>' : ''}
         </div>
         <div class="models-card-grid">
           ${models.map((model) => {
             const runtime = runtimes.find((entry) => entry.role === model.role);
             const status = runtime?.runnerStatus || model.status;
-            const displayStatus = formatRuntimeStatus(status);
             const asset = model.primaryAsset?.name || model.directoryName;
             const detail = formatModelDetail(runtime?.detail || asset || 'локально');
             const roleLabel = modelRoleLabel(model.role);
@@ -151,7 +156,9 @@ function renderModels() {
               : managed && managed.phase !== 'ready'
                 ? renderManagedComponent(managed)
                 : '';
+            const missingOptional = missingOptionalComponents(provisioned);
             const canInstall = provisioned && (!provisioned.installed || !provisioned.complete);
+            const notDownloaded = Boolean(provisioned && !provisioned.installed);
             return `
               <article class="model-record-card" data-status="${escapeHtml(status)}">
                 <header>
@@ -160,17 +167,17 @@ function renderModels() {
                     <h3>${escapeHtml(model.label)}</h3>
                     <p class="model-role-description">${escapeHtml(roleDescription)}</p>
                   </div>
-                  <span class="status-text ${escapeHtml(status)}">${escapeHtml(displayStatus)}</span>
+                  <div class="model-record-side">
+                    <span class="status-text ${escapeHtml(notDownloaded ? 'missing' : status)}">${escapeHtml(notDownloaded ? 'не скачана' : formatRuntimeStatus(status))}</span>
+                    ${canInstall ? `<button type="button" class="claude-primary-btn model-install-action" data-model-install="${escapeHtml(model.role)}">${provisioned.phase === 'failed' ? 'Повторить' : missingOptional.length ? 'Скачать дополнения' : provisioned.installed ? 'Докачать' : 'Скачать'}</button>` : ''}
+                  </div>
                 </header>
+                ${renderRamFit(provisioned?.recommendedRamGb, ramTotalGb)}
                 ${managedStatus}
-                ${canInstall ? `<button type="button" class="claude-primary-btn model-install-action" data-model-install="${escapeHtml(model.role)}">${provisioned.phase === 'failed' ? 'Повторить' : provisioned.installed ? 'Докачать' : 'Скачать'}</button>` : ''}
+                ${renderOptionalComponentNote(missingOptional)}
                 <details class="model-record-details">
-                  <summary>Технические детали</summary>
+                  <summary>О модели</summary>
                   <div class="model-record-meta">
-                    <span>
-                      <small>Runtime</small>
-                      <strong>${escapeHtml(model.provider || 'llama.cpp')}</strong>
-                    </span>
                     <span>
                       <small>Размер</small>
                       <strong>${escapeHtml(model.totalSize || 'Н/Д')}</strong>
@@ -186,9 +193,88 @@ function renderModels() {
             `;
           }).join('')}
         </div>
+        ${renderExtraComponents(state.data.components?.extras || [], ramTotalGb)}
       </div>
     `;
   }
+}
+
+/** Downloads for single features (Coder, speech recognition, memory search):
+ * never part of first setup, each fetched only when the person asks for it. */
+export function renderExtraComponents(extras, ramTotalGb) {
+  if (!Array.isArray(extras) || extras.length === 0) return '';
+  return `
+    <section class="models-extras" aria-labelledby="models-extras-title">
+      <div class="models-extras-heading">
+        <h3 id="models-extras-title">Для отдельных функций</h3>
+        <p>Скачай, когда понадобится. Всё работает на твоём компьютере.</p>
+      </div>
+      <div class="models-card-grid">
+        ${extras.map((extra) => renderExtraCard(extra, ramTotalGb)).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function renderExtraCard(extra, ramTotalGb) {
+  const active = ['checking', 'downloading', 'verifying'].includes(extra.phase);
+  const failed = extra.phase === 'failed';
+  const ready = extra.installed === true;
+  const size = formatComponentSize(extra.expectedBytes);
+
+  const failure = (extra.components || []).find((component) => component.phase === 'failed');
+  const percent = Math.max(0, Math.min(100, Math.round(Number(extra.progress || 0) * 100)));
+  return `
+    <article class="model-record-card model-extra-card" data-status="${ready ? 'ready' : active ? 'loading' : 'missing'}" data-extra="${escapeHtml(extra.role)}">
+      <header>
+        <div>
+          <span class="model-role-pill">${escapeHtml(extra.beta ? `${extra.summary} · бета` : extra.summary)}</span>
+          <h3>${escapeHtml(extra.label)}</h3>
+          <p class="model-role-description">${escapeHtml(extra.description || '')}</p>
+        </div>
+        ${ready ? '<div class="model-record-side"><span class="status-text ready">готово</span></div>' : ''}
+      </header>
+      ${Number(extra.recommendedRamGb) > 0 ? renderRamFit(extra.recommendedRamGb, ramTotalGb) : ''}
+      ${active ? `
+        <div class="model-component-state" data-phase="${escapeHtml(extra.phase)}">
+          <div><strong>${extra.phase === 'verifying' ? 'Проверяем и распаковываем' : 'Загружаем'}</strong><span>${percent}%</span></div>
+          <progress max="100" value="${percent}">${percent}%</progress>
+          <p>${escapeHtml(`${formatComponentSize(extra.downloadedBytes)} из ${size}`)}</p>
+        </div>` : ''}
+      ${failed && failure?.error ? `<p class="model-install-note">${escapeHtml(failure.error)}</p>` : ''}
+      ${!ready && !active ? `<div class="model-extra-actions"><button type="button" class="claude-primary-btn model-install-action" data-model-install="${escapeHtml(extra.role)}">${failed ? 'Повторить' : `Скачать · ${escapeHtml(size)}`}</button></div>` : ''}
+    </article>
+  `;
+}
+
+/** Megabytes under a gigabyte read better for the small helper packs. */
+export function formatComponentSize(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024 ** 3) return `${Math.max(1, Math.round(bytes / (1024 ** 2)))} МБ`;
+  return `${(bytes / (1024 ** 3)).toFixed(1).replace('.', ',')} ГБ`;
+}
+
+/** How much of this computer's memory the model needs. The bar is the share
+ * of your RAM it takes; past 100% the missing part is shown, not hidden. */
+export function renderRamFit(needGb, haveGb) {
+  const need = Number(needGb);
+  const have = Number(haveGb);
+  if (!(need > 0) || !(have > 0)) return '';
+  const fits = have >= need;
+  const share = Math.min(1, need / have);
+  const missing = fits ? 0 : Math.ceil(need - have);
+  const text = fits
+    ? `Нужно около ${formatNumber(need)} ГБ памяти, у тебя ${formatNumber(have)} ГБ — хватает`
+    : `Нужно около ${formatNumber(need)} ГБ памяти, у тебя ${formatNumber(have)} ГБ — не хватает ${missing} ГБ, будет медленнее`;
+  return `
+    <div class="model-ram-fit" data-fit="${fits ? 'ok' : 'short'}">
+      <span class="model-ram-bar" aria-hidden="true"><i style="--share:${share.toFixed(3)}"></i></span>
+      <small>${escapeHtml(text)}</small>
+    </div>`;
+}
+
+function formatNumber(value) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1).replace('.', ',');
 }
 
 function renderProvisionedModel(model) {
@@ -212,7 +298,7 @@ function renderManagedComponent(component) {
   const failed = component.phase === 'failed';
   return `
     <div class="model-component-state" data-phase="${escapeHtml(component.phase)}">
-      <div><strong>${failed ? 'Нужен повтор установки' : 'Monarch устанавливает модель'}</strong><span>${percent}%</span></div>
+      <div><strong>${failed ? 'Установка прервалась — попробуй ещё раз' : 'Monarch устанавливает модель'}</strong><span>${percent}%</span></div>
       <progress max="100" value="${percent}">${percent}%</progress>
       <p>${escapeHtml(component.error || `${formatManagedBytes(component.downloadedBytes)} из ${formatManagedBytes(component.expectedBytes)}`)}</p>
       ${failed ? '<button type="button" class="claude-primary-btn" data-component-ensure>Повторить</button>' : ''}
@@ -220,17 +306,12 @@ function renderManagedComponent(component) {
   `;
 }
 
-function formatManagedBytes(value) {
-  const bytes = Math.max(0, Number(value) || 0);
-  return `${(bytes / (1024 ** 3)).toFixed(2)} ГБ`;
-}
-
 function formatModelDetail(detail) {
   switch (detail) {
   case 'Model is present and ready.':
-    return 'Готова локально';
+    return 'Готова к работе';
   case 'Model is ready (experimental).':
-    return 'Готова, экспериментальный профиль';
+    return 'Готова · пока тестовая';
   default:
     return detail;
   }
@@ -251,11 +332,11 @@ function modelRoleDescription(role) {
   const descriptions = {
     'gemma4-fast': 'Короткие ответы, повседневные задачи и быстрые уточнения.',
     'gemma4-balanced': 'Основной профиль для разработки, анализа и длинных диалогов.',
-    'qwen3.8-27b-pro': 'Полный адаптивный Agent для сложной разработки, анализа и мультимодальных задач. Vision пока beta.',
+    'qwen3.8-27b-pro': 'Для сложных задач, разработки и анализа. Работа с изображениями — пробная.',
     micro: 'Минимальная задержка для простых локальных реплик.',
     lite: 'Лёгкий профиль для голосового режима и коротких ответов.',
   };
-  return descriptions[role] || 'Локальный профиль Monarch с собственным runtime-маршрутом.';
+  return descriptions[role] || 'Модель для работы с Оскаром.';
 }
 
 function renderPipeline() {

@@ -126,6 +126,19 @@ describe('Action Protocol v1', () => {
     expect(changed.idempotencyKey).toBe(base.idempotencyKey);
   });
 
+  it('gives every read proposal its own identity so a repeated read is never answered from the past', () => {
+    const list = workspaceManifest.capabilities.find(item => item.id === 'workspace.files.list')!;
+    const options = { capability: list, workspaceRoot: 'E:\\Monarch', intentId: 'intent_reads' };
+    const first = normalizeActionProposal({ capabilityId: list.id, args: { path: 'tmp' }, proposalId: 'read_1' }, options);
+    const second = normalizeActionProposal({ capabilityId: list.id, args: { path: 'tmp' }, proposalId: 'read_2' }, options);
+    expect(first.riskVector.effect).toBe('read');
+    expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
+    expect(second.canonicalHash).toBe(first.canonicalHash);
+    const write = (proposalId: string) => normalizeActionProposal({ capabilityId: workspaceWrite.id,
+      args: { path: 'safe.txt', content: 'safe' }, proposalId }, { ...options, capability: workspaceWrite });
+    expect(write('write_2').idempotencyKey).toBe(write('write_1').idempotencyKey);
+  });
+
   it('uses one action identity for Windows path aliases while preserving dispatch args', () => {
     const relative = '.\\RUNTIME\\..\\runtime\\LOG.txt';
     const absolute = 'e:\\monarch\\runtime\\log.txt';

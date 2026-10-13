@@ -3,7 +3,9 @@ import path from 'node:path';
 import { mkdir, mkdtemp, readdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { MonarchKernel } from '../../src/core';
 import { MemoryModule } from '../../src/modules/memory';
+import { executeTypedCapability } from '../helpers/typed-capability';
 import { MonarchMemoryStore } from '../../src/modules/memory/store';
+import { createDeterministicSecurityModule } from '../fixtures/agent/deterministic-security-module';
 
 describe('Memory Module', () => {
   it('serializes concurrent snapshot writes without losing records', async () => {
@@ -127,20 +129,25 @@ describe('Memory Module', () => {
     const kernel = new MonarchKernel({
       permissionProfile: { sandboxMode: 'read-only', approvalPolicy: 'on-request' },
     });
+    kernel.registerModule(createDeterministicSecurityModule());
     kernel.registerModule(new MemoryModule({ storePath: filePath }));
     
     await kernel.start();
     try {
-      const unconfirmedMemory = await kernel.submitIntent('Запомни: Monarch должен быть локальной экосистемой', 'smoke');
-      expect(unconfirmedMemory.execution?.error).toBe('confirmation-required');
+      const unconfirmedMemory = await executeTypedCapability(kernel, 'memory.remember', {
+        text: 'Monarch должен быть локальной экосистемой', source: 'smoke',
+      });
+      expect(unconfirmedMemory.error).toBe('confirmation-required');
 
-      const confirmedMemory = await kernel.submitIntent('Запомни: Monarch должен быть локальной экосистемой', 'smoke', { confirmed: true });
-      if (!confirmedMemory.execution?.ok) throw new Error(confirmedMemory.summary);
-      expect(confirmedMemory.execution?.ok).toBe(true);
+      const confirmedMemory = await executeTypedCapability(kernel, 'memory.remember', {
+        text: 'Monarch должен быть локальной экосистемой', source: 'smoke',
+      }, { confirmed: true });
+      if (!confirmedMemory.ok) throw new Error(confirmedMemory.summary);
+      expect(confirmedMemory.ok).toBe(true);
 
-      const recalledMemory = await kernel.submitIntent('Вспомни Monarch', 'smoke');
-      if (!recalledMemory.execution?.ok) throw new Error(recalledMemory.summary);
-      expect(recalledMemory.execution?.ok).toBe(true);
+      const recalledMemory = await executeTypedCapability(kernel, 'memory.search', { query: 'Monarch' });
+      if (!recalledMemory.ok) throw new Error(recalledMemory.summary);
+      expect(recalledMemory.ok).toBe(true);
     } finally {
       await kernel.stop();
       await rm(filePath, { force: true });
@@ -172,16 +179,16 @@ describe('Memory Module', () => {
       kernel.registerModule(new MemoryModule({ storePath: filePath }));
       await kernel.start();
 
-      const recalled = await kernel.submitIntent('recall legacy Monarch', 'smoke');
+      const recalled = await executeTypedCapability(kernel, 'memory.search', { query: 'legacy Monarch' });
       await kernel.stop();
       kernel = undefined;
 
       const records = (
-        recalled.execution?.output as { records?: Array<{ text?: unknown; tier?: unknown; category?: unknown; accessCount?: unknown }> } | undefined
+        recalled.output as { records?: Array<{ text?: unknown; tier?: unknown; category?: unknown; accessCount?: unknown }> } | undefined
       )?.records || [];
       const migrated = records.find((record) => record.text === 'legacy Monarch project memory');
       
-      expect(recalled.execution?.ok).toBe(true);
+      expect(recalled.ok).toBe(true);
       expect(migrated).toBeDefined();
       expect(migrated?.tier).toBe('long');
       expect(migrated?.category).toBe('project');
@@ -272,39 +279,39 @@ describe('Memory Module', () => {
 
     try {
       firstKernel = new MonarchKernel();
+      firstKernel.registerModule(createDeterministicSecurityModule());
       firstKernel.registerModule(new MemoryModule({ storePath: filePath }));
       await firstKernel.start();
 
-      const remembered = await firstKernel.submitIntent(
-        'Запомни: persistent smoke memory',
-        'smoke',
-        { confirmed: true }
-      );
+      const remembered = await executeTypedCapability(firstKernel, 'memory.remember', {
+        text: 'persistent smoke memory', source: 'smoke',
+      }, { confirmed: true });
       await firstKernel.stop();
       firstKernel = undefined;
 
-      if (!remembered.execution?.ok) throw new Error(remembered.summary);
-      expect(remembered.execution?.ok).toBe(true);
+      if (!remembered.ok) throw new Error(remembered.summary);
+      expect(remembered.ok).toBe(true);
       
-      const rememberedRecord = remembered.execution.output as { record?: { tier?: unknown; category?: unknown; importance?: unknown } } | undefined;
+      const rememberedRecord = remembered.output as { record?: { tier?: unknown; category?: unknown; importance?: unknown } } | undefined;
       expect(rememberedRecord?.record?.tier).toBe('long');
       expect(rememberedRecord?.record?.category).toBe('fact');
       expect(typeof rememberedRecord?.record?.importance).toBe('number');
 
       secondKernel = new MonarchKernel();
+      secondKernel.registerModule(createDeterministicSecurityModule());
       secondKernel.registerModule(new MemoryModule({ storePath: filePath }));
       await secondKernel.start();
 
-      const recalled = await secondKernel.submitIntent('Вспомни persistent smoke', 'smoke');
+      const recalled = await executeTypedCapability(secondKernel, 'memory.search', { query: 'persistent smoke' });
       await secondKernel.stop();
       secondKernel = undefined;
 
       const records = (
-        recalled.execution?.output as { records?: Array<{ text?: unknown }> } | undefined
+        recalled.output as { records?: Array<{ text?: unknown }> } | undefined
       )?.records || [];
 
-      if (!recalled.execution?.ok) throw new Error(recalled.summary);
-      expect(recalled.execution?.ok).toBe(true);
+      if (!recalled.ok) throw new Error(recalled.summary);
+      expect(recalled.ok).toBe(true);
       expect(records.some((record) => record.text === 'persistent smoke memory')).toBe(true);
     } finally {
       await firstKernel?.stop().catch(() => undefined);

@@ -1,0 +1,13 @@
+{
+  "profile": "astra-v3-owned-live-qwen25-15b-cpu-only.v1",
+  "purpose": "Representative small-model QA; NOT product model selection or general agent acceptance",
+  "repository": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+  "revision": "91cad51170dc346986eccefdc2dd33a9da36ead9",
+  "file": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+  "size": 1117320736,
+  "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+  "source": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/blob/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+  "license": "apache-2.0",
+  "execution": { "gpuLayers": 0, "contextTokens": 4096, "threads": 4, "maxOutputTokens": 256, "modelTimeoutMs": 45000 },
+  "scope": "Only exact marked D-backed .test-tmp child; no product/user/Safe/model-store reads; anonymous network only for this pinned public asset before offline inference"
+}

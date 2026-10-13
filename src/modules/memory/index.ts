@@ -2,12 +2,10 @@ import path from 'node:path';
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchMemoryEntryType,
   MonarchModule,
   MonarchModulePackage,
-  MonarchRouteDecision,
 } from '../../core';
 import { resolveMonarchRuntimePaths } from '../../core';
 import { memoryManifest } from './manifest';
@@ -55,54 +53,6 @@ export class MemoryModule implements MonarchModule {
     };
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.trim();
-    const lower = text.toLowerCase();
-
-    if (/(запомни|remember|сохрани в память)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'memory.remember',
-        confidence: 0.9,
-        reason: 'User asks Monarch to remember information.',
-        permissionMode: 'confirm',
-        input: {
-          text: extractMemoryText(text),
-          source: intent.source,
-        },
-      };
-    }
-
-    if (/(найди в памяти|вспомни|search memory|recall)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'memory.search',
-        confidence: 0.82,
-        reason: 'User asks Monarch to recall memory.',
-        permissionMode: 'allow',
-        input: {
-          query: extractMemorySearchQuery(text),
-          limit: 10,
-        },
-      };
-    }
-
-    if (/(что ты помнишь|покажи память|list memory)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'memory.list',
-        confidence: 0.8,
-        reason: 'User asks to list memory.',
-        permissionMode: 'allow',
-        input: { limit: 20 },
-      };
-    }
-
-    return null;
-  }
 
   async executeCapability(
     request: MonarchExecutionRequest,
@@ -398,18 +348,6 @@ export class MemoryModule implements MonarchModule {
     await context.emit('memory.record.forgotten', this.manifest.id, { recordId: record.id });
     return { ok: true, summary: 'Memory record removed.', output: { record } };
   }
-}
-
-function extractMemoryText(text: string): string {
-  return text
-    .replace(/^(запомни|remember|сохрани в память)[:,\s-]*/i, '')
-    .trim();
-}
-
-function extractMemorySearchQuery(text: string): string {
-  return text
-    .replace(/^(найди в памяти|вспомни|search memory|recall)[:,\s-]*/i, '')
-    .trim();
 }
 
 function readStringInput(input: unknown, key: string): string {

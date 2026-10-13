@@ -1,11 +1,12 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   MonarchUpdateService,
   compareSemver,
+  startBackgroundUpdateChecks,
   verifySignedManifest,
 } from '../../desktop/electron/update-service.mjs';
 
@@ -473,7 +474,7 @@ describe('Monarch UpdateService download boundary', () => {
   });
 
   it('keeps renderer intents argument-free and does not expose URL or path controls', async () => {
-    const preload = await readFile(path.resolve('desktop/electron/preload.mjs'), 'utf8');
+    const preload = await readFile(path.resolve('desktop/electron/preload.cjs'), 'utf8');
     const main = await readFile(path.resolve('desktop/electron/main.mjs'), 'utf8');
 
     for (const intent of ['check', 'download', 'install', 'pause', 'resume', 'cancel', 'discard']) {
@@ -529,5 +530,145 @@ describe('Monarch UpdateService download boundary', () => {
     expect(await readFile(partialPath)).toHaveLength(2);
     expect((await service.discard()).state).toBe('idle');
     await expect(readFile(partialPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+function assetResponse(chunks: Buffer[], { status = 200, headers = {} as Record<string, string>, failAfter = false } = {}) {
+  const queue = [...chunks];
+  return new Response(new ReadableStream({
+    pull(controller) {
+      const chunk = queue.shift();
+      if (chunk) controller.enqueue(chunk);
+      else if (failAfter) controller.error(new TypeError('terminated'));
+      else controller.close();
+    },
+  }), {
+    status,
+    headers: { 'Content-Type': 'application/octet-stream', ETag: '"installer-v1"', ...headers },
+  });
+}
+
+describe('Monarch UpdateService recovery', () => {
+  it('continues an interrupted download from its checkpoint after a network failure', async () => {
+    const root = await tempRoot();
+    const payload = signed(manifest(30));
+    const ranges: unknown[] = [];
+    const service = new MonarchUpdateService({
+      currentVersion: '0.1.5',
+      endpoints: [endpoints()[0]],
+      publicKeys: PUBLIC_KEYS,
+      updateRoot: root,
+      now: () => NOW,
+      diskReserveBytes: 0,
+      fetchImpl: async (urlValue: URL | string, init?: RequestInit) => {
+        const url = String(urlValue);
+        if (!url.includes('/releases/download/')) return metadataFetch({ github: payload, sites: payload })(url);
+        ranges.push(init?.headers);
+        if (ranges.length === 1) {
+          return assetResponse([INSTALLER.subarray(0, 4)], {
+            headers: { 'Content-Length': String(INSTALLER.length) },
+            failAfter: true,
+          });
+        }
+        return assetResponse([INSTALLER.subarray(4)], {
+          status: 206,
+          headers: { 'Content-Length': '4', 'Content-Range': 'bytes 4-7/8' },
+        });
+      },
+    });
+
+    await service.check();
+    const failed = await service.download();
+    expect(failed.state).toBe('failed');
+    expect(failed.error?.code).toBe('network-error');
+
+    expect((await service.check()).state).toBe('update-available');
+    const ready = await service.download();
+    expect(ready.error).toBeNull();
+    expect(ready.state).toBe('ready-to-install');
+    expect(ranges[1]).toEqual({ Range: 'bytes=4-' });
+    expect(await readFile(path.join(root, 'Monarch-Setup-0.2.0.exe'))).toEqual(INSTALLER);
+  });
+
+  it('reuses a verified installer from an earlier session and replaces a corrupt one', async () => {
+    const root = await tempRoot();
+    const payload = signed(manifest(31));
+    let assetRequests = 0;
+    const create = () => new MonarchUpdateService({
+      currentVersion: '0.1.5',
+      endpoints: [endpoints()[0]],
+      publicKeys: PUBLIC_KEYS,
+      updateRoot: root,
+      now: () => NOW,
+      diskReserveBytes: 0,
+      fetchImpl: async (urlValue: URL | string) => {
+        const url = String(urlValue);
+        if (!url.includes('/releases/download/')) return metadataFetch({ github: payload, sites: payload })(url);
+        assetRequests += 1;
+        return assetResponse([INSTALLER], { headers: { 'Content-Length': String(INSTALLER.length) } });
+      },
+    });
+    const installerPath = path.join(root, 'Monarch-Setup-0.2.0.exe');
+
+    await writeFile(installerPath, INSTALLER);
+    const reused = create();
+    await reused.check();
+    expect((await reused.download()).state).toBe('ready-to-install');
+    expect(assetRequests).toBe(0);
+
+    await writeFile(installerPath, Buffer.from('MZcorrupt', 'ascii'));
+    const replaced = create();
+    await replaced.check();
+    expect((await replaced.download()).state).toBe('ready-to-install');
+    expect(assetRequests).toBe(1);
+    expect(await readFile(installerPath)).toEqual(INSTALLER);
+  });
+
+  it('refuses a check that would replace a paused or ready update', async () => {
+    const root = await tempRoot();
+    const payload = signed(manifest(32));
+    const service = new MonarchUpdateService({
+      currentVersion: '0.1.5',
+      endpoints: [endpoints()[0]],
+      publicKeys: PUBLIC_KEYS,
+      updateRoot: root,
+      now: () => NOW,
+      fetchImpl: metadataFetch({ github: payload, sites: payload }),
+    });
+    await service.check();
+    for (const state of ['paused', 'ready-to-install', 'installing']) {
+      service.state = state;
+      const result = await service.check();
+      expect(result.state).toBe(state);
+      expect(result.intentError?.code).toBe('update-in-progress');
+      expect(result.release?.version).toBe('0.2.0');
+    }
+  });
+
+  it('re-checks in the background only from a resting state', async () => {
+    vi.useFakeTimers();
+    try {
+      const check = vi.fn(async () => undefined);
+      const service = { installationPolicy: { canInstall: true }, state: 'up-to-date', activeOperation: null, check };
+      const stop = startBackgroundUpdateChecks(service, { intervalMs: 1000 });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(check).toHaveBeenCalledTimes(1);
+      service.state = 'downloading';
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(check).toHaveBeenCalledTimes(1);
+      service.state = 'failed';
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(check).toHaveBeenCalledTimes(2);
+      stop();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(check).toHaveBeenCalledTimes(2);
+
+      const blocked = vi.fn();
+      startBackgroundUpdateChecks({ installationPolicy: { canInstall: false }, state: 'idle', check: blocked }, { intervalMs: 1000 });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(blocked).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

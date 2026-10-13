@@ -16,11 +16,6 @@ export const safeManifest: MonarchModuleManifest = {
     description: 'Reports only static availability and isolation properties; never returns vault metadata or content.',
     risk: 'read',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    routing: {
-      aliases: ['monarch safe status', 'статус monarch safe'],
-      keywords: ['monarch safe', 'изолированное хранилище'],
-      examples: ['Как защищён Monarch Safe?'],
-      intentKinds: ['explanation'],
-    },
+
   }],
 };

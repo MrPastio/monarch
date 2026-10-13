@@ -1,3 +1,4 @@
+import { reducedUiMotion } from './ui-motion.js';
 const ACTIVE_STATES = new Set(['preparing', 'generating']);
 
 export class MonarchGenesisField {
@@ -7,7 +8,7 @@ export class MonarchGenesisField {
     this.context = this.canvas?.getContext('2d', { alpha: true }) || null;
     this.statusLabel = root?.querySelector('#genesis-status-label') || null;
     this.lowPerformance = options.lowPerformance ?? detectLowPerformance();
-    this.reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+    this.reducedMotion = reducedUiMotion.matches === true;
     this.state = 'idle';
     this.frame = 0;
     this.lastFrameAt = 0;

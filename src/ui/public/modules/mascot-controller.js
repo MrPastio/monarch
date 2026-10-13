@@ -1,3 +1,4 @@
+import { reducedUiMotion } from './ui-motion.js';
 const MASCOT_BASE_PATH = '/assets/mascot/';
 
 export const MASCOT_STATES = {
@@ -84,9 +85,8 @@ export function setMascotState(stateName, options = {}) {
   if (mascotMeta) {
     mascotMeta.textContent = options.meta || metaForMascotState(resolvedState);
   }
-  if (options.detail) {
-    mascotView.title = String(options.detail);
-  }
+  mascotView.title = String(options.detail || detailForMascotState(resolvedState));
+  mascotView.setAttribute('aria-label', `${options.title || titleForMascotState(resolvedState)}: ${mascotView.title}`);
   if (currentMascotState !== resolvedState || mascotImg.getAttribute('src') !== src) {
     currentMascotState = resolvedState;
     mascotImg.src = src;
@@ -97,12 +97,29 @@ export function setMascotState(stateName, options = {}) {
   }
 }
 
+/** Only the current Oscar conversation can set its companion's failure state. */
+export function deriveOscarMascotRuntime(oscar = {}, appBusy = false) {
+  const backend = oscar.status?.backend;
+  const busy = Boolean(appBusy || oscar.busy);
+  // A blocked turn waits for the person (a permission, a switch); it is not a
+  // fault, so it must not put the mascot into its error pose.
+  const turnFailed = !busy && oscar.context?.outcome === 'failed';
+  const backendFailed = Boolean(backend && !backend.connected && backend.startupAttempted);
+  const error = String(oscar.error || (turnFailed && oscar.context?.summary)
+    || (backendFailed && (backend.error || 'Не удалось запустить локальную модель')) || '');
+  const reply = oscar.messages?.findLast?.(message => message.role === 'assistant')?.content || '';
+  return {
+    busy, errored: Boolean(error), coding: busy && /```/.test(reply),
+    detail: error || (backend?.connected ? 'Готов помочь' : 'Готов к запуску'),
+  };
+}
+
 export function syncMascotFromRuntime({ activeView, busy, errored, securityRunning, coding, detail } = {}) {
   if (activeView) {
     setMascotView(activeView);
   }
   if (errored) {
-    setMascotState('error', { title: 'Oscar', detail: detail || 'Нужно внимание к runtime' });
+    setMascotState('error', { title: 'Оскар', detail: detail || 'Нужно твоё внимание' });
     return;
   }
   if (coding) {
@@ -282,7 +299,7 @@ export function initMascotInteraction(options = {}) {
 
 function scheduleIdleAction() {
   clearIdleActionTimer();
-  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
+  if (typeof window !== 'undefined' && reducedUiMotion.matches) {
     return;
   }
   const mascotView = document.getElementById('mascot-view');
@@ -371,7 +388,7 @@ function detailForMascotState(value) {
   case 'success':
     return 'Операция завершена';
   case 'error':
-    return 'Проверь runtime';
+    return 'Проверь подключение';
   default:
     return 'Готов к локальной работе';
   }

@@ -128,7 +128,14 @@ describe('generic Windows application resolver', () => {
       { name: 'Manual', appId: 'C:/Product/manual.pdf', source: 'start-apps' },
       { name: '', appId: 'missing-name', source: 'start-apps' },
       { name: 'Unknown source', appId: 'fixture', source: 'untrusted' },
+      { name: 'YouTube Music', appId: 'https://music.youtube.com/', source: 'web-shortcut' },
+      { name: 'Unsafe', appId: 'javascript:alert(1)', source: 'web-shortcut' },
+      { name: 'Obsidian', appId: 'C:/Users/demo/Desktop/Obsidian.lnk', source: 'shortcut', executableName: 'Obsidian.exe' },
       'not-an-entry',
-    ])).toEqual([{ name: 'Paint', launchId: 'Microsoft.Paint', source: 'start-apps' }]);
+    ])).toEqual([
+      { name: 'Paint', launchId: 'Microsoft.Paint', source: 'start-apps' },
+      { name: 'YouTube Music', launchId: 'https://music.youtube.com/', source: 'web-shortcut' },
+      { name: 'Obsidian', launchId: 'C:/Users/demo/Desktop/Obsidian.lnk', source: 'shortcut', executableName: 'Obsidian.exe' },
+    ]);
   });
 });

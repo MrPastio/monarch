@@ -3,6 +3,7 @@ import { MonarchKernel } from '../../src/core';
 import {
   createDevicePowerShellEnvironment,
   DeviceModule,
+  createDeviceModule,
   normalizeApplicationRequest,
   normalizeBrightnessRequest,
   normalizeBrowserRequest,
@@ -10,8 +11,15 @@ import {
   prepareDevicePowerShellScript,
 } from '../../src/modules/device';
 import { createDeterministicSecurityModule } from '../fixtures/agent/deterministic-security-module';
+import { executeTypedCapability } from '../helpers/typed-capability';
 
 describe('Device Module', () => {
+  it('does not warm the application catalog in the default product factory', async () => {
+    const module = createDeviceModule();
+    const load = vi.spyOn(module as any, 'readInstalledApplicationCatalog');
+    await module.activate({ emit: vi.fn(async () => undefined) } as any);
+    expect(load).not.toHaveBeenCalled();
+  });
   it('forces Windows PowerShell stdin and stdout to UTF-8 before device scripts run', () => {
     const prepared = prepareDevicePowerShellScript("'Калькулятор' | Write-Output");
 
@@ -50,76 +58,71 @@ describe('Device Module', () => {
     await kernel.start();
 
     try {
-      const result = await kernel.submitIntent('очисти корзину на компе и закрой активный браузер', 'telegram');
-      expect(result.route?.capabilityId).not.toBe('device.desktop.actions');
       expect(kernel.listCapabilities().some((capability) => capability.id === 'device.desktop.actions')).toBe(false);
     } finally {
       await kernel.stop();
     }
   });
 
-  it('routes individual actions without executing them before confirmation', async () => {
+  it('guards exact individual actions without executing them before confirmation', async () => {
     const kernel = new MonarchKernel();
     kernel.registerModule(new DeviceModule());
     await kernel.start();
 
     try {
-      const recycle = await kernel.submitIntent('очисти корзину', 'desktop');
-      const browser = await kernel.submitIntent('закрой активный браузер', 'desktop');
-      expect(recycle.route?.capabilityId).toBe('device.recycle-bin.empty');
-      expect(browser.route?.capabilityId).toBe('device.browser.close-active');
-      expect(recycle.execution?.error).toBe('confirmation-required');
-      expect(browser.execution?.error).toBe('confirmation-required');
+      const recycle = await executeTypedCapability(kernel, 'device.recycle-bin.empty', {}, { source: 'desktop' });
+      const browser = await executeTypedCapability(kernel, 'device.browser.close-active', {}, { source: 'desktop' });
+      expect(recycle.error).toBe('confirmation-required');
+      expect(browser.error).toBe('confirmation-required');
     } finally {
       await kernel.stop();
     }
   });
 
-  it('routes app and browser opening behind device-control confirmation', async () => {
+  it('keeps exact app and browser opening behind device-control confirmation', async () => {
     const kernel = new MonarchKernel();
     kernel.registerModule(new DeviceModule());
     await kernel.start();
 
     try {
-      const app = await kernel.submitIntent('открой калькулятор', 'voice');
-      const browser = await kernel.submitIntent('открой сайт example.com', 'voice');
-      expect(app.route).toMatchObject({ capabilityId: 'device.app.open', input: { app: 'calculator' } });
-      expect(browser.route).toMatchObject({ capabilityId: 'device.browser.open' });
-      expect(app.execution?.error).toBe('confirmation-required');
-      expect(browser.execution?.error).toBe('confirmation-required');
+      const app = await executeTypedCapability(kernel, 'device.app.open', { app: 'calculator' }, { source: 'voice' });
+      const browser = await executeTypedCapability(kernel, 'device.browser.open', {
+        url: 'https://example.com', browser: 'default',
+      }, { source: 'voice' });
+      expect(app.error).toBe('confirmation-required');
+      expect(browser.error).toBe('confirmation-required');
     } finally {
       await kernel.stop();
     }
   });
 
-  it('routes Telegram, YouTube, volume, brightness, and the real clock through Device', async () => {
+  it('executes or guards exact Telegram, YouTube, volume, brightness, and clock capabilities', async () => {
     const now = new Date('2026-07-21T20:34:00.000Z');
     const kernel = new MonarchKernel();
     kernel.registerModule(new DeviceModule(undefined, () => now));
     await kernel.start();
 
     try {
-      const telegram = await kernel.submitIntent('Оскар, открой Телеграм', 'desktop');
-      const youtube = await kernel.submitIntent('Оскар, открой YouTube', 'desktop');
-      const volume = await kernel.submitIntent('поставь громкость на 45 процентов', 'desktop');
-      const brightness = await kernel.submitIntent('поставь яркость на 55 процентов', 'desktop');
-      const clock = await kernel.submitIntent('Оскар, скажи, сколько сейчас времени', 'desktop');
+      const telegram = await executeTypedCapability(kernel, 'device.app.open', { app: 'telegram' }, { source: 'desktop' });
+      const youtube = await executeTypedCapability(kernel, 'device.browser.open', {
+        provider: 'youtube', browser: 'default',
+      }, { source: 'desktop' });
+      const volume = await executeTypedCapability(kernel, 'device.volume.set', {
+        action: 'set', value: 45,
+      }, { source: 'desktop' });
+      const brightness = await executeTypedCapability(kernel, 'device.brightness.set', {
+        operation: 'set', value: 55,
+      }, { source: 'desktop' });
+      const clock = await executeTypedCapability(kernel, 'device.system.time.get', { kind: 'time' }, { source: 'desktop' });
 
-      expect(telegram.route).toMatchObject({ capabilityId: 'device.app.open', input: { app: 'telegram' } });
-      expect(youtube.route).toMatchObject({
-        capabilityId: 'device.browser.open',
-        input: { provider: 'youtube', browser: 'default' },
-      });
-      expect(volume.route).toMatchObject({ capabilityId: 'device.volume.set', input: { action: 'set', value: 45 } });
-      expect(brightness.route).toMatchObject({ capabilityId: 'device.brightness.set', input: { operation: 'set', value: 55 } });
-      expect(clock.execution).toMatchObject({
+      expect(clock).toMatchObject({
         ok: true,
         output: { observedAt: now.toISOString(), verified: true, authoritative: true, source: 'system-clock' },
       });
-      expect(telegram.execution?.error).toBe('confirmation-required');
-      expect(youtube.execution?.error).toBe('confirmation-required');
-      expect(volume.execution?.error).toBe('confirmation-required');
-      expect(brightness.execution?.error).toBe('confirmation-required');
+      expect(telegram.error).toBe('confirmation-required');
+      expect(youtube.error).toBe('confirmation-required');
+      expect(volume.error).toBe('confirmation-required');
+      expect(brightness.error).toBe('confirmation-required');
     } finally {
       await kernel.stop();
     }
@@ -159,6 +162,46 @@ describe('Device Module', () => {
     expect(app).toMatchObject({ ok: true, output: { opened: true, text: 'Открыл Калькулятор.' } });
     expect(browser).toMatchObject({ ok: true, output: { opened: true, text: 'Открыл страницу в браузере.' } });
     expect(runner).toHaveBeenCalledTimes(3);
+  });
+
+  it('warms one shared application catalog before the first simplified command', async () => {
+    let resolveCatalog!: (value: string) => void;
+    const catalog = new Promise<string>((resolve) => { resolveCatalog = resolve; });
+    const runner = vi.fn(async (script: string) => {
+      if (script.includes('$entries = New-Object')) return catalog;
+      return JSON.stringify({ opened: true, verified: true, processId: 42 });
+    });
+    const module = new DeviceModule(
+      runner,
+      undefined,
+      undefined,
+      { warmApplicationCatalog: true },
+    );
+    const context = { emit: vi.fn(async () => undefined) } as any;
+
+    await module.activate(context);
+    const opening = module.executeCapability({
+      id: 'exec_warm_telegram',
+      intentId: 'intent_warm_telegram',
+      moduleId: 'device',
+      capabilityId: 'device.app.open',
+      input: { app: 'телеграм' },
+      createdAt: new Date(0).toISOString(),
+      requestedBy: 'ui:voice-simplified',
+      source: 'voice',
+      confirmed: false,
+    }, context);
+
+    expect(runner).toHaveBeenCalledTimes(1);
+    resolveCatalog(JSON.stringify({
+      entries: [{
+        name: 'Telegram Desktop',
+        launchId: 'TelegramMessenger.TelegramDesktop!App',
+        source: 'start-apps',
+      }],
+    }));
+    await expect(opening).resolves.toMatchObject({ ok: true, output: { resolvedName: 'Telegram Desktop' } });
+    expect(runner).toHaveBeenCalledTimes(2);
   });
 
   it('resolves a misspelled application once inside Device and launches only the exact catalog target', async () => {

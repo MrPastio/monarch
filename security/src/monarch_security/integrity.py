@@ -165,6 +165,12 @@ def _dpapi_unprotect(data: bytes) -> ProtectedDataResult:
             ctypes.windll.kernel32.LocalFree(output.pbData)
 
 
+def read_existing_key(path: Path) -> bytes:
+    """Read a secured key without creating it or migrating its stored bytes."""
+    data = _read_key_file_secure(path)
+    return data if _is_master_key(data) else _decode_protected_key(data)
+
+
 def get_or_create_key(path: Path) -> bytes:
     path.parent.mkdir(parents=True, exist_ok=True)
     if os.path.lexists(path):

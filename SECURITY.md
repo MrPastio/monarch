@@ -53,6 +53,23 @@ Invalid signatures, another device key, expired entitlement/proof, corrupted or 
 
 When reporting a security issue, include the affected Monarch version, authority tier, request source, capability ID, safe error code, and a minimal synthetic reproduction. Do not attach real credentials, signing keys, Production Safe data, or unrelated personal files.
 
+## Development subordinate-agent boundary
+
+External coding agents that operate on the Monarch checkout are untrusted execution clients, not extensions of the product `PolicyKernel`. The repository policy and controller in `config/subordinate-agents.policy.json` and `scripts/subordinate-agent-control.mjs` govern their admission and acceptance.
+
+- Codex is the current controller and integrator. Grok is admitted as a worker. Antigravity and unknown agents are denied by default.
+- The owner may explicitly grant a named agent `admitted`, `controller`, or `integrator`. The grant must name the agent and role; controller/integrator grants are task-scoped unless the owner explicitly says durable/global. A controller records the grant before it becomes effective. No grant is retroactive.
+- The owner may explicitly grant an exception to any repository-level restriction. The authorization must identify the agent, restricted action or data, concrete target and purpose. A vague approval is invalid. Sensitive exceptions remain broker- or controller-mediated when a broad tool permission cannot technically represent the narrow target.
+- Grok subagents are derivatively admitted only under a valid parent permit. They inherit the intersection of the parent restrictions, cannot expand scope/network/lifetime, cannot gain controller/integrator authority by inheritance, and cannot delegate further.
+- A controlled task binds agent identity, policy digest, Git HEAD, dirty-worktree baseline, objective, allowed paths, expiry, task role grants and owner exceptions. A policy or HEAD change invalidates launch. Completion is only a candidate for the currently authorized integrator; it is never automatic acceptance. Codex is the current integrator unless the owner explicitly records another integrator for that task or durably/globally.
+- Allowed paths are Windows-canonical and case-insensitive; traversal, NTFS alternate streams, ambiguous trailing components, symlink-backed scopes and task records outside the controller root fail closed. Acceptance also requires the live worktree to match the candidate-close snapshot, so stale evidence cannot authorize later changes.
+- Direct or expired sessions are non-authoritative. Their output may be inspected as untrusted evidence, but changes require a fresh full authorized-integrator review before integration.
+- Safe, credentials, release keys, destructive operations, publication and policy mutation are denied by default. An exact owner exception authorizes the narrowly described outcome, not broad removal of the surrounding guard.
+
+Reportable failures include fail-open admission, an unrecorded role grant, a subordinate expanding or delegating scope, bypass of a protected-path/tool deny, acceptance without baseline/diff evidence, or an exception that grants materially broader access than the owner named.
+
 ## Limitations
 
 Owner authority is a product trust boundary, not DRM against a computer owner who patches and rebuilds the executable. Release acceptance therefore validates both the signed runtime path and the public-export boundary; it does not claim resistance to a locally modified binary.
+
+The development controller is defense in depth for cooperative tools, mistakes and prompt injection. Grok Build on Windows currently has no separate kernel sandbox, and all local agents run under the same Windows account. The policy therefore does not claim containment of a malicious same-account process. Protected CLI rules, isolated task records, baseline comparison and mandatory authorized-integrator acceptance are compensating controls; stronger hostile-process isolation would require a separate OS identity, VM or broker.

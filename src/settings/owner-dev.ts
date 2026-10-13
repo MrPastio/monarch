@@ -1,10 +1,4 @@
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type {
@@ -15,6 +9,7 @@ import type {
   MonarchSettingsReadResultV1,
   MonarchSettingsWriteReceiptV1,
 } from './contracts';
+import { renameWithWindowsRetrySync } from '../core/durable-json';
 
 interface StoredOwnerDevSettingsV1 {
   schemaVersion: 1;
@@ -60,6 +55,12 @@ export class LocalOwnerDevSettingsStore implements MonarchSettingsBackend {
     return { ...this.state.value };
   }
 
+  /** Same-owner synchronous read; retain revision as well as value to prevent
+   * off/on cycles from re-authorizing previously admitted work. */
+  snapshotWithRevision(): { revision: number; value: MonarchOwnerDevSettingsV1 } {
+    return { revision: this.state.revision, value: this.snapshot() };
+  }
+
   async read(request: MonarchSettingsReadRequestV1): Promise<MonarchSettingsReadResultV1> {
     if (request.kind !== 'dev' || request.scope.type !== 'chat') {
       throw new Error('Owner DEV settings support only the global chat scope.');
@@ -85,7 +86,7 @@ export class LocalOwnerDevSettingsStore implements MonarchSettingsBackend {
     const replay = this.state.receipts[request.clientRequestId];
     if (replay) {
       if (replay.requestHash !== requestHash) throw new Error('clientRequestId was already used for a different DEV command.');
-      return { ...replay.receipt, replayed: true };
+      return { ...structuredClone(replay.receipt), replayed: true };
     }
     if (request.expectedRevision !== this.state.revision) {
       throw new Error(`DEV settings revision changed: expected ${request.expectedRevision}, actual ${this.state.revision}.`);
@@ -95,14 +96,15 @@ export class LocalOwnerDevSettingsStore implements MonarchSettingsBackend {
     const value = request.command === 'dev.reset'
       ? { ...DEFAULT_OWNER_DEV_SETTINGS, updatedAt: now }
       : this.applyPatch(request.payload.patch, now);
-    this.state = { ...this.state, revision: this.state.revision + 1, value };
-    const readBack = this.readBack();
+    const next: StoredOwnerDevSettingsV1 = { ...this.state, revision: this.state.revision + 1, value,
+      receipts: { ...this.state.receipts } };
+    const readBack = this.readBack(next);
     const receipt: MonarchSettingsWriteReceiptV1 = {
       schemaVersion: 1,
       receiptId: `owner_dev_receipt_${randomUUID().replaceAll('-', '')}`,
       clientRequestId: request.clientRequestId,
       command: request.command,
-      scope: request.scope,
+      scope: structuredClone(request.scope),
       revision: readBack.revision,
       contentHash: readBack.contentHash,
       readBackHash: readBack.contentHash,
@@ -111,10 +113,13 @@ export class LocalOwnerDevSettingsStore implements MonarchSettingsBackend {
       replayed: false,
       result: { value },
     };
-    this.state.receipts[request.clientRequestId] = { requestHash, receipt };
-    this.trimReceipts();
-    this.persist();
-    return receipt;
+    next.receipts[request.clientRequestId] = { requestHash, receipt };
+    this.trimReceipts(next);
+    // No await between persistence and publication. Failed writes must not
+    // publish an enabled policy or an idempotency receipt for an uncommitted update.
+    this.persist(next);
+    this.state = next;
+    return structuredClone(receipt);
   }
 
   private applyPatch(input: unknown, now: string): MonarchOwnerDevSettingsV1 {
@@ -132,14 +137,14 @@ export class LocalOwnerDevSettingsStore implements MonarchSettingsBackend {
     return next;
   }
 
-  private readBack(): MonarchSettingsReadResultV1 {
+  private readBack(state = this.state): MonarchSettingsReadResultV1 {
     const response: MonarchSettingsReadResultV1 = {
       schemaVersion: 1,
       kind: 'dev',
       scope: { type: 'chat' },
-      revision: this.state.revision,
+      revision: state.revision,
       contentHash: '',
-      value: this.snapshot(),
+      value: { ...state.value },
     };
     response.contentHash = sha256({ ...response, contentHash: undefined });
     return response;
@@ -168,17 +173,17 @@ export class LocalOwnerDevSettingsStore implements MonarchSettingsBackend {
     }
   }
 
-  private persist(): void {
+  private persist(state: StoredOwnerDevSettingsV1): void {
     mkdirSync(path.dirname(this.filePath), { recursive: true });
     const tempPath = `${this.filePath}.${process.pid}.tmp`;
-    writeFileSync(tempPath, `${JSON.stringify(this.state, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    renameSync(tempPath, this.filePath);
+    writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    renameWithWindowsRetrySync(tempPath, this.filePath);
   }
 
-  private trimReceipts(): void {
-    const entries = Object.entries(this.state.receipts);
+  private trimReceipts(state: StoredOwnerDevSettingsV1): void {
+    const entries = Object.entries(state.receipts);
     if (entries.length <= 64) return;
-    this.state.receipts = Object.fromEntries(entries.slice(-64));
+    state.receipts = Object.fromEntries(entries.slice(-64));
   }
 }
 

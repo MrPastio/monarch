@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
-import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { createMonarchRuntime } from '../../src/bootstrap';
 import { evaluateFilesystemAccess, MonarchKernel } from '../../src/core';
+import { SecurityModule } from '../../src/modules/security';
 import {
   WINDOWS_RECYCLE_ANCESTOR_FENCE_CSHARP,
   WorkspaceModule,
@@ -163,6 +165,16 @@ describe('Workspace Module', () => {
         diagnostic: null,
       },
     });
+    kernel.registerModule(new SecurityModule({
+      available: false,
+      config: {
+        projectRoot: path.join(root, 'security'),
+        configPath: path.join(root, 'security', 'config', 'monarch_security.toml'),
+        pythonPath: 'python',
+      },
+      backgroundBenchmarkStatus: () => null,
+      dispose: () => {},
+    } as never));
     kernel.registerModule(new WorkspaceModule({ workspaceRoot: root }));
     await kernel.start();
     try {
@@ -280,48 +292,42 @@ describe('Workspace Module', () => {
         content: 'nope',
       }, true);
       const randomOutside = await executeWorkspace(kernel, 'workspace.files.read', { path: outsideFile });
-      const routedDesktopList = await kernel.submitIntent('Перечисли файлы на рабочем столе', 'smoke');
-      const routedDesktopMkdir = await kernel.submitIntent('создай новую папку на рабочем столе', 'smoke', { confirmed: true });
-      const routedNamedDesktopMkdir = await kernel.submitIntent('создай папку demo на рабочем столе', 'smoke', { confirmed: true });
-      const routedWorkingDesktopMkdir = await kernel.submitIntent('создай рабочую папку на столе', 'smoke', { confirmed: true });
-      const routedGeneratedWorkspaceMkdir = await kernel.submitIntent('создай новую папку название придумай сам', 'smoke', { confirmed: true });
-      const routedAssignedWorkspaceMkdir = await kernel.submitIntent(
-        'Создай новую папку в твоем рабочем пространстве назови ее цветок.',
-        'smoke',
-        { confirmed: true },
-      );
+      const routedDesktopList = await executeWorkspace(kernel, 'workspace.files.list', { path: desktop });
+      const routedDesktopAudit = await executeWorkspace(kernel, 'workspace.storage.audit', { root: desktop });
+      const routedDesktopMkdir = await executeWorkspace(kernel, 'workspace.files.mkdir', {
+        path: path.join(desktop, 'Новая папка'), ensureUnique: true,
+      }, true);
+      const routedNamedDesktopMkdir = await executeWorkspace(kernel, 'workspace.files.mkdir', {
+        path: path.join(desktop, 'demo'), ensureUnique: false,
+      }, true);
+      const routedWorkingDesktopMkdir = await executeWorkspace(kernel, 'workspace.files.mkdir', {
+        path: path.join(desktop, 'Рабочая папка'), ensureUnique: false,
+      }, true);
+      const routedGeneratedWorkspaceMkdir = await executeWorkspace(kernel, 'workspace.files.mkdir', {
+        path: 'Новая папка', ensureUnique: true,
+      }, true);
+      const routedAssignedWorkspaceMkdir = await executeWorkspace(kernel, 'workspace.files.mkdir', {
+        path: 'цветок', ensureUnique: false,
+      }, true);
 
       expect(listed.ok).toBe(true);
       expect(read.ok).toBe(true);
       expect((read.output as { content?: unknown } | undefined)?.content).toBe('desktop data');
       expect(blockedWrite.error).toBe('filesystem-policy-blocked');
       expect(randomOutside.error).toBe('filesystem-policy-blocked');
-      expect(routedDesktopList.route?.capabilityId).toBe('workspace.files.list');
-      expect(routedDesktopList.route?.input).toMatchObject({ path: desktop });
-      expect(routedDesktopList.execution?.ok).toBe(true);
-      expect((routedDesktopList.execution?.output as { entries?: Array<{ name: string }> } | undefined)?.entries)
+      expect(routedDesktopList.ok).toBe(true);
+      expect((routedDesktopList.output as { entries?: Array<{ name: string }> } | undefined)?.entries)
         .toEqual(expect.arrayContaining([expect.objectContaining({ name: 'visible.txt' })]));
-      expect(routedDesktopMkdir.route?.capabilityId).toBe('workspace.files.mkdir');
-      expect(routedDesktopMkdir.route?.input).toMatchObject({
-        path: path.join(desktop, 'Новая папка'),
-        ensureUnique: true,
-      });
-      expect(routedDesktopMkdir.execution?.ok).toBe(true);
+      expect(routedDesktopAudit.ok).toBe(true);
+      expect(routedDesktopMkdir.ok).toBe(true);
       expect((await stat(path.join(desktop, 'Новая папка'))).isDirectory()).toBe(true);
-      expect(routedNamedDesktopMkdir.route?.input).toMatchObject({ path: path.join(desktop, 'demo') });
-      expect(routedNamedDesktopMkdir.execution?.ok).toBe(true);
+      expect(routedNamedDesktopMkdir.ok).toBe(true);
       expect((await stat(path.join(desktop, 'demo'))).isDirectory()).toBe(true);
-      expect(routedWorkingDesktopMkdir.route?.input).toMatchObject({ path: path.join(desktop, 'Рабочая папка') });
-      expect(routedWorkingDesktopMkdir.execution?.ok).toBe(true);
+      expect(routedWorkingDesktopMkdir.ok).toBe(true);
       expect((await stat(path.join(desktop, 'Рабочая папка'))).isDirectory()).toBe(true);
-      expect(routedGeneratedWorkspaceMkdir.route?.capabilityId).toBe('workspace.files.mkdir');
-      expect((routedGeneratedWorkspaceMkdir.route?.input as any)?.path).toBe('Новая папка');
-      expect((routedGeneratedWorkspaceMkdir.route?.input as any)?.ensureUnique).toBe(true);
-      expect(routedGeneratedWorkspaceMkdir.execution?.ok).toBe(true);
+      expect(routedGeneratedWorkspaceMkdir.ok).toBe(true);
       expect((await stat(path.join(root, 'Новая папка'))).isDirectory()).toBe(true);
-      expect(routedAssignedWorkspaceMkdir.route?.capabilityId).toBe('workspace.files.mkdir');
-      expect(routedAssignedWorkspaceMkdir.route?.input).toMatchObject({ path: 'цветок' });
-      expect(routedAssignedWorkspaceMkdir.execution?.ok).toBe(true);
+      expect(routedAssignedWorkspaceMkdir.ok).toBe(true);
       expect((await stat(path.join(root, 'цветок'))).isDirectory()).toBe(true);
     } finally {
       await kernel.stop();
@@ -430,7 +436,7 @@ describe('Workspace Module', () => {
     }
   });
 
-  it('routes a named Desktop text file through the typed known-folder writer and keeps generic writes blocked', async () => {
+  it('executes a named Desktop file through the typed known-folder writer and keeps generic writes blocked', async () => {
     const qaBase = path.join(path.parse(process.cwd()).root, 'Monarch-Agent-QA');
     await mkdir(qaBase, { recursive: true });
     const workspaceRoot = await mkdtemp(path.join(qaBase, 'known-folder-workspace-'));
@@ -463,11 +469,9 @@ describe('Workspace Module', () => {
     }));
     await kernel.start();
     try {
-      const routed = await kernel.submitIntent(
-        'создай на рабочем столе текстовый файл с именем ромашка',
-        'smoke',
-        { confirmed: true },
-      );
+      const routed = await executeWorkspace(kernel, 'workspace.known-folder.write', {
+        knownFolder: 'desktop', basename: 'ромашка.txt', content: '', overwrite: false,
+      }, true);
       const genericOutsideWrite = await executeWorkspace(kernel, 'workspace.files.write', {
         path: path.join(desktop, 'generic.txt'),
         content: 'must stay blocked',
@@ -496,16 +500,7 @@ describe('Workspace Module', () => {
         confirmed: true,
       });
 
-      expect(routed.route, JSON.stringify(routed)).toMatchObject({
-        capabilityId: 'workspace.known-folder.write',
-        input: {
-          knownFolder: 'desktop',
-          basename: 'ромашка.txt',
-          content: '',
-          overwrite: false,
-        },
-      });
-      expect(routed.execution).toMatchObject({
+      expect(routed).toMatchObject({
         ok: true,
         output: {
           knownFolder: 'desktop',
@@ -590,7 +585,7 @@ describe('Workspace Module', () => {
     }
   });
 
-  it('should guard file operations and route correctly', async () => {
+  it('should guard and execute exact typed file operations', async () => {
     const runtime = createMonarchRuntime({
       enabledModules: ['workspace'],
       enableLocalSystemRouter: false,
@@ -603,11 +598,9 @@ describe('Workspace Module', () => {
 
     await runtime.kernel.start();
     try {
-      const routeResult = await runtime.kernel.submitIntent('list files in runtime', 'smoke');
-      expect(routeResult.route?.targetModuleId).toBe('workspace');
-      expect(routeResult.route?.capabilityId).toBe('workspace.files.list');
-      if (!routeResult.execution?.ok) throw new Error(routeResult.summary);
-      expect(routeResult.execution?.ok).toBe(true);
+      const routeResult = await executeWorkspace(runtime.kernel, 'workspace.files.list', { path: 'runtime' });
+      if (!routeResult.ok) throw new Error(routeResult.summary);
+      expect(routeResult.ok).toBe(true);
 
       const blockedRootDelete = await runtime.kernel.execute({
         id: 'exec_smoke_workspace_root_delete',
@@ -708,177 +701,6 @@ describe('Workspace Module', () => {
     } finally {
       await runtime.kernel.stop().catch(() => undefined);
       await rm(filePath, { force: true });
-    }
-  }, 15_000);
-
-  it('should route Russian patterns correctly', async () => {
-    const runtime = createMonarchRuntime({
-      enabledModules: ['workspace'],
-      enableLocalSystemRouter: false,
-    });
-
-    await runtime.kernel.start();
-    try {
-      // 1. Test "покажи файлы"
-      const listResult = await runtime.kernel.submitIntent('покажи файлы', 'smoke');
-      expect(listResult.route?.targetModuleId).toBe('workspace');
-      expect(listResult.route?.capabilityId).toBe('workspace.files.list');
-      if (!listResult.execution?.ok) throw new Error(listResult.summary);
-      expect(listResult.execution?.ok).toBe(true);
-
-      const contentsResult = await runtime.kernel.submitIntent(
-        `Содержание папки по этому пути "${path.join(process.cwd(), 'src', 'modules', 'workspace')}"`,
-        'smoke'
-      );
-      expect(contentsResult.route?.targetModuleId).toBe('workspace');
-      expect(contentsResult.route?.capabilityId).toBe('workspace.files.list');
-      expect((contentsResult.route?.input as any)?.path).toContain(path.join('src', 'modules', 'workspace'));
-
-      const historyListResult = await runtime.kernel.submitIntent(
-        'Просмотри какие названия папок в твоей корневой папке',
-        'smoke'
-      );
-      expect(historyListResult.route?.capabilityId).toBe('workspace.files.list');
-      expect(historyListResult.execution?.ok).toBe(true);
-      expect(historyListResult.route?.input).toMatchObject({
-        path: '.',
-        entryType: 'directory',
-      });
-
-      const workspaceRootResult = await runtime.kernel.submitIntent(
-        'Где находится твое рабочее пространство?',
-        'smoke'
-      );
-      expect(workspaceRootResult.route?.capabilityId).toBe('workspace.root.get');
-      expect(workspaceRootResult.execution?.ok).toBe(true);
-      expect(workspaceRootResult.plan).toBeNull();
-      expect(workspaceRootResult.execution?.output).toMatchObject({
-        workspaceRoot: process.cwd(),
-      });
-
-      const explicitCapabilityResult = await runtime.kernel.submitIntent(
-        JSON.stringify({
-          capability: 'workspace.files.list',
-          parameters: { path: path.join(process.cwd(), 'src', 'modules', 'workspace') },
-        }),
-        'smoke'
-      );
-      expect(explicitCapabilityResult.route?.capabilityId).toBe('workspace.files.list');
-      expect(explicitCapabilityResult.execution?.ok).toBe(true);
-
-      const explicitSnakeCaseCopy = await runtime.kernel.submitIntent(
-        JSON.stringify({
-          capability: 'workspace.files.copy',
-          parameters: { path: 'runtime/a.txt', target_path: 'runtime/b.txt' },
-        }),
-        'smoke'
-      );
-      expect(explicitSnakeCaseCopy.route?.capabilityId).toBe('workspace.files.copy');
-      expect((explicitSnakeCaseCopy.route?.input as any)?.targetPath).toBe('runtime/b.txt');
-
-      const explicitSnakeCaseReplace = await runtime.kernel.submitIntent(
-        JSON.stringify({
-          capability: 'workspace.files.replace',
-          parameters: { path: 'runtime/ui-note.txt', old_text: 'готово', new_text: 'готово!' },
-        }),
-        'smoke'
-      );
-      expect(explicitSnakeCaseReplace.route?.capabilityId).toBe('workspace.files.replace');
-      expect((explicitSnakeCaseReplace.route?.input as any)?.oldText).toBe('готово');
-      expect((explicitSnakeCaseReplace.route?.input as any)?.newText).toBe('готово!');
-
-      const standalonePathResult = await runtime.kernel.submitIntent(
-        `"${path.join(process.cwd(), 'src', 'modules', 'workspace')}"`,
-        'smoke'
-      );
-      expect(standalonePathResult.route?.capabilityId).toBe('workspace.files.list');
-      expect(standalonePathResult.execution?.ok).toBe(true);
-
-      // 2. Test "прочитай файл package.json"
-      const readResult = await runtime.kernel.submitIntent('прочитай файл package.json', 'smoke');
-      expect(readResult.route?.targetModuleId).toBe('workspace');
-      expect(readResult.route?.capabilityId).toBe('workspace.files.read');
-      expect((readResult.route?.input as any)?.path).toBe('package.json');
-
-      const directReadResult = await runtime.kernel.submitIntent('прочитай package.json', 'smoke');
-      expect(directReadResult.route?.targetModuleId).toBe('workspace');
-      expect(directReadResult.route?.capabilityId).toBe('workspace.files.read');
-      expect((directReadResult.route?.input as any)?.path).toBe('package.json');
-
-      const prefixedReadResult = await runtime.kernel.submitIntent('можешь прочитать package.json', 'smoke');
-      expect(prefixedReadResult.route?.targetModuleId).toBe('workspace');
-      expect(prefixedReadResult.route?.capabilityId).toBe('workspace.files.read');
-      expect((prefixedReadResult.route?.input as any)?.path).toBe('package.json');
-
-      // 3. Test "найди в файлах router"
-      const searchRoute = await routeWorkspaceText(runtime.kernel, 'найди в файлах router');
-      expect(searchRoute?.targetModuleId).toBe('workspace');
-      expect(searchRoute?.capabilityId).toBe('workspace.files.search');
-      expect((searchRoute?.input as any)?.query).toBe('router');
-
-      const projectSearchRoute = await routeWorkspaceText(runtime.kernel, 'найди AssistantModule в проекте');
-      expect(projectSearchRoute?.targetModuleId).toBe('workspace');
-      expect(projectSearchRoute?.capabilityId).toBe('workspace.files.search');
-      expect((projectSearchRoute?.input as any)?.query).toBe('AssistantModule');
-      expect((projectSearchRoute?.input as any)?.path).toBe('.');
-
-      const writeResult = await runtime.kernel.submitIntent('создай файл runtime/ui-note.txt с текстом "готово"', 'smoke');
-      expect(writeResult.route?.targetModuleId).toBe('workspace');
-      expect(writeResult.route?.capabilityId).toBe('workspace.files.write');
-      expect((writeResult.route?.input as any)?.content).toBe('готово');
-
-      const bareCodeWrite = await runtime.kernel.submitIntent(
-        'Создай runtime/hello.py и напиши print("Hello World")',
-        'smoke',
-      );
-      expect(bareCodeWrite.route?.capabilityId).toBe('workspace.files.write');
-      expect(bareCodeWrite.route?.input).toMatchObject({
-        path: 'runtime/hello.py',
-        content: 'print("Hello World")',
-      });
-
-      const emptyWriteRoute = await runtime.kernel.submitIntent(
-        '{"capability":"workspace.files.write","parameters":{"path":"runtime/empty-agent-file.txt","content":""}}',
-        'smoke'
-      );
-      expect(emptyWriteRoute.route?.capabilityId).toBe('workspace.files.write');
-      expect(emptyWriteRoute.execution?.error).not.toBe('clarification-required');
-
-      const incompleteHistoryRequest = await runtime.kernel.submitIntent(
-        'Хорошо ты можешь создать в своем рабочем пространсве папку,а в папке создать текстовый документ с надписью Hello World?',
-        'smoke'
-      );
-      expect(incompleteHistoryRequest.route).toBeNull();
-      expect(incompleteHistoryRequest.execution?.error).toBe('clarification-required');
-
-      const mkdirResult = await runtime.kernel.submitIntent('создай папку runtime/telegram-demo', 'smoke');
-      expect(mkdirResult.route?.capabilityId).toBe('workspace.files.mkdir');
-      expect((mkdirResult.route?.input as any)?.path).toBe('runtime/telegram-demo');
-
-      const missingMkdirResult = await runtime.kernel.submitIntent('создай папку', 'smoke');
-      expect(missingMkdirResult.route).toBeNull();
-      expect(missingMkdirResult.execution?.error).toBe('clarification-required');
-      expect(missingMkdirResult.summary).not.toContain('TODO');
-      expect(missingMkdirResult.execution?.summary).not.toContain('Top candidate');
-
-      const appendResult = await runtime.kernel.submitIntent('допиши файл runtime/ui-note.txt с текстом "ещё"', 'smoke');
-      expect(appendResult.route?.capabilityId).toBe('workspace.files.append');
-      expect((appendResult.route?.input as any)?.content).toBe('ещё');
-
-      const copyResult = await runtime.kernel.submitIntent('скопируй файл "runtime/a.txt" в "runtime/b.txt"', 'smoke');
-      expect(copyResult.route?.capabilityId).toBe('workspace.files.copy');
-      expect((copyResult.route?.input as any)?.targetPath).toBe('runtime/b.txt');
-
-      const replaceResult = await runtime.kernel.submitIntent('замени в файле runtime/ui-note.txt "готово" на "готово!"', 'smoke');
-      expect(replaceResult.route?.targetModuleId).toBe('workspace');
-      expect(replaceResult.route?.capabilityId).toBe('workspace.files.replace');
-      expect((replaceResult.route?.input as any)?.path).toBe('runtime/ui-note.txt');
-      expect((replaceResult.route?.input as any)?.oldText).toBe('готово');
-      expect((replaceResult.route?.input as any)?.newText).toBe('готово!');
-    } finally {
-      await runtime.kernel.stop();
-      await rm(path.join(process.cwd(), 'runtime', 'ui-note.txt'), { force: true });
-      await rm(path.join(process.cwd(), 'runtime', 'empty-agent-file.txt'), { force: true });
     }
   }, 15_000);
 
@@ -1089,6 +911,69 @@ describe('Workspace Module', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it('reads a large file as a window with its size, line count and where to continue', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-workspace-window-'));
+    const lines = Array.from({ length: 3000 }, (_, index) => `строка ${index} ${'ж'.repeat(20)}`);
+    await writeFile(path.join(root, 'big.txt'), lines.join('\n') + '\n');
+    const kernel = new MonarchKernel({ permissionProfile: { sandboxMode: 'workspace-write', approvalPolicy: 'on-request' } });
+    kernel.registerModule(new WorkspaceModule({ workspaceRoot: root }));
+    await kernel.start();
+    try {
+      const refused = await executeWorkspace(kernel, 'workspace.files.read', { path: 'big.txt', maxBytes: 10_000 });
+      expect(refused).toMatchObject({ ok: false, error: 'file-too-large' });
+      expect(refused.summary).toContain('offset');
+      const first = await executeWorkspace(kernel, 'workspace.files.read', { path: 'big.txt', maxBytes: 10_000, offset: 0 });
+      const head = first.output as { sizeBytes: number; lineCount: number; offset: number; nextOffset: number; truncated: boolean; content: string };
+      expect(first.ok).toBe(true);
+      expect(head).toMatchObject({ lineCount: 3000, offset: 0, truncated: true });
+      expect(head.nextOffset).toBeGreaterThan(9_990);
+      expect(head.content).not.toContain('�');
+      const next = await executeWorkspace(kernel, 'workspace.files.read', { path: 'big.txt', maxBytes: 10_000, offset: head.nextOffset });
+      const tail = next.output as { offset: number; content: string };
+      expect(tail.offset).toBe(head.nextOffset);
+      expect(tail.content).not.toContain('�');
+      expect((head.content + tail.content).startsWith(lines.slice(0, 5).join('\n'))).toBe(true);
+      const small = await executeWorkspace(kernel, 'workspace.files.read', { path: 'big.txt', maxBytes: 512_000 });
+      expect(small.output).toMatchObject({ lineCount: 3000 });
+      expect((small.output as { truncated?: boolean }).truncated).toBeUndefined();
+    } finally {
+      await kernel.stop().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('finds code two levels down in a real-sized project instead of reporting no matches', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-workspace-search-depth-'));
+    // Heavy early trees used to consume the 1000-entry listing budget before
+    // `src/` was ever reached; dependency and tool-state trees are not searched.
+    for (const heavy of ['artifacts', 'data', 'runtime']) {
+      await mkdir(path.join(root, heavy), { recursive: true });
+      await Promise.all(Array.from({ length: 500 }, (_, index) =>
+        writeFile(path.join(root, heavy, `log-${index}.txt`), 'nothing here\n')));
+    }
+    await mkdir(path.join(root, '.git', 'objects'), { recursive: true });
+    await writeFile(path.join(root, '.git', 'objects', 'decoy.txt'), 'DEEP_PROJECT_CONSTANT = 1\n');
+    await mkdir(path.join(root, 'src', 'agent'), { recursive: true });
+    await writeFile(path.join(root, 'src', 'agent', 'limits.ts'), 'export const DEEP_PROJECT_CONSTANT = 65_536;\n');
+    const kernel = new MonarchKernel({
+      permissionProfile: { sandboxMode: 'workspace-write', approvalPolicy: 'on-request' },
+    });
+    kernel.registerModule(new WorkspaceModule({ workspaceRoot: root }));
+    await kernel.start();
+    try {
+      const searched = await executeWorkspace(kernel, 'workspace.files.search', { query: 'DEEP_PROJECT_CONSTANT', limit: 10 });
+      const output = searched.output as { matches: Array<{ path: string; preview: string }>; scannedFiles: number; truncated: boolean };
+      expect(searched.ok).toBe(true);
+      expect(output.matches.map(match => path.relative(root, match.path))).toEqual([path.join('src', 'agent', 'limits.ts')]);
+      expect(output.matches[0]!.preview).toContain('65_536');
+      expect(output).toMatchObject({ truncated: false });
+      expect(output.scannedFiles).toBeGreaterThan(1500);
+    } finally {
+      await kernel.stop().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it('should report missing list and search roots instead of empty success', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'monarch-workspace-missing-root-'));
@@ -1402,20 +1287,76 @@ describe('Workspace Module', () => {
     }
   });
 
-});
-
-let workspaceRouteSequence = 0;
-
-function routeWorkspaceText(kernel: MonarchKernel, text: string) {
-  workspaceRouteSequence += 1;
-  return kernel.routeIntent({
-    id: `intent_workspace_route_${workspaceRouteSequence}`,
-    source: 'smoke',
-    text,
-    createdAt: new Date(0).toISOString(),
-    context: {},
+  it('lets Full Access write outside the workspace except owner red zones', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-redzone-ws-'));
+    const allowed = await mkdtemp(path.join(tmpdir(), 'monarch-redzone-ok-'));
+    const forbidden = await mkdtemp(path.join(tmpdir(), 'monarch-redzone-no-'));
+    const module = new WorkspaceModule({ workspaceRoot: root, localReadOnlyRoots: [] });
+    module.setOwnerRedZoneRootsProvider(() => [forbidden]);
+    const kernel = new MonarchKernel({
+      permissionProfile: { sandboxMode: 'danger-full-access', approvalPolicy: 'on-request', autonomyMode: 'full-local' },
+    });
+    kernel.registerModule(module);
+    await kernel.start();
+    try {
+      const okFile = path.join(allowed, 'dino.html');
+      const nestedFile = path.join(allowed, 'games', 'dino.html');
+      const blockedFile = path.join(forbidden, 'dino.html');
+      const written = await executeWorkspace(kernel, 'workspace.files.write', {
+        path: okFile, content: '<html></html>', overwrite: false,
+      }, true);
+      const nested = await executeWorkspace(kernel, 'workspace.files.write', {
+        path: nestedFile, content: '<html>nested</html>', overwrite: false,
+      }, true);
+      const blocked = await executeWorkspace(kernel, 'workspace.files.write', {
+        path: blockedFile, content: '<html></html>', overwrite: false,
+      }, true);
+      expect(written.ok).toBe(true);
+      expect(nested.ok).toBe(true);
+      expect(blocked).toMatchObject({ ok: false, error: 'filesystem-policy-blocked' });
+      await expect(readFile(okFile, 'utf8')).resolves.toBe('<html></html>');
+      await expect(readFile(nestedFile, 'utf8')).resolves.toBe('<html>nested</html>');
+    } finally {
+      await kernel.stop();
+      await rm(root, { recursive: true, force: true });
+      await rm(allowed, { recursive: true, force: true });
+      await rm(forbidden, { recursive: true, force: true });
+    }
   });
-}
+
+  it.runIf(process.platform === 'win32' && existsSync('D:\\'))(
+    'writes a file on an existing volume root without mkdir of that root',
+    async () => {
+      const root = await mkdtemp(path.join(tmpdir(), 'monarch-drive-root-ws-'));
+      const target = path.join('D:\\', `monarch-qa-drive-root-${Date.now()}.html`);
+      const module = new WorkspaceModule({ workspaceRoot: root, localReadOnlyRoots: [] });
+      const kernel = new MonarchKernel({
+        permissionProfile: {
+          sandboxMode: 'danger-full-access',
+          approvalPolicy: 'on-request',
+          autonomyMode: 'full-local',
+        },
+      });
+      kernel.registerModule(module);
+      await kernel.start();
+      try {
+        const written = await executeWorkspace(kernel, 'workspace.files.write', {
+          path: target,
+          content: '<html>drive-root</html>',
+          overwrite: false,
+        }, true);
+        expect(written.ok).toBe(true);
+        expect(written.error).not.toBe('permission-denied');
+        await expect(readFile(target, 'utf8')).resolves.toBe('<html>drive-root</html>');
+      } finally {
+        await kernel.stop();
+        await unlink(target).catch(() => undefined);
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+});
 
 function executeWorkspace(
   kernel: MonarchKernel,

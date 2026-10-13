@@ -1,22 +1,19 @@
 import { describe, it, expect } from 'vitest';
 import { MonarchKernel, MonarchModuleLoader, type MonarchModule } from '../../src/core';
 
-function createThrowingRouterModule(): MonarchModule {
+function createMinimalModule(): MonarchModule {
   return {
     manifest: {
-      id: 'smoke-throwing-router',
-      name: 'Smoke Throwing Router',
+      id: 'smoke-minimal-module',
+      name: 'Smoke Minimal Module',
       version: '0.1.0',
       kind: 'system',
-      description: 'Smoke-only module that throws during route handling.',
-      owns: ['smoke routing failure'],
+      description: 'Smoke-only module for loader checks.',
+      owns: ['smoke loader'],
       permissions: [],
       capabilities: [],
     },
     async activate(): Promise<void> {},
-    async handleIntent(): Promise<null> {
-      throw new Error('smoke route failure');
-    },
   };
 }
 
@@ -49,7 +46,7 @@ describe('MonarchModuleLoader', () => {
       core: {
         minVersion: '99.0.0',
       },
-      factory: createThrowingRouterModule,
+      factory: createMinimalModule,
     });
 
     expect(() => loader.loadInto(kernel)).toThrow();
@@ -61,14 +58,14 @@ describe('MonarchModuleLoader', () => {
   it('should load legacy factory', () => {
     const kernel = new MonarchKernel();
     const loader = new MonarchModuleLoader();
-    loader.registerFactory(createThrowingRouterModule);
+    loader.registerFactory(createMinimalModule);
 
     const modules = loader.loadInto(kernel);
     const record = loader.getLoadRecords()[0];
 
-    expect(modules[0]?.manifest.id).toBe('smoke-throwing-router');
+    expect(modules[0]?.manifest.id).toBe('smoke-minimal-module');
     expect(record?.status).toBe('loaded');
-    expect(record?.moduleId).toBe('smoke-throwing-router');
+    expect(record?.moduleId).toBe('smoke-minimal-module');
   });
 
   it('should validate manifest permissions', () => {

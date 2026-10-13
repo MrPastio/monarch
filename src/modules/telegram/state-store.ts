@@ -13,9 +13,14 @@ export interface TelegramPairing {
   userId: number;
   username?: string;
   pairedAt: string;
+  /** Telegram message that durably created this pairing; used only for exact replay. */
+  sourceMessageId?: number;
 }
 
 export interface TelegramReminder {
+  threadId?: number;
+  pairingEpoch?: string;
+  deliveryState?: 'attempting' | 'uncertain';
   id: string;
   chatId: number;
   text: string;
@@ -23,10 +28,52 @@ export interface TelegramReminder {
   createdAt: string;
 }
 
+export interface TelegramPendingTaskDelivery {
+  threadId?: number;
+  pairingEpoch?: string;
+  clientRequestId: string;
+  turnClientRequestId: string;
+  turnId: string;
+  chatId: number;
+  userId: number;
+  sourceMessageId: number;
+  progressMessageId: number;
+  /** Digest of a deterministic multipart result plan; never stores result text. */
+  deliveryDigest?: string;
+  /** Number of tail parts durably acknowledged before a restart. */
+  deliveredPartCount?: number;
+  /** Last content-free Turn phase projected into the Telegram progress card. */
+  projectedTurnStatus?: 'accepted' | 'routing' | 'answering' | 'running';
+  privacyMode: 'persistent';
+  createdAt: string;
+}
+
+export interface TelegramArtifactEgressOffer {
+  id: string;
+  turnId: string;
+  taskId: string;
+  artifactId: string;
+  chatId: number;
+  userId: number;
+  pairingEpoch: string;
+  messageId: number;
+  name: string;
+  checksum: string;
+  status: 'offered' | 'attempting' | 'delivered' | 'uncertain';
+  createdAt: string;
+  expiresAt: string;
+  permitDigest?: string;
+  sizeBytes?: number;
+  mimeType?: string;
+  telegramMessageId?: number;
+}
+
 export interface TelegramState {
   offset: number;
   pairings: TelegramPairing[];
   reminders: TelegramReminder[];
+  pendingTaskDeliveries: TelegramPendingTaskDelivery[];
+  artifactEgressOffers: TelegramArtifactEgressOffer[];
   remotePaused: boolean;
   pairingAttempts: Record<string, PairingAttemptWindow>;
 }
@@ -48,7 +95,7 @@ interface TelegramFileLock {
 }
 
 export function defaultTelegramState(remotePaused: boolean): TelegramState {
-  return { offset: 0, pairings: [], reminders: [], remotePaused, pairingAttempts: {} };
+  return { offset: 0, pairings: [], reminders: [], pendingTaskDeliveries: [], artifactEgressOffers: [], remotePaused, pairingAttempts: {} };
 }
 
 export function pairingAttemptKey(chatId: number, userId: number): string {
@@ -135,13 +182,28 @@ export async function writeAtomicJson(filePath: string, value: unknown): Promise
 
 export function validPairing(value: unknown): value is TelegramPairing {
   const item = value as TelegramPairing;
-  return Boolean(item && Number.isSafeInteger(item.chatId) && Number.isSafeInteger(item.userId) && typeof item.pairedAt === 'string');
+  return Boolean(
+    item
+    && Number.isSafeInteger(item.chatId)
+    && item.chatId !== 0
+    && Number.isSafeInteger(item.userId)
+    && item.userId > 0
+    && typeof item.pairedAt === 'string'
+    && Number.isFinite(Date.parse(item.pairedAt))
+    && (item.sourceMessageId === undefined
+      || Number.isSafeInteger(item.sourceMessageId) && item.sourceMessageId > 0)
+    && (item.username === undefined
+      || (typeof item.username === 'string' && item.username.length >= 1 && item.username.length <= 64))
+  );
 }
 
 export function validReminder(value: unknown): value is TelegramReminder {
   const item = value as TelegramReminder;
   return Boolean(
     item
+    && (item.threadId === undefined || Number.isSafeInteger(item.threadId) && item.threadId >= 0)
+    && (item.pairingEpoch === undefined || typeof item.pairingEpoch === 'string' && item.pairingEpoch.length > 0 && item.pairingEpoch.length <= 128)
+    && (item.deliveryState === undefined || item.deliveryState === 'attempting' || item.deliveryState === 'uncertain')
     && typeof item.id === 'string'
     && Boolean(item.id.trim())
     && Number.isSafeInteger(item.chatId)
@@ -149,6 +211,66 @@ export function validReminder(value: unknown): value is TelegramReminder {
     && Boolean(item.text.trim())
     && typeof item.dueAt === 'string'
     && Number.isFinite(Date.parse(item.dueAt))
+  );
+}
+
+export function validPendingTaskDelivery(value: unknown): value is TelegramPendingTaskDelivery {
+  const item = value as TelegramPendingTaskDelivery;
+  const validDeliveryCursor = Boolean(item) && (
+    item.deliveryDigest === undefined && item.deliveredPartCount === undefined
+    || /^sha256:[a-f0-9]{64}$/u.test(String(item.deliveryDigest))
+      && Number.isSafeInteger(item.deliveredPartCount)
+      && Number(item.deliveredPartCount) >= 0
+  );
+  return Boolean(
+    item
+    && /^[A-Za-z0-9._:-]{1,256}$/u.test(item.clientRequestId)
+    && /^[A-Za-z0-9._:-]{1,256}$/u.test(item.turnClientRequestId)
+    && /^[A-Za-z0-9._:-]{1,256}$/u.test(item.turnId)
+    && (item.threadId === undefined || Number.isSafeInteger(item.threadId) && item.threadId >= 0)
+    && (item.pairingEpoch === undefined || typeof item.pairingEpoch === 'string' && item.pairingEpoch.length > 0 && item.pairingEpoch.length <= 128)
+    && Number.isSafeInteger(item.chatId)
+    && Number.isSafeInteger(item.userId)
+    && Number.isSafeInteger(item.sourceMessageId)
+    && item.sourceMessageId > 0
+    && Number.isSafeInteger(item.progressMessageId)
+    && item.progressMessageId > 0
+    && validDeliveryCursor
+    && (item.projectedTurnStatus === undefined
+      || ['accepted', 'routing', 'answering', 'running'].includes(item.projectedTurnStatus))
+    && item.privacyMode === 'persistent'
+    && typeof item.createdAt === 'string'
+    && Number.isFinite(Date.parse(item.createdAt))
+  );
+}
+
+export function validArtifactEgressOffer(value: unknown): value is TelegramArtifactEgressOffer {
+  const item = value as TelegramArtifactEgressOffer;
+  const hasAttempt = item?.status !== 'offered';
+  return Boolean(
+    item
+    && /^telegram_artifact_offer_[a-f0-9]{24}$/u.test(item.id)
+    && /^[A-Za-z0-9._:-]{1,256}$/u.test(item.turnId)
+    && /^[A-Za-z0-9._:-]{1,256}$/u.test(item.taskId)
+    && /^agent_artifact_[A-Za-z0-9_-]{8,128}$/u.test(item.artifactId)
+    && Number.isSafeInteger(item.chatId) && item.chatId !== 0
+    && Number.isSafeInteger(item.userId) && item.userId > 0
+    && typeof item.pairingEpoch === 'string' && Number.isFinite(Date.parse(item.pairingEpoch))
+    && Number.isSafeInteger(item.messageId) && item.messageId > 0
+    && typeof item.name === 'string' && item.name.length > 0 && item.name.length <= 120
+    && !/[\\/\u0000-\u001F\u007F]/u.test(item.name)
+    && /^sha256:[a-f0-9]{64}$/u.test(item.checksum)
+    && ['offered', 'attempting', 'delivered', 'uncertain'].includes(item.status)
+    && typeof item.createdAt === 'string' && Number.isFinite(Date.parse(item.createdAt))
+    && typeof item.expiresAt === 'string' && Number.isFinite(Date.parse(item.expiresAt))
+    && (!hasAttempt || (
+      /^sha256:[a-f0-9]{64}$/u.test(String(item.permitDigest))
+      && Number.isSafeInteger(item.sizeBytes) && Number(item.sizeBytes) > 0
+      && Number(item.sizeBytes) <= 8 * 1024 * 1024
+      && typeof item.mimeType === 'string' && item.mimeType.length > 0 && item.mimeType.length <= 120
+    ))
+    && (item.telegramMessageId === undefined
+      || Number.isSafeInteger(item.telegramMessageId) && item.telegramMessageId > 0)
   );
 }
 

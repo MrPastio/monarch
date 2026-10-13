@@ -18,71 +18,20 @@ class FakeBaselineClient {
 }
 
 describe('Security persistence baseline approval', () => {
-  it.each([
-    'Проверь вирус гриппа и объясни симптомы',
-    'Как защитить растения от вредителей?',
-    'Объясни целостность личности',
-    'Проведи аудит маркетинговой кампании',
-  ])('ignores non-technical uses of security vocabulary: %s', async (text) => {
-    const security = new SecurityModule(new FakeBaselineClient() as any);
-
-    expect(await security.handleIntent({ id: 'semantic-security', text } as any)).toBeNull();
-  });
-
   let kernel: MonarchKernel | null = null;
   afterEach(async () => { await kernel?.stop(); kernel = null; });
 
-  it('routes Oscar Security reads to native Security capabilities and baseline requests to preview', async () => {
+  it('exposes Security only as exact capabilities without a phrase router', () => {
     const security = new SecurityModule(new FakeBaselineClient() as any);
-    const incidents = await security.handleIntent({ id: 'incidents', text: 'Oscar, покажи угрозы и инциденты Security' } as any);
-    const quarantine = await security.handleIntent({ id: 'quarantine', text: 'Oscar, покажи что находится в карантине' } as any);
-    const baseline = await security.handleIntent({ id: 'baseline', text: 'Oscar, проверь baseline автозапуска' } as any);
-
-    expect(incidents?.capabilityId).toBe('security.incidents.list');
-    expect(quarantine?.capabilityId).toBe('security.quarantine.list');
-    expect(baseline).toMatchObject({ capabilityId: 'security.baseline.preview', permissionMode: 'allow' });
-  });
-
-  it('routes a natural current-process safety audit to a real system scan', async () => {
-    const security = new SecurityModule(new FakeBaselineClient() as any);
-    const route = await security.handleIntent({
-      id: 'process-audit',
-      text: 'Можешь выдать мне аудит по всем текущим процессам на их безопасность',
-    } as any);
-
-    expect(route).toMatchObject({
-      capabilityId: 'security.scan.system',
-      permissionMode: 'allow',
-      input: { includeFiles: false, includeInstalls: false, noLlm: true },
-    });
-  });
-
-  it('routes Security strictness changes to the confirmed native profile capability', async () => {
-    const security = new SecurityModule(new FakeBaselineClient() as any);
-    const route = await security.handleIntent({
-      id: 'security-level',
-      text: 'Установи максимальный уровень строгости Security',
-    } as any);
-
-    expect(route).toMatchObject({
-      capabilityId: 'security.profile.set',
-      permissionMode: 'confirm',
-      input: { level: 'maximum' },
-    });
-  });
-
-  it('routes model command safety settings to the native Security policy', async () => {
-    const security = new SecurityModule(new FakeBaselineClient() as any);
-    const route = await security.handleIntent({
-      id: 'model-policy',
-      text: 'Security, всегда спрашивай подтверждение перед командами Oscar модели',
-    } as any);
-
-    expect(route).toMatchObject({
-      capabilityId: 'security.model_policy.set',
-      permissionMode: 'confirm',
-      input: { enabled: true, actionGuardReaction: 'confirm-all' },
-    });
+    expect('handleIntent' in security).toBe(false);
+    expect(security.manifest.capabilities.map((capability) => capability.id)).toEqual(expect.arrayContaining([
+      'security.incidents.list',
+      'security.quarantine.list',
+      'security.baseline.preview',
+      'security.scan.system',
+      'security.profile.set',
+      'security.model_policy.set',
+    ]));
   });
 
   it('keeps preview read-only and requires its exact digest for persistence approval', async () => {

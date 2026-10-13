@@ -24,6 +24,6 @@ describe('Monarch Safe trusted authorization dialog', () => {
 
     expect(main).toContain('trustedAuthorizationOpen');
     expect(main).toContain("promptWindow.on('blur'");
-    expect(main).toContain("parentWindow.webContents.send('monarch-safe:force-lock')");
+    expect(main).toContain("void lockSafeFromMain(parentWindow)");
   });
 });

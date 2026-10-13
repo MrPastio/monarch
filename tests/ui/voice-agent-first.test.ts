@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { oscarManifest } from '../../src/modules/oscar/manifest';
 import { voiceManifest } from '../../src/modules/voice/manifest';
 
-describe('Voice Agent-first surface', () => {
+describe('Voice surface ownership', () => {
   it('keeps Voice as STT/TTS transport and exposes no private decision or execution loop', () => {
     const capabilityIds = voiceManifest.capabilities.map((capability) => capability.id);
 
@@ -12,14 +12,20 @@ describe('Voice Agent-first surface', () => {
     expect(capabilityIds.some((id) => id.startsWith('voice.mode.'))).toBe(false);
   });
 
-  it('submits one common Agent Turn after transcription', () => {
+  it('uses deterministic Simplified Mode by default and keeps full Agent Voice explicit', () => {
     const source = readFileSync(
       new URL('../../src/ui/public/modules/oscar-voice-mode.js', import.meta.url),
       'utf8',
     );
 
     expect(source).toContain('executeVoiceAgentTask(text, controller.signal)');
-    expect(source).toContain("surface.dataset.lane = 'agent'");
+    expect(source).toContain('executeSimplifiedVoiceCommand(text, controller.signal, {');
+    expect(source).toContain("surface.dataset.speechWarmup = 'system'");
+    expect(source).toContain("latencyMode: simplifiedMode ? 'instant' : 'natural'");
+    expect(source).toContain("surface.dataset.lane = simplifiedMode ? 'simplified' : 'agent'");
+    expect(source).toContain("result.status === 'unsupported'");
+    // Outside the quick set the phrase goes to the ordinary chat; full Agent Voice is never started for it.
+    expect(source).toContain('const sent = sendTranscriptToChat(text);');
     expect(source).not.toContain('classifyVoiceModeText');
     expect(source).not.toContain('dispatchVoiceModeTurn');
     expect(source).not.toContain('respondVoiceModeFast');

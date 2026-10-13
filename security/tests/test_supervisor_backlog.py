@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import json
 import os
 import zipfile
+import time
+from concurrent.futures import Future
 
 import pytest
 
@@ -19,6 +21,56 @@ from monarch_security.sensors import FileScanner
 from monarch_security.state import StateStore
 from monarch_security.supervisor import SecuritySupervisor, _ScheduledSensor
 from monarch_security.supervisor import PENDING_SENSOR_BATCHES_KEY, SENSOR_CHECKPOINTS_KEY
+from monarch_security import inspection_worker
+from monarch_security.config import FileConfig
+from monarch_security.inspection_queue import FileInspectionQueue
+
+
+@pytest.fixture(autouse=True)
+def close_owned_inspections(monkeypatch):
+    queues = []
+    original = FileInspectionQueue.__init__
+    def initialize(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        queues.append(self)
+    monkeypatch.setattr(FileInspectionQueue, '__init__', initialize)
+    yield
+    for queue in queues:
+        queue.close()
+
+
+def _mock_inspection_pool(monkeypatch):
+    class Pool:
+        available = True
+        def tick(self):
+            pass
+        def close(self):
+            pass
+        def submit(self, request, *, timeout):
+            scanned = FileScanner(FileConfig(**request['config'])).inspect(Path(request['path']))
+            facts = {**scanned.facts, 'inspection_complete': True,
+                     'content_parser_isolated': True,
+                     'content_parser_sandbox': {'process': 'isolated-worker', 'integrity': 'low',
+                                                'memory_limit': 'windows-job'},
+                     'authenticode_status': 'NotSigned', 'authenticode_signed': False}
+            future = Future()
+            future.set_result(inspection_worker._response(request, 'complete', facts))
+            return future
+    monkeypatch.setattr(inspection_worker, 'new_pool', Pool)
+
+
+def _observed_facts(path):
+    return {'path': str(path), 'extension': path.suffix.lower(), **inspection_worker.file_version(path)}
+
+
+def _drain_until(supervisor, limit):
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        processed = supervisor._drain_sensor_backlog(limit)
+        if processed:
+            return processed
+        time.sleep(0.01)
+    raise AssertionError('file inspection did not finish')
 
 
 def test_capped_backlog_survives_restart_before_checkpoint_ack(tmp_path: Path) -> None:
@@ -194,6 +246,9 @@ def test_heartbeat_exposes_bounded_overflow_health(tmp_path: Path) -> None:
         "oldest_queued_at": heartbeat["sensor_backlog"]["oldest_queued_at"],
         "overflow": True,
         "queued": 5,
+        "queued_events": 5,
+        "incomplete_files": 0,
+        "recovery_pending": False,
     }
     assert heartbeat["sensor_backlog"]["oldest_queued_at"]
 
@@ -204,14 +259,21 @@ def test_run_stages_entire_poll_before_enforcing_per_tick_limit(
 ) -> None:
     config = _config(tmp_path, max_events_per_tick=2)
     supervisor = _supervisor(config)
-    supervisor.sensors = [_signature_sensor("file_watch_sensor", count=3)]
+    from monarch_security.sensors import FileChangeSensor
+    watched = tmp_path / 'watched'
+    watched.mkdir()
+    for index in range(3):
+        (watched / f'example-{index}.txt').write_text('synthetic fixture')
+    supervisor.sensors = [_ScheduledSensor('file_watch_sensor', FileChangeSensor(
+        [watched], recursive=False, max_entries_per_tick=10, include_existing=True), 1)]
 
-    def stop_after_first_tick(*_args):
-        raise KeyboardInterrupt
+    def stop_after_first_tick():
+        path = config.runtime.audit_log_path
+        return path.exists() and _audit_kind_count(path, "decision") >= 2
 
-    monkeypatch.setattr(supervisor, "_sleep_until_next_sensor", stop_after_first_tick)
+    monkeypatch.setattr(supervisor, "_should_stop", stop_after_first_tick)
 
-    assert supervisor.run(duration=0) == 130
+    assert supervisor.run(duration=5) == 0
     assert _audit_kind_count(config.runtime.audit_log_path, "decision") == 2
     assert supervisor._sensor_backlog_health()["queued"] == 1
     assert supervisor.state.get_dict("known_file_signatures") == {}
@@ -221,6 +283,7 @@ def test_file_inspection_runs_during_drain_and_is_persisted_before_handler(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _mock_inspection_pool(monkeypatch)
     config = _config(tmp_path, max_events_per_tick=2)
     supervisor = _supervisor(config)
     path = tmp_path / "sample.exe"
@@ -229,7 +292,7 @@ def test_file_inspection_runs_during_drain_and_is_persisted_before_handler(
         kind="file.observed",
         source="file_watch_sensor",
         subject=str(path),
-        facts={"path": str(path), "extension": ".exe"},
+        facts=_observed_facts(path),
     )
     sensor = SimpleNamespace(
         poll=lambda: [source],
@@ -255,10 +318,6 @@ def test_file_inspection_runs_during_drain_and_is_persisted_before_handler(
         )
 
     monkeypatch.setattr(FileScanner, "inspect", inspect)
-    monkeypatch.setattr(
-        "monarch_security.supervisor._with_authenticode_facts_if_needed",
-        lambda event: event,
-    )
     handled: list[RuleAssessment] = []
 
     def handle(assessment: RuleAssessment) -> None:
@@ -284,6 +343,7 @@ def test_materialized_file_assessment_survives_handler_failure_without_rescan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _mock_inspection_pool(monkeypatch)
     config = _config(tmp_path, max_events_per_tick=1)
     supervisor = _supervisor(config)
     path = tmp_path / "sample.exe"
@@ -292,7 +352,7 @@ def test_materialized_file_assessment_survives_handler_failure_without_rescan(
         kind="file.observed",
         source="file_watch_sensor",
         subject=str(path),
-        facts={"path": str(path), "extension": ".exe"},
+        facts=_observed_facts(path),
     )
     sensor = SimpleNamespace(
         poll=lambda: [source],
@@ -318,10 +378,6 @@ def test_materialized_file_assessment_survives_handler_failure_without_rescan(
         )
 
     monkeypatch.setattr(FileScanner, "inspect", inspect)
-    monkeypatch.setattr(
-        "monarch_security.supervisor._with_authenticode_facts_if_needed",
-        lambda event: event,
-    )
     supervisor._stage_sensor_poll(_ScheduledSensor("file_watch_sensor", sensor, 1.0))
     monkeypatch.setattr(
         supervisor,
@@ -352,6 +408,7 @@ def test_multiple_file_assessments_materialize_before_one_batched_acknowledgemen
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _mock_inspection_pool(monkeypatch)
     config = _config(tmp_path, max_events_per_tick=3)
     supervisor = _supervisor(config)
     paths = [tmp_path / f"sample-{index}.zip" for index in range(3)]
@@ -362,7 +419,7 @@ def test_multiple_file_assessments_materialize_before_one_batched_acknowledgemen
             kind="file.observed",
             source="file_watch_sensor",
             subject=str(path),
-            facts={"path": str(path), "extension": ".zip"},
+            facts=_observed_facts(path),
         )
         for path in paths
     ]
@@ -390,7 +447,8 @@ def test_multiple_file_assessments_materialize_before_one_batched_acknowledgemen
     monkeypatch.setattr(supervisor, "_handle_assessment", handled.append)
     supervisor._stage_sensor_poll(_ScheduledSensor("file_watch_sensor", sensor, 1.0))
 
-    assert supervisor._drain_sensor_backlog(3) == 3
+    assert supervisor._drain_sensor_backlog(3) == 2
+    assert supervisor._drain_sensor_backlog(3) == 1
     assert [item.event.event_id for item in handled] == [item.event_id for item in events]
     assert all(item.event.kind == "file.scanned" for item in handled)
     assert supervisor._sensor_backlog_health()["queued"] == 0
@@ -439,7 +497,7 @@ def test_supervisor_materializes_real_isolated_zip_parser_before_audit(
         kind="file.observed",
         source="file_watch_sensor",
         subject=str(path),
-        facts={"path": str(path), "extension": ".zip"},
+        facts=_observed_facts(path),
     )
     sensor = SimpleNamespace(
         poll=lambda: [source],
@@ -452,7 +510,7 @@ def test_supervisor_materializes_real_isolated_zip_parser_before_audit(
     ) == 1
     staged = supervisor.state.get_json(PENDING_SENSOR_BATCHES_KEY, {})
     assert staged["file_watch_sensor"]["assessments"][0]["event"]["kind"] == "file.observed"
-    assert supervisor._drain_sensor_backlog(2) == 1
+    assert _drain_until(supervisor, 2) == 1
 
     decisions = [
         json.loads(line)

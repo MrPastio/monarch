@@ -74,7 +74,9 @@ export class SettingsCommandBus {
   }
 
   private enforceOwnerDevAccess(kind: string): void {
-    if (!['prompts', 'dev', 'owner-override'].includes(kind)) return;
+    // Direct Access is a product control behind the attested Desktop mutation
+    // principal and its own explicit warning. It is not an Oscar DEV feature.
+    if (!['prompts', 'dev'].includes(kind)) return;
     if (this.authority.tier === 'owner' && this.authority.source === 'signed-device-entitlement') return;
     throw new MonarchSettingsCommandError(
       403,

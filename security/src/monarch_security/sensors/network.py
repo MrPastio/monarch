@@ -7,9 +7,10 @@ import subprocess
 
 from monarch_security.config import NetworkConfig
 from monarch_security.events import SecurityEvent
+from monarch_security.observation import ObservedSensor, ObservationUnavailable, parse_query_json
 
 
-class NetworkSensor:
+class NetworkSensor(ObservedSensor):
     def __init__(
         self,
         config: NetworkConfig,
@@ -40,6 +41,7 @@ class NetworkSensor:
         return {key: dict(value) for key, value in self._overflow_detail.items()}
 
     def snapshot(self) -> list[dict[str, Any]]:
+        self.begin_observation()
         self.last_error = None
         self._overflow = False
         self._overflow_detail = {}
@@ -55,6 +57,10 @@ class NetworkSensor:
             self.last_error = error
             return []
         snapshot_items = _normalize_items(parsed)
+        if not isinstance(parsed, (list, dict)) or (isinstance(parsed, list) and len(snapshot_items) != len(parsed)):
+            raise ObservationUnavailable('network-query-invalid')
+        if any(item.get('kind') not in {'config', 'neighbor', 'listener', 'connection', 'dns_cache'} for item in snapshot_items):
+            raise ObservationUnavailable('network-query-invalid')
         dns_cache: dict[str, str] = {}
         for item in snapshot_items:
             if item.get("kind") != "dns_cache":
@@ -66,6 +72,31 @@ class NetworkSensor:
         items = [item for item in snapshot_items if item.get("kind") != "dns_cache"]
         if native_tcp_items is not None:
             items.extend(native_tcp_items)
+        for item in items:
+            kind = item.get('kind')
+            if kind == 'config':
+                if not isinstance(item.get('interface_alias'), str) or not item['interface_alias']:
+                    raise ObservationUnavailable('network-query-invalid')
+                for field in ('ipv4', 'ipv6', 'dns', 'gateway'):
+                    if field not in item or item[field] is None:
+                        self.limit_observation('network-fields-unavailable')
+                    elif not isinstance(item[field], list) or any(not isinstance(value, str) for value in item[field]):
+                        raise ObservationUnavailable('network-query-invalid')
+            elif kind in {'listener', 'connection'}:
+                fields = ('local_address',) if kind == 'listener' else ('local_address', 'remote_address')
+                for field in fields:
+                    try:
+                        ipaddress.ip_address(str(item.get(field) or '').strip('[]').split('%', 1)[0])
+                    except ValueError as exc:
+                        raise ObservationUnavailable('network-query-invalid') from exc
+                ports = ('local_port',) if kind == 'listener' else ('local_port', 'remote_port')
+                if any(type(item.get(field)) is not int or not 0 <= item[field] <= 65535 for field in ports):
+                    raise ObservationUnavailable('network-query-invalid')
+            elif kind == 'neighbor':
+                if any(not isinstance(item.get(field), str) or not item[field] for field in ('interface_alias', 'ip_address', 'link_layer_address')):
+                    raise ObservationUnavailable('network-query-invalid')
+            else:
+                raise ObservationUnavailable('network-query-invalid')
         limits = {
             "neighbor": max(1, int(self.config.max_neighbors)),
             "listener": max(1, int(self.config.max_listeners)),
@@ -79,12 +110,14 @@ class NetworkSensor:
                     "configured_threshold": limit,
                 }
         self._overflow = bool(self._overflow_detail)
-        _enrich_process_names(items)
+        _enrich_process_names(items, on_limit=self.limit_observation)
         _enrich_dns_names(items, dns_cache)
         return [_with_signature(item) for item in items]
 
     def poll(self) -> list[SecurityEvent]:
         snapshot = self.snapshot()
+        if self.last_error:
+            raise ObservationUnavailable('network-query-unavailable')
         changed = [
             item
             for item in snapshot
@@ -126,8 +159,8 @@ ForEach-Object {
     interface_alias = $_.InterfaceAlias
     ipv4 = @($_.IPv4Address | ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" })
     ipv6 = @($_.IPv6Address | ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" })
-    dns = @($_.DNSServer.ServerAddresses)
-    gateway = @($_.IPv4DefaultGateway.NextHop)
+    dns = @($_.DNSServer.ServerAddresses | Where-Object { $_ })
+    gateway = @($_.IPv4DefaultGateway.NextHop | Where-Object { $_ })
   }
 }
 """
@@ -135,7 +168,7 @@ ForEach-Object {
 
 def _neighbors_command(max_neighbors: int) -> str:
     return rf"""
-Get-NetNeighbor -ErrorAction SilentlyContinue |
+Get-NetNeighbor -ErrorAction Stop |
 Where-Object {{
   $_.IPAddress -and
   $_.LinkLayerAddress -and
@@ -157,7 +190,8 @@ ForEach-Object {{
 
 def _listeners_command(max_listeners: int) -> str:
     return rf"""
-Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+Get-NetTCPConnection -ErrorAction Stop |
+Where-Object {{ [string]$_.State -eq 'Listen' }} |
 ForEach-Object {{
   [pscustomobject]@{{
     kind = 'listener'
@@ -173,7 +207,8 @@ ForEach-Object {{
 
 def _connections_command(max_connections: int) -> str:
     return rf"""
-Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue |
+Get-NetTCPConnection -ErrorAction Stop |
+Where-Object {{ [string]$_.State -eq 'Established' }} |
 ForEach-Object {{
   [pscustomobject]@{{
     kind = 'connection'
@@ -191,7 +226,7 @@ ForEach-Object {{
 
 def _dns_cache_command() -> str:
     return r"""
-Get-DnsClientCache -ErrorAction SilentlyContinue |
+Get-DnsClientCache -ErrorAction Stop |
 Where-Object { $_.Data -match '\d+\.\d+\.\d+\.\d+' -or $_.Data -match ':' } |
 ForEach-Object {
   [pscustomobject]@{
@@ -214,7 +249,7 @@ def _network_snapshot_command(config: NetworkConfig, *, include_tcp: bool = True
             _listeners_command(config.max_listeners),
             _connections_command(config.max_connections),
         ))
-    return "& {\n" + "\n".join(pipelines) + "\n} | ConvertTo-Json -Depth 5 -Compress"
+    return "$ErrorActionPreference = 'Stop'; & {\n" + "\n".join(pipelines) + "\n} | ConvertTo-Json -Depth 5 -Compress"
 
 
 def _native_tcp_items(max_listeners: int, max_connections: int) -> list[dict[str, Any]] | None:
@@ -303,9 +338,9 @@ def _run_powershell_json(command: str, timeout: int = 30) -> tuple[Any, str | No
     if not output:
         return [], None
     try:
-        return json.loads(output), None
-    except json.JSONDecodeError as exc:
-        return None, f"network PowerShell returned invalid JSON: {exc}"
+        return parse_query_json(output), None
+    except ObservationUnavailable:
+        return None, 'network-query-json-invalid'
 
 
 def _normalize_items(parsed: Any) -> list[dict[str, Any]]:
@@ -376,6 +411,12 @@ def _with_signature(item: dict[str, Any]) -> dict[str, Any]:
         normalized["remote_scope"] = _ip_scope(normalized.get("remote_address"))
         normalized["remote_is_public"] = normalized["remote_scope"] == "public"
     normalized["key"] = key.lower()
+    if kind in {'listener', 'connection'}:
+        signature_fields['process_identity'] = {
+            field: normalized.get(field) for field in ('process_name', 'process_exe', 'process_start_time',
+                                                       'process_parent_name', 'process_parent_exe',
+                                                       'process_ancestor_names', 'process_ancestor_exes')
+        }
     normalized["signature"] = json.dumps(signature_fields, ensure_ascii=True, sort_keys=True)
     return normalized
 
@@ -415,7 +456,13 @@ def _ip_scope(value: Any) -> str:
     return "other"
 
 
-def _enrich_process_names(items: list[dict[str, Any]]) -> None:
+def _enrich_process_names(items: list[dict[str, Any]], *, on_limit=None) -> None:
+    def limited(reason):
+        if on_limit is not None:
+            on_limit(reason)
+    if any(item.get('kind') in {'listener', 'connection'} and
+           (type(item.get('owning_process')) is not int or item['owning_process'] <= 0) for item in items):
+        limited('network-process-details-unavailable')
     pids = {
         int(item["owning_process"])
         for item in items
@@ -426,6 +473,7 @@ def _enrich_process_names(items: list[dict[str, Any]]) -> None:
     try:
         import psutil  # type: ignore
     except Exception:
+        limited('network-process-details-unavailable')
         return
     details: dict[int, dict[str, Any]] = {}
     for pid in pids:
@@ -434,8 +482,11 @@ def _enrich_process_names(items: list[dict[str, Any]]) -> None:
             # Command lines frequently contain session tokens, API keys, and
             # other secrets. Network telemetry only needs process identity.
             info = process.as_dict(attrs=["name", "exe", "create_time"], ad_value=None)
-            lineage = _bounded_process_lineage(process, psutil)
+            if any(info.get(field) is None for field in ('name', 'exe', 'create_time')):
+                limited('network-process-details-unavailable')
+            lineage = _bounded_process_lineage(process, psutil, on_limit=limited)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
+            limited('network-process-details-unavailable')
             continue
         details[pid] = {
             "process_name": info.get("name"),
@@ -452,11 +503,13 @@ def _enrich_process_names(items: list[dict[str, Any]]) -> None:
             item.update(details.get(int(pid_value), {}))
 
 
-def _bounded_process_lineage(process, psutil, *, limit: int = 4) -> list[dict[str, str | None]]:
+def _bounded_process_lineage(process, psutil, *, limit: int = 4, on_limit=None) -> list[dict[str, str | None]]:
     lineage: list[dict[str, str | None]] = []
     try:
         current = process.parent()
     except (psutil.NoSuchProcess, psutil.AccessDenied):
+        if on_limit is not None:
+            on_limit('network-process-lineage-unavailable')
         return lineage
     while current is not None and len(lineage) < max(1, min(8, int(limit))):
         try:
@@ -467,6 +520,8 @@ def _bounded_process_lineage(process, psutil, *, limit: int = 4) -> list[dict[st
             parent_fn = getattr(current, "parent", None)
             current = parent_fn() if callable(parent_fn) else None
         except (psutil.NoSuchProcess, psutil.AccessDenied):
+            if on_limit is not None:
+                on_limit('network-process-lineage-unavailable')
             break
     return lineage
 

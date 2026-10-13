@@ -1,16 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { createHash, verify as verifySignature } from 'node:crypto';
-import {
-  mkdir,
-  open,
-  readFile,
-  rename,
-  stat,
-  statfs,
-  unlink,
-  writeFile,
-} from 'node:fs/promises';
+import { mkdir, open, readFile, stat, statfs, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { renameWithRetry } from './windows-rename.mjs';
 
 export const UPDATE_STATES = Object.freeze([
   'idle',
@@ -38,6 +30,19 @@ const CANCELLABLE_STATES = new Set([
   'ready-to-install',
   'waiting-for-tasks',
 ]);
+// A check replaces the selected release, so it must not run over a download or
+// installation that is already bound to one.
+const CHECK_BLOCKED_STATES = new Set([
+  'downloading',
+  'paused',
+  'verifying-installer',
+  'ready-to-install',
+  'waiting-for-tasks',
+  'installing',
+  'restart-pending',
+]);
+const BACKGROUND_CHECK_STATES = new Set(['idle', 'up-to-date', 'failed', 'completed']);
+const DEFAULT_BACKGROUND_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DOWNLOAD_CONTENT_TYPES = new Set([
   'application/octet-stream',
   'application/x-msdownload',
@@ -181,6 +186,9 @@ export class MonarchUpdateService extends EventEmitter {
       await this.initialize();
       if (!this.installationPolicy.canInstall) {
         return this.#blockUnavailableInstallation();
+      }
+      if (CHECK_BLOCKED_STATES.has(this.state)) {
+        return this.#invalidIntent('check', 'update-in-progress');
       }
       this.stopIntent = null;
       this.#transition('checking', {
@@ -465,9 +473,26 @@ export class MonarchUpdateService extends EventEmitter {
     let responseEtag = null;
 
     try {
+      // An installer verified by an earlier session (or before a re-check) is
+      // reused after the same signed size and SHA-256 check instead of re-downloaded.
+      if (await stat(installerPath).then((value) => value.isFile(), () => false)) {
+        this.#transition('verifying-installer', { progress: null, reason: null, error: null });
+        const reusable = await verifyInstallerFile(installerPath, this.release.asset, this.maxInstallerBytes)
+          .then(() => true, () => false);
+        if (reusable) {
+          await Promise.all([removeIfExists(partialPath), removeIfExists(this.checkpointPath)]);
+          this.readyInstallerPath = installerPath;
+          return this.#transition('ready-to-install', {
+            progress: downloadProgress(this.release.asset.size, this.release.asset.size),
+          });
+        }
+        await removeIfExists(installerPath);
+      }
       await this.#assertDiskSpace(this.release.asset.size);
       let offset = 0;
-      let checkpoint = allowResume ? await readJsonIfExists(this.checkpointPath) : null;
+      // A checkpoint bound to the same signed manifest survives failures and
+      // restarts; the server still has to prove the same ETag and byte range.
+      let checkpoint = await readJsonIfExists(this.checkpointPath);
       if (
         checkpoint?.schemaVersion === 1
         && checkpoint.manifestDigest === this.manifestDigest
@@ -602,16 +627,24 @@ export class MonarchUpdateService extends EventEmitter {
       this.#transition('verifying-installer');
       await verifyInstallerFile(partialPath, this.release.asset, this.maxInstallerBytes);
       await removeIfExists(installerPath);
-      await rename(partialPath, installerPath);
+      await renameWithRetry(partialPath, installerPath);
       await removeIfExists(this.checkpointPath);
       this.readyInstallerPath = installerPath;
       return this.#transition('ready-to-install', {
         progress: downloadProgress(this.release.asset.size, this.release.asset.size),
       });
     } catch (error) {
-      if (this.stopIntent) {
+      const integrityFailure = [
+        'installer-size-mismatch',
+        'installer-hash-mismatch',
+        'invalid-installer-format',
+        'installer-too-large',
+      ].includes(error?.code);
+      if (this.stopIntent || !integrityFailure) {
+        // Pause, cancel and transient network failures keep the exact bytes on
+        // disk so the next attempt continues instead of starting from zero.
         const partialStat = await stat(partialPath).catch(() => null);
-        if (partialStat?.isFile()) {
+        if (partialStat?.isFile() && partialStat.size > 0) {
           const existing = await readJsonIfExists(this.checkpointPath);
           await this.#writeCheckpoint({
             manifestDigest: this.manifestDigest,
@@ -619,19 +652,14 @@ export class MonarchUpdateService extends EventEmitter {
             expectedSize: this.release.asset.size,
             downloaded: partialStat.size,
             etag: responseEtag || existing?.etag || null,
-          });
+          }).catch(() => undefined);
         }
-        return this.#finishStoppedOperation();
       }
+      if (this.stopIntent) return this.#finishStoppedOperation();
       if (error?.name === 'AbortError') {
         return this.#fail(new UpdateServiceError('network-error', 'Installer download was interrupted.', error));
       }
-      if ([
-        'installer-size-mismatch',
-        'installer-hash-mismatch',
-        'invalid-installer-format',
-        'installer-too-large',
-      ].includes(error?.code)) {
+      if (integrityFailure) {
         await Promise.all([
           removeIfExists(partialPath),
           removeIfExists(this.checkpointPath),
@@ -818,6 +846,27 @@ export class MonarchUpdateService extends EventEmitter {
   }
 }
 
+// Long-running sessions learn about a new release without a restart. A check
+// only runs from a resting state, so it never replaces a download or install.
+export function startBackgroundUpdateChecks(service, {
+  intervalMs = DEFAULT_BACKGROUND_CHECK_INTERVAL_MS,
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
+} = {}) {
+  if (!service?.installationPolicy?.canInstall) return () => {};
+  let running = false;
+  const timer = setIntervalImpl(() => {
+    if (running || service.activeOperation || !BACKGROUND_CHECK_STATES.has(service.state)) return;
+    running = true;
+    Promise.resolve()
+      .then(() => service.check())
+      .catch(() => undefined)
+      .finally(() => { running = false; });
+  }, intervalMs);
+  timer?.unref?.();
+  return () => clearIntervalImpl(timer);
+}
+
 export function verifySignedManifest({
   bytes,
   signatureBytes,
@@ -917,8 +966,8 @@ function normalizeInstallationPolicy(value) {
 
 function normalizeEndpoint(value) {
   const id = readBoundedString(value?.id, 'endpoint.id', 32);
-  if (!['github', 'sites'].includes(id)) {
-    throw new UpdateServiceError('invalid-endpoint', 'Update endpoint must be github or sites.');
+  if (!['github', 'sites', 'vercel'].includes(id)) {
+    throw new UpdateServiceError('invalid-endpoint', 'Update endpoint must be github, sites or vercel.');
   }
   const manifestUrl = readHttpsUrl(value?.manifestUrl, 'endpoint.manifestUrl');
   const signatureUrl = readHttpsUrl(value?.signatureUrl, 'endpoint.signatureUrl');
@@ -1165,7 +1214,7 @@ function checkpointIsFresh(checkpoint, now) {
 }
 
 function endpointRank(endpoint) {
-  return endpoint.id === 'github' ? 0 : 1;
+  return ['github', 'sites', 'vercel'].indexOf(endpoint.id);
 }
 
 function downloadProgress(downloaded, total) {
@@ -1222,16 +1271,16 @@ async function atomicWriteJson(filePath, value) {
   await writeFile(nextPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
   await removeIfExists(previousPath);
   try {
-    await rename(filePath, previousPath);
+    await renameWithRetry(filePath, previousPath);
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
   try {
-    await rename(nextPath, filePath);
+    await renameWithRetry(nextPath, filePath);
     await removeIfExists(previousPath);
   } catch (error) {
     try {
-      await rename(previousPath, filePath);
+      await renameWithRetry(previousPath, filePath);
     } catch {
       // readJsonIfExists also accepts the previous sibling after interruption.
     }
@@ -1256,7 +1305,10 @@ function isPathInside(root, candidate) {
 function readStreamChunk(reader, timeoutMs) {
   let timer;
   return Promise.race([
-    reader.read(),
+    reader.read().catch((error) => {
+      if (error?.name === 'AbortError' || error instanceof UpdateServiceError) throw error;
+      throw new UpdateServiceError('network-error', 'Installer download was interrupted.', error);
+    }),
     new Promise((_, reject) => {
       timer = setTimeout(() => {
         reject(new UpdateServiceError('download-stalled', 'Installer download stopped making progress.'));

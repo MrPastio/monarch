@@ -273,6 +273,9 @@ export async function runWindowsVolumeAction(action: VoiceVolumeAction): Promise
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    // EPIPE on a worker that already exited is reported by its exit handling;
+    // an unlistened stream 'error' would end the whole process.
+    child.stdin?.on('error', () => undefined);
     const finish = (error?: VoiceVolumeError, state?: VoiceVolumeState) => {
       if (settled) return;
       settled = true;

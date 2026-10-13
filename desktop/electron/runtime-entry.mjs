@@ -14,7 +14,10 @@ export function resolveRuntimeLaunch({
     return {
       kind: 'tsx',
       entryPath: sourceMain,
-      args: [tsxCli, sourceMain],
+      // Import the tsx loader in the owned Node process. Launching the tsx CLI
+      // creates an extra child which can outlive its Electron-owned parent and
+      // keep the strict runtime port occupied after a crash.
+      args: ['--import', 'tsx', sourceMain],
     };
   }
 
@@ -30,7 +33,7 @@ export function resolveRuntimeLaunch({
     return {
       kind: 'tsx',
       entryPath: sourceMain,
-      args: [tsxCli, sourceMain],
+      args: ['--import', 'tsx', sourceMain],
     };
   }
 

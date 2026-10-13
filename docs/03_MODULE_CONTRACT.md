@@ -55,13 +55,13 @@ export const filesModulePackage: MonarchModulePackage = {
 останавливается после него.
 
 ```ts
-export const studioManifest: MonarchModuleManifest = {
-  id: 'studio',
-  name: 'Monarch Studio',
+export const exampleChildManifest: MonarchModuleManifest = {
+  id: 'example-child',
+  name: 'Example Child',
   version: '0.1.0',
   kind: 'domain',
-  parentSuiteId: 'monarch-modules',
-  dependencies: ['monarch-modules'],
+  parentSuiteId: 'example-suite',
+  dependencies: ['example-suite'],
   // ...
 };
 ```

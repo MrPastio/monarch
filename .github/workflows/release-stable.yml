@@ -34,7 +34,9 @@ jobs:
             iniconfig==2.3.0 packaging==26.2 pluggy==1.6.0 Pygments==2.20.0
       - name: Run Security tests
         shell: pwsh
-        timeout-minutes: 3
+        # The suite now drives real worker, guardian and inspection processes
+        # (about 4-5 minutes on a developer machine).
+        timeout-minutes: 12
         run: |
           $env:MONARCH_SECURITY_PYTHON = (Get-Command python).Source
           .\security\scripts\test.ps1
@@ -144,6 +146,15 @@ jobs:
           "MONARCH_RUNTIME_DEPENDENCIES_ROOT=$resolved" >> $env:GITHUB_ENV
       - name: Build installer from clean public snapshot
         shell: pwsh
+        env:
+          # Authenticode signing; see installer/CODE_SIGNING.md. Set the
+          # repository variable MONARCH_SIGN_REQUIRED=1 once a certificate
+          # is provisioned so an unsigned stable release can never ship.
+          MONARCH_SIGN_MODE: ${{ vars.MONARCH_SIGN_MODE || 'none' }}
+          MONARCH_SIGN_REQUIRED: ${{ vars.MONARCH_SIGN_REQUIRED || '0' }}
+          MONARCH_SIGN_TIMESTAMP: ${{ vars.MONARCH_SIGN_TIMESTAMP }}
+          MONARCH_SIGN_CERT_SHA1: ${{ vars.MONARCH_SIGN_CERT_SHA1 }}
+          MONARCH_SIGN_COMMAND: ${{ secrets.MONARCH_SIGN_COMMAND }}
         run: .\installer\build-installer.ps1 -RuntimeDependenciesRoot $env:MONARCH_RUNTIME_DEPENDENCIES_ROOT
       - name: Version installer artifact
         shell: pwsh

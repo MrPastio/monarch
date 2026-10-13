@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { access, cp, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { renameWithWindowsRetry } from '../../core/durable-json-file';
 
 const MAX_BROKER_OUTPUT_BYTES = 64 * 1024;
 const MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
@@ -201,7 +202,7 @@ export class CoderSandboxRunner {
       throw new Error(`Coder sandbox broker compilation failed: ${(result.stderr || result.stdout).trim().slice(0, 2_000)}`);
     }
     await rm(this.binaryPath, { force: true });
-    await rename(temporaryBinary, this.binaryPath);
+    await renameWithWindowsRetry(temporaryBinary, this.binaryPath);
     const acl = await runDirect(this.binaryPath, ['grant-read', this.runtimeRoot], this.runtimeRoot, 60_000, sanitizedProcessEnvironment(this.runtimeRoot, buildTemp));
     if (acl.exitCode !== 0) throw new Error(`Coder sandbox broker ACL initialization failed: ${acl.stderr || acl.stdout}`);
     await writeFile(markerPath, `${JSON.stringify({ sourceHash, sharedAcl: 'all-app-packages-read-v1' })}\n`, 'utf8');
@@ -243,7 +244,7 @@ export class CoderSandboxRunner {
         sharedAcl: 'all-app-packages-read-v1',
       }), 'utf8');
       await rm(targetRoot, { recursive: true, force: true });
-      await rename(temporary, targetRoot);
+      await renameWithWindowsRetry(temporary, targetRoot);
     }
     const relativeExecutable = path.relative(sourceRoot, executable);
     const stagedGit = /\\Git$/i.test(sourceRoot.replace(/\//g, '\\'))

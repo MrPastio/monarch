@@ -2,19 +2,24 @@ param(
   [string]$SourceRoot = "",
   [string]$RuntimeDependenciesRoot = "",
   [string]$OutputDirectory = "",
-  [string]$AppVersion = "0.2.5.0",
-  [string]$RuntimeVersion = "2026.07.7",
-  [string]$BackendEnvironment = "backend-0.1.5-offline8",
+  [string]$AppVersion = "0.3.0.97",
+  [string]$RuntimeVersion = "2026.10.1",
+  [string]$BackendEnvironment = "backend-0.1.6-offline1",
   [int]$DataSchemaVersion = 1,
   [int]$MinimumReadableDataSchema = 1,
   [int]$MaximumReadableDataSchema = 1,
   [int]$MinimumModelCatalogSchema = 1,
   [int]$MaximumModelCatalogSchema = 1,
+  [ValidateSet('fast', 'normal', 'max', 'ultra', 'ultra64')]
+  [string]$CompressionLevel = 'ultra64',
   [switch]$InstallCompiler
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "code-signing.ps1")
+# Resolve signing before the long build so a misconfiguration fails fast.
+$signingConfig = Get-MonarchSigningConfig
 
 $installerRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $installerRoot ".."))
@@ -269,7 +274,18 @@ try {
 
   New-Item -ItemType Directory -Path $output -Force | Out-Null
   $definition = Join-Path $root "installer\Monarch.iss"
+  $signingArguments = @()
+  if ($signingConfig.enabled) {
+    # Inno Setup signs Monarch-Setup.exe and the embedded uninstaller through
+    # sign-file.ps1, which inherits this environment. Inno expands $q to a
+    # quote and $f to the quoted file path; literal quotes would be split by
+    # Windows PowerShell native argument passing.
+    $signScript = Join-Path $PSScriptRoot "sign-file.ps1"
+    $signCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `$q$signScript`$q -Path `$f"
+    $signingArguments = @("/Smonarch=$signCommand", "/DMonarchSigned=1")
+  }
   & $iscc `
+    @signingArguments `
     "/DSourceRoot=$root" `
     "/DOutputDir=$output" `
     "/DAppVersion=$AppVersion" `
@@ -280,6 +296,7 @@ try {
     "/DMaximumReadableDataSchema=$MaximumReadableDataSchema" `
     "/DMinimumModelCatalogSchema=$MinimumModelCatalogSchema" `
     "/DMaximumModelCatalogSchema=$MaximumModelCatalogSchema" `
+    "/DCompressionLevel=$CompressionLevel" `
     $definition
   if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed."
@@ -289,6 +306,7 @@ try {
   if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
     throw "Installer output is missing: $setup"
   }
+  Assert-MonarchSignature -Config $signingConfig -Path $setup
   $hash = Get-Sha256Hex -Path $setup
   Write-Host "Built: $setup"
   Write-Host "SHA256: $hash"

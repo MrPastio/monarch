@@ -11,6 +11,14 @@ export function resolveSafeStorageRoot({ workspaceRoot, qaUserDataRoot = null })
   return path.join(path.parse(path.resolve(workspaceRoot)).root, ...SAFE_STORAGE_SEGMENTS);
 }
 
+export function resolveSafeMainStorageRoot({ workspaceRoot, qaUserDataRoot = null, installedConfigRoot = null, updateDemoMode = false }) {
+  if (qaUserDataRoot) return resolveSafeStorageRoot({ workspaceRoot, qaUserDataRoot });
+  if (!updateDemoMode && installedConfigRoot && path.isAbsolute(installedConfigRoot)) {
+    return path.join(path.resolve(installedConfigRoot), 'Safe', 'safe-v1');
+  }
+  return resolveSafeStorageRoot({ workspaceRoot });
+}
+
 export const SAFE_STORAGE_LAYOUT = Object.freeze({
   dataDirectory: 'MonarchData',
   safeDirectory: 'Safe',

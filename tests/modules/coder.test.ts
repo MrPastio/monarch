@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { MonarchKernel } from '../../src/core';
@@ -49,6 +49,16 @@ describe('Coder Mode', () => {
     }
   });
 
+  it.runIf(process.platform === 'win32')('keeps development sandbox payloads on the source drive instead of a temporary project drive', async () => {
+    const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-runtime-placement-'));
+    try {
+      const module = new CoderModule({ monarchRoot });
+      expect(module.sandbox.runtimeRoot).toBe(path.resolve(path.parse(process.cwd()).root, 'MonarchCoderSandbox'));
+    } finally {
+      await rm(monarchRoot, { recursive: true, force: true });
+    }
+  });
+
   it('creates projects under Workspace Coder and keeps Monarch and OS paths immutable', async () => {
     const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-host-'));
     const module = new CoderModule({ monarchRoot });
@@ -68,6 +78,17 @@ describe('Coder Mode', () => {
       expect(write.output).toMatchObject({ verified: true, sizeBytes: 27 });
       expect((write.output as any).sha256).toMatch(/^[a-f0-9]{64}$/);
       expect(await readFile(path.join(project.root, 'src', 'index.ts'), 'utf8')).toContain('ready');
+      // A long file is written in parts: append adds to the end, never creates.
+      const appended = await execute(module, 'coder.files.write', { projectId: project.id, path: 'src/index.ts',
+        content: 'export const parts = 2;\n', append: true });
+      expect(appended.ok).toBe(true);
+      expect(await readFile(path.join(project.root, 'src', 'index.ts'), 'utf8'))
+        .toBe('export const ready = true;\nexport const parts = 2;\n');
+      const appendMissing = await execute(module, 'coder.files.write', { projectId: project.id, path: 'src/missing.ts',
+        content: 'x', append: true });
+      expect(appendMissing.ok).toBe(false);
+      const replaceRefused = await execute(module, 'coder.files.write', { projectId: project.id, path: 'src/index.ts', content: 'x' });
+      expect(replaceRefused.ok).toBe(false);
       await mkdir(path.join(project.root, '.agents', 'session'), { recursive: true });
       await writeFile(path.join(project.root, '.agents', 'session', 'trace.txt'), 'generated trace', 'utf8');
       const listed = await execute(module, 'coder.files.list', { projectId: project.id, recursive: true });
@@ -202,7 +223,7 @@ describe('Coder Mode', () => {
         executable: 'node',
         args: ['hello.js'],
       });
-      expect(nodeFile.ok).toBe(true);
+      expect(nodeFile.ok, nodeFile.summary).toBe(true);
       expect((nodeFile.output as any).stdout.trim()).toBe('MONARCH_CODER_OK');
       const nodeAbsoluteFile = await execute(module, 'coder.command.run', {
         projectId: project.id,
@@ -492,7 +513,7 @@ describe('Coder Mode', () => {
   });
 
   it.runIf(process.platform === 'win32' && process.env.MONARCH_SKIP_SANDBOXED_GIT_TEST !== '1')('provides a verified first-class Git lifecycle inside AppContainer', async () => {
-    const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-git-'));
+    const monarchRoot = await mkdtemp(path.join(await realpath('.test-tmp'), 'monarch-coder-git-'));
     const module = new CoderModule({ monarchRoot });
     await module.activate(context);
     try {
@@ -662,6 +683,29 @@ describe('Coder Mode', () => {
       await rm(monarchRoot, { recursive: true, force: true });
     }
   });
+
+  it.runIf(process.platform === 'win32')('leaves folders created later beside a project with an ordinary inherited DACL', async () => {
+    // The broker used to write ancestor DACLs without the auto-inherited mark;
+    // every folder created there afterwards got a DACL Windows refuses to change.
+    const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-acl-'));
+    const module = new CoderModule({ monarchRoot });
+    await module.activate(context);
+    try {
+      const project = (await execute(module, 'coder.projects.create', { name: 'Acl' })).output as any;
+      const command = await execute(module, 'coder.command.run', {
+        projectId: project.id, executable: process.execPath, args: ['-e', 'process.stdout.write("ok")'], timeoutMs: 10_000,
+      });
+      expect(command.ok, command.summary).toBe(true);
+      const later = path.join(monarchRoot, 'created-later');
+      await mkdir(later);
+      const { execFileSync } = await import('node:child_process');
+      const canonical = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        `(Get-Acl -LiteralPath '${later.replaceAll("'", "''")}').AreAccessRulesCanonical`], { encoding: 'utf8', windowsHide: true }).trim();
+      expect(canonical).toBe('True');
+    } finally {
+      await rm(monarchRoot, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
 
 async function execute(module: CoderModule, capabilityId: string, input: unknown, control: { signal?: AbortSignal } = {}) {

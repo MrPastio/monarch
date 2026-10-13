@@ -1,0 +1,457 @@
+/* Settings, simplified (2026-09-26): a grouped source list on the left, one
+   calm surface per section on the right, no card inside a card. Uses theme
+   tokens, so both themes follow; the white theme is the reference. */
+
+/* ---------- source list ---------- */
+#settings-section .settings-rail {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+#settings-section .settings-rail .settings-tabs {
+  display: grid;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+#settings-section .settings-tabs-group {
+  margin: 16px 12px 6px;
+  color: var(--ds-ink-3);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+#settings-section .settings-tabs-group:first-child { margin-top: 2px; }
+#settings-section .settings-tabs > button {
+  min-height: 36px;
+  border-radius: 10px;
+  transition: background 160ms var(--ds-ease), box-shadow 200ms var(--ds-ease);
+}
+#settings-section .settings-tabs > button strong { font-size: 13.5px; }
+#settings-section .settings-tabs > button[aria-selected="true"] {
+  background: var(--ds-sheet);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, calc(.08 * var(--theme-shadow-strength, 1))), 0 0 0 1px var(--ds-line);
+}
+#settings-section .settings-tabs > button[aria-selected="true"] strong { color: var(--ds-ink); }
+:root[data-theme="light"] #settings-section .settings-tabs > button[aria-selected="true"] {
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(24, 22, 18, .07), 0 0 0 1px rgba(24, 22, 18, .07);
+}
+
+/* ---------- one surface per section ---------- */
+:root[data-theme="light"] #settings-section .settings-panel-stack > .settings-group{
+  border: 1px solid rgba(24, 22, 18, .08);
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(24, 22, 18, .03), 0 10px 30px rgba(24, 22, 18, .045);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+:root[data-theme="light"] #settings-section .settings-view-header,
+:root[data-theme="light"] #settings-section.is-scrolled .settings-view-header { background: transparent; box-shadow: none; }
+/* Inner blocks sit on the section as fills, not as more cards. */
+:root[data-theme="light"] #settings-section .settings-panel-stack > .settings-group :is(.model-record-card, .max-provider-card, .dev-toggle-card) {
+  background: #fbfbfa;
+  box-shadow: none;
+}
+
+/* ---------- appearance (Система) ---------- */
+.settings-appearance-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 220px)); gap: 12px; margin-top: 4px; }
+@media (max-width: 760px) { .settings-appearance-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.settings-theme-card {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  padding: 10px 10px 12px;
+  border: 1px solid var(--ds-line);
+  border-radius: 16px;
+  color: var(--ds-ink);
+  background: var(--ds-sheet);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 200ms var(--ds-ease), box-shadow 200ms var(--ds-ease), transform 220ms cubic-bezier(.16, 1, .3, 1);
+}
+.settings-theme-card:hover { transform: translateY(-1px); }
+.settings-theme-card[aria-checked="true"] { border-color: #f28a1e; box-shadow: 0 0 0 4px rgba(242, 138, 30, .15); }
+.settings-theme-card strong { padding: 0 4px; font-size: 14px; }
+.settings-theme-card .setup-theme-preview { border-radius: 10px; }
+.settings-appearance-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--ds-line); }
+.settings-appearance-row > span { display: grid; gap: 2px; }
+.settings-appearance-row small { color: var(--ds-ink-3); font-size: 12.5px; }
+
+/* The mini window reused from first setup, outside its scope. */
+.settings-theme-card .setup-theme-preview { position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid var(--ds-line); background: var(--p-bg); }
+.settings-theme-card .setup-theme-preview[data-preview="light"] { --p-bg: #ffffff; --p-side: #f6f5f2; --p-line: #e7e4de; --p-bubble: #f3f1ec; --p-mine: #ffe7c2; --p-ink: #d9d5ce; }
+.settings-theme-card .setup-theme-preview[data-preview="dark"] { --p-bg: #121210; --p-side: #1a1917; --p-line: #2b2a27; --p-bubble: #22211e; --p-mine: #4a3312; --p-ink: #3a3834; }
+.settings-theme-card .setup-theme-preview i { position: absolute; inset: 0 auto 0 0; width: 26%; background: var(--p-side); border-right: 1px solid var(--p-line); }
+.settings-theme-card .setup-theme-preview b { position: absolute; left: 6%; width: 13%; height: 6%; border-radius: 99px; background: var(--p-ink); }
+.settings-theme-card .setup-theme-preview b:nth-of-type(1) { top: 16%; }
+.settings-theme-card .setup-theme-preview b:nth-of-type(2) { top: 28%; width: 10%; }
+.settings-theme-card .setup-theme-preview em { position: absolute; height: 14%; border-radius: 7px; }
+.settings-theme-card .setup-theme-preview em:nth-of-type(1) { top: 18%; right: 8%; width: 34%; background: var(--p-mine); }
+.settings-theme-card .setup-theme-preview em:nth-of-type(2) { top: 40%; left: 33%; width: 46%; background: var(--p-bubble); }
+.settings-theme-card .setup-theme-preview u { position: absolute; left: 34%; right: 8%; bottom: 10%; height: 15%; border: 1px solid var(--p-line); border-radius: 8px; background: var(--p-bg); }
+
+/* ---------- MAX: fallback switch and quieter provider cards ---------- */
+.max-fallback-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin: 18px 0 6px;
+  padding: 14px 16px;
+  border: 1px solid var(--ds-line);
+  border-radius: 16px;
+  background: var(--ds-fill-1);
+  cursor: pointer;
+}
+.max-fallback-card > svg { width: 30px; height: 30px; fill: none; stroke: var(--ds-accent-ink); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.max-fallback-card > span { display: grid; gap: 3px; }
+.max-fallback-card strong { font-size: 14px; }
+.max-fallback-card small { color: var(--ds-ink-3); font-size: 12.5px; line-height: 1.45; }
+.max-fallback-card input { position: absolute; opacity: 0; pointer-events: none; }
+.max-fallback-card .ds-switch { position: relative; display: block; width: 42px; height: 26px; border-radius: 99px; background: var(--ds-fill-3); box-shadow: 0 0 0 1px var(--ds-line) inset; transition: background 200ms var(--ds-ease); }
+.max-fallback-card .ds-switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .22); transition: transform 260ms cubic-bezier(.16, 1, .3, 1); }
+.max-fallback-card input:checked + .ds-switch { background: #f28a1e; }
+.max-fallback-card input:checked + .ds-switch::after { transform: translateX(16px); }
+.max-fallback-card:has(input:focus-visible) .ds-switch { outline: 2px solid var(--ds-focus); outline-offset: 2px; }
+.max-fallback-card:has(input:disabled) { opacity: .6; cursor: default; }
+
+.max-limits-card { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; gap: 12px 16px; margin: 0 0 10px; padding: 14px 16px; border: 1px solid var(--ds-line); border-radius: 16px; background: var(--ds-fill-1); }
+.max-limits-card > div { display: grid; gap: 3px; grid-column: 1 / -1; }
+.max-limits-card strong { font-size: 14px; }
+.max-limits-card small { color: var(--ds-ink-3); font-size: 12.5px; line-height: 1.45; }
+.max-limits-card label { display: grid; gap: 4px; font-size: 12px; color: var(--ds-ink-3); }
+.max-limits-card select { width: 100%; padding: 8px 10px; border: 1px solid var(--ds-line); border-radius: 10px; background: var(--ds-fill-2, transparent); color: var(--ds-ink-1, inherit); font: inherit; font-size: 13px; }
+.max-limits-card select:focus-visible { outline: 2px solid var(--ds-focus); outline-offset: 2px; }
+
+/* MAX connection: pick a service, then key and consent on one screen. */
+.max-connection-dialog .max-pick-step > p { margin: 0 0 18px; font-size: 13px; line-height: 1.6; color: var(--ds-ink-3); }
+.max-pick-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.max-pick-choice { display: grid; justify-items: center; gap: 8px; padding: 14px 8px; border: 1px solid var(--ds-line); border-radius: 14px; background: var(--ds-fill-1); color: inherit; font: inherit; cursor: pointer; transition: border-color 180ms var(--ds-ease), transform 220ms cubic-bezier(.16, 1, .3, 1); }
+.max-pick-choice:hover { border-color: var(--ds-accent-ink); transform: translateY(-2px); }
+.max-pick-choice:focus-visible { outline: 2px solid var(--ds-focus); outline-offset: 2px; }
+.max-pick-choice strong { font-size: 12.5px; font-weight: 600; text-align: center; }
+.max-pick-choice .max-provider-mark { display: grid; place-items: center; width: 34px; height: 34px; }
+.max-connection-dialog .astra-max-checks label.ds-confirm { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: start; gap: 10px; margin: 8px 0; padding: 10px 12px; font-size: 12px; line-height: 1.5; }
+.max-connection-dialog .astra-max-checks .ds-check { width: 20px; height: 20px; }
+.max-connection-dialog .astra-max-checks legend { margin-bottom: 8px; font-size: 14px; }
+.max-connection-dialog .max-key-step > p:first-child { margin-bottom: 14px; }
+.max-connection-dialog .max-cost-note { margin: 10px 0 0; }
+.max-connection-dialog .max-editor-actions { display: flex; gap: 10px; margin-top: 14px; }
+.max-connection-dialog .max-editor-actions .claude-primary-btn { flex: 1; }
+.max-connection-dialog .astra-max-checks { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--ds-line); }
+@media (max-width: 540px) { .max-pick-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (prefers-reduced-motion: reduce) { .max-pick-choice { transition-duration: 1ms; } }
+
+.max-provider-more { position: relative; }
+.max-provider-more > summary {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--ds-line);
+  border-radius: 10px;
+  color: var(--ds-ink-2);
+  background: transparent;
+  cursor: pointer;
+  list-style: none;
+  font-size: 16px;
+  line-height: 1;
+}
+.max-provider-more > summary::-webkit-details-marker { display: none; }
+.max-provider-more > summary:hover, .max-provider-more[open] > summary { color: var(--ds-ink); background: var(--ds-fill-2); }
+.max-provider-more > div {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 5;
+  display: grid;
+  min-width: 190px;
+  padding: 6px;
+  border: 1px solid var(--ds-line);
+  border-radius: 12px;
+  background: var(--ds-sheet);
+  box-shadow: var(--ds-shadow-menu);
+  transform-origin: top right;
+  animation: settingsMenuIn 200ms cubic-bezier(.16, 1, .3, 1);
+}
+.max-provider-more > div > button { justify-content: flex-start; width: 100%; min-height: 34px; border: 0; background: transparent; box-shadow: none; }
+.max-provider-more > div > button:hover { background: var(--ds-fill-2); }
+@keyframes settingsMenuIn { from { opacity: 0; transform: translateY(-4px) scale(.97); } }
+
+/* ---------- custom models ---------- */
+.models-summary-strip { display: none; }
+.custom-models { display: grid; gap: 12px; margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--ds-line); }
+.custom-models-head h4 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
+.custom-models-head p { margin: 4px 0 0; color: var(--ds-ink-3); font-size: 13px; line-height: 1.5; }
+.custom-drop {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+  border: 1.5px dashed var(--ds-line-2);
+  border-radius: 18px;
+  background: var(--ds-fill-1);
+  transition: border-color 200ms var(--ds-ease), background 200ms var(--ds-ease), transform 240ms cubic-bezier(.16, 1, .3, 1);
+}
+.custom-drop[data-dragging="true"] { border-color: #f28a1e; background: rgba(242, 138, 30, .07); transform: scale(1.01); }
+.custom-drop-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 14px; background: rgba(242, 138, 30, .1); }
+.custom-drop-icon svg { width: 22px; height: 22px; fill: none; stroke: var(--ds-accent-ink); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform 240ms cubic-bezier(.16, 1, .3, 1); }
+.custom-drop[data-dragging="true"] .custom-drop-icon svg { transform: translateY(-3px); }
+.custom-drop-copy { display: grid; gap: 3px; min-width: 0; }
+.custom-drop-copy strong { font-size: 14.5px; }
+.custom-drop-copy small { color: var(--ds-ink-3); font-size: 12.5px; }
+.custom-drop-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.custom-hub { display: grid; gap: 8px; overflow: hidden; padding: 16px; border: 1px solid var(--ds-line); border-radius: 18px; background: var(--ds-sheet); }
+.custom-hub-label { font-size: 13px; font-weight: 600; }
+.custom-hub-row { display: flex; gap: 8px; }
+.custom-hub-row input { flex: 1 1 auto; min-width: 0; height: 40px; padding: 0 12px; border: 1px solid var(--ds-line-2); border-radius: 11px; color: var(--ds-ink); background: var(--ds-field); font: 14px/1 var(--font); }
+.custom-hub-row input:focus { border-color: #f28a1e; outline: none; box-shadow: 0 0 0 4px rgba(242, 138, 30, .13); }
+.custom-hub-hint { margin: 0; color: var(--ds-ink-3); font-size: 12.5px; line-height: 1.45; }
+.custom-hub-files { display: flex; flex-wrap: wrap; gap: 8px; overflow: hidden; padding: 2px 0; }
+.custom-hub-file {
+  position: relative;
+  display: grid;
+  gap: 2px;
+  min-width: 108px;
+  padding: 9px 12px;
+  border: 1px solid var(--ds-line);
+  border-radius: 12px;
+  color: var(--ds-ink);
+  background: var(--ds-sheet);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 180ms var(--ds-ease), box-shadow 180ms var(--ds-ease);
+}
+.custom-hub-file strong { font: 650 14px/1.2 var(--font); }
+.custom-hub-file small { color: var(--ds-ink-3); font-size: 12px; }
+.custom-hub-file em { color: var(--ds-accent-ink); font-size: 11px; font-style: normal; font-weight: 650; }
+.custom-hub-file[aria-checked="true"] { border-color: #f28a1e; box-shadow: 0 0 0 3px rgba(242, 138, 30, .15); }
+.custom-hub-final { display: grid; gap: 8px; overflow: hidden; }
+.custom-models-feedback { min-height: 0; margin: 0; color: var(--ds-ink-2); font-size: 13px; }
+.custom-models-feedback:empty { display: none; }
+.custom-models-list { display: grid; gap: 8px; }
+.custom-models-list:empty { display: none; }
+.custom-model {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 12px 12px 14px;
+  border: 1px solid var(--ds-line);
+  border-radius: 16px;
+  background: var(--ds-sheet);
+}
+.custom-model-mark { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 11px; color: var(--ds-accent-ink); background: rgba(242, 138, 30, .1); font-weight: 700; }
+.custom-model-copy { display: grid; gap: 3px; min-width: 0; }
+.custom-model-copy strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.custom-model-copy small { color: var(--ds-ink-3); font-size: 12.5px; }
+.custom-model[data-status="failed"] .custom-model-copy small,
+.custom-model[data-status="missing"] .custom-model-copy small { color: var(--ds-danger-ink); }
+.custom-model-bar { position: relative; display: block; height: 5px; margin-top: 3px; overflow: hidden; border-radius: 99px; background: var(--ds-fill-2); }
+.custom-model-bar i { position: absolute; inset: 0; border-radius: inherit; background: linear-gradient(90deg, #ffc02e, #f28a1e); transform-origin: left; transform: scaleX(var(--progress, 0)); transition: transform 600ms var(--ds-ease); }
+.custom-model-actions { display: flex; align-items: center; gap: 6px; }
+.custom-models-note { margin: 0; color: var(--ds-ink-3); font-size: 12.5px; }
+
+/* The chat model menu: owner models under the Monarch scale. */
+
+/* ---------- MAX → local fallback note in the answer ---------- */
+.oscar-max-fallback-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 5px 10px;
+  border-radius: 99px;
+  color: var(--ds-ink-2);
+  background: var(--ds-fill-2);
+  font-size: 12px;
+}
+.oscar-max-fallback-note svg { width: 14px; height: 14px; fill: none; stroke: var(--ds-accent-ink); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+@media (max-width: 760px) {
+  .custom-drop { grid-template-columns: auto minmax(0, 1fr); }
+  .custom-drop-actions { grid-column: 1 / -1; }
+  .custom-model { grid-template-columns: auto minmax(0, 1fr); }
+  .custom-model-actions { grid-column: 1 / -1; justify-content: flex-end; }
+  .settings-appearance-grid { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :is(.custom-drop, .custom-drop-icon svg, .custom-model-bar i, .settings-theme-card, .max-fallback-card .ds-switch, .max-fallback-card .ds-switch::after) { transition-duration: 1ms !important; }
+  .max-provider-more > div { animation: none; }
+}
+html[data-motion="reduced"] :is(.custom-drop, .custom-drop-icon svg, .custom-model-bar i, .settings-theme-card, .max-fallback-card .ds-switch, .max-fallback-card .ds-switch::after) { transition-duration: 1ms !important; }
+html[data-motion="reduced"] .max-provider-more > div { animation: none; }
+
+/* ---------- quieter MAX and model sections ---------- */
+:root[data-theme="light"] #settings-section .max-settings-panel {
+  background: #ffffff !important;
+  border-color: rgba(24, 22, 18, .08) !important;
+  box-shadow: 0 1px 2px rgba(24, 22, 18, .03), 0 10px 30px rgba(24, 22, 18, .045);
+}
+:root[data-theme="light"] #settings-section .max-journey { border-color: rgba(24, 22, 18, .06); background: #fbfbfa; }
+#settings-section .models-settings-panel .settings-group-heading .settings-save-state { display: none; }
+/* Models: one flat list on the section — hairline rows, not cards in a card.
+   Status and the one action sit on the right; the memory bar spans the row. */
+#settings-section .models-page-content .models-card-grid { gap: 0; }
+#settings-section .models-page-content .model-record-card,
+:root[data-theme] #settings-section .settings-panel-stack > .settings-group .models-page-content .model-record-card {
+  gap: 10px 16px; min-height: 0; padding: 16px 2px; border: 0; border-radius: 0;
+  border-top: 1px solid var(--ds-line); background: transparent; box-shadow: none;
+}
+#settings-section .models-page-content .model-record-card:first-child { border-top: 0; padding-top: 4px; }
+#settings-section .model-record-card h3 { margin: 4px 0 0; font-size: 16px; }
+#settings-section .model-record-card .model-role-description { margin-top: 3px; max-width: 60ch; }
+#settings-section .model-record-card > header { align-items: center; }
+#settings-section .model-record-side { display: flex; flex: none; gap: 10px; align-items: center; }
+#settings-section .model-record-side .model-install-action { width: auto; min-height: 32px; padding: 0 16px; }
+#settings-section .model-record-card .model-ram-fit { max-width: 520px; }
+/* Feature downloads (Coder, speech, memory) follow the chat tiers as a second list. */
+#settings-section .models-extras { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--ds-line); }
+#settings-section .models-extras-heading { display: grid; gap: 3px; margin-bottom: 6px; }
+#settings-section .models-extras-heading h3 { margin: 0; font-size: 15px; font-weight: 600; }
+#settings-section .models-extras-heading p { margin: 0; color: var(--ds-text-muted, var(--muted)); font-size: 13px; }
+#settings-section .model-extra-actions { display: flex; justify-content: flex-start; margin-top: 2px; }
+#settings-section .model-extra-actions .model-install-action { width: auto; min-height: 32px; padding: 0 16px; }
+.custom-hub-files[data-compact="true"] .custom-hub-file { min-width: 150px; }
+.custom-hub-file small { font-variant-numeric: tabular-nums; }
+.custom-hub-more { align-self: center; padding: 8px 6px; border: 0; color: var(--ds-accent-ink); background: none; font: 600 13px/1 var(--font); cursor: pointer; }
+.custom-hub-more:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+/* A consent line with links is one sentence, not a grid of fragments. */
+label.ds-confirm > span:not(.ds-check):has(> a) { display: block; }
+
+/* Telegram: the settings panel is the only card. Items inside are
+   one quiet fill without a frame; nested sections are separated by a hairline. */
+#settings-section #telegram-v2-settings :is(.tg-welcome, .tg-feature, .tg-receipt, .tg-callout),
+#settings-section :is(.telegram-bot-copy, .telegram-code-panel) {
+  border-color: transparent;
+  background: var(--ds-fill-1);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+#settings-section #telegram-v2-settings .tg-feature:hover { border-color: transparent; background: var(--ds-fill-2); }
+#settings-section .personality-preview {
+  margin-top: 6px;
+  padding: 16px 0 0;
+  border: 0;
+  border-top: 1px solid var(--ds-line);
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+#settings-section .personality-preview-output { border-color: transparent; background: var(--ds-fill-1); }
+
+/* Auto theme: the whole mini window twice, dark half clipped on the diagonal. */
+.settings-theme-card .setup-theme-preview[data-preview="auto"] > .setup-theme-preview { position: absolute; inset: 0; border: 0; border-radius: 0; aspect-ratio: auto; }
+.settings-theme-card .setup-theme-preview[data-preview="auto"] > [data-preview="dark"] { clip-path: polygon(100% 0, 100% 100%, 0 100%); }
+/* When Auto switches: Windows or the clock. Opens from under the cards. */
+.settings-auto-theme { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-width: 684px; margin-top: 12px; transform-origin: top center; animation: settingsAutoThemeIn 240ms cubic-bezier(.16, 1, .3, 1); }
+.settings-auto-theme[hidden] { display: none; }
+.settings-auto-theme-option { display: grid; gap: 2px; padding: 10px 14px; border: 1px solid var(--ds-line); border-radius: 12px; color: var(--ds-ink); background: var(--ds-sheet); font: inherit; text-align: left; cursor: pointer; transition: border-color 200ms var(--ds-ease), box-shadow 200ms var(--ds-ease); }
+.settings-auto-theme-option strong { font-size: 13.5px; }
+.settings-auto-theme-option small { color: var(--ds-ink-3); font-size: 12px; }
+.settings-auto-theme-option[aria-checked="true"] { border-color: #f28a1e; box-shadow: 0 0 0 3px rgba(242, 138, 30, .14); }
+@keyframes settingsAutoThemeIn { from { opacity: 0; transform: translateY(-6px) scaleY(.96); } }
+@media (prefers-reduced-motion: reduce) { .settings-auto-theme { animation: none; } }
+:root[data-motion="reduced"] .settings-auto-theme { animation: none; }
+@media (max-width: 620px) { .settings-auto-theme { grid-template-columns: 1fr; } }
+
+/* Interface language: one segmented choice, names in their own language. */
+:is(.ui-language-picker, .style-segment) { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px; border: 1px solid var(--ds-line); border-radius: 14px; background: var(--ds-sheet); }
+:is(.ui-language-option, .style-segment > [role="radio"]) { min-height: 32px; padding: 6px 12px; border: 1px solid transparent; border-radius: 10px; color: var(--ds-ink-2, var(--ds-ink)); background: transparent; font: inherit; font-size: 13px; cursor: pointer; transition: color 180ms var(--ds-ease), background-color 180ms var(--ds-ease), border-color 180ms var(--ds-ease), box-shadow 180ms var(--ds-ease); }
+:is(.ui-language-option, .style-segment > [role="radio"]):hover { color: var(--ds-ink); }
+:is(.ui-language-option, .style-segment > [role="radio"])[aria-checked="true"] { color: var(--ds-ink); border-color: #f28a1e; box-shadow: 0 0 0 3px rgba(242, 138, 30, .14); }
+:is(.ui-language-option, .style-segment > [role="radio"]):focus-visible { outline: 2px solid #f28a1e; outline-offset: 2px; }
+
+/* Answer style: one row per choice, the label on the left and three positions on the right.
+   While the own style is off the choices stay editable but read as inactive. */
+:is(#style-settings, #voice-settings) .style-master-toggle { margin: 4px 0 14px; }
+:is(#style-settings, #voice-settings) .style-form { display: grid; gap: 0; }
+:is(#style-settings, #voice-settings) .style-choices { display: grid; gap: 0; transition: opacity 200ms var(--ds-ease); }
+:is(#style-settings, #voice-settings) .style-choices[data-enabled="false"] { opacity: .58; }
+:is(#style-settings, #voice-settings) .style-choice { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 10px 2px; border-top: 1px solid var(--ds-line); }
+:is(#style-settings, #voice-settings) .style-choice:first-child { border-top: 0; }
+:is(#style-settings, #voice-settings) .style-choice-label { color: var(--ds-ink); font-size: 14px; font-weight: 550; }
+:is(#style-settings, #voice-settings) .style-segment > [role="radio"] { min-width: 84px; }
+:is(#style-settings, #voice-settings) .style-language select { min-width: 200px; }
+:is(#style-settings, #voice-settings) .style-more { border-top: 1px solid var(--ds-line); }
+:is(#style-settings, #voice-settings) .style-more > summary { padding: 12px 2px; color: var(--ds-ink-2, var(--ds-ink)); font-size: 13.5px; cursor: pointer; }
+:is(#style-settings, #voice-settings) .style-more > summary:hover { color: var(--ds-ink); }
+:is(#style-settings, #voice-settings) .style-more[open] > summary { padding-bottom: 4px; }
+:is(#style-settings, #voice-settings) .style-rules-field { margin-top: 12px; }
+:is(#style-settings, #voice-settings) .style-preview { margin-top: 16px; }
+@media (max-width: 620px) {
+  :is(#style-settings, #voice-settings) .style-choice { align-items: stretch; flex-direction: column; }
+  :is(#style-settings, #voice-settings) .style-segment { display: flex; }
+  :is(#style-settings, #voice-settings) .style-segment > [role="radio"] { flex: 1; min-width: 0; }
+}
+@media (prefers-reduced-motion: reduce) { :is(#style-settings, #voice-settings) .style-choices { transition: none; } }
+:root[data-motion="reduced"] :is(#style-settings, #voice-settings) .style-choices { transition: none; }
+.setup-language { margin: 22px auto 0; }
+.setup-step--hello .setup-language { display: flex; width: fit-content; }
+@media (prefers-reduced-motion: reduce) { .ui-language-option { transition: none; } }
+:root[data-motion="reduced"] .ui-language-option { transition: none; }
+
+/* One-time early-alpha note on voice mode, Coder and Sharing. */
+.early-access-note { position: relative; z-index: 5; display: flex; align-items: center; gap: 14px; width: min(560px, calc(100% - 32px)); margin: 14px auto 0; padding: 12px 12px 12px 16px; border: 1px solid rgba(242, 138, 30, .28); border-radius: 14px; color: var(--ds-ink); background: color-mix(in srgb, var(--ds-sheet) 88%, transparent); box-shadow: 0 10px 30px rgba(0, 0, 0, .12); backdrop-filter: blur(16px) saturate(1.2); }
+.early-access-note--overlay { position: absolute; top: 18px; left: 50%; z-index: 60; margin: 0; transform: translate(-50%, 0); }
+.early-access-note > span { display: grid; flex: 1; gap: 2px; min-width: 0; }
+.early-access-note strong { font-size: 13.5px; font-weight: 650; }
+.early-access-note small { color: var(--ds-ink-2, var(--ds-ink)); font-size: 12.5px; line-height: 1.4; }
+.early-access-note button { flex: none; padding: 6px 12px; border: 1px solid var(--ds-line-2, var(--ds-line)); border-radius: 10px; color: var(--ds-ink); background: transparent; font: inherit; font-size: 12.5px; cursor: pointer; transition: border-color 160ms ease; }
+.early-access-note button:hover { border-color: #f28a1e; }
+.early-access-note button:focus-visible { outline: 2px solid #f28a1e; outline-offset: 2px; }
+
+/* Monarch Security: development note, until acknowledged once. */
+
+
+
+/* Services: the tab row is drawn only by designs that show one service at a time. */
+.service-switcher { display: none; }
+
+/* Voice → Слушать: whether speech recognition is installed, with the download in place. */
+#settings-section .voice-recognition-state { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin-bottom: 10px; padding: 12px 14px; border: 1px solid var(--ds-line); border-radius: 14px; background: var(--ds-fill-1); }
+#settings-section .voice-recognition-state[hidden] { display: none; }
+#settings-section .voice-recognition-state[data-ready="false"] { border-color: rgba(242, 138, 30, .38); }
+#settings-section .voice-recognition-state > span, #settings-section .voice-recognition-state { line-height: 1.4; }
+#settings-section .voice-recognition-state strong { display: block; color: var(--ds-ink); font-size: 14px; font-weight: 600; }
+#settings-section .voice-recognition-state small { display: block; color: var(--ds-ink-2, var(--ds-ink)); font-size: 12.5px; }
+#settings-section .voice-recognition-state button { width: auto; min-height: 32px; padding: 0 16px; }
+
+/* Voice: the same rows as the answer style. The voice is one segmented choice
+   with «Послушать» beside it; tuning, presets, stress rules and info cards fold away. */
+#voice-settings .voice-runtime-line { margin: 0 0 10px; }
+#voice-settings .voice-runtime-line span { display: inline-flex; align-items: center; gap: 8px; color: var(--ds-ink-2, var(--ds-ink)); font-size: 13px; }
+#voice-settings .voice-runtime-line span::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: #f28a1e; }
+#voice-settings .voice-runtime-line .is-unavailable::before { background: var(--ds-line); box-shadow: inset 0 0 0 1.5px var(--ds-ink-2, var(--ds-ink)); }
+#voice-settings .voice-choice-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#voice-settings .voice-listen { width: auto; min-height: 34px; padding: 0 14px; }
+#settings-section #voice-settings .voice-recognition-state { margin: 0; padding: 12px 2px; border: 0; border-top: 1px solid var(--ds-line); border-radius: 0; background: transparent; }
+#settings-section #voice-settings .voice-recognition-state[data-ready="false"] { border-color: var(--ds-line); }
+:is(#style-settings, #voice-settings) .style-language { flex-wrap: nowrap; }
+#settings-section :is(#style-settings, #voice-settings) .style-language :is(select, .max-model-trigger) { flex: 0 0 260px; width: 260px; max-width: 100%; min-width: 0; }
+#voice-settings .voice-switch { margin: 0; padding: 12px 2px; border-top: 1px solid var(--ds-line); border-radius: 0; background: transparent; }
+#voice-settings .voice-switch small em { font-style: normal; color: var(--ds-ink-2, var(--ds-ink)); }
+#voice-settings .style-more > :not(summary) { margin-bottom: 14px; }
+#voice-settings .voice-tuning { display: grid; gap: 12px; }
+#voice-settings .voice-slider-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 18px; }
+#voice-settings .voice-slider { display: grid; gap: 6px; }
+#voice-settings .voice-slider > span { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+#voice-settings .voice-slider small { color: var(--ds-ink-2, var(--ds-ink)); font-size: 12px; }
+#voice-settings .voice-reset { justify-self: start; width: auto; min-height: 32px; padding: 0 14px; }
+#voice-settings .voice-preset-save { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+#voice-settings .voice-preset-save input { flex: 1 1 200px; min-height: 36px; }
+#voice-settings .voice-preset-save button { width: auto; min-height: 36px; padding: 0 16px; }
+@media (max-width: 620px) {
+  #voice-settings .voice-choice-controls { align-items: stretch; flex-direction: column; }
+}

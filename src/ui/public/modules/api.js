@@ -113,6 +113,81 @@ export async function fetchImageProviderAgreement() {
   return payload?.agreement;
 }
 
+export async function saveModelPreference(patch) {
+  return jsonMutation('/api/model-preference', 'POST', patch);
+}
+
+export async function listCustomModels() {
+  const response = await fetch('/api/models/custom', { headers: apiHeaders() });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) throw createMonarchHttpError(response.status, payload);
+  return payload;
+}
+
+export async function addCustomModelFile(input) {
+  return jsonMutation('/api/models/custom/file', 'POST', input);
+}
+
+export async function inspectCustomModelHub(link) {
+  return jsonMutation('/api/models/custom/hub/inspect', 'POST', { link });
+}
+
+export async function downloadCustomModel(input) {
+  return jsonMutation('/api/models/custom/hub/download', 'POST', input);
+}
+
+export async function removeCustomModel(id) {
+  return jsonMutation('/api/models/custom/' + encodeURIComponent(String(id || '')), 'DELETE');
+}
+
+export async function renameCustomModel(id, label) {
+  return jsonMutation('/api/models/custom/' + encodeURIComponent(String(id || '')) + '/rename', 'POST', { label });
+}
+
+/** Monarch Security policy center. */
+export async function fetchSecurityPolicy() {
+  const response = await fetch('/api/security/policy', { headers: apiHeaders() });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) throw createMonarchHttpError(response.status, payload);
+  return payload;
+}
+
+/** Weakening without `confirmWeakening` comes back as 409, code
+ * security-policy-weakening-unconfirmed: the caller asks the person first. */
+export async function saveSecurityPolicy(control, level, confirmWeakening = false) {
+  return jsonMutation('/api/security/policy', 'POST', { control, level, ...(confirmWeakening ? { confirmWeakening: true } : {}) });
+}
+
+async function jsonMutation(url, method, body) {
+  const response = await fetch(url, {
+    method,
+    headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) throw createMonarchHttpError(response.status, payload);
+  return payload;
+}
+
+export async function fetchMaxMemoryConsent(providerId) {
+  const response = await fetch('/api/max/memory-consent?provider=' + encodeURIComponent(String(providerId || '')), { headers: apiHeaders() });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) throw createMonarchHttpError(response.status, payload);
+  return payload;
+}
+
+export async function decideMaxMemoryConsent(input) {
+  const response = await fetch('/api/max/memory-consent', {
+    method: 'POST',
+    headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ providerId: input.providerId, decision: input.decision,
+      ...(input.decision === 'granted' ? { confirmed: input.confirmed === true, version: input.version } : {}) }),
+  });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) throw createMonarchHttpError(response.status, payload);
+  return payload;
+}
+
 export async function translateImagePrompt(text) {
   const response = await fetch('/api/images/prompt/translate', {
     method: 'POST',
@@ -276,6 +351,26 @@ export async function writeLocalSettings(command, payload, options = {}) {
   return { receipt, context };
 }
 
+export async function controlTelegram(action) {
+  const response = await fetch('/api/telegram/control', {
+    method: 'POST',
+    headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ schemaVersion: 1, action }),
+  });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) throw createMonarchHttpError(response.status, payload);
+  return payload?.result || payload;
+}
+
+export async function controlTelegramV2(input) {
+  const response = await fetch('/api/telegram/v2', {
+    method: 'POST', headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(input),
+  });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) throw createMonarchHttpError(response.status, payload);
+  return payload.result;
+}
+
 export async function previewPersonality(scope = { type: 'chat' }) {
   const response = await fetch('/api/settings/personality/preview', {
     method: 'POST',
@@ -302,6 +397,9 @@ export async function fetchOscarRequestDisposition(text, history = [], options =
     body: JSON.stringify({
       text: String(text || '').trim(),
       ...(boundedHistory.length ? { history: boundedHistory } : {}),
+      ...(options.conversationId ? { conversationId: String(options.conversationId) } : {}),
+      ...(options.webAllowed === true ? { webAllowed: true } : {}),
+      ...(options.webAllowed === true && options.requestedModel ? { requestedModel: String(options.requestedModel) } : {}),
     }),
   });
   const payload = await readOptionalJson(response);
@@ -390,6 +488,57 @@ export async function createOscarTurn(input, options = {}) {
   });
 }
 
+// Explicit isolated Astra transport. Never use the ordinary text-normalizing
+// submission or generic /messages approval path for these immutable bindings.
+export function createOscarAstraTurn(request, options = {}) {
+  return oscarTurnRequest('/api/oscar/turns', {
+    method: 'POST', body: request, ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+export function fetchAstraAvailability() {
+  return oscarTurnRequest('/api/astra/v3/availability', { method: 'GET' });
+}
+
+export function fetchOscarAstraSelections(conversationId, options = {}) {
+  return oscarTurnRequest('/api/oscar/astra/selections?' + new URLSearchParams({ conversationId }), options);
+}
+
+// Read-only detail projection. No scheduler wake, target discovery or new capture.
+export function fetchAstraComputerObservation(turn, options = {}) {
+  return oscarTurnRequest(`/api/astra/v3/computer-observe-tasks/${encodeURIComponent(turn.taskId)}?`
+    + new URLSearchParams({ conversationId: turn.conversationId, inputMessageId: turn.inputMessageId }), options);
+}
+
+export function revokeOscarAstraSelection(selectionId, conversationId, options = {}) {
+  return oscarTurnRequest(`/api/oscar/astra/selections/${encodeURIComponent(selectionId)}/revoke`, {
+    method: 'POST', body: { version: 1, conversationId }, ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+export function sendOscarAstraInput(turn, input, options = {}) {
+  return oscarTurnRequest(`/api/oscar/turns/${encodeURIComponent(turn.id)}/astra-input`, {
+    method: 'POST', body: { version: 1, conversationId: turn.conversationId, inputMessageId: turn.inputMessageId, input },
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+export function controlOscarAstraTurn(turn, command, options = {}) {
+  if (!['pause', 'resume', 'cancel'].includes(command)) throw new Error('Неизвестное действие Astra.');
+  return oscarTurnRequest(`/api/oscar/turns/${encodeURIComponent(turn.id)}/${command}`, {
+    method: 'POST', body: command === 'cancel' ? { version: 1 }
+      : { version: 1, conversationId: turn.conversationId, inputMessageId: turn.inputMessageId },
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+export function recoverOscarAstraTurn(turn, requestId, options = {}) {
+  return oscarTurnRequest(`/api/oscar/turns/${encodeURIComponent(turn.id)}/astra-recover`, {
+    method: 'POST', body: { version: 1, conversationId: turn.conversationId, inputMessageId: turn.inputMessageId, requestId },
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
 export function createOscarIncognitoConversation(options = {}) {
   return oscarTurnRequest('/api/oscar/incognito-conversations', {
     method: 'POST',
@@ -429,6 +578,7 @@ export function cancelOscarTurnSubmission(clientRequestId, options = {}) {
       version: 1,
       clientRequestId: String(clientRequestId || '').trim(),
       privacyMode: options.privacyMode || 'persistent',
+      ...(options.astra === true ? { astra: true } : {}),
       ...(options.surface === 'voice' ? { surface: 'voice' } : {}),
     },
     ...(options.signal ? { signal: options.signal } : {}),
@@ -577,8 +727,39 @@ export async function fetchCoderProject(projectId) {
   return coderRequest(`/api/coder/projects/${encodeURIComponent(projectId)}`);
 }
 
-export async function startCoderRun(prompt, projectId, model) {
-  return coderRequest('/api/coder/runs', { method: 'POST', body: { prompt, projectId, model } });
+export async function startCoderRun(prompt, projectId, model, clientRequestId, sessionId) {
+  return coderRequest('/api/coder/runs', { method: 'POST',
+    body: { prompt, projectId, model, clientRequestId, ...(sessionId ? { sessionId } : {}) } });
+}
+
+export async function fetchCoderChanges(projectId) {
+  return coderRequest(`/api/coder/projects/${encodeURIComponent(projectId)}/changes`);
+}
+
+/** Live snapshots of one run. Ends when the run settles or the signal aborts. */
+export async function* streamCoderRun(runId, options = {}) {
+  const response = await fetch(`/api/coder/runs/${encodeURIComponent(runId)}/stream`, {
+    headers: apiHeaders({ Accept: 'text/event-stream' }),
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(formatMonarchHttpError(response.status, await readOptionalJson(response)));
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      const drained = drainSseBuffer(buffer, done);
+      buffer = drained.buffer;
+      for (const event of drained.events) if (event.type === 'run' && event.data?.run) yield event.data.run;
+      if (done) return;
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 export async function fetchCoderRun(runId) {
@@ -598,6 +779,13 @@ export async function resumeCoderRun(runId) {
   return coderRequest(`/api/coder/runs/${encodeURIComponent(runId)}/resume`, { method: 'POST', body: {} });
 }
 
+export async function submitCoderReply(runId, questionId, questionDigest, text) {
+  return coderRequest(`/api/coder/runs/${encodeURIComponent(runId)}/reply`, {
+    method: 'POST',
+    body: { questionId, questionDigest, text },
+  });
+}
+
 export async function deleteCoderRun(runId) {
   return coderRequest(`/api/coder/runs/${encodeURIComponent(runId)}`, { method: 'DELETE', body: {} });
 }
@@ -607,9 +795,13 @@ export async function submitCoderFastChat(message, history = []) {
 }
 
 async function coderRequest(url, options = {}) {
+  const method = options.method || 'GET';
   const response = await fetch(url, {
-    method: options.method || 'GET',
-    headers: apiHeaders(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    method,
+    signal: AbortSignal.timeout(30_000),
+    headers: method === 'GET'
+      ? apiHeaders(options.body === undefined ? {} : { 'Content-Type': 'application/json' })
+      : await mutationApiHeaders(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
   });
   const payload = await readOptionalJson(response);
@@ -708,6 +900,34 @@ export async function updatePermissionProfile(sandboxMode, approvalPolicy) {
     throw new Error(formatMonarchHttpError(response.status, payload));
   }
   return payload.profile;
+}
+
+export async function listOwnerRedZones() {
+  const response = await fetch('/api/filesystem/red-zones', { headers: apiHeaders() });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(formatMonarchHttpError(response.status, payload));
+  return payload;
+}
+
+export async function addOwnerRedZone(pathValue) {
+  const response = await fetch('/api/filesystem/red-zones', {
+    method: 'POST',
+    headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ path: pathValue }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(formatMonarchHttpError(response.status, payload));
+  return payload;
+}
+
+export async function removeOwnerRedZone(id) {
+  const response = await fetch('/api/filesystem/red-zones/' + encodeURIComponent(id), {
+    method: 'DELETE',
+    headers: await mutationApiHeaders(),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(formatMonarchHttpError(response.status, payload));
+  return payload;
 }
 
 export async function updateAutonomyMode(autonomyMode) {
@@ -905,6 +1125,7 @@ export async function createAgentTask(request, options = {}) {
       ...(Array.isArray(options.constraints) ? { constraints: options.constraints } : {}),
       ...(Array.isArray(options.successCriteria) ? { successCriteria: options.successCriteria } : {}),
       ...(options.budgets ? { budgets: options.budgets } : {}),
+      ...(typeof options.model === 'string' && options.model.trim() ? { model: options.model.trim() } : {}),
       autoStart: options.autoStart !== false,
     },
     ...(options.signal ? { signal: options.signal } : {}),
@@ -972,7 +1193,7 @@ function requireAgentApprovalBinding(binding) {
   const canonicalProposalHash = String(binding?.canonicalProposalHash || '').trim();
   const capabilityId = String(binding?.capabilityId || '').trim();
   if (!canonicalProposalHash || !capabilityId) {
-    const error = new Error('Approval-card не содержит exact capability/hash binding.');
+    const error = new Error('Разрешение устарело или повреждено. Запроси новое разрешение.');
     error.code = 'approval-binding-missing';
     throw error;
   }
@@ -1006,16 +1227,19 @@ export function repeatAgentTask(taskId, options = {}) {
     body: {
       version: 1,
       clientRequestId: options.clientRequestId || createClientScopeId(),
+      ...(typeof options.model === 'string' && options.model.trim() ? { model: options.model.trim() } : {}),
       autoStart: options.autoStart !== false,
     },
   });
 }
 
 export async function streamAgentTask(taskId, after = 0, options = {}) {
+  const headers = await mutationApiHeaders({ Accept: 'text/event-stream' });
+  options.signal?.throwIfAborted();
   const response = await fetch(
     `/api/agent/tasks/${encodeURIComponent(taskId)}/events?after=${encodeURIComponent(after)}`,
     {
-      headers: apiHeaders({ Accept: 'text/event-stream' }),
+      headers,
       signal: options.signal,
     },
   );
@@ -1052,9 +1276,9 @@ async function agentTaskRequest(url, options = {}) {
   const method = options.method || 'GET';
   const response = await fetch(url, {
     method,
-    headers: method === 'GET'
-      ? apiHeaders(options.body === undefined ? {} : { 'Content-Type': 'application/json' })
-      : await mutationApiHeaders(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    // Incognito Agent reads are bound to the same attested Desktop principal
+    // as task creation and approval, even though they do not mutate state.
+    headers: await mutationApiHeaders(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
     ...(options.signal ? { signal: options.signal } : {}),
   });
@@ -1212,6 +1436,23 @@ export async function executeVoiceModeAction(_candidate, text, signal) {
   return executeVoiceAgentTask(text, signal);
 }
 
+export async function executeSimplifiedVoiceCommand(text, signal, options = {}) {
+  const request = String(text || '').trim();
+  if (!request) return { ok: false, text: '', status: 'unsupported', reason: 'empty-command' };
+  const location = options.deviceLocation && typeof options.deviceLocation === 'object'
+    ? options.deviceLocation
+    : null;
+  const response = await fetch('/api/voice/simplified', {
+    method: 'POST',
+    headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ text: request, ...(location ? { deviceLocation: location } : {}) }),
+    ...(signal ? { signal } : {}),
+  });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) throw createMonarchHttpError(response.status, payload);
+  return payload?.result || { ok: false, text: '', status: 'failed', reason: 'invalid-response' };
+}
+
 /**
  * Single conversational and operational entrypoint for Voice. STT/TTS stay
  * Voice-owned transports; every ordinary transcript is owned by the common
@@ -1263,6 +1504,17 @@ export async function executeVoiceAgentTask(text, signal) {
           error: '',
           message: question || 'Нужно уточнение, чтобы продолжить.',
           output: { turnId, taskId: String(payload.taskId || ''), status: 'waiting-for-user', performed: false },
+        };
+      }
+      if (event.type === 'runtime.waiting') {
+        const summary = String(payload.summary || '').trim()
+          || 'Нужно восстановить модель или инструмент, чтобы продолжить задачу.';
+        return {
+          ok: false,
+          text: summary,
+          error: 'voice-runtime-unavailable',
+          message: summary,
+          output: { turnId, taskId: String(payload.taskId || ''), status: 'waiting-for-runtime', performed: false },
         };
       }
       if (event.type === 'turn.outcome' || event.type === 'turn.failed') {
@@ -1320,6 +1572,16 @@ function voiceTurnResult(checkpoint) {
       output: { ...baseOutput, performed: false },
     };
   }
+  if (turn.status === 'waiting-for-runtime') {
+    const message = 'Нужно восстановить модель или инструмент, чтобы продолжить задачу.';
+    return {
+      ok: false,
+      text: message,
+      error: 'voice-runtime-unavailable',
+      message,
+      output: { ...baseOutput, performed: false },
+    };
+  }
   if (outcome === 'verified') {
     return { ok: true, text: summary, error: '', message: summary, output: { ...baseOutput, verified: true } };
   }
@@ -1359,6 +1621,24 @@ function voiceTurnResult(checkpoint) {
 }
 
 export async function executeConfirmedCapability(moduleId, capabilityId, input, requestedBy) {
+  if (moduleId === 'security') {
+    const response = await fetch('/api/security/control', {
+      method: 'POST', headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ schemaVersion: 1, capabilityId, input: input ?? {} }),
+    });
+    const payload = await readOptionalJson(response);
+    if (!response.ok) {
+      const code = payload?.error?.code || payload?.error;
+      const message = code === 'settings-desktop-required'
+        ? 'Управление защитой доступно в настольном Monarch. Открой приложение на компьютере.'
+        : response.status === 404 ? 'Нужно перезапустить Monarch, чтобы подключить обновлённое управление защитой.'
+          : formatMonarchHttpError(response.status, payload);
+      throwCapabilityExecutionError(message, payload?.result, payload);
+    }
+    const result = payload.result || payload;
+    if (result.ok !== true) throwCapabilityExecutionError(readFailureMessage(result) || result.error || 'Команда не выполнена.', result, payload);
+    return result;
+  }
   const prepared = await executeCapability(moduleId, capabilityId, input, requestedBy, false);
   if (prepared.ok || prepared.result?.ok) {
     return prepared.result || prepared;
@@ -1485,7 +1765,7 @@ export function drainSseBuffer(buffer, flush = false) {
 }
 
 function createRuntimeDisconnectedError() {
-  const error = new Error('Oscar потерял соединение с runtime до завершения ответа. Уже полученная часть будет сохранена.');
+  const error = new Error('Связь с Оскаром прервалась. Уже полученная часть ответа будет сохранена.');
   error.code = 'runtime-disconnected';
   return error;
 }
@@ -1531,10 +1811,20 @@ function terminalOscarTurnEvent(checkpoint, cursor) {
   };
 }
 
+// Access-boundary codes carry English diagnostics for logs; people see plain Russian.
+const MONARCH_HTTP_ERROR_COPY = Object.freeze({
+  'settings-desktop-required': 'Эти настройки меняются только в приложении Monarch на компьютере.',
+  'untrusted-origin': 'Запрос пришёл не из окна Monarch. Открой приложение и попробуй снова.',
+  // Also what an open window saw while the runtime was restarting.
+  'invalid-api-token': 'Monarch перезапускает свою службу. Подожди пару секунд и повтори — окно обновится само.',
+});
+
 export function formatMonarchHttpError(status, payload = {}) {
   if (status >= 500) {
     return 'Monarch столкнулся с внутренней ошибкой. Детали остались в локальных логах.';
   }
+  const code = typeof payload?.error === 'string' ? payload.error : payload?.error?.code || payload?.code;
+  if (code && Object.hasOwn(MONARCH_HTTP_ERROR_COPY, code)) return MONARCH_HTTP_ERROR_COPY[code];
 
   const message = typeof payload?.message === 'string' && payload.message.trim()
     ? payload.message.trim()
@@ -1544,7 +1834,7 @@ export function formatMonarchHttpError(status, payload = {}) {
   if (message) return message;
   if (status === 401) return 'Нет доступа к Monarch API. Обнови страницу или перезапусти локальный UI.';
   if (status === 403) return 'Monarch API отклонил запрос (403).';
-  if (status === 404) return 'Monarch API не нашел нужный endpoint. Похоже, UI и runtime разных версий.';
+  if (status === 404) return 'Эта функция недоступна. Если ты обновил Monarch, перезапусти его.';
   if (status === 429) return 'Monarch сейчас занят. Попробуй еще раз через несколько секунд.';
   return `Monarch API вернул ошибку ${status}.`;
 }
@@ -1576,7 +1866,7 @@ function normalizeVoiceModeCapabilityResult(payload, { requireText = true } = {}
       ok: false,
       text: '',
       error: 'voice-mode-response-empty',
-      message: 'Голосовой runtime вернул пустой ответ.',
+      message: 'Не удалось получить голосовой ответ. Попробуй ещё раз.',
       output: result.output,
       result,
     };
@@ -1643,4 +1933,23 @@ export async function executeConfirmedCapabilityStream(moduleId, capabilityId, i
     throw new Error(summary || error || 'Поток не разрешён Monarch Access.');
   }
   throw new Error(summary || 'Поток ждёт точную Agent action-card; текстовый confirmation token отключён.');
+}
+
+/** Reminders asked for in the chat; only the Desktop window reads or changes them. */
+export async function fetchReminders() {
+  const response = await fetch('/api/reminders', { headers: await mutationApiHeaders() });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) throw createMonarchHttpError(response.status, payload);
+  return Array.isArray(payload?.reminders) ? payload.reminders : [];
+}
+
+export async function updateReminder(id, action, body = {}) {
+  const response = await fetch(`/api/reminders/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, {
+    method: 'POST',
+    headers: await mutationApiHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(body),
+  });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) throw createMonarchHttpError(response.status, payload);
+  return payload?.reminder || null;
 }

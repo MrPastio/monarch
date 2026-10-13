@@ -7,6 +7,93 @@ import {
 } from '../../src/core';
 
 describe('Execution Engine cancellation control', () => {
+  it('does not let an approving dispatch guard bypass the Kernel read-only policy', async () => {
+    let calls = 0;
+    const kernel = new MonarchKernel({ agencyStateDirectory: false,
+      permissionProfile: { sandboxMode: 'read-only', approvalPolicy: 'never' } });
+    const module = createCancellableModule(() => {});
+    module.manifest = { ...module.manifest, permissions: ['write'], capabilities: module.manifest.capabilities.map(capability => ({ ...capability, risk: 'write' })) };
+    module.executeCapability = async () => { calls++; return { ok: true, summary: 'Unexpected dispatch.' }; };
+    kernel.registerModule(module); await kernel.start();
+    try {
+      const result = await kernel.executeActionProposal({ capabilityId: 'test.cancel.wait', args: {} }, { dispatchGuard: () => true });
+      expect(result.result.ok).toBe(false); expect(calls).toBe(0);
+    } finally { await kernel.stop(); }
+  });
+  it.each(['cancel', 'fence'])('rechecks %s after asynchronous start observers and before module dispatch', async mode => {
+    let calls = 0, current = true;
+    const controller = new AbortController();
+    const kernel = new MonarchKernel({ agencyStateDirectory: false,
+      permissionProfile: { sandboxMode: 'read-only', approvalPolicy: 'on-request' } });
+    const module = createCancellableModule(() => { calls++; });
+    // If dispatched incorrectly, return promptly so this regression cannot hang.
+    module.executeCapability = async () => { calls++; return { ok: true, summary: 'Unexpected dispatch.' }; };
+    kernel.registerModule(module); await kernel.start();
+    const unsubscribe = kernel.subscribeEvent('capability.execution.started', async () => {
+      await Promise.resolve();
+      if (mode === 'cancel') controller.abort('cancel-at-last-boundary'); else current = false;
+    });
+    try {
+      const result = await kernel.executeActionProposal({ capabilityId: 'test.cancel.wait', args: {} },
+        { requestedBy: 'agent:test', signal: controller.signal, dispatchGuard: () => current });
+      expect(result.result).toMatchObject({ ok: false, error: mode === 'cancel' ? 'cancelled' : 'execution-dispatch-fenced' });
+      expect(result.result.metadata?.dispatchControl).toEqual({ dispatched: false, reason: mode === 'cancel' ? 'cancelled' : 'runtime-fence' });
+      expect(calls).toBe(0);
+      const receipt = kernel.getActionLedgerRecord(result.proposal.idempotencyKey);
+      expect(receipt?.result?.ok).toBe(false);
+      expect(receipt?.result?.metadata?.dispatchControl).toEqual(result.result.metadata?.dispatchControl);
+    } finally { unsubscribe(); await kernel.stop(); }
+  });
+
+  it('does not pass an internal dispatch fence to capability code or durable data', async () => {
+    let received: MonarchExecutionControl | undefined;
+    const kernel = new MonarchKernel({ agencyStateDirectory: false,
+      permissionProfile: { sandboxMode: 'read-only', approvalPolicy: 'on-request' } });
+    const module = createCancellableModule(() => {});
+    module.executeCapability = async (_request, _context, control) => { received = control; return { ok: true, summary: 'Synthetic observation.' }; };
+    kernel.registerModule(module); await kernel.start();
+    try {
+      const controller = new AbortController();
+      const result = await kernel.executeActionProposal({ capabilityId: 'test.cancel.wait', args: {} },
+        { requestedBy: 'agent:test', signal: controller.signal, dispatchGuard: () => true });
+      expect(result.result.ok).toBe(true); expect(received?.signal).toBe(controller.signal);
+      expect(received?.dispatchGuard).toBeUndefined();
+      expect(JSON.stringify(kernel.listActionLedger())).not.toContain('dispatchGuard');
+      expect(JSON.stringify(kernel.getEvents())).not.toContain('dispatchGuard');
+    } finally { await kernel.stop(); }
+  });
+
+  it.each(['return', 'throw'])('does not let a %s after dispatch claim that cancellation prevented the action', async mode => {
+    const kernel = new MonarchKernel({ agencyStateDirectory: false }), controller = new AbortController();
+    let actualCalls = 0;
+    const module = createCancellableModule(() => {});
+    module.executeCapability = async () => {
+      actualCalls++; controller.abort('after-module-start');
+      if (mode === 'throw') throw new Error('owned-synthetic-module-fault');
+      return { ok: false, summary: 'Already entered module.', error: 'cancelled',
+        metadata: { dispatchControl: { dispatched: false, reason: 'runtime-fence' } } };
+    };
+    kernel.registerModule(module); await kernel.start();
+    try {
+      const returned = await kernel.executeActionProposal({ capabilityId: 'test.cancel.wait', args: {} }, { signal: controller.signal });
+      expect(actualCalls).toBe(1);
+      expect(returned.result).toMatchObject({ ok: false, error: 'cancelled', metadata: { dispatchControl: { dispatched: true } } });
+      expect(kernel.getActionLedgerRecord(returned.proposal.idempotencyKey)?.result?.metadata?.dispatchControl)
+        .toMatchObject({ dispatched: true });
+    } finally { await kernel.stop(); }
+  });
+
+  it('fails closed on a throwing guard without exposing its exception or dispatching', async () => {
+    let calls = 0;
+    const kernel = new MonarchKernel({ agencyStateDirectory: false });
+    kernel.registerModule(createCancellableModule(() => { calls++; })); await kernel.start();
+    try {
+      const result = await kernel.executeActionProposal({ capabilityId: 'test.cancel.wait', args: {} },
+        { dispatchGuard: () => { throw new Error('synthetic-private-guard-detail'); } });
+      expect(result.result).toMatchObject({ ok: false, error: 'execution-dispatch-fenced' });
+      expect(JSON.stringify(result)).not.toContain('synthetic-private-guard-detail'); expect(calls).toBe(0);
+    } finally { await kernel.stop(); }
+  });
   it('propagates AbortSignal to an active capability worker through the action gateway', async () => {
     let receivedSignal: AbortSignal | undefined;
     const kernel = new MonarchKernel({

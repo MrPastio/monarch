@@ -272,15 +272,7 @@ export interface MonarchCapability {
   inputSchema?: MonarchJsonSchema;
   outputSchema?: MonarchJsonSchema;
   examples?: unknown[];
-  routing?: MonarchCapabilityRoutingMetadata;
   agent?: MonarchAgentCapabilityMetadataInput;
-}
-
-export interface MonarchCapabilityRoutingMetadata {
-  aliases?: string[];
-  keywords?: string[];
-  examples?: string[];
-  intentKinds?: string[];
 }
 
 export interface MonarchModuleManifest {
@@ -763,6 +755,10 @@ export interface MonarchActionLedgerRecord {
   modelId?: string;
   skillIds?: string[];
   durable?: boolean;
+  /** An agent action receipt: kept across restarts once it has finished. */
+  receipt?: boolean;
+  /** actionResultDigest of the full result, taken when the action finished. */
+  resultDigest?: string;
   status: 'authorized' | 'executing' | 'completed' | 'failed';
   createdAt: string;
   updatedAt: string;
@@ -869,6 +865,8 @@ export interface MonarchExecutionRequest {
   source?: MonarchAgentCapabilitySource;
   confirmed?: boolean;
   securityOverrideConfirmed?: boolean;
+  /** Internal deny-only source requirement. Cannot grant permission; never copied from HTTP/model JSON. */
+  requireExactConfirmation?: true;
   /** Internal durable approval policy binding; never accepted from HTTP JSON. */
   approvalPolicyDecisionHash?: string;
   /** Internal durable approval purpose; never accepted from HTTP JSON. */
@@ -903,6 +901,11 @@ export interface MonarchExecutionRequest {
  */
 export interface MonarchExecutionControl {
   signal?: AbortSignal;
+  /** Internal synchronous fence, checked again immediately before module dispatch.
+   * It can only deny execution, never override Kernel permission/approval checks.
+   * Never deserialize this callback from HTTP/model input or forward it to a tool.
+   */
+  dispatchGuard?: () => boolean;
 }
 
 export interface MonarchExecutionResult {
@@ -985,10 +988,6 @@ export interface MonarchModule {
     capability: MonarchCapability,
     context: MonarchKernelContext
   ): Promise<MonarchTrustedActionContext | undefined> | MonarchTrustedActionContext | undefined;
-  handleIntent?(
-    intent: MonarchIntent,
-    context: MonarchKernelContext
-  ): Promise<MonarchRouteDecision | null>;
   executeCapability?(
     request: MonarchExecutionRequest,
     context: MonarchKernelContext,

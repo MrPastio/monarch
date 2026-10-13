@@ -37,6 +37,13 @@ await build({
 });
 
 const output = await stat(outputPath);
+await build({
+  entryPoints: [path.join(projectRoot, 'src', 'agent-v3', 'max-electron-entry.ts')],
+  outfile: path.join(outputDirectory, 'astra-max-electron.mjs'),
+  bundle: true, platform: 'node', format: 'esm', target: 'node22',
+  banner: { js: "import { createRequire as __monarchCreateRequire } from 'node:module'; const require = __monarchCreateRequire(import.meta.url);" },
+  legalComments: 'none', sourcemap: false, logLevel: 'warning',
+});
 if (!output.isFile() || output.size < 100_000) {
   throw new Error(`Monarch runtime bundle is invalid: ${outputPath}`);
 }

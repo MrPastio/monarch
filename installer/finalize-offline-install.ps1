@@ -1,9 +1,9 @@
 param(
   [Parameter(Mandatory = $true)][string]$StagingRoot,
   [Parameter(Mandatory = $true)][string]$InstallRoot,
-  [string]$AppVersion = "0.2.5.0",
-  [string]$RuntimeVersion = "2026.07.7",
-  [string]$BackendEnvironment = "backend-0.1.5-offline8",
+  [string]$AppVersion = "0.3.0.97",
+  [string]$RuntimeVersion = "2026.10.1",
+  [string]$BackendEnvironment = "backend-0.1.6-offline1",
   [int]$DataSchemaVersion = 1,
   [int]$MinimumReadableDataSchema = 1,
   [int]$MaximumReadableDataSchema = 1,

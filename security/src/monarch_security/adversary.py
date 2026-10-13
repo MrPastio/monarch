@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 import os
+import secrets
 import statistics
 import time
 import zipfile
@@ -102,6 +103,20 @@ def run_live_threat_simulation(
             "automatic_response_applied": False,
         },
     }
+
+
+def emergency_test_events() -> tuple[SecurityEvent, SecurityEvent, SecurityEvent]:
+    """Inert labelled evidence for the temporary end-to-end emergency test."""
+    synthetic_pid = 900_000_000 + secrets.randbelow(100_000_000)
+    process = _obfuscated_powershell_event_for_pid(synthetic_pid)
+    network = _reverse_shell_event_for_pid(synthetic_pid)
+    persistence = _download_persistence_event()
+    return (
+        SecurityEvent(kind=process.kind, source="emergency_test", subject=process.subject, facts=process.facts),
+        SecurityEvent(kind=network.kind, source="emergency_test", subject=network.subject, facts=network.facts),
+        SecurityEvent(kind=persistence.kind, source="emergency_test", subject=persistence.subject,
+                      facts={**persistence.facts, "pid": synthetic_pid}),
+    )
 
 
 def run_attack_simulation(
@@ -322,6 +337,12 @@ def _file_case(
         required_reason,
         required_control,
     )
+    result["inspection"] = {
+        "status": event.facts.get("content_parser_status", "unknown"),
+        "complete": event.facts.get("content_parser_status") == "ok",
+        "error": event.facts.get("content_error"),
+        "phase": event.facts.get("content_parser_phase"),
+    }
     result["duration_ms"] = (time.perf_counter_ns() - started) / 1_000_000
     return result
 

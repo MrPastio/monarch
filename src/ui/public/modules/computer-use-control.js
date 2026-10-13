@@ -34,7 +34,8 @@ export function initComputerUseControl() {
     try {
       await ensureComputerUseReady('ui:oscar-function-menu');
       window.dispatchEvent(new CustomEvent('monarch:computer-use-selected'));
-      document.querySelector('#oscar-composer-menu')?.removeAttribute('open');
+      const { closeOscarComposerMenu } = await import('./oscar-plus-menu.js');
+      closeOscarComposerMenu({ immediate: true });
     } catch {
       // The menu row already exposes the bounded runtime error.
     } finally {
@@ -44,6 +45,15 @@ export function initComputerUseControl() {
   document.querySelectorAll('[data-computer-use-permission]').forEach((button) => {
     button.addEventListener('click', () => {
       void setComputerUsePermissionPreset(button.getAttribute('data-computer-use-permission') || '');
+    });
+    button.addEventListener('keydown', (event) => {
+      const steps = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 };
+      if (!(event.key in steps) && event.key !== 'Home' && event.key !== 'End') return;
+      event.preventDefault();
+      const choices = [...button.parentElement.querySelectorAll('[role="radio"]')];
+      const index = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1
+        : (choices.indexOf(button) + steps[event.key] + choices.length) % choices.length;
+      choices[index]?.focus(); choices[index]?.click();
     });
   });
   window.monarchDesktop?.onComputerUseEmergencyStop?.((receipt) => {
@@ -121,6 +131,10 @@ export function syncComputerUsePermissionProfile(profile) {
     button.classList.toggle('is-selected', selected);
     button.setAttribute('aria-checked', String(selected));
     button.tabIndex = selected ? 0 : -1;
+    if (selected) {
+      const summary = document.querySelector('#oscar-permission-summary');
+      if (summary) summary.textContent = button.title || button.textContent.trim();
+    }
   });
 }
 
@@ -134,7 +148,7 @@ async function changeComputerUseControl(capabilityId, requestedBy) {
       : await executeCapability('computer', capabilityId, {}, requestedBy, false, '', { includeState: false });
     const result = payload?.result || payload;
     if (result?.ok === false) {
-      throw new Error(result?.summary || result?.error || 'Kernel не подтвердил Computer Use.');
+      throw new Error(result?.summary || result?.error || 'Не удалось подтвердить разрешение на управление компьютером.');
     }
     return applyComputerUseControlReceipt(result);
   } catch (error) {
@@ -176,19 +190,19 @@ function setComputerUseControlStatus(status, detail) {
     toggle.classList.toggle('is-active', enabled);
     toggle.setAttribute('aria-pressed', String(enabled));
   }
-  const stateNode = document.querySelector('#oscar-computer-use-menu-state');
-  if (stateNode) {
-    stateNode.textContent = status === 'active'
-      ? 'В работе'
-      : status === 'ready' ? 'Готов' : status === 'error' ? 'Ошибка' : 'Включить';
-  }
   setMenuDetail(detail, status === 'error');
 }
 
 function setMenuDetail(detail, error = false) {
   const node = document.querySelector('#oscar-computer-use-menu-detail');
   if (!node) return;
-  node.textContent = detail;
+  node.textContent = error
+    ? String(detail || 'Ошибка')
+    : currentState === 'active'
+      ? 'Oscar управляет курсором'
+      : currentState === 'ready'
+        ? 'Включён · позови через @'
+        : 'Экран и курсор';
   node.classList.toggle('error-text', error);
 }
 

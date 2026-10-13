@@ -4,13 +4,10 @@ import type {
   MonarchEvent,
   MonarchExecutionRequest,
   MonarchExecutionResult,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
   MonarchModuleRecord,
-  MonarchRouteDecision,
-  MonarchRoutingAnalysis,
 } from '../../core';
 import { diagnosticsManifest } from './manifest';
 
@@ -30,95 +27,6 @@ export class DiagnosticsModule implements MonarchModule {
     };
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.toLowerCase();
-    const analysis = intent.context?.routingAnalysis as MonarchRoutingAnalysis | undefined;
-    if (analysis?.classification.kind === 'capabilities_question') {
-      return null;
-    }
-    if (mentionsForeignModuleScope(text) && !mentionsExplicitDiagnosticsScope(text)) {
-      return null;
-    }
-    if (!mentionsDiagnostics(text)) {
-      return null;
-    }
-
-    if (mentionsWholeSystemInspection(text)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'diagnostics.system.inspect',
-        confidence: 0.94,
-        reason: 'User asks for an adaptive live inspection of the Monarch system.',
-        permissionMode: 'allow',
-        input: { query: intent.text },
-      };
-    }
-
-    if (mentionsProjectDiagnostics(text)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'diagnostics.project.report',
-        confidence: 0.87,
-        reason: 'User asks for a structured project diagnostic report.',
-        permissionMode: 'allow',
-        input: {
-          limit: 50,
-        },
-      };
-    }
-
-    if (mentionsCapabilityRequest(text)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'diagnostics.capabilities.list',
-        confidence: 0.84,
-        reason: 'User asks to inspect available capabilities.',
-        permissionMode: 'allow',
-        input: {},
-      };
-    }
-
-    if (/(event|событи|history|истори)/i.test(text)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'diagnostics.events.list',
-        confidence: 0.82,
-        reason: 'User asks to inspect kernel events.',
-        permissionMode: 'allow',
-        input: {
-          limit: 25,
-        },
-      };
-    }
-
-    if (/(audit|аудит|лог|logs?)/i.test(text)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'diagnostics.audit.list',
-        confidence: 0.82,
-        reason: 'User asks to inspect redacted audit history.',
-        permissionMode: 'allow',
-        input: {
-          limit: 25,
-        },
-      };
-    }
-
-    return {
-      intentId: intent.id,
-      targetModuleId: this.manifest.id,
-      capabilityId: 'diagnostics.modules.list',
-      confidence: 0.8,
-      reason: 'User asks to inspect kernel/module status.',
-      permissionMode: 'allow',
-      input: {},
-    };
-  }
 
   async executeCapability(
     request: MonarchExecutionRequest,
@@ -411,50 +319,10 @@ export class DiagnosticsModule implements MonarchModule {
   }
 }
 
-function mentionsDiagnostics(text: string): boolean {
-  return /^(?:diagnostics?|диагностика|kernel|ядро)[.!? ]*$/i.test(text)
-    || /(?:\b(?:diagnostic|diagnostics|kernel)\b|диагност|ядр).{0,40}(?:\b(?:monarch|system|modules?|project|repo|workspace|runtime|backend|computer|host|code|tests?)\b|монарх|систем|модул|проект|репозитор|workspace|рантайм|бэкенд|компьютер|хост|код|тест)/i.test(text)
-    || /(?:\b(?:monarch|system|modules?|project|repo|workspace|runtime|backend|computer|host|code|tests?)\b|монарх|систем|модул|проект|репозитор|workspace|рантайм|бэкенд|компьютер|хост|код|тест).{0,40}(?:\b(?:diagnostic|diagnostics|kernel)\b|диагност|ядр)/i.test(text)
-    || mentionsWholeSystemInspection(text)
-    || mentionsProjectDiagnostics(text)
-    || mentionsCapabilityRequest(text)
-    || /^(?:status|health|статус|состояние)(?:\s+(?:monarch|монарх))?[.!? ]*$/i.test(text)
-    || /^(?:(?:show|check|покажи|проверь)\s+)?(?:system\s+(?:status|health)|(?:status|health)\s+(?:of\s+the\s+)?system|(?:статус|состояние|здоровье)\s+системы)[.!? ]*$/i.test(text)
-    || /(?:\b(?:show|list|check|inspect|status|health)\b|покажи|проверь|список|статус|состояние).{0,40}(?:\b(?:monarch|kernel|modules?|runtime|backend|workspace|project)\b|монарх|ядр|модул|рантайм|бэкенд|проект|workspace)/i.test(text)
-    || /(?:\b(?:audit|events?|logs?)\b|аудит|событи|логи)(?=.{0,40}(?:\b(?:monarch|kernel|modules?)\b|монарх|ядр|модул))/i.test(text);
-}
-
 function mentionsWholeSystemInspection(text: string): boolean {
   return /(?:monarch|монарх).{0,48}(?:system|modules?|check|inspect|health|status|систем|модул|провер|статус|здоров)|(?:system|modules?|check|inspect|health|status|систем|модул|провер|статус|здоров).{0,48}(?:monarch|монарх)/i.test(text)
     || /^(?:check|inspect|diagnose)\s+(?:the\s+)?(?:whole\s+|entire\s+|full\s+)?system[.!? ]*$/i.test(text)
     || /^(?:проверь|диагностируй)\s+(?:всю\s+|полностью\s+)?систему[.!? ]*$/i.test(text);
-}
-
-function mentionsForeignModuleScope(text: string): boolean {
-  return /\b(security|protector|oscar|memory|models?|telegram|voice|workspace|astra)\b/i.test(text)
-    || /(защит|безопасност|памят|модел|телеграм|голос|рабоч(?:ее|его|ем)\s+пространств|астра)/i.test(text);
-}
-
-function mentionsExplicitDiagnosticsScope(text: string): boolean {
-  return /\b(diagnostic|diagnostics|kernel|modules?)\b/i.test(text)
-    || /(диагност|ядр|модул)/i.test(text);
-}
-
-function mentionsProjectDiagnostics(text: string): boolean {
-  return (
-    /\b(project|repo|workspace|runtime|diff|tests?|logs?|anomal(?:y|ies)|problem|proactive|self[- ]?check)\b/i.test(text)
-    || /(проект|репозитор|рабоч\w*\s+пространств|рантайм|дифф|тест|лог|аномал|проблем|самопровер)/i.test(text)
-  ) && (
-    /\b(diagnostic|diagnostics|diagnose|health|audit|check)\b/i.test(text)
-    || /(диагност|провер|аудит|здоров)/i.test(text)
-  );
-}
-
-function mentionsCapabilityRequest(text: string): boolean {
-  return /\b(?:what can you do|available (?:capabilities|tools|actions|commands)|(?:show|list) (?:capabilities|tools|actions|commands))\b/i.test(text)
-    || /(?:покажи|перечисли|какие|какими|доступн\w*|что\s+ты\s+умеешь).{0,36}(?:инструмент|возможност|способност|команд|действи)/i.test(text)
-    || /(?:что|какими|какие|какой|чем)\s+(?:ты\s+)?(?:можешь|умеешь)(?:\s+делать|\s+пользоваться)?/i.test(text)
-    || /(?:можешь|умеешь)\s+(?:делать|использовать|пользоваться|управлять)/i.test(text);
 }
 
 type DiagnosticStatus = 'ok' | 'warning' | 'critical';

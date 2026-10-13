@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+import asyncio
 import sys
 
 from fastapi.testclient import TestClient
@@ -15,6 +16,7 @@ from oscar_agent.schemas import ChatMessage
 from oscar_agent.sharing_qwen import QwenSharingRuntime
 from oscar_agent.sharing_tts import TtsSynthesisResult
 from oscar_agent import main as main_module
+from oscar_agent import sharing as sharing_module
 
 
 class FakeSharingRuntime:
@@ -360,10 +362,19 @@ def test_agent_session_reuses_exact_resident_model_with_half_gib_emergency_reser
     assert response.json()["monarch_runtime"]["resident_model_reused_under_pressure"] is True
 
 
-def test_agent_session_extends_backend_recycle_window(monkeypatch):
-    recycle_delays = []
+def record_releases(monkeypatch):
+    releases = []
+    monkeypatch.setattr(
+        main_module,
+        "unload_after_generation",
+        lambda tier=None, *, agent_session=False: releases.append((tier, agent_session)),
+    )
+    return releases
+
+
+def test_agent_session_is_released_as_a_session_that_owes_a_next_request(monkeypatch):
     client, _runtime = configured_client(monkeypatch)
-    monkeypatch.setattr(main_module, "unload_after_generation", lambda delay=5.0: recycle_delays.append(delay))
+    releases = record_releases(monkeypatch)
 
     response = client.post(
         "/v1/chat/completions",
@@ -377,7 +388,27 @@ def test_agent_session_extends_backend_recycle_window(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert recycle_delays == [45.0]
+    assert releases == [("gemma4-fast", True)]
+
+
+def test_an_interactive_completion_on_this_lane_actually_releases_its_model(monkeypatch):
+    # The release used to be written as one lambda with a conditional body whose
+    # else-branch returned another lambda instead of calling it, so an ordinary
+    # completion here never scheduled a release at all.
+    client, _runtime = configured_client(monkeypatch)
+    releases = record_releases(monkeypatch)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=auth_headers(),
+        json={
+            "model": "monarch-fast",
+            "messages": [{"role": "user", "content": "Say something."}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert releases == [("gemma4-fast", False)]
 
 
 def test_resident_model_pressure_exception_stays_closed_for_interactive_or_emergency_ram(monkeypatch):
@@ -460,6 +491,76 @@ def test_sharing_non_stream_preserves_native_length_finish_reason(monkeypatch):
     assert body["choices"][0]["finish_reason"] == "length"
     assert body["monarch_runtime"]["generation_stop_reason"] == "length"
     assert body["monarch_runtime"]["likely_truncated"] is True
+
+
+def test_sharing_non_stream_cancels_generation_when_exact_caller_disconnects():
+    runtime = FakeSharingRuntime()
+    qwen_runtime = FakeQwenRuntime()
+    lease = SimpleNamespace(
+        lane="agent",
+        queue_latency_ms=0.0,
+        released=False,
+    )
+    lease.release = lambda: setattr(lease, "released", True)
+    lease.locked = lambda: not lease.released
+
+    class DisconnectedRequest:
+        async def is_disconnected(self):
+            return True
+
+    async def acquire(_lane):
+        return lease
+
+    response = asyncio.run(sharing_module.create_openai_chat_completion(
+        sharing_module.SharingChatRequest(
+            model="monarch-fast",
+            messages=[{"role": "user", "content": "Cancel this exact non-stream request."}],
+            inference_lane="agent",
+        ),
+        DisconnectedRequest(),
+        runtime=runtime,
+        qwen_runtime=qwen_runtime,
+        acquire_inference_slot=acquire,
+        unload_after_generation=lambda _delay: None,
+    ))
+
+    assert response.status_code == 499
+    assert runtime.cancelled is True
+    assert lease.released is True
+
+
+def test_sharing_tier_swap_schedules_one_lifecycle_recycle(monkeypatch):
+    runtime = FakeSharingRuntime()
+    recycle_delays = []
+    lease = SimpleNamespace(lane="interactive", queue_latency_ms=0.0, released=False)
+    lease.release = lambda: setattr(lease, "released", True)
+    lease.locked = lambda: not lease.released
+
+    class ConnectedRequest:
+        async def is_disconnected(self):
+            return False
+
+    async def acquire(_lane):
+        return lease
+
+    monkeypatch.setattr(sharing_module, "local_tier_swap_needs_fresh_process", lambda _runtime, _tier: True)
+    response = asyncio.run(sharing_module.create_openai_chat_completion(
+        sharing_module.SharingChatRequest(
+            model="monarch-balanced",
+            messages=[{"role": "user", "content": "Use the exact requested tier."}],
+        ),
+        ConnectedRequest(),
+        runtime=runtime,
+        qwen_runtime=FakeQwenRuntime(),
+        acquire_inference_slot=acquire,
+        unload_after_generation=lambda *_args, **_kwargs: None,
+        request_backend_recycle=recycle_delays.append,
+    ))
+
+    assert response.status_code == 503
+    assert response.body and b'"code":"model-tier-recycle-required"' in response.body
+    assert lease.released is True
+    assert recycle_delays == [0.25]
 
 
 def test_sharing_non_stream_preserves_unsupported_native_tool_call_finish(monkeypatch):

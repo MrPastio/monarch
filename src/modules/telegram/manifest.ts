@@ -5,12 +5,13 @@ export const telegramManifest: MonarchModuleManifest = {
   name: 'Monarch Telegram',
   version: '0.1.0',
   kind: 'domain',
-  description: 'Local Telegram Bot API bridge for trusted Monarch tasks, reminders, polls, rich tables, and notifications.',
-  owns: ['telegram', 'bot', 'remote tasks', 'reminders', 'polls', 'notifications'],
+  description: 'Local Telegram Bot API bridge for trusted Monarch tasks, bounded image/text-document and ephemeral voice-note intake, explicit verified-artifact egress, reminders, polls, rich tables, and notifications.',
+  owns: ['telegram', 'bot', 'remote tasks', 'image intake', 'text-document intake', 'verified-artifact egress', 'voice-note intake', 'reminders', 'polls', 'notifications'],
   permissions: ['read', 'write', 'network', 'execute'],
   events: [
     'telegram.activated',
     'telegram.started',
+    'telegram.polling.owner.acquired',
     'telegram.stopped',
     'telegram.paired',
     'telegram.pairing.revoked',
@@ -26,12 +27,7 @@ export const telegramManifest: MonarchModuleManifest = {
       title: 'Telegram status',
       description: 'Show local bot configuration, pairing state, polling status, and reminder counts.',
       risk: 'read',
-      routing: {
-        aliases: ['telegram status', 'bot status', 'статус telegram', 'статус бота'],
-        keywords: ['telegram', 'телеграм', 'bot', 'бот', 'status', 'статус', 'pairing', 'привязка'],
-        examples: ['покажи статус Telegram-бота'],
-        intentKinds: ['integration.read'],
-      },
+
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
     {
@@ -40,12 +36,7 @@ export const telegramManifest: MonarchModuleManifest = {
       title: 'Describe Telegram bot capabilities',
       description: 'Answer direct questions about what the Telegram bot can do, its plugin directions, and its safety mode.',
       risk: 'read',
-      routing: {
-        aliases: ['what can the telegram bot do', 'telegram bot capabilities', 'что умеет тг бот', 'что ты умеешь через телеграм'],
-        keywords: ['telegram', 'телеграм', 'tg', 'тг', 'bot', 'бот', 'capabilities', 'возможности', 'умеешь', 'можешь', 'plugins', 'плагины', 'security', 'безопасность'],
-        examples: ['что ты умеешь через тг бот?', 'какие плагины доступны через Telegram?', 'какая безопасность у тг бота?'],
-        intentKinds: ['capabilities_question', 'integration.read'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: { topic: { type: 'string' } },
@@ -93,7 +84,7 @@ export const telegramManifest: MonarchModuleManifest = {
       moduleId: 'telegram',
       title: 'Create Telegram pairing code',
       description: 'Create a fresh short-lived code for pairing a Telegram chat.',
-      risk: 'read',
+      risk: 'write',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     },
     {
@@ -110,6 +101,14 @@ export const telegramManifest: MonarchModuleManifest = {
       title: 'Send Telegram message',
       description: 'Send a message to a paired Telegram chat.',
       risk: 'network',
+      agent: {
+        idempotency: 'non-idempotent', cancellation: 'supported',
+        estimatedLatency: 'short', computeClass: 'light',
+        effectProfile: {
+          mutation: 'persistent', targetScope: 'external-service', reversibility: 'manual',
+          dataSensitivity: 'private', communication: 'third-party',
+        },
+      },
       inputSchema: {
         type: 'object',
         properties: { chatId: { type: 'number' }, text: { type: 'string' } },
@@ -123,6 +122,14 @@ export const telegramManifest: MonarchModuleManifest = {
       title: 'Send Telegram poll',
       description: 'Send a native Telegram poll to a paired chat.',
       risk: 'network',
+      agent: {
+        idempotency: 'non-idempotent', cancellation: 'supported',
+        estimatedLatency: 'short', computeClass: 'light',
+        effectProfile: {
+          mutation: 'persistent', targetScope: 'external-service', reversibility: 'manual',
+          dataSensitivity: 'private', communication: 'third-party',
+        },
+      },
       inputSchema: {
         type: 'object',
         properties: {
@@ -141,6 +148,10 @@ export const telegramManifest: MonarchModuleManifest = {
       title: 'Create Telegram reminder',
       description: 'Persist a reminder and deliver it to a paired chat at the requested time.',
       risk: 'write',
+      agent: {
+        idempotency: 'non-idempotent', cancellation: 'supported',
+        estimatedLatency: 'instant', computeClass: 'light',
+      },
       inputSchema: {
         type: 'object',
         properties: { chatId: { type: 'number' }, text: { type: 'string' }, dueAt: { type: 'string' } },
@@ -162,6 +173,10 @@ export const telegramManifest: MonarchModuleManifest = {
       title: 'Cancel Telegram reminder',
       description: 'Cancel one pending Telegram reminder by id.',
       risk: 'write',
+      agent: {
+        idempotency: 'conditional', cancellation: 'supported',
+        estimatedLatency: 'instant', computeClass: 'light',
+      },
       inputSchema: {
         type: 'object',
         properties: { id: { type: 'string' }, chatId: { type: 'number' } },
@@ -173,8 +188,16 @@ export const telegramManifest: MonarchModuleManifest = {
       id: 'telegram.api.call',
       moduleId: 'telegram',
       title: 'Call Telegram Bot API',
-      description: 'Compatibility escape hatch for current Telegram Bot API methods, including rich messages and new media types.',
+      description: 'Compatibility adapter for Bot API methods that Monarch can bind to one paired chat; bot-global and unscoped methods stay unavailable.',
       risk: 'execute',
+      agent: {
+        idempotency: 'non-idempotent', cancellation: 'supported',
+        estimatedLatency: 'short', computeClass: 'light',
+        effectProfile: {
+          mutation: 'persistent', targetScope: 'external-service', reversibility: 'manual',
+          dataSensitivity: 'private', communication: 'third-party',
+        },
+      },
       inputSchema: {
         type: 'object',
         properties: { method: { type: 'string' }, parameters: { type: 'object' } },

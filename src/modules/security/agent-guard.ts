@@ -22,6 +22,10 @@ export interface AgentGuardRequest {
   trustedActionContext?: Record<string, unknown>;
   /** Trusted Kernel authority, never model-provided. */
   filesystemAuthority?: 'workspace' | 'full-local';
+  /** Runtime-owned signal that ordinary policy walls are disabled. */
+  directAccess?: boolean;
+  /** Runtime-owned Action Guard strictness. */
+  agentSecurityMode?: 'off' | 'observe' | 'guard' | 'strict';
 }
 
 export interface AgentGuardDecision {
@@ -54,7 +58,11 @@ const NETWORK_INTENT = /(отправ|скача|загруз|поиск|сет�
 const EXECUTE_INTENT = /(запус|выполн|установ|команд|скрипт|управ|нажм|клик|введ|напечат|прокрут|листай|откро|откры|закро|закры|выбер|переключ|execute|run|install|command|script|control|click|press|type|enter|scroll|open|close|select|toggle)/i;
 const PROTECTED_WORKSPACE_SEGMENTS = /(?:^|[\\/])(?:\.git|secrets|data[\\/]local|runtime[\\/]settings)(?:[\\/]|$)/i;
 const SECURITY_TAMPER = /(Set-MpPreference\s+.*DisableRealtimeMonitoring|Add-MpPreference\s+.*Exclusion|netsh\s+advfirewall\s+set\s+.*state\s+off|reg\s+delete\s+HKLM)/i;
-const CATASTROPHIC_COMMAND = /(?:\brm\s+-rf\s+[\/'"]|Remove-Item\s+(?:-[^\s]+\s+)*["']?[A-Za-z]:\\(?:\s|["']|$)|\bformat(?:\.com)?\s+[A-Za-z]:|\bdiskpart\b[\s\S]*\bclean\b|\bbcdedit\b)/i;
+const SYSTEM_DESTRUCTIVE_COMMAND = /(?:\bformat(?:\.com)?\s+[A-Za-z]:|\bdiskpart\b[\s\S]*\bclean\b|\bbcdedit\b)/i;
+const POWERSHELL_RECURSIVE_DELETE = /\bRemove-Item\b[^\r\n]{0,360}(?:^|\s)-Recurse\b/i;
+const UNIX_RECURSIVE_DELETE = /\brm\s+(?:-[a-z]*r[a-z]*f|-rf|-fr)\b/i;
+const CMD_RECURSIVE_DELETE = /\b(?:del|erase)\b[^\r\n]{0,240}\/(?:s|q)\b/i;
+const FILESYSTEM_ROOT_TARGET = /(?:^|\s|["'])(?:[A-Za-z]:\\|\/)(?=\s|["']|$|\*)/;
 const COMPUTER_ACTION = /^computer\.window\.(?:click|close|type|key|scroll)$/i;
 const TERMINAL_TARGET = /(?:^|[\\/\s_.-])(?:cmd|powershell|pwsh|windows\s+terminal|terminal|console|bash|wsl|command\s+prompt|командн(?:ая|ой)?\s+строк|терминал)(?:$|[\\/\s_.-])/i;
 const SENSITIVE_COMMIT_TARGET = /(?:\bpay(?:ment)?\b|\bpurchase\b|\bbuy\b|\bsend\b|\bsubmit\b|\bdelete\b|\bremove\b|\binstall\b|\ballow\b|\bgrant\b|\bconfirm\b|оплат|куп(?:ить|и)|отправ|удал|установ|разреш|подтверд)/i;
@@ -70,7 +78,13 @@ export class AgentActionGuard {
     lastStatus: null,
   };
 
-  constructor(private readonly workspaceRoot = process.cwd()) {}
+  private readonly localReadOnlyRoots: string[] | undefined;
+
+  constructor(private readonly workspaceRoot = process.cwd(), options: { localReadOnlyRoots?: readonly string[] } = {}) {
+    // Host-only frozen snapshot. The action payload cannot change filesystem
+    // roots; omitted configuration keeps the existing Windows discovery policy.
+    this.localReadOnlyRoots = options.localReadOnlyRoots === undefined ? undefined : [...options.localReadOnlyRoots];
+  }
 
   assess(request: AgentGuardRequest): AgentGuardDecision {
     const parsedInput = parseActionInput(request.actionInput);
@@ -80,6 +94,8 @@ export class AgentActionGuard {
       : '';
     const capability = request.actionCapability.toLowerCase();
     const intent = request.intentText.trim();
+    const directAccess = request.directAccess === true;
+    const directStrict = directAccess && request.agentSecurityMode === 'strict';
     const reasons: string[] = [];
     const evidenceCodes: string[] = [];
     let status: AgentGuardStatus = 'allowed';
@@ -96,25 +112,25 @@ export class AgentActionGuard {
       || /execute|run|install|start|stop|control|block/.test(capability);
     const isNetwork = request.actionRisk === 'network' || /send|upload|network|api\.call/.test(capability);
 
-    if (isDelete && !DELETE_INTENT.test(intent)) {
-      status = 'blocked';
+    if (isDelete && !DELETE_INTENT.test(intent) && (!directAccess || directStrict)) {
+      status = 'approval_required';
       reasons.push('Удаление не подтверждается исходным намерением пользователя.');
       evidenceCodes.push('intent.delete.mismatch');
     }
 
-    if (status !== 'blocked' && isWrite && !WRITE_INTENT.test(intent)) {
+    if (status !== 'blocked' && isWrite && !WRITE_INTENT.test(intent) && (!directAccess || directStrict)) {
       status = 'approval_required';
       reasons.push('Изменение данных слабо связано с исходным запросом.');
       evidenceCodes.push('intent.write.weak-match');
     }
 
-    if (status !== 'blocked' && isNetwork && !NETWORK_INTENT.test(intent)) {
+    if (status !== 'blocked' && isNetwork && !NETWORK_INTENT.test(intent) && (!directAccess || directStrict)) {
       status = 'approval_required';
       reasons.push('Сетевое действие не было явно запрошено.');
       evidenceCodes.push('intent.network.weak-match');
     }
 
-    if (status !== 'blocked' && isExecute && !EXECUTE_INTENT.test(intent)) {
+    if (status !== 'blocked' && isExecute && !EXECUTE_INTENT.test(intent) && (!directAccess || directStrict)) {
       status = 'approval_required';
       reasons.push('Выполнение команды или управление системой требует явного намерения.');
       evidenceCodes.push('intent.execute.weak-match');
@@ -122,7 +138,7 @@ export class AgentActionGuard {
 
     if (request.actionModule === 'workspace') {
       const operation = workspaceOperationFor(capability, request.actionRisk);
-      const localReadOnlyRoots = defaultLocalReadOnlyRoots();
+      const localReadOnlyRoots = this.localReadOnlyRoots ?? defaultLocalReadOnlyRoots();
       const pathChecks = collectWorkspacePathChecks(parsedInput, capability, request.actionRisk);
       if (capability === 'workspace.known-folder.write') {
         const knownFolderTarget = resolveKnownFolderGuardTarget(parsedInput);
@@ -151,6 +167,10 @@ export class AgentActionGuard {
           allowFullDiskAccess,
           readOnlyRoots: candidate.allowedRoot ? [] : localReadOnlyRoots,
           createDirectoryRoots: candidate.allowedRoot ? [] : localReadOnlyRoots,
+          ...(directAccess && allowFullDiskAccess ? {
+            includeDefaultRedZones: false,
+            protectWorkspaceInternals: false,
+          } : {}),
         });
         if (!evaluation.allowed) {
           status = 'blocked';
@@ -158,7 +178,9 @@ export class AgentActionGuard {
           evidenceCodes.push(workspacePolicyEvidence(evaluation.reason));
           break;
         }
-        if ((isWrite || isDelete) && PROTECTED_WORKSPACE_SEGMENTS.test(candidate.path)) {
+        if ((isWrite || isDelete)
+          && PROTECTED_WORKSPACE_SEGMENTS.test(candidate.path)
+          && (!directAccess || directStrict)) {
           if (status !== 'blocked') status = 'approval_required';
           reasons.push('Цель находится в защищённой служебной области проекта.');
           evidenceCodes.push('workspace.path.service-area');
@@ -171,19 +193,30 @@ export class AgentActionGuard {
     const terminalTarget = computerAction && TERMINAL_TARGET.test(trustedTargetText);
     if (!computerAction || terminalTarget) {
       if (SECURITY_TAMPER.test(searchableInput)) {
-        status = 'blocked';
-        reasons.push('Команда меняет Defender, firewall или системную защиту.');
+        status = 'approval_required';
+        reasons.push('Команда меняет Defender, firewall или системную защиту. Нужно твоё решение.');
         evidenceCodes.push('command.security-tamper');
       }
-      if (CATASTROPHIC_COMMAND.test(searchableInput)) {
-        status = 'blocked';
-        reasons.push('Обнаружена команда с широким необратимым воздействием на систему или диск.');
+      if (isCatastrophicCommand(searchableInput)) {
+        status = 'approval_required';
+        reasons.push('Команда может массово и необратимо изменить систему или диск. Выполнение приостановлено до твоего решения.');
         evidenceCodes.push('command.catastrophic');
+      }
+      const bulkDeleteCount = isDelete ? explicitDeleteTargetCount(parsedInput) : 0;
+      const recursiveDeleteNeedsStrictReview = isDelete
+        && requestsRecursiveDeletion(parsedInput)
+        && (!directAccess || directStrict);
+      if (bulkDeleteCount >= 100 || recursiveDeleteNeedsStrictReview) {
+        status = 'approval_required';
+        reasons.push(bulkDeleteCount >= 100
+          ? `Действие затронет не менее ${bulkDeleteCount} целей.`
+          : 'Строгий режим требует проверить рекурсивное удаление с неизвестным итоговым объёмом.');
+        evidenceCodes.push('delete.large-scope');
       }
     } else if (
       capability === 'computer.window.type'
       && !request.trustedActionContext
-      && (SECURITY_TAMPER.test(searchableInput) || CATASTROPHIC_COMMAND.test(searchableInput))
+      && (SECURITY_TAMPER.test(searchableInput) || isCatastrophicCommand(searchableInput))
       && status !== 'blocked'
     ) {
       status = 'approval_required';
@@ -244,7 +277,7 @@ function createDecision(
     report: status === 'blocked'
       ? 'Monarch Security заблокировал действие агента: нарушена жёсткая локальная граница.'
       : status === 'approval_required'
-        ? 'Monarch Security требует одноразовое подтверждение этого действия.'
+        ? `Monarch Security приостановил одно конкретное опасное действие. ${reasons.join(' ')}`.trim()
         : 'Локальный Agent Guard не обнаружил нарушения границ.',
     reasons,
     evidenceCodes: Array.from(new Set(evidenceCodes)),
@@ -265,10 +298,31 @@ function guardDisposition(status: AgentGuardStatus, evidenceCodes: string[]): Ag
     'workspace.path.red-zone',
     'workspace.path.policy-blocked',
     'capability.unregistered',
-    'command.security-tamper',
-    'command.catastrophic',
   ]);
   return evidenceCodes.some((code) => hardEvidence.has(code)) ? 'hard-deny' : 'owner-confirmable';
+}
+
+function explicitDeleteTargetCount(value: unknown): number {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 0;
+  const record = value as Record<string, unknown>;
+  return ['paths', 'targets', 'files', 'items'].reduce((maximum, key) => {
+    const entries = record[key];
+    return Array.isArray(entries) ? Math.max(maximum, entries.length) : maximum;
+  }, 0);
+}
+
+function requestsRecursiveDeletion(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.recursive === true || record.recurse === true;
+}
+
+function isCatastrophicCommand(value: string): boolean {
+  if (SYSTEM_DESTRUCTIVE_COMMAND.test(value)) return true;
+  if (!FILESYSTEM_ROOT_TARGET.test(value)) return false;
+  return POWERSHELL_RECURSIVE_DELETE.test(value)
+    || UNIX_RECURSIVE_DELETE.test(value)
+    || CMD_RECURSIVE_DELETE.test(value);
 }
 
 function parseActionInput(value: string): unknown {

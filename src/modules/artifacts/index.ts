@@ -4,15 +4,13 @@ import { pathToFileURL } from 'node:url';
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
-  MonarchRouteDecision,
 } from '../../core';
 import {
+  ensureWritableParentDirectory,
   evaluateFilesystemAccess,
-  permissionModeForRisk,
   resolveMonarchRuntimePaths,
 } from '../../core';
 import { artifactsManifest } from './manifest';
@@ -54,25 +52,6 @@ export class ArtifactsModule implements MonarchModule {
     };
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.trim();
-    if (!/(artifact|html|markdown|json).{0,40}(save|write|create|generate)|(?:save|write|create).{0,40}(artifact|html|markdown|json)/i.test(text)) {
-      return null;
-    }
-
-    return {
-      intentId: intent.id,
-      targetModuleId: this.manifest.id,
-      capabilityId: 'artifacts.write',
-      confidence: 0.72,
-      reason: 'Artifact generation/write request detected.',
-      permissionMode: permissionModeForRisk('write'),
-      input: {
-        type: inferArtifactType(text),
-        content: '',
-      },
-    };
-  }
 
   async executeCapability(
     request: MonarchExecutionRequest,
@@ -120,9 +99,14 @@ export class ArtifactsModule implements MonarchModule {
       fileName: readStringInput(input, 'fileName'),
       artifactType,
     });
+    // The capability's own output root must be writable. In the installed
+    // layout it lives outside the workspace (E:\MonarchData\generated), so a
+    // workspace-only policy refused every artifacts.write there; red zones and
+    // Safe isolation still apply on top of these roots.
     const evaluation = evaluateFilesystemAccess(targetPath, 'write', {
       workspaceRoot: this.workspaceRoot,
       sandboxRoot: this.workspaceRoot,
+      allowedRoots: [this.workspaceRoot, this.artifactsRoot],
       fallbackRoot: this.artifactsRoot,
     });
     if (!evaluation.allowed) {
@@ -145,7 +129,7 @@ export class ArtifactsModule implements MonarchModule {
       };
     }
 
-    await mkdir(path.dirname(evaluation.resolvedPath), { recursive: true });
+    await ensureWritableParentDirectory(evaluation.resolvedPath);
     await writeFile(evaluation.resolvedPath, serialization.content, 'utf8');
     await context.emit('artifacts.file.written', this.manifest.id, {
       path: evaluation.resolvedPath,
@@ -210,19 +194,6 @@ function normalizeArtifactType(type: string): ArtifactType | '' {
     : '';
 }
 
-function inferArtifactType(text: string): ArtifactType {
-  if (/html/i.test(text)) {
-    return 'html';
-  }
-  if (/json/i.test(text)) {
-    return 'json';
-  }
-  if (/markdown|\.md|md/i.test(text)) {
-    return 'md';
-  }
-  return 'txt';
-}
-
 function serializeArtifact(
   artifactType: ArtifactType,
   content: unknown
@@ -273,7 +244,15 @@ function resolveArtifactTarget(options: {
   }
 
   const resolved = path.resolve(path.isAbsolute(requested) ? requested : path.join(options.root, requested));
-  return path.extname(resolved) ? resolved : `${resolved}${extension}`;
+  if (path.extname(resolved)) return resolved;
+  // A path without an extension plus a fileName names a folder and the file in
+  // it. Treating the folder as the file silently dropped the name the model gave
+  // (live: path "installed-check" + fileName "two" became installed-check.txt).
+  if (options.fileName.trim()) {
+    const named = safeBaseName(options.fileName);
+    return path.join(resolved, path.extname(named) ? named : `${named}${extension}`);
+  }
+  return `${resolved}${extension}`;
 }
 
 function extensionForType(type: ArtifactType): string {

@@ -48,6 +48,7 @@ ipcRenderer.on('monarch-safe:open-settings', () => {
 });
 
 contextBridge.exposeInMainWorld('monarchSafe', {
+  exportFile: (value) => ipcRenderer.invoke('monarch-safe:export-file', value),
   authorizeDelete: (value) => ipcRenderer.invoke('monarch-safe:authorize-delete', value),
   authorizeWrite: (value) => ipcRenderer.invoke('monarch-safe:authorize-write', value),
   request: async (action, payload = {}) => {

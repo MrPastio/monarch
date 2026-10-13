@@ -59,33 +59,7 @@ export const astraManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: [
-          'astra skills',
-          'skill index',
-          'agent cards',
-          'покажи навыки astra',
-          'карта навыков',
-          'карточки навыков',
-        ],
-        keywords: [
-          'astra',
-          'skills',
-          'skill',
-          'agent',
-          'cards',
-          'capabilities',
-          'навыки',
-          'карточки',
-          'возможности',
-          'способности',
-        ],
-        examples: [
-          'show Astra skill index',
-          'покажи карту навыков для Oscar',
-        ],
-        intentKinds: ['astra.read', 'skills.index', 'agent.cards'],
-      },
+
     },
     {
       id: 'astra.skill.explain',
@@ -101,31 +75,7 @@ export const astraManifest: MonarchModuleManifest = {
         required: ['capabilityId'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: [
-          'explain skill',
-          'explain capability',
-          'объясни навык',
-          'объясни capability',
-          'карточка навыка',
-        ],
-        keywords: [
-          'astra',
-          'skill',
-          'capability',
-          'explain',
-          'card',
-          'навык',
-          'возможность',
-          'объясни',
-          'карточка',
-        ],
-        examples: [
-          'explain skill memory.search',
-          'объясни навык security.scan.system',
-        ],
-        intentKinds: ['astra.read', 'skill.explain', 'capability.explain'],
-      },
+
     },
     {
       id: 'astra.slot.preview',
@@ -142,30 +92,7 @@ export const astraManifest: MonarchModuleManifest = {
         required: ['capabilityId'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: [
-          'preview slot',
-          'skill slot',
-          'покажи слот',
-          'слот навыка',
-          'preview astra slot',
-        ],
-        keywords: [
-          'astra',
-          'slot',
-          'slots',
-          'runtime',
-          'context',
-          'слот',
-          'слоты',
-          'контекст',
-        ],
-        examples: [
-          'preview slot for memory.search',
-          'покажи слот для workspace.files.read',
-        ],
-        intentKinds: ['astra.read', 'slot.preview'],
-      },
+
     },
     {
       id: 'astra.oscar.bridge.describe',
@@ -178,30 +105,7 @@ export const astraManifest: MonarchModuleManifest = {
         properties: {},
         additionalProperties: false,
       },
-      routing: {
-        aliases: [
-          'oscar bridge',
-          'astra oscar integration',
-          'интеграция oscar',
-          'мост oscar',
-          'связь astra oscar',
-        ],
-        keywords: [
-          'astra',
-          'oscar',
-          'bridge',
-          'integration',
-          'api',
-          'интеграция',
-          'мост',
-          'связь',
-        ],
-        examples: [
-          'describe Astra Oscar integration',
-          'покажи план интеграции Oscar с Astra',
-        ],
-        intentKinds: ['astra.read', 'oscar.bridge'],
-      },
+
     },
     {
       id: 'astra.agent-skills.list',
@@ -216,12 +120,7 @@ export const astraManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['agent skills', 'Codex skills', 'Claude skills', 'система навыков', 'навыки SKILL.md'],
-        keywords: ['agent', 'skills', 'SKILL.md', 'Codex', 'Claude', 'навыки'],
-        examples: ['покажи Agent Skills', 'list Codex and Claude skills'],
-        intentKinds: ['skills.list', 'agent-skills.list'],
-      },
+
     },
     {
       id: 'astra.agent-skills.match',
@@ -238,12 +137,7 @@ export const astraManifest: MonarchModuleManifest = {
         required: ['query'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['match skill', 'skill radar', 'suggest skill', 'радар навыков', 'подбери навык'],
-        keywords: ['match', 'radar', 'skill', 'recommend', 'радар', 'навык'],
-        examples: ['подбери навык для генерации изображения', 'skill radar for this task'],
-        intentKinds: ['skills.match', 'agent-skills.match'],
-      },
+
     },
     {
       id: 'astra.agent-skills.activate',
@@ -260,12 +154,7 @@ export const astraManifest: MonarchModuleManifest = {
         required: ['skill'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['activate skill', 'use skill', 'загрузи навык', 'активируй навык'],
-        keywords: ['activate', 'invoke', 'skill', 'активируй', 'навык'],
-        examples: ['активируй навык imagegen', 'activate skill playwright'],
-        intentKinds: ['skills.activate', 'agent-skills.activate'],
-      },
+
     },
     {
       id: 'astra.agent-skills.draft',
@@ -313,12 +202,7 @@ export const astraManifest: MonarchModuleManifest = {
         required: ['purpose'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['draft skill', 'create skill draft', 'авто-черновик навыка', 'создай черновик навыка'],
-        keywords: ['skill', 'draft', 'author', 'навык', 'черновик', 'создать'],
-        examples: ['создай черновик навыка для проверки релизов'],
-        intentKinds: ['skills.draft', 'agent-skills.author'],
-      },
+
     },
     {
       id: 'astra.agent-skills.validate',
@@ -362,12 +246,7 @@ export const astraManifest: MonarchModuleManifest = {
         required: ['draft'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['validate skill', 'check skill draft', 'проверь навык', 'валидация навыка'],
-        keywords: ['skill', 'validate', 'check', 'навык', 'проверка'],
-        examples: ['проверь черновик навыка перед созданием'],
-        intentKinds: ['skills.validate', 'agent-skills.author'],
-      },
+
     },
     {
       id: 'astra.agent-skills.create',
@@ -430,12 +309,7 @@ export const astraManifest: MonarchModuleManifest = {
         },
         required: ['created', 'verified', 'receipt', 'skill'],
       },
-      routing: {
-        aliases: ['create local skill', 'publish skill', 'создай локальный навык', 'опубликуй навык'],
-        keywords: ['skill', 'create', 'publish', 'навык', 'создать', 'опубликовать'],
-        examples: ['создай локальный навык из проверенного черновика'],
-        intentKinds: ['skills.create', 'agent-skills.author'],
-      },
+
     },
   ],
 };

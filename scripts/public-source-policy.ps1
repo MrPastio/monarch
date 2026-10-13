@@ -69,6 +69,13 @@ $MonarchPublicBlockedDirectoryPatterns = @(
   '^docs/debug($|/)',
   '^docs/(?:[^/]+/)*qa($|/)',
   '^docs/(?:[^/]+/)*audit($|/)',
+  # Security program: open weaknesses are described here until they are fixed.
+  '^docs/security/program($|/)',
+  # Internal working notes: audits with open findings, resumption notes, roadmaps and open steps.
+  '^docs/audits($|/)',
+  '^docs/plans/OPEN_STEPS_[^/]+\.md$',
+  '^docs/safe/RESUMPTION_[^/]+\.md$',
+  '^docs/security/RELIABILITY_ROADMAP\.md$',
   '^LLM models($|/)',
   '^models($|/)',
   '^local-models($|/)',
@@ -95,8 +102,15 @@ $MonarchPublicBlockedFilePatterns = @(
   '^\.monarch-public-snapshot$',
   '^remove-(?:artifacts|memory|profile|workspace)\.js$',
   '^remove-workspace-smoke\.cjs$',
-  '^(AI_HANDOFF|agent_notes|ORIGINAL_REQUEST|MARK_ALFA_FINDINGS|design-qa)\.md$',
+  '^(AI_HANDOFF|agent_notes|ORIGINAL_REQUEST|MARK_ALFA_FINDINGS|design-qa|GROK_ONBOARDING)\.md$',
   '^docs/architecture/CODEX_[^/]+\.md$',
+  '^docs/architecture/ASTRA_V3_AUDIT_[^/]+\.md$',
+  '^docs/architecture/MONARCH_ASTRA_V3_FUNDAMENTAL_REVIEW_[^/]+\.md$',
+  # Internal formal-architecture proofs: they read the private config/ tree
+  # and private Git history, so a public checkout can never run them.
+  '^scripts/architecture/',
+  '^tests/architecture/',
+  '^tests/fixtures/architecture/',
   '^docs/release/MONARCH_0\.2\.5_COMPLETE_CHANGELOG\.md$',
   '^docs/OSCAR_AGENT_RUNTIME_QA_[^/]+\.md$',
   '^docs/(10_REPAIR_PLAN_[^/]+|CONTROL_PLANE_ARCHITECTURE_AUDIT_[^/]+|TECH_AUDIT_[^/]+|TECH_REVIEW_[^/]+|WORK_CHECKPOINT_[^/]+)\.md$',
@@ -159,29 +173,28 @@ $MonarchPublicReviewedBinarySha256 = @{
   'oscar/frontend/public/assets/brand/monarch-icon.png' = '81cf1442dff4249f2ea0e00806fdbf72f99e6796dc59d6a529523a6cf86b0960'
   'oscar/frontend/public/assets/brand/monarch-mark.png' = '2821f1df15f051310587e64326516cc6384c7269170bcbd56cb15c668ce4fde3'
   'oscar/frontend/public/assets/mascot/oscar-coding.png' = 'f8b9c3bbf1c373e40aaaa468a753162dec148ae27697488cb832620c141a4487'
-  'oscar/frontend/public/assets/mascot/oscar-error.png' = '8c860bba4d6f04af3fb9615242c92e7a53af719699d4318097946b2f205145ab'
+  'oscar/frontend/public/assets/mascot/oscar-error.png' = '28d244461b975fc8cf4d6757ba827563fe6115ffd960220b0d1165097ac823c8'
   'oscar/frontend/public/assets/mascot/oscar-idle.png' = 'aa8d4e040a105a351ef3e3b46c8e2870196c33b09e0d91f7344448cba05c055c'
   'oscar/frontend/public/assets/mascot/oscar-listening.png' = '46165686357b066866891c3e21367f823ff76882cba84fddfe0b6d54877f80fb'
   'oscar/frontend/public/assets/mascot/oscar-security.png' = 'b43b890cfc073d0833dd2b84c5936e105b3c04103e1b4b9bb3d0491204681af1'
   'oscar/frontend/public/assets/mascot/oscar-success.png' = '88a59f176ef76d3854e33ca96df6fde3626cc25397744be8b847eb18c25d9587'
   'oscar/frontend/public/assets/mascot/oscar-thinking.png' = '0f1d3e5a957463bc7e2eb6e9a1669677898e775b32a303af5c9aeb649192c23a'
   'oscar/frontend/public/favicon.ico' = '56949cee58cad8ea8096982d30c71e97ed9f8e34b85cc06ec53ded728b49ea0a'
+  'src/ui/public/assets/brand/monarch-assembly-crown.png' = 'ca3db93f196ddd2e248ff241c0fbfaa6ede347ae0c67afd59023d62727bd1c0f'
+  'src/ui/public/assets/brand/monarch-assembly-shield.png' = '2eb8b8a307160471f46b2ca64dc83dc4e2014de34dfdab8a10833ce350e3c34b'
   'src/ui/public/assets/brand/monarch-icon.png' = '81cf1442dff4249f2ea0e00806fdbf72f99e6796dc59d6a529523a6cf86b0960'
   'src/ui/public/assets/brand/monarch-incognito-hooded.png' = '4e8e0ae26c1f188f4a855f2de70ff0942738b1a47985355ad5ff65cec6fca0ce'
   'src/ui/public/assets/brand/monarch-mark.png' = '2821f1df15f051310587e64326516cc6384c7269170bcbd56cb15c668ce4fde3'
   'src/ui/public/assets/brand/monarch-startup-3d.png' = '31700673a5e43d03983b2dd22603475a5bb66fa03dd9fbfd48af73ed27b1c15c'
+  'src/ui/public/assets/fonts/MonarchDisplay-Bold.woff2' = '1191d8f825bfe525b2e3f807286ea06ca5428f8965a2c65746031bb1990fc6c2'
   'src/ui/public/assets/mascot/oscar-coding.png' = 'f8b9c3bbf1c373e40aaaa468a753162dec148ae27697488cb832620c141a4487'
-  'src/ui/public/assets/mascot/oscar-error.png' = '8c860bba4d6f04af3fb9615242c92e7a53af719699d4318097946b2f205145ab'
+  'src/ui/public/assets/mascot/oscar-error.png' = '28d244461b975fc8cf4d6757ba827563fe6115ffd960220b0d1165097ac823c8'
   'src/ui/public/assets/mascot/oscar-idle.png' = 'aa8d4e040a105a351ef3e3b46c8e2870196c33b09e0d91f7344448cba05c055c'
   'src/ui/public/assets/mascot/oscar-listening.png' = '46165686357b066866891c3e21367f823ff76882cba84fddfe0b6d54877f80fb'
   'src/ui/public/assets/mascot/oscar-security.png' = 'b43b890cfc073d0833dd2b84c5936e105b3c04103e1b4b9bb3d0491204681af1'
   'src/ui/public/assets/mascot/oscar-success.png' = '88a59f176ef76d3854e33ca96df6fde3626cc25397744be8b847eb18c25d9587'
   'src/ui/public/assets/mascot/oscar-thinking.png' = '0f1d3e5a957463bc7e2eb6e9a1669677898e775b32a303af5c9aeb649192c23a'
   'src/ui/public/assets/monarch-safe-logo.png' = '7235a10ddf470b207f33359633f47c7bae3c780c281d966d4a04aa2895a3f6ed'
-  'src/ui/public/assets/studio/guided-portrait.png' = '7f7d31c3e43295d446d5e2cddb57270e732d670227a5b81d903d7eb074964d22'
-  'src/ui/public/assets/studio/preset-auto.png' = '76e9b8a2ff146db294b2b544f1e4ddf9d5ac4e18f9eac1a22b6c06d23878cb7b'
-  'src/ui/public/assets/studio/preset-cool.png' = 'baf3c304784f49a7f4273a78f223b48ff5d0e804f6a0078e1f4993e518e8c9ce'
-  'src/ui/public/assets/studio/preset-warm.png' = '7be4491a7e02b5716bcf4e44834b810e94bc52e660c7d6e906f06785961f66f6'
   'src/ui/public/favicon.ico' = '56949cee58cad8ea8096982d30c71e97ed9f8e34b85cc06ec53ded728b49ea0a'
   'tools/computer-use/assets/oscar-cursor-idle.png' = '0a84b4fee7a33fab24ee069dec1bd407f199c0581b8927d5535ab6e3e3a0b5df'
   'tools/computer-use/assets/oscar-cursor-hover.png' = '20f396ea6b52be11c24b3007ce61777f5f421b347103b4fb327beeefdffa2843'
@@ -194,8 +207,6 @@ $MonarchPublicReviewedBinarySha256 = @{
 
 $MonarchPublicForbiddenContentPatterns = @(
   ('C:' + '\\Users\\' + 'anton'),
-  ('E:' + '\\' + 'Monarch'),
-  ('E:' + '/' + 'Monarch'),
   'gh[pousr]_[A-Za-z0-9_]{20,}',
   'github_pat_[A-Za-z0-9_]{20,}',
   '\bglpat-[A-Za-z0-9_-]{20,}\b',

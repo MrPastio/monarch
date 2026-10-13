@@ -15,6 +15,56 @@ const capability: MonarchCapability = {
 };
 
 describe('single Policy Kernel', () => {
+  it.each(['public', 'owner'] as const)('requires a source-bound exact confirmation even on the %s fast path', tier => {
+    const policy = tier === 'owner' ? createOwnerPolicy() : createPolicy('workspace-autonomous');
+    const evaluate = (value: MonarchExecutionRequest) => policy.enforceSourceConfirmation(value, policy.preflight(value, capability, 'write').decision);
+    const raw = request({ requireExactConfirmation: true, source: 'desktop', proposalHash: 'a'.repeat(64) });
+    const first = evaluate(raw);
+    expect(first.outcome).toBe('confirm');
+    expect(first.authorityTier).toBe(tier);
+    const approved = { ...raw, confirmed: true, approvalPurpose: 'policy' as const,
+      approvalPolicyDecisionHash: first.policyDecisionHash, authorityTierAtApproval: first.authorityTier };
+    const second = evaluate(approved);
+    expect(second.outcome).toBe('allow'); expect(second.policyDecisionHash).toBe(first.policyDecisionHash);
+    expect(policy.approvalBindingMatches(approved, second)).toBe(true);
+    for (const invalid of [{ ...raw, confirmed: true }, { ...approved, approvalPolicyDecisionHash: 'f'.repeat(64) },
+      { ...approved, confirmed: false }, { ...approved, authorityTierAtApproval: tier === 'owner' ? 'public' as const : 'owner' as const }]) {
+      expect(evaluate(invalid).outcome).toBe('confirm');
+    }
+    const removed = { ...approved }; delete removed.requireExactConfirmation;
+    const changed = evaluate(removed);
+    expect(changed.policyDecisionHash).not.toBe(first.policyDecisionHash);
+    expect(policy.approvalBindingMatches(removed, changed)).toBe(false);
+    const unbound = { ...raw }; delete unbound.proposalHash;
+    const unboundDecision = evaluate(unbound);
+    expect(evaluate({ ...unbound, confirmed: true, approvalPurpose: 'policy', authorityTierAtApproval: unboundDecision.authorityTier,
+      approvalPolicyDecisionHash: unboundDecision.policyDecisionHash }).outcome).toBe('confirm');
+  });
+
+  it('retains source-required review after final Security allow and never weakens a hard denial', () => {
+    const policy = createPolicy('workspace-autonomous'), raw = request({ requireExactConfirmation: true });
+    const preflight = policy.preflight(raw, capability, 'write');
+    const reviewed = { ...preflight, decision: { ...preflight.decision, requiresSecurityReview: true } };
+    expect(policy.enforceSourceConfirmation(raw, policy.finalize(reviewed, raw,
+      { ok: true, status: 'allowed', report: 'Allowed', disposition: 'informational' })).outcome).toBe('confirm');
+    expect(policy.enforceSourceConfirmation(raw, policy.finalize(reviewed, raw,
+      { ok: false, status: 'blocked', report: 'Denied', disposition: 'hard-deny' })).outcome).toBe('deny');
+  });
+  it('binds source confirmation to final Security facts, not the earlier preflight hash', () => {
+    const policy = createPolicy('workspace-autonomous'), raw = request({ requireExactConfirmation: true, proposalHash: 'a'.repeat(64) });
+    const finalize = (value: MonarchExecutionRequest, code = 'security.fixture.allowed') => {
+      const preflight = policy.preflight(value, capability, 'write');
+      return policy.enforceSourceConfirmation(value, policy.finalize({ ...preflight, decision: { ...preflight.decision, requiresSecurityReview: true } },
+        value, { ok: true, status: 'allowed', report: 'Reviewed', evidenceCodes: [code] }));
+    };
+    const first = finalize(raw); expect(first.outcome).toBe('confirm');
+    expect(first.policyDecisionHash).not.toBe(policy.preflight(raw, capability, 'write').decision.policyDecisionHash);
+    const approved = { ...raw, confirmed: true, approvalPurpose: 'policy' as const,
+      approvalPolicyDecisionHash: first.policyDecisionHash, authorityTierAtApproval: first.authorityTier };
+    expect(finalize(approved).outcome).toBe('allow');
+    expect(finalize(approved, 'security.fixture.changed').outcome).toBe('confirm');
+  });
+
   it('allows reversible workspace mutations in workspace-autonomous mode without a second confirmation', () => {
     const policy = createPolicy('workspace-autonomous');
     const decision = policy.preflight(request(), capability, 'write').decision;
@@ -168,7 +218,12 @@ describe('single Policy Kernel', () => {
     const remote = createOwnerPolicy().preflight({ ...shellRequest, source: 'telegram' }, shellCapability, 'execute', {
       agentSecurityMode: 'strict', ownerOverride,
     }).decision;
-    expect(local.outcome).not.toBe('confirm');
+    expect(local).toMatchObject({
+      outcome: 'allow',
+      requiresSecurityReview: true,
+      ownerUnrestrictedOverride: true,
+    });
+    expect(local.dangerAssessment).toBeUndefined();
     expect(remote.outcome).toBe('confirm');
     expect(remote.evidence.map((entry) => entry.code)).toContain('shell.exact-action-card.required');
 
@@ -176,7 +231,36 @@ describe('single Policy Kernel', () => {
       agentSecurityMode: 'strict',
       ownerOverride: { ...ownerOverride, shellApprovalPolicy: 'risk-based' },
     }).decision;
-    expect(riskBased).toMatchObject({ outcome: 'confirm', dangerResponse: 'confirm' });
+    expect(riskBased).toMatchObject({ outcome: 'allow', requiresSecurityReview: true });
+  });
+
+  it('applies base Direct Access on an unenrolled Desktop, never to remote surfaces', () => {
+    // Without a signed device entitlement the control used to read "on" while
+    // Kernel kept gating every action. Direct Access is now the base mode of
+    // the local owner surfaces; owner-only powers stay with the entitlement.
+    const shellCapability: MonarchCapability = {
+      id: 'system.shell.run', moduleId: 'system-shell', title: 'Run exact shell process', risk: 'execute',
+    };
+    const shellRequest = request({
+      moduleId: 'system-shell', capabilityId: shellCapability.id,
+      input: { executable: 'powershell.exe', args: ['-Command', 'Get-Date'], cwd: 'E:\Agent-QA' },
+      proposalId: 'proposal_shell_base', proposalHash: '3'.repeat(64), proposalSource: 'model-tool-call',
+      executionMode: 'agent-runtime', requestedBy: 'agent:task_base', source: 'desktop',
+      originatingUserText: 'Выполни Get-Date в терминале',
+    });
+    const ownerOverride = { enabled: true, lifetime: 'persistent' as const, shellApprovalPolicy: 'never' as const };
+    const unenrolled = new MonarchPolicyKernel(
+      new MonarchPermissionGate({ sandboxMode: 'danger-full-access', approvalPolicy: 'on-request', autonomyMode: 'full-local' }),
+      new MonarchCapabilityLeaseStore('E:\Monarch'));
+    const local = unenrolled.preflight(shellRequest, shellCapability, 'execute', { agentSecurityMode: 'strict', ownerOverride }).decision;
+    expect(local).toMatchObject({ outcome: 'allow', authorityTier: 'public', ownerUnrestrictedOverride: true,
+      requiresSecurityReview: true });
+    for (const source of ['telegram', 'voice', 'api'] as const) {
+      const remote = unenrolled.preflight({ ...shellRequest, source }, shellCapability, 'execute',
+        { agentSecurityMode: 'strict', ownerOverride }).decision;
+      expect(remote.ownerUnrestrictedOverride).not.toBe(true);
+      expect(remote.outcome).not.toBe('allow');
+    }
   });
 
   it('lets Full Local Computer Use reach Action Guard without weakening Guided or confirm-all modes', () => {
@@ -353,6 +437,18 @@ describe('single Policy Kernel', () => {
       reason: expect.stringContaining('owner'),
     });
     expect(createOwnerPolicy().evaluateLocalSettingsCommand(input)).toMatchObject({ outcome: 'allow' });
+  });
+
+  it('treats Direct Access as an attested Desktop product control rather than a DEV entitlement', () => {
+    const input = {
+      source: 'desktop' as const,
+      command: 'owner-override.update',
+      scope: { type: 'chat' as const },
+      payload: { enabled: true, lifetime: 'persistent', shellApprovalPolicy: 'never' },
+    };
+    expect(createPolicy('workspace-autonomous').evaluateLocalSettingsCommand(input)).toMatchObject({ outcome: 'allow' });
+    expect(createPolicy('workspace-autonomous').evaluateLocalSettingsCommand({ ...input, source: 'api' }))
+      .toMatchObject({ outcome: 'deny' });
   });
 
   it('applies the same read-to-write intent guard inside Agent Runtime', () => {

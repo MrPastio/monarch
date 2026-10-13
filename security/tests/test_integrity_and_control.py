@@ -525,6 +525,8 @@ class IntegrityAndControlTests(unittest.TestCase):
 
             class FakeProcess:
                 pid = 4242
+                from io import BytesIO
+                stdin = BytesIO()
 
                 def poll(self):
                     return None

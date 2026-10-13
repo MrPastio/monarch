@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
   "runtime": {
-    "version": "2026.07.7",
-    "sha256": "7cccc4ffc86675056cd301b48ab8b797b8309224d3f65742f06b636698f64502",
+    "version": "2026.10.1",
+    "sha256": "47e97c39021eba9078237c26bad4d23b730fa35bc6c05361c9788a1b951aeda0",
     "files": 957,
-    "size": 494438306
+    "size": 497311880
   },
   "environment": {
-    "version": "backend-0.1.5-offline8",
-    "sha256": "7ff56a5cdd8f5cfb5ebd02cd59289188ff82f7a408fbee13ee94cf1a0de1c78a",
-    "files": 7615,
-    "size": 3332307107
+    "version": "backend-0.1.6-offline1",
+    "sha256": "e6b4c51d0635afd33fa19ffa7a8df19df0eab5c6739700db31194c06258a4fc7",
+    "files": 7693,
+    "size": 3339985085
   }
 }

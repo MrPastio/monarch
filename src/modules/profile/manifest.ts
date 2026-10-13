@@ -19,12 +19,7 @@ export const profileManifest: MonarchModuleManifest = {
       title: 'Read profile',
       description: 'Read the local Monarch profile.',
       risk: 'read',
-      routing: {
-        aliases: ['show profile', 'read profile', 'monarch profile'],
-        keywords: ['profile', 'identity', 'preferences', 'style', 'boundaries'],
-        examples: ['show Monarch profile'],
-        intentKinds: ['profile.read'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {},
@@ -37,12 +32,7 @@ export const profileManifest: MonarchModuleManifest = {
       title: 'Update profile',
       description: 'Update local Monarch profile fields.',
       risk: 'write',
-      routing: {
-        aliases: ['update profile', 'save preference', 'remember preference'],
-        keywords: ['profile', 'update', 'preference', 'style', 'boundary', 'trait'],
-        examples: ['update profile preference tone=concise'],
-        intentKinds: ['profile.write'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {

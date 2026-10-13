@@ -1,5 +1,5 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentTaskCheckpoint, AgentTaskStoreListener, MonarchAgentRuntime } from '../../src/agent';
 import {
   InMemoryOscarTurnStore,
   MESSAGE_PROVENANCE_SCHEMA_VERSION,
@@ -7,8 +7,10 @@ import {
   OSCAR_TURN_CANCELLED_SUMMARY,
   OSCAR_TURN_SCHEMA_VERSION,
   OscarTurnCoordinator,
+  astraStepTitle,
   turnFailureDiagnostic,
   userFacingTurnFailure,
+  researchTraceSteps,
   type OscarAnswerExecutorEvent,
   type OscarPersistedMessage,
   type OscarTurnCheckpoint,
@@ -17,6 +19,93 @@ import {
 import { exactMonarch025Changelog, materialReviewHistory } from '../fixtures/oscar/material-handoff';
 
 describe('OscarTurnCoordinator', () => {
+  it('keeps a custom-file refusal in the answer lane without retry or agent work', async () => {
+    const answerFallback = vi.fn(async () => ({ answer: 'Must not retry.' }));
+    const answerExecutor = vi.fn(async () => stream([{ type: 'error', message: 'custom-model-draft-only' }]));
+    const coordinator = createCoordinator({ answerExecutor, answerFallback });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit({ ...submission('Привет', 'client_custom_draft'), modifiers: { requestedModel: 'custom-a1b2c3d4e5f6' } });
+      const terminal = await waitForTerminal(coordinator, accepted.turn.id);
+      expect(terminal.turn).toMatchObject({ mode: 'answer', status: 'failed' });
+      expect(terminal.turn.outcome?.summary).toContain('MTP draft');
+      expect(terminal.turn.outcome?.summary).not.toContain('Технические детали');
+      expect(terminal.turn.taskId).toBeUndefined();
+      expect(answerExecutor).toHaveBeenCalledTimes(1);
+      expect(answerFallback).not.toHaveBeenCalled();
+    } finally { await coordinator.stop(); }
+  });
+  it('keeps the process alive when a background outbox write fails', async () => {
+    // Live: Windows refused the rename of turns.v1.json and the rejected
+    // background drain ended the server with an unhandled rejection.
+    const persistentStore = new InMemoryOscarTurnStore();
+    const coordinator = createCoordinator({ persistentStore });
+    await coordinator.start();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const list = vi.spyOn(persistentStore, 'listPendingOutbox')
+      .mockRejectedValue(Object.assign(new Error('rename failed'), { code: 'EPERM' }));
+    try {
+      const accepted = await coordinator.submit(submission('Привет', 'client_outbox_eperm'));
+      await waitForTerminal(coordinator, accepted.turn.id);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+      expect(errorLog.mock.calls.map(call => String(call[0])).join('\n'))
+        .toContain('"diagnostic":"oscar-turn-background-failure","work":"outbox","code":"EPERM"');
+    } finally {
+      list.mockRestore(); errorLog.mockRestore();
+      process.off('unhandledRejection', onUnhandled);
+      await coordinator.stop();
+    }
+  });
+  it.each(['question-budget', 'model-turn-budget', 'capability-call-budget', 'failed-action-repeated', 'rejected-action-repeated',
+    'task-deadline', 'transport-deadline', 'Oscar recovery finished without a trustworthy final answer.'])(
+    'names the agent stop reason %s instead of the generic line', reason => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const summary = userFacingTurnFailure(Object.assign(new Error(reason), { code: reason }));
+        expect(summary).not.toContain('Не удалось завершить задачу');
+        expect(summary).toContain('Подтверждённые результаты сохранены');
+        expect(errors).not.toHaveBeenCalled();
+      } finally { errors.mockRestore(); }
+    });
+  it.each(['astra-restore-held', 'Bound Astra host is unavailable; no legacy fallback.'])(
+    'says plainly that agent work is paused while chat works (%s)', reason => {
+      const summary = userFacingTurnFailure(new Error(reason));
+      expect(summary).toContain('Обычный чат работает');
+      expect(summary).not.toContain('Bound Astra');
+    });
+  it('reads the research steps of a Turn from its progress events, in order and once each', () => {
+    const progress = (phase: string, detail: string) => ({ type: 'agent.progress', payload: { phase, detail } });
+    expect(researchTraceSteps([
+      progress('search-plan', 'Подбираю, что искать'),
+      progress('research-plan', 'Вопрос требует разбора — исследую глубже'),
+      progress('search', 'a · b'),
+      progress('search', 'a · b'),
+      { type: 'answer.delta', payload: { content: 'x' } },
+      progress('thinking', 'Думаю'),
+      progress('research-read', 'Изучаю 3 источника'),
+      progress('research-verify', 'Не хватает: цены'),
+      progress('research-write', 'Пишу вывод'),
+    ])).toEqual([
+      { kind: 'plan', detail: 'Подбираю, что искать' },
+      { kind: 'plan', detail: 'Вопрос требует разбора — исследую глубже' },
+      { kind: 'search', detail: 'a · b' },
+      { kind: 'read', detail: 'Изучаю 3 источника' },
+      { kind: 'verify', detail: 'Не хватает: цены' },
+      { kind: 'write', detail: 'Пишу вывод' },
+    ]);
+  });
+  it.each(['model-unavailable', 'safety-input-model-unavailable'])(
+    'tells the person the selected MAX model is gone (%s)', reason => {
+      // Live 2026-10-09: OpenRouter withdrew a free model (404) and the turn
+      // ended as "Не удалось завершить задачу" with no hint what to change.
+      const summary = userFacingTurnFailure(Object.assign(new Error(reason), { code: reason }));
+      expect(summary).toContain('настройках MAX');
+      expect(summary).not.toContain('Не удалось завершить задачу');
+    });
   it('keeps internal schema diagnostics out of the user-facing failure copy', () => {
     const summary = userFacingTurnFailure(new Error('steps[0] contains unexpected fields: id.'));
     expect(summary).toBe('План задачи не прошёл проверку. Oscar остановился до новых действий; выполнение не подтверждено.');
@@ -29,6 +118,56 @@ describe('OscarTurnCoordinator', () => {
       'Oscar остановил слишком долгий выбор следующего действия по лимиту времени. Ранее подтверждённые результаты сохранены; новых действий не было.',
     );
     expect(summary).not.toContain('agent-decision');
+  });
+
+  it.each(['agent-runtime-host-retired', 'control-budget-exhausted'])(
+    'tells the person the executor gave up rather than reporting a generic failure (%s)', reason => {
+      // Before this, the executor abandoning a task produced no outcome at all:
+      // the turn stayed on "Набираю…" forever and Stop did nothing.
+      const summary = userFacingTurnFailure(new Error(`astra-agent-task-${reason}`));
+      expect(summary).toContain('перестал вести эту задачу');
+      expect(summary).toContain('Подтверждённые результаты сохранены');
+      expect(summary).not.toContain(reason);
+    });
+
+  it.each(['task-fault:astra-agent-decision:evidence-shape', 'task-fault:astra-agent-task:capability-args-binding'])(
+    'says one task was stopped by an internal check without naming it (%s)', reason => {
+      const summary = userFacingTurnFailure(Object.assign(new Error(reason), { code: reason }));
+      expect(summary).toContain('внутренней ошибки проверки');
+      expect(summary).toContain('Другие задачи это не затронуло');
+      expect(summary).not.toContain('astra-');
+    });
+
+  it.each([
+    ['primary-json-validation-failed', 'MAX не смог оформить ответ правильно. Попробуй отправить запрос ещё раз.'],
+    ['provider-context-too-large', 'Материалов слишком много для одного запроса. Сократи сообщение или выбери меньше материалов.'],
+    ['credential-unavailable', 'Открой Настройки → MAX: проверь ключ выбранного сервиса и согласие на отправку данных.'],
+    // The provider's real codes, which the former grammar missed.
+    ['provider-rate-limited', 'У выбранного сервиса закончился лимит или баланс. Подожди или проверь свой кабинет, затем повтори запрос.'],
+    ['provider-timeout', 'Сервис не ответил вовремя. Запрос MAX завершён без результата; можно повторить.'],
+    ['credential-rejected', 'Открой Настройки → MAX: проверь ключ выбранного сервиса и согласие на отправку данных.'],
+    // A stage prefix is dropped by the host; the service refusing the request is named, not blamed on the connection.
+    ['primary-provider-request-rejected', 'Сервис MAX не принял этот запрос. Попробуй повторить или переформулировать его.'],
+    ['safety-blocked-model', 'MAX остановился на проверке безопасности. Результаты предыдущих шагов остаются в истории задачи.'],
+    ['provider-response-rejected', 'Сервис MAX отказался отвечать на этот запрос (сработал его фильтр). Ответ не принят; можно переформулировать.'],
+    ['provider-unexpected-tool-call', 'Модель MAX попыталась вызвать свой встроенный инструмент вместо ответа. Ответ не принят; повтори запрос или выбери другую модель.'],
+    ['provider-finish', 'Ответ MAX пришёл не полностью или повреждён. Он не принят как результат. Проверь связь и повтори запрос.'],
+    ['provider-output-truncated', 'MAX заметил, что ответ оборвался на лимите, и не выдал его за завершённый. Сузь задачу или попроси ответ частями.'],
+  ])('names the actionable MAX provider failure instead of the generic line (%s)', (reason, expected) => {
+    // The generic line spoke about unconfirmed actions for a request that asked for none,
+    // and hid the only thing the person could act on.
+    const summary = userFacingTurnFailure(Object.assign(new Error(reason), { code: reason }));
+    expect(summary).toBe(expected);
+    expect(summary).not.toContain('неподтверждённые действия');
+  });
+
+  it.each([
+    ['model-output-limit', 'оборвался на лимите длины'],
+    ['proposal-schema', 'в неправильном формате'],
+  ])('names a model step that could not be accepted (%s)', (reason, expected) => {
+    const summary = userFacingTurnFailure(Object.assign(new Error(reason), { code: reason }));
+    expect(summary).toContain(expected);
+    expect(summary).not.toContain('Технические детали');
   });
 
   it('stores a bounded secret-redacted failure diagnostic with a stable fingerprint', () => {
@@ -118,6 +257,34 @@ describe('OscarTurnCoordinator', () => {
           verification: 'unverified-model',
         },
       });
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it.each([
+    ['memory.list', 'Посмотрел в памяти'],
+    ['memory.remember', 'Записал в память'],
+    ['gmail.messages.list', 'Поработал с почтой'],
+    ['workspace.files.list', 'Посмотрел папку'],
+    ['workspace.files.read', 'Прочитал файл'],
+  ])('names the step %s by what it touched', (capabilityId, title) => {
+    expect(astraStepTitle(capabilityId, undefined, 'done')).toBe(title);
+  });
+
+  it('keeps the lines of the request and of the history the model is given', async () => {
+    const answerExecutor = vi.fn(async (_execution: { turn: OscarTurnV1 }) => stream([{ type: 'token', token: 'Ок.' }, { type: 'done' }]));
+    const coordinator = createCoordinator({ answerExecutor });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit({
+        ...submission('Почини функцию:\r\n```ts\nconst a = 1;\u0007\n```\n\n\n\nСпасибо'),
+        history: [{ role: 'assistant', content: '1. Первый шаг\n2. Второй шаг  \n' }],
+      });
+      await waitForTerminal(coordinator, accepted.turn.id);
+      const turn = answerExecutor.mock.calls[0]![0].turn;
+      expect(turn.request.text).toBe('Почини функцию:\n```ts\nconst a = 1;\n```\n\nСпасибо');
+      expect(turn.request.history).toEqual([{ role: 'assistant', content: '1. Первый шаг\n2. Второй шаг' }]);
     } finally {
       await coordinator.stop();
     }
@@ -573,10 +740,8 @@ describe('OscarTurnCoordinator', () => {
       { type: 'token', token: '<!doctype html><title>Tetris</title>' },
       { type: 'done' },
     ]));
-    const createTask = vi.fn();
     const coordinator = createCoordinator({
       answerExecutor,
-      runtime: mockRuntime({ createTask }),
       dispositionProvider: {
         classify: async () => { throw new Error('decision-model-unavailable'); },
       },
@@ -589,7 +754,6 @@ describe('OscarTurnCoordinator', () => {
       expect(terminal.turn).toMatchObject({ mode: 'answer', status: 'succeeded' });
       expect(terminal.turn.outcome?.summary).toContain('Tetris');
       expect(answerExecutor).toHaveBeenCalledTimes(1);
-      expect(createTask).not.toHaveBeenCalled();
     } finally {
       await coordinator.stop();
     }
@@ -600,10 +764,8 @@ describe('OscarTurnCoordinator', () => {
       { type: 'token', token: 'Список получил. Это материал для просмотра, действий не запускал.' },
       { type: 'done' },
     ]));
-    const createTask = vi.fn();
     const coordinator = createCoordinator({
       answerExecutor,
-      runtime: mockRuntime({ createTask }),
     });
     await coordinator.start();
     try {
@@ -619,7 +781,6 @@ describe('OscarTurnCoordinator', () => {
         kind: 'material_review',
       });
       expect(answerExecutor).toHaveBeenCalledTimes(1);
-      expect(createTask).not.toHaveBeenCalled();
       expect(terminal.events.some((event) => event.type === 'task.linked')).toBe(false);
       expect(terminal.events.some((event) => event.type === 'agent.progress')).toBe(false);
     } finally {
@@ -627,170 +788,13 @@ describe('OscarTurnCoordinator', () => {
     }
   });
 
-  it('does not let a trailing descriptive list hide a leading operational command after an invitation', async () => {
-    const checkpoint = runningAgentCheckpoint('agent_task_leading_command_before_list');
-    const createTask = vi.fn(async () => checkpoint);
-    const runtime = mockRuntime({ createTask, getTask: async () => checkpoint });
-    const answerExecutor = vi.fn(async () => stream([{ type: 'done' }]));
-    const coordinator = createCoordinator({ runtime, answerExecutor });
-    await coordinator.start();
-    try {
-      const request = 'Запусти backend. 1. Исправлена маршрутизация. 2. Добавлена история.';
-      const accepted = await coordinator.submit({
-        ...submission(request, 'client_leading_command_before_list'),
-        history: materialReviewHistory,
-      });
-      const linked = await waitForTurn(coordinator, accepted.turn.id, (turn) => Boolean(turn.taskId));
-
-      expect(linked.turn).toMatchObject({ mode: 'agent', status: 'running', taskId: checkpoint.task.id });
-      expect(createTask).toHaveBeenCalledWith(expect.objectContaining({ request }));
-      expect(answerExecutor).not.toHaveBeenCalled();
-      expect(linked.events.some((event) => event.type === 'task.linked')).toBe(true);
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it.each([
-    {
-      request: 'создай на рабочем столе текстовый файл с именем ромашка',
-      clientRequestId: 'client_typed_file_effect',
-      expectedKind: 'artifact',
-      expectedId: 'requested_artifact',
-    },
-    {
-      request: 'запусти калькулятор',
-      clientRequestId: 'client_typed_system_effect',
-      expectedKind: 'state-change',
-      expectedId: 'requested_state_change',
-    },
-    {
-      request: 'поставь громкость на 20%',
-      clientRequestId: 'client_typed_volume_effect',
-      expectedKind: 'state-change',
-      expectedId: 'requested_state_change',
-    },
-    {
-      request: 'закрой браузер',
-      clientRequestId: 'client_typed_browser_effect',
-      expectedKind: 'state-change',
-      expectedId: 'requested_state_change',
-    },
-    {
-      request: 'создай папку на рабочем столе тест',
-      clientRequestId: 'client_typed_folder_effect',
-      expectedKind: 'state-change',
-      expectedId: 'requested_state_change',
-    },
-  ])('compiles the operational goal into a required verified effect: $request', async ({
-    request,
-    clientRequestId,
-    expectedKind,
-    expectedId,
-  }) => {
-    const checkpoint = runningAgentCheckpoint(`agent_task_${clientRequestId}`);
-    const createTask = vi.fn(async () => checkpoint);
-    const coordinator = createCoordinator({
-      runtime: mockRuntime({ createTask, getTask: async () => checkpoint }),
-    });
-    await coordinator.start();
-    try {
-      const accepted = await coordinator.submit(submission(request, clientRequestId));
-      await waitForTurn(coordinator, accepted.turn.id, (turn) => Boolean(turn.taskId));
-
-      expect(createTask).toHaveBeenCalledWith(expect.objectContaining({
-        request,
-        expectedOutputs: [expect.objectContaining({
-          id: expectedId,
-          kind: expectedKind,
-          required: true,
-          description: expect.stringContaining(request),
-        })],
-        successCriteria: [expect.objectContaining({
-          verificationHint: expect.stringMatching(/mutation truth|postcondition|read-after-write/i),
-        })],
-      }));
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it('removes an explicit skill composer prefix before creating an operational Agent task', async () => {
-    const checkpoint = runningAgentCheckpoint('agent_task_explicit_file_skill');
-    const createTask = vi.fn(async () => checkpoint);
-    const coordinator = createCoordinator({
-      runtime: mockRuntime({ createTask, getTask: async () => checkpoint }),
-    });
-    await coordinator.start();
-    try {
-      const accepted = await coordinator.submit(submission(
-        '$monarch-file-guardian создай на рабочем столе новую папку',
-        'client_explicit_file_skill',
-      ));
-      await waitForTurn(coordinator, accepted.turn.id, (turn) => Boolean(turn.taskId));
-
-      expect(createTask).toHaveBeenCalledWith(expect.objectContaining({
-        request: 'создай на рабочем столе новую папку',
-        expectedOutputs: [expect.objectContaining({
-          description: expect.stringContaining('создай на рабочем столе новую папку'),
-        })],
-      }));
-      expect(JSON.stringify(createTask.mock.calls[0]?.[0])).not.toContain('$monarch-file-guardian');
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it('keeps a Desktop file-summary request in adaptive Agent Runtime', async () => {
-    const checkpoint = runningAgentCheckpoint('agent_task_desktop_summary_regression');
-    const createTask = vi.fn(async () => checkpoint);
-    const answerExecutor = vi.fn(async () => stream([
-      { type: 'token', token: 'У меня нет прямого доступа к рабочему столу.' },
-      { type: 'done' },
-    ]));
-    const coordinator = createCoordinator({
-      agentFirst: true,
-      runtime: mockRuntime({ createTask, getTask: async () => checkpoint }),
-      answerExecutor,
-    });
-    await coordinator.start();
-    try {
-      const accepted = await coordinator.submit(submission(
-        '$monarch-file-guardian Перескажи все мои файлы на рабочем столе',
-        'client_desktop_summary_regression',
-      ));
-      const linked = await waitForTurn(coordinator, accepted.turn.id, (turn) => Boolean(turn.taskId));
-
-      expect(linked.turn).toMatchObject({
-        mode: 'agent',
-        status: 'running',
-        taskId: checkpoint.task.id,
-      });
-      expect(createTask).toHaveBeenCalledTimes(1);
-      expect(createTask).toHaveBeenCalledWith(expect.objectContaining({
-        request: 'Перескажи все мои файлы на рабочем столе',
-        planningMode: 'adaptive',
-        expectedOutputs: [expect.objectContaining({
-          id: 'operational_observation',
-          kind: 'verification',
-          required: true,
-        })],
-      }));
-      expect(answerExecutor).not.toHaveBeenCalled();
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
   it('answers an ordinary question directly without creating an AgentTask', async () => {
-    const createTask = vi.fn();
     const answerExecutor = vi.fn(async () => stream([
       { type: 'token', token: 'Готов.' },
       { type: 'done' },
     ]));
     const coordinator = createCoordinator({
       agentFirst: true,
-      runtime: mockRuntime({ createTask }),
       answerExecutor,
     });
     await coordinator.start();
@@ -804,7 +808,6 @@ describe('OscarTurnCoordinator', () => {
       expect(terminal.turn).toMatchObject({ mode: 'answer', status: 'succeeded' });
       expect(terminal.turn.taskId).toBeUndefined();
       expect(answerExecutor).toHaveBeenCalledTimes(1);
-      expect(createTask).not.toHaveBeenCalled();
     } finally {
       await coordinator.stop();
     }
@@ -821,12 +824,10 @@ describe('OscarTurnCoordinator', () => {
       { type: 'token', token: '<!doctype html><title>Snake</title>' },
       { type: 'done' },
     ]));
-    const createTask = vi.fn();
     const coordinator = createCoordinator({
       answerExecutor,
-      runtime: mockRuntime({ createTask }),
       dispositionProvider: {
-        classify: async () => ({ lane: 'agent', kind: 'wrong-fallback', confidence: 1, reason: 'fixture' }),
+        classify: async () => ({ lane: 'answer', kind: 'semantic-request', confidence: 1, reason: 'fixture' }),
       },
     });
     await coordinator.start();
@@ -836,37 +837,6 @@ describe('OscarTurnCoordinator', () => {
 
       expect(terminal.turn).toMatchObject({ mode: 'answer', status: 'succeeded' });
       expect(answerExecutor).toHaveBeenCalledTimes(1);
-      expect(createTask).not.toHaveBeenCalled();
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it('routes a request to inspect the Monarch codebase into the verified Agent lane', async () => {
-    const checkpoint = runningAgentCheckpoint('agent_task_monarch_code_review');
-    const createTask = vi.fn(async () => checkpoint);
-    const runtime = mockRuntime({ createTask, getTask: async () => checkpoint });
-    const answerExecutor = vi.fn(async () => stream([{ type: 'done' }]));
-    const coordinator = createCoordinator({ runtime, answerExecutor });
-    await coordinator.start();
-    try {
-      const request = 'Интересно более детально, можешь самостоятельно изучить код Monarch и сказать в чем разница?';
-      const accepted = await coordinator.submit({
-        ...submission(request, 'client_monarch_code_review'),
-        modifiers: { requestedModel: 'qwen3.8-27b-pro', reasoningEffort: 'high' },
-      });
-      const linked = await waitForTurn(coordinator, accepted.turn.id, (turn) => Boolean(turn.taskId));
-
-      expect(linked.turn).toMatchObject({ mode: 'agent', status: 'running', taskId: checkpoint.task.id });
-      expect(createTask).toHaveBeenCalledWith(expect.objectContaining({
-        request,
-        decisionModelPolicy: {
-          requestedRole: 'qwen3.8-27b-pro',
-          selectionSource: 'user-explicit',
-          fallback: 'exact',
-        },
-      }));
-      expect(answerExecutor).not.toHaveBeenCalled();
     } finally {
       await coordinator.stop();
     }
@@ -880,12 +850,10 @@ describe('OscarTurnCoordinator', () => {
       contentHash: 'a'.repeat(64),
     }));
     const answerExecutor = vi.fn(async () => stream([{ type: 'done' }]));
-    const createTask = vi.fn();
     const coordinator = createCoordinator({
       persisted,
       rememberMemory,
       answerExecutor,
-      runtime: mockRuntime({ createTask }),
     });
     await coordinator.start();
     try {
@@ -900,7 +868,6 @@ describe('OscarTurnCoordinator', () => {
         turn: expect.objectContaining({ source: 'desktop', privacyMode: 'persistent' }),
       }));
       expect(answerExecutor).not.toHaveBeenCalled();
-      expect(createTask).not.toHaveBeenCalled();
       expect(terminal.turn).toMatchObject({
         mode: 'answer',
         status: 'succeeded',
@@ -1143,145 +1110,9 @@ describe('OscarTurnCoordinator', () => {
     }
   });
 
-  it('routes the exact D drive audit to AgentTask and never calls the answer model', async () => {
-    const checkpoint = runningAgentCheckpoint('agent_task_storage_audit');
-    const createTask = vi.fn(async () => checkpoint);
-    const runtime = mockRuntime({ createTask, getTask: async () => checkpoint });
-    const answerExecutor = vi.fn(async () => stream([{ type: 'done' }]));
-    const coordinator = createCoordinator({ runtime, answerExecutor });
-    await coordinator.start();
-    try {
-      const accepted = await coordinator.submit(submission('проведи аудит папок на диске D'));
-      const linked = await waitForTurn(coordinator, accepted.turn.id, (turn) => Boolean(turn.taskId));
-
-      expect(linked.turn).toMatchObject({ mode: 'agent', status: 'running', taskId: checkpoint.task.id });
-      expect(createTask).toHaveBeenCalledTimes(1);
-      expect(createTask.mock.calls[0]?.[0]).toMatchObject({
-        request: 'проведи аудит папок на диске D',
-        clientRequestId: `oscar_turn_task_${accepted.turn.id}`,
-      });
-      expect(answerExecutor).not.toHaveBeenCalled();
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it('routes the exact wrapped Downloads cleanup request to AgentTask and never calls the answer model', async () => {
-    const checkpoint = runningAgentCheckpoint('agent_task_downloads_cleanup');
-    const createTask = vi.fn(async () => checkpoint);
-    const answerExecutor = vi.fn(async () => stream([{ type: 'done' }]));
-    const coordinator = createCoordinator({
-      runtime: mockRuntime({ createTask, getTask: async () => checkpoint }),
-      answerExecutor,
-    });
-    const request = '// задача: «Наведи порядок в „Загрузках“: разложи файлы по типам, устаревшее — в архив, дубликаты удали»';
-    await coordinator.start();
-    try {
-      const accepted = await coordinator.submit(submission(request, 'client_downloads_cleanup'));
-      const linked = await waitForTurn(coordinator, accepted.turn.id, (turn) => Boolean(turn.taskId));
-
-      expect(linked.turn).toMatchObject({ mode: 'agent', status: 'running', taskId: checkpoint.task.id });
-      expect(createTask).toHaveBeenCalledWith(expect.objectContaining({
-        request,
-        planningMode: 'adaptive',
-      }));
-      expect(answerExecutor).not.toHaveBeenCalled();
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it('waits for an in-flight Agent reconciliation before stop resolves', async () => {
-    const store = new BlockingReadOscarTurnStore();
-    const running = runningAgentCheckpoint('agent_task_shutdown_reconcile');
-    let listener: AgentTaskStoreListener | null = null;
-    const runtime = mockRuntime({
-      subscribe: (_taskId: string, next: AgentTaskStoreListener) => {
-        listener = next;
-        return () => { listener = null; };
-      },
-      createTask: async () => running,
-      getTask: async () => running,
-    });
-    const coordinator = createCoordinator({ persistentStore: store, runtime });
-    await coordinator.start();
-
-    const accepted = await coordinator.submit(submission('проведи аудит папок на диске D', 'client_shutdown_reconcile'));
-    await waitForTurn(coordinator, accepted.turn.id, (turn) => Boolean(turn.taskId));
-    const gate = store.blockNextRead();
-    const failed = structuredClone(running);
-    failed.task.status = 'failed';
-    failed.task.terminalReason = { code: 'unrecoverable-error', summary: 'Synthetic terminal failure.' };
-    listener!({ task: failed.task, checkpoint: failed, appendedEvents: [], replayed: false });
-    await gate.entered;
-
-    let stopped = false;
-    const stopping = coordinator.stop().then(() => { stopped = true; });
-    await Promise.resolve();
-    expect(stopped).toBe(false);
-    gate.release();
-    await stopping;
-
-    expect((await store.getTurn(accepted.turn.id))?.turn.status).toBe('failed');
-  });
-
-  it('turns operational attachments into model-generated evidence and forces exact action-card policy', async () => {
-    const checkpoint = runningAgentCheckpoint('agent_task_attachment_effect');
-    const createTask = vi.fn(async () => checkpoint);
-    const answerExecutor = vi.fn(async () => stream([
-      { type: 'token', token: 'На изображении виден путь D:\\Temp\\candidate.txt.' },
-      { type: 'done' },
-    ]));
-    const attachment = {
-      id: 'oscar_attachment_fixture',
-      name: 'target.png',
-      mimeType: 'image/png',
-      sizeBytes: 128,
-      digest: 'sha256:attachment-fixture',
-      dataBase64: 'iVBORw0KGgo=',
-    };
-    const coordinator = createCoordinator({
-      runtime: mockRuntime({ createTask, getTask: async () => checkpoint }),
-      answerExecutor,
-      resolveAttachments: async () => [attachment],
-      dispositionProvider: {
-        classify: async () => ({ lane: 'agent', kind: 'operation', confidence: 1, reason: 'explicit effect' }),
-      },
-    });
-    await coordinator.start();
-    try {
-      const accepted = await coordinator.submit({
-        ...submission('Удали файл, который указан на изображении.', 'client_attachment_effect'),
-        attachmentIds: [attachment.id],
-      });
-      await waitForTurn(coordinator, accepted.turn.id, (turn) => Boolean(turn.taskId));
-
-      expect(answerExecutor).toHaveBeenCalledTimes(1);
-      expect(createTask).toHaveBeenCalledWith(expect.objectContaining({
-        actionApprovalPolicy: 'all-effects',
-        initialObservations: [expect.objectContaining({
-          capabilityId: 'models.vision.observe',
-          summary: expect.stringContaining('D:\\Temp\\candidate.txt'),
-          structuredData: expect.objectContaining({
-            trust: 'untrusted-model-generated',
-            instructionsAllowed: false,
-          }),
-          evidence: [expect.objectContaining({
-            evidenceClass: 'model-generated',
-            reference: `oscar-attachment:${attachment.id}`,
-            checksum: attachment.digest,
-          })],
-        })],
-      }));
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
   it('blocks an operational attachment instead of falling back when vision observation is incomplete', async () => {
-    const createTask = vi.fn();
     const coordinator = createCoordinator({
-      runtime: mockRuntime({ createTask }),
+      astra: { bindAgent: () => ordinaryAgentBinding(), find: () => null },
       answerExecutor: async () => stream([{ type: 'token', token: 'Оборванное наблюдение.' }]),
       resolveAttachments: async () => [{
         id: 'oscar_attachment_incomplete',
@@ -1301,20 +1132,115 @@ describe('OscarTurnCoordinator', () => {
         ...submission('Удали указанный на изображении файл.', 'client_attachment_incomplete'),
         attachmentIds: ['oscar_attachment_incomplete'],
       });
+      await coordinator.flushOutbox();
       const terminal = await waitForTerminal(coordinator, accepted.turn.id);
       expect(terminal.turn).toMatchObject({
         status: 'blocked',
         outcome: { kind: 'blocked', warning: 'attachment-observation-unavailable' },
       });
-      expect(createTask).not.toHaveBeenCalled();
     } finally {
       await coordinator.stop();
     }
   });
 
-  it('blocks an operational request when Agent Runtime is unavailable without chat fallback', async () => {
+  it('searches first and hands the results to the agent when a consented search must end in an action', async () => {
+    const bound: OscarTurnV1[] = [];
+    const submitted: unknown[] = [];
     const answerExecutor = vi.fn(async () => stream([{ type: 'done' }]));
-    const coordinator = createCoordinator({ answerExecutor, runtime: null });
+    const researchEvidence = vi.fn(async () => JSON.stringify({ kind: 'untrusted-public-search', sources: [{ url: 'https://example.test', snippet: 'Новость' }] }));
+    const coordinator = createCoordinator({
+      answerExecutor,
+      researchEvidence,
+      consumeDataEgressConsent: async () => undefined,
+      astra: {
+        bindAgent: (turn: OscarTurnV1) => { bound.push(turn); return ordinaryAgentBinding(); },
+        find: () => null,
+        submit: (_turn: OscarTurnV1, prepared: unknown) => { submitted.push(prepared); throw new Error('fixture-stops-after-submit'); },
+      },
+      dispositionProvider: { classify: async () => ({ lane: 'agent', kind: 'operation', confidence: 0.9, reason: 'send the news' }) },
+    });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit({
+        ...submission('Найди последние новости и отправь их мне в Telegram', 'client_research_then_act'),
+        modifiers: { webSearch: true, researchMode: 'auto', dataEgressConsentId: 'oscar_egress_research_then_act' },
+      });
+      await coordinator.flushOutbox();
+      await waitFor(() => submitted.length === 1);
+      expect(answerExecutor).not.toHaveBeenCalled();
+      expect(bound[0]!.request.modifiers).not.toHaveProperty('webSearch');
+      expect(bound[0]!.request.modifiers).not.toHaveProperty('dataEgressConsentId');
+      expect(researchEvidence).toHaveBeenCalledWith(expect.objectContaining({ query: 'Найди последние новости и отправь их мне в Telegram', deep: false }));
+      expect(submitted[0]).toMatchObject({ kind: 'agent-attachments-v1', initialEvidence: [
+        { ref: 'agent_research_0', digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u), text: expect.stringContaining('untrusted-public-search') },
+      ] });
+      const routed = (await coordinator.getTurn(accepted.turn.id))!;
+      expect(routed.events.find((event) => event.type === 'turn.routed')?.payload).toMatchObject({ disposition: 'agent', kind: 'research_then_act' });
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('asks the model about the action under Direct Access too instead of answering every search', async () => {
+    const submitted: unknown[] = [];
+    const classify = vi.fn(async () => ({ lane: 'agent' as const, kind: 'operation', confidence: 0.9, reason: 'save the findings' }));
+    const coordinator = createCoordinator({
+      researchEvidence: async () => JSON.stringify({ kind: 'untrusted-public-search', sources: [{ url: 'https://example.test', snippet: 'Данные' }] }),
+      consumeDataEgressConsent: async () => undefined,
+      getOwnerUnrestrictedOverride: () => ({ enabled: true, lifetime: 'persistent', shellApprovalPolicy: 'never' }),
+      astra: {
+        bindAgent: () => ordinaryAgentBinding(),
+        find: () => null,
+        submit: (_turn: OscarTurnV1, prepared: unknown) => { submitted.push(prepared); throw new Error('fixture-stops-after-submit'); },
+      },
+      dispositionProvider: { classify },
+    });
+    await coordinator.start();
+    try {
+      await coordinator.submit({
+        ...submission('Найди в интернете прогноз погоды и сохрани его в новый файл', 'client_research_direct'),
+        modifiers: { webSearch: true, researchMode: 'auto', dataEgressConsentId: 'oscar_egress_research_direct' },
+      });
+      await coordinator.flushOutbox();
+      await waitFor(() => submitted.length === 1);
+      expect(classify).toHaveBeenCalledTimes(1);
+      expect(submitted[0]).toMatchObject({ kind: 'agent-attachments-v1', initialEvidence: [{ ref: 'agent_research_0' }] });
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('keeps a consented search that only needs an answer in the sourced answer lane', async () => {
+    const answerExecutor = vi.fn(async () => stream([{ type: 'token', token: 'Вот новости.' }, { type: 'done' }]));
+    const bindAgent = vi.fn(() => ordinaryAgentBinding());
+    const coordinator = createCoordinator({
+      answerExecutor,
+      researchEvidence: async () => 'unused',
+      consumeDataEgressConsent: async () => undefined,
+      astra: { bindAgent, find: () => null },
+      dispositionProvider: { classify: async () => ({ lane: 'answer', kind: 'external_research', confidence: 0.9, reason: 'just news' }) },
+    });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit({
+        ...submission('Какие последние новости о SpaceX?', 'client_research_answer'),
+        modifiers: { webSearch: true, researchMode: 'auto', dataEgressConsentId: 'oscar_egress_research_answer' },
+      });
+      const terminal = await waitForTerminal(coordinator, accepted.turn.id);
+      expect(terminal.turn).toMatchObject({ status: 'succeeded', mode: 'answer' });
+      expect(bindAgent).not.toHaveBeenCalled();
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('blocks an operational request when Astra V3 is unavailable without chat or V2 fallback', async () => {
+    const answerExecutor = vi.fn(async () => stream([{ type: 'done' }]));
+    const coordinator = createCoordinator({
+      answerExecutor,
+      astra: { bindAgent: () => null },
+      dispositionProvider: { classify: async () => ({ lane: 'agent', kind: 'operation', confidence: 1, reason: 'explicit effect' }) },
+    });
     await coordinator.start();
     try {
       const terminal = await coordinator.submit(submission('проведи аудит папок на диске D'));
@@ -1322,40 +1248,6 @@ describe('OscarTurnCoordinator', () => {
       expect(terminal.turn).toMatchObject({ status: 'blocked', outcome: { kind: 'blocked' } });
       expect(terminal.turn.outcome?.summary).toContain('не был отправлен в обычный чат');
       expect(answerExecutor).not.toHaveBeenCalled();
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it('persists a terminal Agent failure instead of leaving a user-only conversation', async () => {
-    const persisted: OscarPersistedMessage[] = [];
-    const failed = runningAgentCheckpoint('agent_task_failed_model_plan');
-    failed.task.status = 'failed';
-    failed.task.terminalReason = {
-      code: 'unrecoverable-error',
-      summary: 'Agent decision did not pass the strict plan schema.',
-    };
-    const coordinator = createCoordinator({
-      persisted,
-      runtime: mockRuntime({
-        createTask: async () => failed,
-        getTask: async () => failed,
-      }),
-    });
-    await coordinator.start();
-    try {
-      const accepted = await coordinator.submit(submission(
-        'проведи аудит папок на диске D',
-        'client_failed_agent_persistence',
-      ));
-      const terminal = await waitForTerminal(coordinator, accepted.turn.id);
-
-      expect(terminal.turn).toMatchObject({ status: 'failed', outcome: { kind: 'failed' } });
-      await waitFor(() => persisted.some((message) => message.role === 'assistant'));
-      expect(persisted.find((message) => message.role === 'assistant')).toMatchObject({
-        outcome: 'failed',
-        provenance: { origin: 'system', verification: 'system-state' },
-      });
     } finally {
       await coordinator.stop();
     }
@@ -1389,11 +1281,9 @@ describe('OscarTurnCoordinator', () => {
   ])('blocks an implicit external lookup before local inference: %s', async (request, clientRequestId) => {
     const persisted: OscarPersistedMessage[] = [];
     const answerExecutor = vi.fn(async () => stream([{ type: 'token', token: 'stale answer' }, { type: 'done' }]));
-    const createTask = vi.fn();
     const coordinator = createCoordinator({
       persisted,
       answerExecutor,
-      runtime: mockRuntime({ createTask }),
     });
     await coordinator.start();
     try {
@@ -1406,13 +1296,12 @@ describe('OscarTurnCoordinator', () => {
       expect(terminal.turn).toMatchObject({
         mode: 'answer',
         status: 'blocked',
-        outcome: { kind: 'blocked', summary: expect.stringContaining('актуальные публичные источники') },
+        outcome: { kind: 'blocked', summary: expect.stringContaining('Включи «Интернет»') },
       });
       expect(answerExecutor).not.toHaveBeenCalled();
-      expect(createTask).not.toHaveBeenCalled();
       await waitFor(() => persisted.some((message) => message.role === 'assistant'));
       expect(persisted.find((message) => message.role === 'assistant')).toMatchObject({
-        content: expect.stringContaining('актуальные публичные источники'),
+        content: expect.stringContaining('Включи «Интернет»'),
         outcome: 'blocked',
         provenance: { origin: 'system', verification: 'system-state' },
       });
@@ -1426,6 +1315,7 @@ describe('OscarTurnCoordinator', () => {
   it('consumes exact data-egress consent once before an answer-only model call', async () => {
     const consumeDataEgressConsent = vi.fn(async () => undefined);
     const answerExecutor = vi.fn(async () => stream([
+      { type: 'search', queries: ['актуальные источники', 'official sources'] },
       {
         type: 'sources',
         sources: [{
@@ -1433,6 +1323,10 @@ describe('OscarTurnCoordinator', () => {
           title: 'Разрешённый публичный источник',
           url: 'https://example.com/allowed',
           excerpt: 'Bound to the exact consented Turn.',
+          published: '2026-09-28T08:00:00Z',
+          origin: 'engine',
+        }, {
+          title: 'Not a page', url: 'javascript:alert(1)', excerpt: 'x', origin: 'evil', published: 'yesterday',
         }],
       },
       { type: 'token', token: 'Ответ с источником.' },
@@ -1454,217 +1348,260 @@ describe('OscarTurnCoordinator', () => {
         type: 'agent.progress',
         payload: expect.objectContaining({
           label: 'Поиск · Интернет',
-          detail: 'Найди актуальные источники',
+          detail: 'Подбираю, что искать',
           activity: expect.objectContaining({ domain: 'internet', motion: 'breathing' }),
         }),
+      }));
+      // The cards get title, link, date and origin; provenance keeps references only.
+      expect(terminal.events).toContainEqual(expect.objectContaining({
+        type: 'turn.outcome',
+        payload: expect.objectContaining({ sources: [{ id: 1, title: 'Разрешённый публичный источник',
+          url: 'https://example.com/allowed', published: '2026-09-28', origin: 'engine' }] }),
+      }));
+      // The planned queries, not the raw request, are what the search line shows.
+      expect(terminal.events).toContainEqual(expect.objectContaining({
+        type: 'agent.progress',
+        payload: expect.objectContaining({ detail: 'актуальные источники · official sources' }),
       }));
     } finally {
       await coordinator.stop();
     }
   });
 
-  it('reroutes an exact router clarification on the same durable Turn and persists the continuation', async () => {
+  it('settles a Turn whose routing model failed instead of leaving it in routing forever', async () => {
     const persisted: OscarPersistedMessage[] = [];
-    const checkpoint = runningAgentCheckpoint('agent_task_after_clarification');
-    const createTask = vi.fn(async () => checkpoint);
-    const classify = vi.fn(async ({ text }: { text: string }) => (
-      text.includes('Уточнение пользователя')
-        ? { lane: 'agent' as const, kind: 'operation', confidence: 1, reason: 'exact target supplied' }
-        : { lane: 'clarify' as const, kind: 'ambiguous', confidence: 1, reason: 'missing target' }
-    ));
+    const classify = vi.fn(async () => {
+      throw Object.assign(new Error('astra-max-native:not-configured'), { code: 'astra-max-native:not-configured' });
+    });
+    const coordinator = createCoordinator({ persisted, dispositionProvider: { classify } });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit(submission('max test', 'client_routing_provider_failed'));
+      const terminal = await waitForTerminal(coordinator, accepted.turn.id);
+
+      expect(terminal.turn.status).toBe('failed');
+      expect(terminal.turn.outcome?.summary).toContain('Настройки → MAX');
+      expect(terminal.turn.outcome?.diagnostic?.code).toBe('astra-max-native:not-configured');
+      expect(persisted.some((message) => message.role === 'assistant'
+        && message.content.includes('Настройки → MAX'))).toBe(true);
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('keeps Direct Access on Astra V3 when the model is unsure, without a V2 fallback', async () => {
+    const persisted: OscarPersistedMessage[] = [];
+    const classify = vi.fn(async () => ({
+      lane: 'clarify' as const,
+      kind: 'ambiguous',
+      confidence: 1,
+      reason: 'missing target',
+    }));
     const coordinator = createCoordinator({
       persisted,
-      runtime: mockRuntime({ createTask, getTask: async () => checkpoint }),
+      astra: { bindAgent: () => null },
+      dispositionProvider: { classify },
+      getOwnerUnrestrictedOverride: () => ({ enabled: true, lifetime: 'persistent', shellApprovalPolicy: 'never' }),
+    });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit(submission('Проверь', 'client_direct_tools'));
+      expect(accepted.turn.status).toBe('blocked');
+      expect(accepted.turn.outcome?.summary).toContain('Astra V3 Agent Runtime недоступен');
+      // Direct Access asks the model, and its doubt keeps the agent default.
+      expect(classify).toHaveBeenCalledOnce();
+      expect(accepted.turn.taskId).toBeUndefined();
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('routes Direct Access locally when MAX fails, so a plain question is still answered', async () => {
+    const classify = vi.fn(async ({ requestedModel }: { requestedModel?: string }) => {
+      if (requestedModel) throw Object.assign(new Error('astra-max-native:rate-limit'), { code: 'astra-max-native:rate-limit' });
+      return { lane: 'answer' as const, kind: 'semantic-request', confidence: 0.9, reason: 'arithmetic' };
+    });
+    const coordinator = createCoordinator({
+      astra: { bindAgent: () => null },
+      dispositionProvider: { classify } as never,
+      maxLocalFallbackAllowed: () => true,
+      getOwnerUnrestrictedOverride: () => ({ enabled: true, lifetime: 'persistent', shellApprovalPolicy: 'never' }),
+    });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit({ ...submission('сколько будет 17 умножить на 23?', 'client_direct_max_down'),
+        modifiers: { requestedModel: 'max-gpt-oss-120b' } });
+      await vi.waitFor(async () => expect((await coordinator.getTurn(accepted.turn.id))?.turn.status).not.toBe('routing'));
+      const turn = (await coordinator.getTurn(accepted.turn.id))!.turn;
+      expect(classify.mock.calls.map(([call]) => call.requestedModel)).toEqual(['max-gpt-oss-120b', undefined]);
+      expect(turn.taskId).toBeUndefined();
+      expect(turn.outcome?.summary ?? '').not.toContain('Agent Runtime');
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('answers a plain question under Direct Access when the model says it is not work', async () => {
+    const persisted: OscarPersistedMessage[] = [];
+    const classify = vi.fn(async () => ({ lane: 'answer' as const, kind: 'semantic-request', confidence: 0.9, reason: 'arithmetic' }));
+    const coordinator = createCoordinator({
+      persisted,
+      astra: { bindAgent: () => null },
+      dispositionProvider: { classify },
+      getOwnerUnrestrictedOverride: () => ({ enabled: true, lifetime: 'persistent', shellApprovalPolicy: 'never' }),
+    });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit(submission('сколько будет 17 умножить на 23?', 'client_direct_math'));
+      await vi.waitFor(async () => expect((await coordinator.getTurn(accepted.turn.id))?.turn.status).not.toBe('routing'));
+      const turn = (await coordinator.getTurn(accepted.turn.id))!.turn;
+      expect(classify).toHaveBeenCalledOnce();
+      expect(turn.outcome?.summary ?? '').not.toContain('Agent Runtime');
+      expect(turn.taskId).toBeUndefined();
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it.each([
+    ['росскажи что ты умеешь и какая ты модель', 'client_direct_cap_typo'],
+    ['расскажи что ты умеешь и какая ты модель', 'client_direct_cap_tell'],
+    ['что ты умеешь', 'client_direct_cap_can'],
+    ['who are you', 'client_direct_cap_who'],
+  ])('keeps Direct Access from turning a capability question into an Agent task: %s', async (text, clientRequestId) => {
+    const persisted: OscarPersistedMessage[] = [];
+    const classify = vi.fn(async () => ({
+      lane: 'agent' as const,
+      kind: 'semantic-request',
+      confidence: 1,
+      reason: 'biased execution classifier',
+    }));
+    const coordinator = createCoordinator({
+      persisted,
+      astra: { bindAgent: () => ({ schemaVersion: 'monarch.oscar-astra-binding.v1' }) },
+      dispositionProvider: { classify },
+      getOwnerUnrestrictedOverride: () => ({ enabled: true, lifetime: 'persistent', shellApprovalPolicy: 'never' }),
+    });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit(submission(text, clientRequestId));
+      const terminal = await waitForTerminal(coordinator, accepted.turn.id);
+      expect(terminal.turn.status).toBe('succeeded');
+      expect(terminal.turn.mode).toBe('answer');
+      expect(terminal.turn.outcome?.kind).toBe('answered');
+      expect(terminal.turn.taskId).toBeUndefined();
+      expect(classify).not.toHaveBeenCalled();
+      expect(persisted.find((message) => message.role === 'assistant')?.content).toContain('Обычный ответ.');
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('projects an exact critical Security verdict into a generic Astra V3 approval card', async () => {
+    let view: any = null;
+    const policySnapshotJson = JSON.stringify({
+      outcome: 'confirm',
+      reason: 'Monarch Security приостановил массовое удаление 120 целей.',
+      riskVector: { effect: 'delete', reversibility: 'irreversible', privilege: 'user' },
+      evidence: [{ source: 'security', code: 'delete.large-scope', severity: 'warn', message: 'review' }],
+    });
+    const astra = {
+      bindAgent: () => ordinaryAgentBinding(),
+      find: () => view,
+      submit: () => {
+        view = {
+          id: 'astra_agent_critical_card',
+          status: 'waiting-for-approval',
+          nativeCompletionCertified: false,
+          approval: {
+            id: 'approval_critical_card',
+            digest: `sha256:${'b'.repeat(64)}`,
+            expiresAt: Date.now() + 60_000,
+            policySnapshotJson,
+            source: { taskId: 'astra_agent_critical_card' },
+            capability: {
+              id: 'workspace.files.delete',
+              moduleId: 'workspace',
+              title: 'Удалить файлы',
+              description: 'Удаляет точный список файлов.',
+              risk: 'delete',
+            },
+            args: { paths: Array.from({ length: 120 }, (_, index) => `cache/${index}.tmp`) },
+            reason: 'Очистить устаревший кэш.',
+          },
+        };
+        return view;
+      },
+      command: vi.fn(),
+    };
+    const coordinator = createCoordinator({
+      astra,
+      dispositionProvider: { classify: async () => ({ lane: 'agent', kind: 'operation', confidence: 1, reason: 'fixture' }) },
+    });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit(submission('Очисти устаревший кэш', 'client_critical_card'));
+      await coordinator.flushOutbox();
+      const pending = await waitForTurn(coordinator, accepted.turn.id, turn => turn.status === 'waiting-for-approval');
+      const approval = pending.events.filter(event => event.type === 'approval.required').at(-1)?.payload;
+      expect(approval).toMatchObject({
+        runtime: 'astra-v3',
+        approvalKind: 'capability-action',
+        critical: true,
+        warningReason: 'Monarch Security приостановил массовое удаление 120 целей.',
+        decisionReason: 'security',
+        warningCodes: ['delete.large-scope'],
+        capability: { id: 'workspace.files.delete', risk: 'delete' },
+        args: { paths: expect.arrayContaining(['cache/0.tmp', 'cache/119.tmp']) },
+      });
+      expect(approval).not.toHaveProperty('policySnapshotJson');
+      expect(approval).not.toHaveProperty('source');
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('never falls back from an enabled V3 host to the V2 runtime for an unsupported persistent Agent Turn', async () => {
+    const coordinator = createCoordinator({
+      astra: { bindAgent: () => null },
+      dispositionProvider: { classify: async () => ({ lane: 'agent', kind: 'semantic-request', confidence: 1,
+        reason: 'fixture agent request' }) },
+    });
+    await coordinator.start();
+    try {
+      const result = await coordinator.submit(submission('Выполни неподдерживаемую V3 задачу', 'no_v2_fallback'));
+      expect(result.turn).toMatchObject({ status: 'blocked', outcome: { kind: 'blocked' } });
+      expect(result.turn.outcome?.summary).toContain('не был отправлен в обычный чат или другой исполнитель');
+    } finally { await coordinator.stop(); }
+  });
+
+  it.each([
+    ['мне грустно', 'client_leftover_feeling'],
+    ['сегодня странный день', 'client_leftover_day'],
+    ['давай просто поговорим', 'client_leftover_talk'],
+    ['хм', 'client_leftover_hmm'],
+  ])('answers leftover chat instead of asking for an operation goal: %s', async (text, clientRequestId) => {
+    const persisted: OscarPersistedMessage[] = [];
+    const classify = vi.fn(async () => ({
+      lane: 'answer' as const,
+      kind: 'semantic-request',
+      confidence: 1,
+      reason: 'ordinary chat',
+    }));
+    const coordinator = createCoordinator({
+      persisted,
       dispositionProvider: { classify },
     });
     await coordinator.start();
     try {
-      const waiting = await coordinator.submit(submission('Проверь', 'client_clarify_1'));
-      expect(waiting.turn.status).toBe('waiting-for-user');
-      await waitFor(() => persisted.some((message) => message.role === 'assistant'));
-      expect(persisted.find((message) => message.role === 'assistant')).toMatchObject({
-        content: 'Укажи точную цель операции, чтобы Monarch мог проверить её policy.',
-        provenance: { origin: 'system', verification: 'system-state' },
-      });
-      expect(persisted.find((message) => message.role === 'assistant')?.messageId).toMatch(
-        /^oscar_message_clarification_[a-f0-9]{32}$/,
-      );
-      expect(persisted.find((message) => message.role === 'assistant')?.messageId.length).toBeLessThanOrEqual(64);
-      const continued = await coordinator.sendMessage(waiting.turn.id, {
-        content: 'Точная цель D:\\',
-        messageId: 'clarification_message_1',
-        source: 'desktop',
-      });
-      expect(continued.turn.id).toBe(waiting.turn.id);
-      const linked = await waitForTurn(coordinator, waiting.turn.id, (turn) => Boolean(turn.taskId));
-      expect(linked.turn).toMatchObject({ status: 'running', taskId: checkpoint.task.id });
-      expect(createTask.mock.calls[0]?.[0]?.request).toContain('Уточнение пользователя 1: Точная цель D:\\');
-      await waitFor(() => persisted.some((message) => message.messageId === 'clarification_message_1'));
-      expect(persisted.find((message) => message.messageId === 'clarification_message_1')).toMatchObject({
-        role: 'user',
-        turnId: waiting.turn.id,
-        provenance: { verification: 'user-assertion' },
-      });
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it('starts a fresh Agent Turn when a complete new operation arrives during an old clarification', async () => {
-    const oldCheckpoint = runningAgentCheckpoint('agent_task_old_ambiguous');
-    oldCheckpoint.task.status = 'waiting-for-user';
-    oldCheckpoint.task.messages.push({
-      id: 'agent_old_clarification',
-      role: 'assistant',
-      kind: 'clarification',
-      content: 'Какое именно приложение открыть?',
-      createdAt: oldCheckpoint.task.createdAt,
-    });
-    const newCheckpoint = runningAgentCheckpoint('agent_task_new_exact');
-    const createTask = vi.fn(async (input: { request: string }) => (
-      input.request.includes('qwxzvbnmjk') ? newCheckpoint : oldCheckpoint
-    ));
-    const cancel = vi.fn(async () => oldCheckpoint);
-    const getTask = vi.fn(async (taskId: string) => (
-      taskId === newCheckpoint.task.id ? newCheckpoint : oldCheckpoint
-    ));
-    const coordinator = createCoordinator({
-      runtime: mockRuntime({ createTask, cancel, getTask }),
-    });
-    await coordinator.start();
-    try {
-      const oldAccepted = await coordinator.submit(submission(
-        'открой zzqvmonarchfixture',
-        'client_stale_operation_old',
-      ));
-      const oldWaiting = await waitForTurn(
-        coordinator,
-        oldAccepted.turn.id,
-        (turn) => turn.status === 'waiting-for-user',
-      );
-
-      const fresh = await coordinator.submit({
-        ...submission('открой qwxzvbnmjk', 'client_stale_operation_new'),
-        replyToTurnId: oldWaiting.turn.id,
-      });
-      const freshLinked = await waitForTurn(
-        coordinator,
-        fresh.turn.id,
-        (turn) => Boolean(turn.taskId),
-      );
-      const oldTerminal = await coordinator.getTurn(oldWaiting.turn.id);
-
-      expect(fresh.turn.id).not.toBe(oldWaiting.turn.id);
-      expect(fresh.turn.supersedesTurnId).toBe(oldWaiting.turn.id);
-      expect(freshLinked.turn.taskId).toBe(newCheckpoint.task.id);
-      expect(oldTerminal?.turn.status).toBe('cancelled');
-      expect(cancel).toHaveBeenCalledWith(oldCheckpoint.task.id);
-      expect(createTask).toHaveBeenCalledTimes(2);
-      expect(createTask.mock.calls[1]?.[0]?.request).toBe('открой qwxzvbnmjk');
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it('runs Incognito operational Turns in a disposable adaptive Agent runtime', async () => {
-    const persistentStore = new InMemoryOscarTurnStore();
-    const volatileStore = new InMemoryOscarTurnStore();
-    const persisted: OscarPersistedMessage[] = [];
-    const persistentCreateTask = vi.fn();
-    const discardTask = vi.fn(async () => true);
-    const checkpoint = runningAgentCheckpoint('agent_task_incognito');
-    checkpoint.task.eventSequence = 4;
-    checkpoint.events = [
-      {
-        schemaVersion: 'monarch.agent-task-event.v1',
-        id: 'event_incognito_model',
-        taskId: checkpoint.task.id,
-        traceId: checkpoint.task.traceId,
-        sequence: 1,
-        type: 'model.started',
-        createdAt: checkpoint.task.createdAt,
-        payload: { phase: 'planning', repair: false },
-      },
-      {
-        schemaVersion: 'monarch.agent-task-event.v1',
-        id: 'event_incognito_plan',
-        taskId: checkpoint.task.id,
-        traceId: checkpoint.task.traceId,
-        sequence: 3,
-        type: 'plan.revised',
-        createdAt: checkpoint.task.createdAt,
-        payload: {
-          revision: 2,
-          summary: 'Определить точную рабочую область и затем создать скрипты.',
-          steps: [{ title: 'Проверить рабочую область', expectedEffect: 'Путь подтверждён' }],
-        },
-      },
-      {
-        schemaVersion: 'monarch.agent-task-event.v1',
-        id: 'event_incognito_tool',
-        taskId: checkpoint.task.id,
-        traceId: checkpoint.task.traceId,
-        sequence: 4,
-        type: 'tool.started',
-        createdAt: checkpoint.task.createdAt,
-        payload: {
-          capabilityId: 'workspace.files.search',
-          activity: {
-            operation: 'search',
-            domain: 'files',
-            subject: 'release manifest',
-            target: 'src',
-            motion: 'breathing',
-          },
-        },
-      },
-    ];
-    const incognitoCreateTask = vi.fn(async () => checkpoint);
-    const incognitoRuntime = mockRuntime({
-      createTask: incognitoCreateTask,
-      getTask: async (taskId: string) => taskId === checkpoint.task.id ? checkpoint : null,
-      discardTask,
-    });
-    const coordinator = createCoordinator({
-      persistentStore,
-      volatileStore,
-      persisted,
-      runtime: mockRuntime({ createTask: persistentCreateTask }),
-      incognitoRuntime,
-      dispositionProvider: {
-        classify: async () => ({ lane: 'agent', kind: 'local-effect', confidence: 1, reason: 'explicit-operational-request' }),
-      },
-    });
-    await coordinator.start();
-    try {
-      const accepted = await coordinator.submit({
-        ...submission('ты можешь создать нужные мне скрипты по указанному пути?', 'client_incognito_agent'),
-        privacyMode: 'incognito',
-      });
-      const linked = await waitForTurn(coordinator, accepted.turn.id, (turn) => Boolean(turn.taskId));
-
-      expect(linked.turn).toMatchObject({ status: 'running', privacyMode: 'incognito', taskId: checkpoint.task.id });
-      expect(await persistentStore.listTurns()).toEqual([]);
-      expect(await volatileStore.listTurns()).toHaveLength(1);
-      expect(persistentCreateTask).not.toHaveBeenCalled();
-      expect(incognitoCreateTask).toHaveBeenCalledWith(expect.objectContaining({
-        request: 'ты можешь создать нужные мне скрипты по указанному пути?',
-        planningMode: 'adaptive',
-      }));
-      expect(linked.events.filter((event) => event.type === 'agent.progress').map((event) => event.payload.label))
-        .toEqual(['План · Задача', 'План · Готов', 'Поиск · Файлы']);
-      expect(linked.events.filter((event) => event.type === 'agent.progress').at(-1)?.payload).toMatchObject({
-        detail: 'release manifest · в src',
-        activity: {
-          operation: 'search',
-          domain: 'files',
-          motion: 'breathing',
-        },
-      });
-      expect(persisted).toEqual([]);
-      await expect(coordinator.discardIncognitoConversation('conversation_1', 'desktop')).resolves.toBe(1);
-      expect(discardTask).toHaveBeenCalledWith(checkpoint.task.id);
-      expect(await volatileStore.listTurns()).toEqual([]);
+      const accepted = await coordinator.submit(submission(text, clientRequestId));
+      const terminal = await waitForTerminal(coordinator, accepted.turn.id);
+      expect(terminal.turn.status).toBe('succeeded');
+      expect(terminal.turn.mode).toBe('answer');
+      expect(terminal.turn.outcome?.kind).toBe('answered');
+      expect(classify).toHaveBeenCalledOnce();
+      expect(persisted.some((message) => message.content.includes('Укажи точную цель операции'))).toBe(false);
+      expect(persisted.find((message) => message.role === 'assistant')?.content).toContain('Обычный ответ.');
     } finally {
       await coordinator.stop();
     }
@@ -1673,11 +1610,10 @@ describe('OscarTurnCoordinator', () => {
   it('keeps encrypted Safe operational Turns answer-only and fail-closed', async () => {
     const persistentStore = new InMemoryOscarTurnStore();
     const volatileStore = new InMemoryOscarTurnStore();
-    const createTask = vi.fn();
     const coordinator = createCoordinator({
       persistentStore,
       volatileStore,
-      runtime: mockRuntime({ createTask }),
+      dispositionProvider: { classify: async () => ({ lane: 'agent', kind: 'operation', confidence: 1, reason: 'explicit effect' }) },
     });
     await coordinator.start();
     try {
@@ -1689,42 +1625,6 @@ describe('OscarTurnCoordinator', () => {
       expect(terminal.turn).toMatchObject({ status: 'blocked', privacyMode: 'encrypted' });
       expect(await persistentStore.listTurns()).toEqual([]);
       expect(await volatileStore.listTurns()).toHaveLength(1);
-      expect(createTask).not.toHaveBeenCalled();
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it('treats typed confirmation as non-authoritative and replays the exact pending action-card', async () => {
-    const store = new InMemoryOscarTurnStore();
-    const approvalCheckpoint = pendingApprovalCheckpoint('agent_task_pending', 'approval_pending');
-    await store.createTurn(waitingApprovalTurn(approvalCheckpoint));
-    const resolveApproval = vi.fn();
-    const coordinator = createCoordinator({
-      persistentStore: store,
-      runtime: mockRuntime({
-        getTask: async () => approvalCheckpoint,
-        resolveApproval,
-      }),
-    });
-    await coordinator.start();
-    try {
-      const terminal = await coordinator.submit(submission('подтверждаю', 'client_confirm_1'));
-
-      expect(terminal.turn).toMatchObject({ status: 'blocked', outcome: { kind: 'blocked' } });
-      expect(terminal.events.map((event) => event.type)).toEqual(expect.arrayContaining([
-        'non-authoritative-confirmation',
-        'approval.required',
-        'turn.outcome',
-      ]));
-      const presentation = terminal.events.find((event) => event.type === 'approval.required');
-      expect(presentation?.payload).toMatchObject({
-        taskId: 'agent_task_pending',
-        approvalId: 'approval_pending',
-        capabilityId: 'workspace.files.delete',
-        canonicalProposalHash: 'sha256:pending',
-      });
-      expect(resolveApproval).not.toHaveBeenCalled();
     } finally {
       await coordinator.stop();
     }
@@ -1754,226 +1654,6 @@ describe('OscarTurnCoordinator', () => {
       expect(answerExecutor).not.toHaveBeenCalled();
     } finally {
       await coordinator.stop();
-    }
-  });
-
-  it('never creates a verified Turn without a successful Agent completion verifier record', async () => {
-    const store = new InMemoryOscarTurnStore();
-    const checkpoint = completedAgentCheckpoint('agent_task_missing_verifier', {
-      capabilityId: 'workspace.storage.audit',
-      evidenceClass: 'kernel-observation',
-      includeCompletionVerifier: false,
-    });
-    await store.createTurn(linkedAgentTurn(checkpoint.task.id));
-    const coordinator = createCoordinator({
-      persistentStore: store,
-      runtime: mockRuntime({ getTask: async () => checkpoint }),
-    });
-    await coordinator.start();
-    try {
-      const terminal = await waitForTerminal(coordinator, 'oscar_turn_linked');
-      expect(terminal.turn).toMatchObject({ status: 'failed', outcome: { kind: 'failed' } });
-      expect(terminal.turn.outcome?.summary).toBe(
-        'Не удалось завершить задачу. Технические детали сохранены локально; неподтверждённые действия не считаются выполненными.',
-      );
-      expect(terminal.turn.outcome?.summary).not.toContain('Kernel verifier');
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it.each([
-    { stepStatus: 'ready' as const, reason: 'unfinished plan work' },
-    { stepStatus: 'completed' as const, reason: 'missing mutation evidence' },
-  ])('rejects a root-only completed file task with $reason', async ({ stepStatus }) => {
-    const store = new InMemoryOscarTurnStore();
-    const checkpoint = completedAgentCheckpoint(`agent_task_root_only_${stepStatus}`, {
-      capabilityId: 'workspace.root.get',
-      evidenceClass: 'kernel-observation',
-      summary: 'Workspace root observed.',
-    });
-    checkpoint.task.goal.expectedOutputs = [{
-      id: 'requested_artifact',
-      kind: 'artifact',
-      required: true,
-      description: 'The requested Desktop text file named ромашка exists.',
-    }];
-    checkpoint.task.goal.successCriteria = [{
-      id: 'requested_artifact_verified',
-      description: 'The requested file write is verified by a Kernel postcondition.',
-    }];
-    checkpoint.task.plan = {
-      id: `plan_root_only_${stepStatus}`,
-      revision: 2,
-      goalSummary: 'Create the requested Desktop file.',
-      createdAt: checkpoint.task.createdAt,
-      steps: [{
-        id: `step_root_only_${stepStatus}`,
-        title: 'Create File',
-        status: stepStatus,
-        dependsOn: [],
-        expectedEffects: [{ kind: 'artifact', description: 'The requested file exists.' }],
-        verification: [{ kind: 'exists', description: 'The requested file exists.' }],
-      }],
-    };
-    if (stepStatus === 'ready') checkpoint.task.currentStepId = checkpoint.task.plan.steps[0]!.id;
-    await store.createTurn(linkedAgentTurn(checkpoint.task.id));
-    const coordinator = createCoordinator({
-      persistentStore: store,
-      runtime: mockRuntime({ getTask: async () => checkpoint }),
-    });
-    await coordinator.start();
-    try {
-      const terminal = await waitForTerminal(coordinator, 'oscar_turn_linked');
-      expect(terminal.turn).toMatchObject({ status: 'failed', outcome: { kind: 'failed' } });
-      expect(terminal.turn.outcome?.summary).not.toContain('Workspace root observed');
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it('marks a mutating result partial when receipt-bound predicate verification is absent', async () => {
-    const store = new InMemoryOscarTurnStore();
-    const persisted: OscarPersistedMessage[] = [];
-    const checkpoint = completedAgentCheckpoint('agent_task_weak_mutation', {
-      capabilityId: 'workspace.files.write',
-      evidenceClass: 'kernel-observation',
-      mutation: true,
-    });
-    await store.createTurn(linkedAgentTurn(checkpoint.task.id));
-    const coordinator = createCoordinator({
-      persistentStore: store,
-      persisted,
-      runtime: mockRuntime({ getTask: async () => checkpoint }),
-    });
-    await coordinator.start();
-    try {
-      const terminal = await waitForTerminal(coordinator, 'oscar_turn_linked');
-      expect(terminal.turn).toMatchObject({ status: 'succeeded', outcome: { kind: 'partial' } });
-      await waitFor(() => persisted.some((message) => message.role === 'assistant'));
-      expect(persisted.find((message) => message.role === 'assistant')?.provenance.verification).toBe('kernel-partial');
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it('finishes models.agent.respond as answered and never as verified', async () => {
-    const store = new InMemoryOscarTurnStore();
-    const persisted: OscarPersistedMessage[] = [];
-    const checkpoint = completedAgentCheckpoint('agent_task_model_answer', {
-      capabilityId: 'models.agent.respond',
-      evidenceClass: 'model-generated',
-      summary: 'Это обычный ответ модели.',
-    });
-    await store.createTurn(linkedAgentTurn(checkpoint.task.id, 'Ответь на вопрос'));
-    const coordinator = createCoordinator({
-      persistentStore: store,
-      persisted,
-      runtime: mockRuntime({ getTask: async () => checkpoint }),
-    });
-    await coordinator.start();
-    try {
-      const terminal = await waitForTerminal(coordinator, 'oscar_turn_linked');
-      expect(terminal.turn).toMatchObject({ status: 'succeeded', outcome: { kind: 'answered' } });
-      await waitFor(() => persisted.some((message) => message.role === 'assistant'));
-      expect(persisted.find((message) => message.role === 'assistant')?.provenance).toMatchObject({
-        origin: 'model',
-        verification: 'unverified-model',
-        taskId: checkpoint.task.id,
-      });
-    } finally {
-      await coordinator.stop();
-    }
-  });
-
-  it('reconciles a durable Turn-to-Task crash gap after restart', async () => {
-    const store = new InMemoryOscarTurnStore();
-    const first = createCoordinator({ persistentStore: store, runtime: mockRuntime() });
-    const accepted = await first.submit(submission('проведи аудит папок на диске D', 'client_restart_1'));
-    expect(accepted.turn.taskId).toBeUndefined();
-    expect(await store.listPendingOutbox()).toEqual([
-      expect.objectContaining({ kind: 'persist-message' }),
-      expect.objectContaining({ kind: 'create-agent-task' }),
-    ]);
-
-    const checkpoint = runningAgentCheckpoint('agent_task_after_restart');
-    const createTask = vi.fn(async () => checkpoint);
-    const persistMessage = vi.fn(async () => ({ disposition: 'created' as const }));
-    const restarted = createCoordinator({
-      persistentStore: store,
-      runtime: mockRuntime({ createTask, getTask: async () => checkpoint }),
-      persistMessage,
-    });
-    await restarted.start();
-    try {
-      const linked = await waitForTurn(restarted, accepted.turn.id, (turn) => Boolean(turn.taskId));
-      expect(linked.turn.taskId).toBe('agent_task_after_restart');
-      expect(createTask).toHaveBeenCalledTimes(1);
-      expect(createTask.mock.invocationCallOrder[0]).toBeLessThan(persistMessage.mock.invocationCallOrder[0]!);
-    } finally {
-      await restarted.stop();
-    }
-  });
-
-  it('relinks an already-created idempotent AgentTask after a task-to-Turn crash gap', async () => {
-    const store = new InMemoryOscarTurnStore();
-    const turn = linkedAgentTurn('placeholder_task');
-    delete turn.taskId;
-    await store.createTurn({ ...turn, status: 'running' }, {
-      outbox: [{ id: 'outbox_create_existing_task', turnId: turn.id, kind: 'create-agent-task', payload: {} }],
-    });
-    const existing = runningAgentCheckpoint('agent_task_created_before_crash');
-    const createTask = vi.fn(async (input) => {
-      expect(input.clientRequestId).toBe(`oscar_turn_task_${turn.id}`);
-      return existing;
-    });
-    const restarted = createCoordinator({
-      persistentStore: store,
-      runtime: mockRuntime({ createTask, getTask: async () => existing }),
-    });
-    await restarted.start();
-    try {
-      const linked = await waitForTurn(restarted, turn.id, (candidate) => Boolean(candidate.taskId));
-      expect(linked.turn.taskId).toBe(existing.task.id);
-      expect(createTask).toHaveBeenCalledTimes(1);
-    } finally {
-      await restarted.stop();
-    }
-  });
-
-  it('retries the terminal message outbox after restart without changing the verified Turn', async () => {
-    const store = new InMemoryOscarTurnStore();
-    const checkpoint = completedAgentCheckpoint('agent_task_message_gap', {
-      capabilityId: 'workspace.storage.audit',
-      evidenceClass: 'kernel-observation',
-    });
-    await store.createTurn(linkedAgentTurn(checkpoint.task.id));
-    const firstPersist = vi.fn(async () => { throw new Error('simulated-message-store-gap'); });
-    const first = createCoordinator({
-      persistentStore: store,
-      runtime: mockRuntime({ getTask: async () => checkpoint }),
-      persistMessage: firstPersist,
-    });
-    await first.start();
-    const terminalBeforeRestart = await waitForTerminal(first, 'oscar_turn_linked');
-    expect(terminalBeforeRestart.turn.outcome?.kind).toBe('verified');
-    await waitFor(() => firstPersist.mock.calls.length > 0);
-    await first.stop();
-
-    const persisted: OscarPersistedMessage[] = [];
-    const restarted = createCoordinator({
-      persistentStore: store,
-      persisted,
-      runtime: mockRuntime({ getTask: async () => checkpoint }),
-    });
-    await restarted.start();
-    try {
-      await waitFor(() => persisted.some((message) => message.turnId === 'oscar_turn_linked'), 4_000);
-      const terminalAfterRestart = await restarted.getTurn('oscar_turn_linked');
-      expect(terminalAfterRestart?.turn).toMatchObject({ status: 'succeeded', outcome: { kind: 'verified' } });
-      expect(persisted.filter((message) => message.turnId === 'oscar_turn_linked')).toHaveLength(1);
-    } finally {
-      await restarted.stop();
     }
   });
 
@@ -2031,6 +1711,125 @@ describe('OscarTurnCoordinator', () => {
       'assistant',
     ]);
     expect(await store.listPendingOutbox(new Date('2030-01-01T00:00:00.000Z'))).toEqual([]);
+  });
+
+  it('abandons a persistent message at once when nothing will ever deliver its prerequisite', async () => {
+    const store = new InMemoryOscarTurnStore();
+    const turn = terminalPersistenceTurn('deleted-conversation');
+    const assistantOutbox = persistedMessageOutbox(turn, {
+      messageId: turn.outputMessageId!,
+      role: 'assistant',
+      content: turn.outcome!.summary,
+      requiredPreviousMessageId: turn.inputMessageId,
+    });
+    // Only the assistant message is queued: its conversation, and the user
+    // message it must follow, are gone for good.
+    await store.createTurn(turn, { outbox: [assistantOutbox] });
+    const persistMessage = vi.fn(async () => {
+      throw Object.assign(new Error('required previous user message has not been persisted yet'), {
+        code: 'conversation-message-prerequisite-pending',
+        statusCode: 409,
+      });
+    });
+
+    const coordinator = createCoordinator({ persistentStore: store, persistMessage });
+    await coordinator.start();
+    await coordinator.stop();
+
+    expect(persistMessage).toHaveBeenCalledOnce();
+    expect(await store.listPendingOutbox(new Date('2030-01-01T00:00:00.000Z'))).toEqual([]);
+    const settled = await store.readOutboxItem(assistantOutbox.id);
+    expect(settled?.status).toBe('superseded');
+    expect(settled?.attempts).toBe(0);
+    expect(settled?.lastError).toContain('required previous user message');
+  });
+
+  it('keeps a message queued while the user message it follows is still waiting to be delivered', async () => {
+    const store = new InMemoryOscarTurnStore();
+    const turn = terminalPersistenceTurn('prerequisite-race');
+    const userOutbox = persistedMessageOutbox(turn, {
+      messageId: turn.inputMessageId,
+      role: 'user',
+      content: 'Сохрани по порядку.',
+    });
+    const assistantOutbox = persistedMessageOutbox(turn, {
+      messageId: turn.outputMessageId!,
+      role: 'assistant',
+      content: turn.outcome!.summary,
+      requiredPreviousMessageId: turn.inputMessageId,
+    });
+    await store.createTurn(turn, { outbox: [userOutbox, assistantOutbox] });
+    const persistMessage = vi.fn(async (message: OscarPersistedMessage) => {
+      if (message.role === 'user') throw new Error('simulated isolated user append outage');
+      throw Object.assign(new Error('required previous user message has not been persisted yet'), {
+        code: 'conversation-message-prerequisite-pending',
+        statusCode: 409,
+      });
+    });
+
+    const coordinator = createCoordinator({ persistentStore: store, persistMessage });
+    await coordinator.start();
+    await coordinator.stop();
+
+    const assistant = await store.readOutboxItem(assistantOutbox.id);
+    expect(assistant?.status).toBe('retrying');
+    expect(await store.readOutboxItem(userOutbox.id)).toMatchObject({ status: 'retrying' });
+  });
+
+  it('gives up on a queued prerequisite that never lands, after the bounded backstop', async () => {
+    const store = new InMemoryOscarTurnStore();
+    const turn = terminalPersistenceTurn('prerequisite-backstop');
+    const userOutbox = persistedMessageOutbox(turn, {
+      messageId: turn.inputMessageId,
+      role: 'user',
+      content: 'Никогда не сохранится.',
+    });
+    const assistantOutbox = persistedMessageOutbox(turn, {
+      messageId: turn.outputMessageId!,
+      role: 'assistant',
+      content: turn.outcome!.summary,
+      requiredPreviousMessageId: turn.inputMessageId,
+    });
+    await store.createTurn(turn, { outbox: [userOutbox, assistantOutbox] });
+    const persistMessage = vi.fn(async (message: OscarPersistedMessage) => {
+      if (message.role === 'user') throw new Error('simulated permanent user append outage');
+      throw Object.assign(new Error('required previous user message has not been persisted yet'), {
+        code: 'conversation-message-prerequisite-pending',
+        statusCode: 409,
+      });
+    });
+    for (let attempt = 0; attempt < 239; attempt += 1) {
+      await store.markOutboxFailed(assistantOutbox.id, 'still waiting', new Date(0).toISOString());
+    }
+
+    const coordinator = createCoordinator({ persistentStore: store, persistMessage });
+    await coordinator.start();
+    await coordinator.stop();
+
+    expect(await store.readOutboxItem(assistantOutbox.id)).toMatchObject({ status: 'superseded' });
+  });
+
+  it('keeps retrying a delivery failure that is not a missing prerequisite', async () => {
+    const store = new InMemoryOscarTurnStore();
+    const turn = terminalPersistenceTurn('backend-outage');
+    const assistantOutbox = persistedMessageOutbox(turn, {
+      messageId: turn.outputMessageId!,
+      role: 'assistant',
+      content: turn.outcome!.summary,
+      requiredPreviousMessageId: turn.inputMessageId,
+    });
+    await store.createTurn(turn, { outbox: [assistantOutbox] });
+    const persistMessage = vi.fn(async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:7861'); });
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      await store.markOutboxFailed(assistantOutbox.id, 'outage', new Date(0).toISOString());
+    }
+
+    const coordinator = createCoordinator({ persistentStore: store, persistMessage });
+    await coordinator.start();
+    await coordinator.stop();
+
+    const settled = await store.readOutboxItem(assistantOutbox.id);
+    expect(settled?.status).toBe('retrying');
   });
 
   it('settles an exact duplicate after a crash between remote append and local acknowledgement', async () => {
@@ -2137,11 +1936,9 @@ describe('OscarTurnCoordinator', () => {
       events: [{ type: 'turn.failed', payload: { outcome: 'failed' } }],
     });
     const persisted: OscarPersistedMessage[] = [];
-    const getTask = vi.fn();
     const restarted = createCoordinator({
       persistentStore: store,
       persisted,
-      runtime: mockRuntime({ getTask }),
     });
 
     await restarted.start();
@@ -2161,21 +1958,17 @@ describe('OscarTurnCoordinator', () => {
           provenance: expect.objectContaining({ origin: 'system', verification: 'system-state' }),
         }),
       ]);
-      expect(getTask).not.toHaveBeenCalled();
     } finally {
       await restarted.stop();
     }
 
-    const secondGetTask = vi.fn();
     const secondRestart = createCoordinator({
       persistentStore: store,
       persisted,
-      runtime: mockRuntime({ getTask: secondGetTask }),
     });
     await secondRestart.start();
     await secondRestart.stop();
     expect(persisted).toHaveLength(1);
-    expect(secondGetTask).not.toHaveBeenCalled();
   });
 
   it('does not recover synthetic legacy API terminal Turns into chat history', async () => {
@@ -2200,11 +1993,9 @@ describe('OscarTurnCoordinator', () => {
       },
     }, { expectedRevision: created.turn.revision });
     const persisted: OscarPersistedMessage[] = [];
-    const getTask = vi.fn();
     const restarted = createCoordinator({
       persistentStore: store,
       persisted,
-      runtime: mockRuntime({ getTask }),
     });
 
     await restarted.start();
@@ -2213,7 +2004,90 @@ describe('OscarTurnCoordinator', () => {
     expect((await store.getTurn(legacy.id))?.turn.outputMessageId).toBeUndefined();
     expect(await store.listPendingOutbox()).toEqual([]);
     expect(persisted).toEqual([]);
-    expect(getTask).not.toHaveBeenCalled();
+  });
+
+  it('reconciles every other Turn before an unrecoverable Astra Turn closes the barrier', async () => {
+    // Throwing from inside the reconciliation loop meant one task that could
+    // not be restored stopped reconciliation for every Turn after it: no
+    // privacy mode, no terminal message repair, no re-routing, for the whole
+    // process lifetime. The failure still has to reach the caller, because a
+    // Turn that cannot be restored must hold the source-restore barrier closed.
+    const store = new InMemoryOscarTurnStore();
+    const broken: OscarTurnV1 = {
+      ...linkedAgentTurn('agent_task_unrestorable'),
+      id: 'oscar_turn_a_unrestorable',
+      clientRequestId: 'client_a_unrestorable',
+      inputMessageId: 'message_a_unrestorable',
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+      request: {
+        text: 'Задача, которую не удастся восстановить.', attachmentIds: [], modifiers: {},
+        astra: ordinaryAgentBinding(),
+      },
+    };
+    await store.createTurn(broken);
+
+    const later: OscarTurnV1 = {
+      ...linkedAgentTurn('agent_task_later'),
+      id: 'oscar_turn_b_later',
+      clientRequestId: 'client_b_later',
+      inputMessageId: 'message_b_later',
+      createdAt: '2026-08-01T00:00:05.000Z',
+      updatedAt: '2026-08-01T00:00:05.000Z',
+      conversationId: 'conversation_later',
+      request: { text: 'Обычный ход после неё.', attachmentIds: [], modifiers: {} },
+    };
+    const createdLater = await store.createTurn(later);
+    await store.saveTurn({
+      ...createdLater.turn,
+      status: 'succeeded',
+      outputMessageId: undefined,
+      outcome: { kind: 'verified', summary: 'Готово.', evidenceRefs: [],
+        completedAt: '2026-08-01T00:00:06.000Z' },
+    }, { expectedRevision: createdLater.turn.revision });
+
+    const persisted: OscarPersistedMessage[] = [];
+    const coordinator = createCoordinator({ persistentStore: store, persisted,
+      astra: { find: () => { throw new Error('astra-oscar-source-unavailable'); } } });
+
+    await expect(coordinator.start()).rejects.toThrow('astra-oscar-source-unavailable');
+    // The Turn that comes after it was still reconciled: its terminal message
+    // was repaired rather than skipped, and the coordinator kept running, so
+    // the repair was delivered.
+    expect(persisted).toContainEqual(expect.objectContaining({ turnId: later.id }));
+    expect(coordinator.isAstraRestoreHeld()).toBe(true);
+    await coordinator.stop();
+  });
+
+  it('blocks an unrecoverable pre-stable-identity Astra Turn without aborting application startup', async () => {
+    const store = new InMemoryOscarTurnStore();
+    const turn: OscarTurnV1 = {
+      ...linkedAgentTurn('agent_task_old_ephemeral_actor'),
+      id: 'oscar_turn_old_ephemeral_actor',
+      clientRequestId: 'client_old_ephemeral_actor',
+      inputMessageId: 'message_old_ephemeral_actor',
+      request: {
+        text: 'Продолжи задачу после перезапуска.', attachmentIds: [], modifiers: {},
+        astra: ordinaryAgentBinding(),
+      },
+    };
+    await store.createTurn(turn);
+    const persisted: OscarPersistedMessage[] = [];
+    const coordinator = createCoordinator({ persistentStore: store, persisted,
+      astra: { find: () => { throw new Error('astra-oscar-actor-changed'); } } });
+
+    await coordinator.start();
+    const blocked = await coordinator.getTurn(turn.id);
+    expect(blocked?.turn).toMatchObject({ status: 'blocked', outcome: {
+      kind: 'blocked', warning: 'astra-persistent-actor-migration-required',
+    } });
+    expect(blocked?.events).toContainEqual(expect.objectContaining({ type: 'turn.outcome',
+      payload: expect.objectContaining({ outcome: 'blocked' }) }));
+    expect(persisted).toContainEqual(expect.objectContaining({
+      turnId: turn.id, outcome: 'blocked',
+      content: expect.stringContaining('новая задача сохранит личность между запусками'),
+    }));
+    await coordinator.stop();
   });
 
   it('rebinds an oversized historical terminal message id and retires its HTTP 422 retry loop', async () => {
@@ -2266,11 +2140,9 @@ describe('OscarTurnCoordinator', () => {
       new Date(0).toISOString(),
     );
     const persisted: OscarPersistedMessage[] = [];
-    const getTask = vi.fn();
     const restarted = createCoordinator({
       persistentStore: store,
       persisted,
-      runtime: mockRuntime({ getTask }),
     });
 
     await restarted.start();
@@ -2289,19 +2161,18 @@ describe('OscarTurnCoordinator', () => {
       }),
     ]);
     expect(await store.listPendingOutbox()).toEqual([]);
-    expect(getTask).not.toHaveBeenCalled();
   });
 });
 
 function createCoordinator(options: {
   persistentStore?: InMemoryOscarTurnStore;
   volatileStore?: InMemoryOscarTurnStore;
-  runtime?: MonarchAgentRuntime | null;
-  incognitoRuntime?: MonarchAgentRuntime | null;
+  astra?: any;
   answerExecutor?: (...args: any[]) => Promise<AsyncIterable<OscarAnswerExecutorEvent>>;
   answerFallback?: () => Promise<{ answer: string; sources?: unknown[] }>;
   persisted?: OscarPersistedMessage[];
   dispositionProvider?: { classify(input: { text: string }): Promise<{ lane: 'answer' | 'agent' | 'clarify'; kind: string; confidence: number; reason: string }> };
+  getOwnerUnrestrictedOverride?: () => { enabled: boolean; lifetime: 'session' | 'task' | 'persistent'; shellApprovalPolicy: 'always' | 'risk-based' | 'never' };
   consumeDataEgressConsent?: (consentId: string, turn: OscarTurnV1) => Promise<void>;
   persistMessage?: (message: OscarPersistedMessage) => Promise<
     void | { disposition: 'created' | 'duplicate' | 'superseded' }
@@ -2313,14 +2184,15 @@ function createCoordinator(options: {
     contentHash: string;
   }>;
   resolvePersonality?: () => Promise<OscarTurnV1['request']['personality'] | null>;
+  researchEvidence?: (input: { query: string; deep: boolean; signal: AbortSignal }) => Promise<string>;
   agentFirst?: boolean;
+  maxLocalFallbackAllowed?: () => boolean;
 } = {}) {
   const persisted = options.persisted || [];
   return new OscarTurnCoordinator({
     persistentStore: options.persistentStore || new InMemoryOscarTurnStore(),
     volatileStore: options.volatileStore || new InMemoryOscarTurnStore(),
-    agentRuntime: options.runtime === undefined ? null : options.runtime,
-    incognitoAgentRuntime: options.incognitoRuntime === undefined ? null : options.incognitoRuntime,
+    ...(options.astra ? { astra: options.astra } : {}),
     ...(options.agentFirst === undefined ? {} : { agentFirst: options.agentFirst }),
     answerExecutor: options.answerExecutor || (async () => stream([
       { type: 'token', token: 'Обычный ответ.' },
@@ -2330,9 +2202,14 @@ function createCoordinator(options: {
     persistMessage: options.persistMessage || (async (message) => { persisted.push(message); }),
     ...(options.resolveAttachments ? { resolveAttachments: options.resolveAttachments } : {}),
     ...(options.dispositionProvider ? { dispositionProvider: options.dispositionProvider } : {}),
+    ...(options.maxLocalFallbackAllowed ? { maxLocalFallbackAllowed: options.maxLocalFallbackAllowed } : {}),
+    ...(options.getOwnerUnrestrictedOverride
+      ? { getOwnerUnrestrictedOverride: options.getOwnerUnrestrictedOverride }
+      : {}),
     ...(options.consumeDataEgressConsent ? { consumeDataEgressConsent: options.consumeDataEgressConsent } : {}),
     ...(options.rememberMemory ? { rememberMemory: options.rememberMemory } : {}),
     ...(options.resolvePersonality ? { resolvePersonality: options.resolvePersonality } : {}),
+    ...(options.researchEvidence ? { researchEvidence: options.researchEvidence } : {}),
   });
 }
 
@@ -2481,6 +2358,16 @@ function submission(text: string, clientRequestId = 'client_request_1') {
   };
 }
 
+function ordinaryAgentBinding() {
+  return {
+    version: 'astra-oscar-isolated-v1' as const,
+    actor: { id: `sha256:${'a'.repeat(64)}`, source: 'desktop' as const },
+    selectionId: 'ordinary_agent_test_selection',
+    goal: { kind: 'agent' as const, modelMode: 'local' as const },
+    admission: 'ordinary-agent-v1' as const,
+  };
+}
+
 function acceptedTurnForClient(clientRequestId: string): OscarTurnV1 {
   const now = new Date().toISOString();
   return {
@@ -2567,98 +2454,6 @@ function personalityContext(revision: number): NonNullable<OscarTurnV1['request'
   };
 }
 
-function mockRuntime(overrides: Record<string, unknown> = {}): MonarchAgentRuntime {
-  return {
-    subscribe: () => () => undefined,
-    createTask: async () => runningAgentCheckpoint('agent_task_default'),
-    getTask: async () => null,
-    cancel: async () => null,
-    sendMessage: async () => null,
-    discardTask: async () => false,
-    resolveApproval: async () => null,
-    ...overrides,
-  } as unknown as MonarchAgentRuntime;
-}
-
-function runningAgentCheckpoint(taskId: string): AgentTaskCheckpoint {
-  const now = '2026-08-01T00:00:00.000Z';
-  return {
-    schemaVersion: 'monarch.agent-checkpoint.v1',
-    task: {
-      schemaVersion: 'monarch.agent-task.v1',
-      id: taskId,
-      traceId: `trace_${taskId}`,
-      source: { surface: 'desktop', remote: false },
-      goal: { originalRequest: 'audit', normalizedObjective: 'audit', expectedOutputs: [], constraints: [], successCriteria: [] },
-      status: 'running',
-      messages: [],
-      observations: [],
-      artifacts: [],
-      approvals: [],
-      budgets: {
-        maxSteps: 16,
-        maxModelTurns: 12,
-        maxToolCalls: 10,
-        maxWallTimeMs: 300_000,
-        maxFailures: 4,
-        maxConsecutiveNoProgress: 3,
-      },
-      usage: { steps: 0, modelTurns: 0, toolCalls: 0, failures: 0, consecutiveNoProgress: 0, startedAt: now, updatedAt: now },
-      checkpointVersion: 1,
-      eventSequence: 0,
-      createdAt: now,
-      updatedAt: now,
-    },
-    events: [],
-    observations: [],
-    approvals: [],
-    savedAt: now,
-  } as AgentTaskCheckpoint;
-}
-
-function pendingApprovalCheckpoint(taskId: string, approvalId: string): AgentTaskCheckpoint {
-  const checkpoint = runningAgentCheckpoint(taskId);
-  checkpoint.task.status = 'waiting-for-approval';
-  checkpoint.task.activeApprovalId = approvalId;
-  checkpoint.approvals = [{
-    schemaVersion: 'monarch.agent-approval.v1',
-    id: approvalId,
-    taskId,
-    capabilityId: 'workspace.files.delete',
-    canonicalProposalHash: 'sha256:pending',
-    proposal: {
-      capabilityId: 'workspace.files.delete',
-      args: { path: 'D:\\Temp\\candidate' },
-      riskVector: { effect: 'delete' },
-    },
-    status: 'pending',
-    requestedAt: '2026-08-01T00:00:00.000Z',
-    expiresAt: '2026-08-01T00:05:00.000Z',
-  }];
-  return checkpoint;
-}
-
-function waitingApprovalTurn(checkpoint: AgentTaskCheckpoint): OscarTurnV1 {
-  const now = '2026-08-01T00:00:00.000Z';
-  return {
-    schemaVersion: OSCAR_TURN_SCHEMA_VERSION,
-    id: 'oscar_turn_pending',
-    clientRequestId: 'client_pending',
-    conversationId: 'conversation_1',
-    source: 'desktop',
-    privacyMode: 'persistent',
-    mode: 'agent',
-    status: 'waiting-for-approval',
-    request: { text: 'удали D:\\Temp\\candidate', attachmentIds: [], modifiers: {} },
-    inputMessageId: 'message_pending',
-    taskId: checkpoint.task.id,
-    activeApprovalId: checkpoint.approvals[0]!.id,
-    revision: 0,
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
 function linkedAgentTurn(taskId: string, text = 'выполни операцию'): OscarTurnV1 {
   const now = '2026-08-01T00:00:00.000Z';
   return {
@@ -2679,63 +2474,3 @@ function linkedAgentTurn(taskId: string, text = 'выполни операцию
   };
 }
 
-function completedAgentCheckpoint(
-  taskId: string,
-  options: {
-    capabilityId: string;
-    evidenceClass: 'model-generated' | 'kernel-observation';
-    includeCompletionVerifier?: boolean;
-    mutation?: boolean;
-    summary?: string;
-  },
-): AgentTaskCheckpoint {
-  const checkpoint = runningAgentCheckpoint(taskId);
-  const now = '2026-08-01T00:00:01.000Z';
-  const summary = options.summary || 'Capability returned an observed result.';
-  const observation = {
-    schemaVersion: 'monarch.agent-observation.v1',
-    id: `observation_${taskId}`,
-    taskId,
-    capabilityId: options.capabilityId,
-    status: 'success',
-    summary,
-    structuredData: options.mutation ? {
-      provenance: { executionId: `execution_${taskId}`, ledgerId: `ledger_${taskId}` },
-      mutationTruth: { state: 'occurred', source: 'kernel-journal' },
-      sideEffects: [{ kind: 'persistent', summary: 'Target changed.' }],
-    } : { provenance: { executionId: `execution_${taskId}` } },
-    evidence: [{
-      kind: 'api',
-      evidenceClass: options.evidenceClass,
-      reference: `execution:${taskId}`,
-      summary,
-    }],
-    artifacts: [],
-    warnings: [],
-    retryable: false,
-    occurredAt: now,
-  } as AgentTaskCheckpoint['observations'][number];
-  checkpoint.task.status = 'completed';
-  checkpoint.task.completedAt = now;
-  checkpoint.task.updatedAt = now;
-  checkpoint.task.terminalReason = { code: 'completed', summary };
-  checkpoint.task.observations = [{
-    id: observation.id,
-    taskId,
-    status: observation.status,
-    summary,
-    occurredAt: now,
-  }];
-  checkpoint.observations = [observation];
-  checkpoint.events = options.includeCompletionVerifier === false ? [] : [{
-    schemaVersion: 'monarch.agent-task-event.v1',
-    id: `event_${taskId}`,
-    taskId,
-    traceId: checkpoint.task.traceId,
-    sequence: 1,
-    type: 'verification.completed',
-    createdAt: now,
-    payload: { status: 'verified' },
-  }];
-  return checkpoint;
-}

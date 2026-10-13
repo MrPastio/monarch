@@ -53,19 +53,13 @@ describe('Monarch Sharing module', () => {
     expect(module?.manifest.dependencies).toEqual(['models', 'oscar']);
   });
 
-  it('routes connection requests and exposes no token value', async () => {
+  it('executes the exact connection capability and exposes no token value', async () => {
     const module = new SharingModule(new StubSharingClient({
       connected: true,
       connection,
       models: ['monarch-auto', 'monarch-fast'],
       ttsModels: ['qwen3-tts-0.6b-base'],
     }));
-    const route = await module.handleIntent({
-      id: 'intent_sharing_connection',
-      text: 'как подключить локальную модель к Monarch Sharing API',
-      source: 'test',
-      createdAt: new Date(0).toISOString(),
-    });
     const result = await module.executeCapability({
       id: 'exec_sharing_connection',
       intentId: 'intent_sharing_connection',
@@ -76,7 +70,6 @@ describe('Monarch Sharing module', () => {
       requestedBy: 'test',
     });
 
-    expect(route?.capabilityId).toBe('sharing.connection.get');
     expect(result.ok).toBe(true);
     expect(result.output).toMatchObject({
       connection: {

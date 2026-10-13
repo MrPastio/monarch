@@ -6,9 +6,10 @@ import os
 import stat as stat_module
 
 from monarch_security.events import SecurityEvent
+from monarch_security.observation import ObservedSensor, ObservationUnavailable
 
 
-class FileChangeSensor:
+class FileChangeSensor(ObservedSensor):
     def __init__(
         self,
         paths: Iterable[Path],
@@ -26,6 +27,9 @@ class FileChangeSensor:
         self._cursor = 0
         self._overflow = False
         self._cycle_seen: set[str] = set()
+        self._verify_inventory = False
+        self._verification_match = False
+        self._verification_passes = 0
 
     @property
     def signatures(self) -> dict[str, str]:
@@ -55,16 +59,32 @@ class FileChangeSensor:
         self._cursor = cursor
 
     @property
-    def checkpoint_metadata(self) -> dict[str, list[str]]:
-        return {"cycle_seen": sorted(self._cycle_seen)}
+    def checkpoint_metadata(self) -> dict[str, object]:
+        return {'cycle_seen': sorted(self._cycle_seen), 'verify_inventory': self._verify_inventory,
+                'verification_match': self._verification_match, 'verification_passes': self._verification_passes}
 
     def restore_checkpoint_metadata(self, value: object) -> None:
         if not isinstance(value, dict) or not isinstance(value.get("cycle_seen"), list):
             raise ValueError("file watch checkpoint metadata is invalid")
         self._cycle_seen = {str(item) for item in value["cycle_seen"]}
+        verify, match, passes = (value.get('verify_inventory', False), value.get('verification_match', False),
+                                 value.get('verification_passes', 0))
+        if type(verify) is not bool or type(match) is not bool or type(passes) is not int or not 0 <= passes <= 3:
+            raise ValueError('file watch verification metadata is invalid')
+        self._verify_inventory, self._verification_match, self._verification_passes = verify, match, passes
 
     def poll(self) -> list[SecurityEvent]:
-        snapshot = self._snapshot_page()
+        if self._verify_inventory:
+            # One full owned query validates that pagination did not skip a
+            # current file when directory positions changed between pages.
+            snapshot = self._snapshot_all()
+            self._verification_passes = min(3, self._verification_passes + 1)
+            self._verification_match = self._signatures == {key: item['signature'] for key, item in snapshot.items()}
+            self._cursor, self._overflow = 0, False
+            if not self._verification_match:
+                self.limit_observation('recovery-inventory-changed')
+        else:
+            snapshot = self._snapshot_page()
         changed = [
             item
             for item in snapshot.values()
@@ -92,6 +112,7 @@ class FileChangeSensor:
         return [self._event_from_item(item) for item in changed]
 
     def _snapshot_page(self) -> dict[str, dict[str, str]]:
+        self.begin_observation()
         snapshot: dict[str, dict[str, str]] = {}
         budget = self.max_entries_per_tick
         skipped = 0
@@ -100,8 +121,6 @@ class FileChangeSensor:
         for root in self.paths:
             if has_more:
                 break
-            if not root.exists():
-                continue
             for path in self._walk(root):
                 if skipped < self._cursor:
                     skipped += 1
@@ -114,14 +133,15 @@ class FileChangeSensor:
                 if item is not None:
                     snapshot[item["key"]] = item
         self._overflow = has_more
+        if has_more:
+            self.limit_observation('inventory-page-pending')
         self._cursor = self._cursor + consumed if has_more else 0
         return snapshot
 
     def _snapshot_all(self) -> dict[str, dict[str, str]]:
+        self.begin_observation()
         snapshot: dict[str, dict[str, str]] = {}
         for root in self.paths:
-            if not root.exists():
-                continue
             for path in self._walk(root):
                 item = self._snapshot_item(path)
                 if item is not None:
@@ -131,35 +151,48 @@ class FileChangeSensor:
     @staticmethod
     def _snapshot_item(path: Path) -> dict[str, str] | None:
         try:
-            file_stat = path.stat()
-        except OSError:
-            return None
-        if not stat_module.S_ISREG(file_stat.st_mode):
+            file_stat = path.lstat()
+        except OSError as exc:
+            raise ObservationUnavailable('file-metadata-unavailable') from exc
+        if not stat_module.S_ISREG(file_stat.st_mode) or getattr(file_stat, 'st_file_attributes', 0) & 0x400:
             return None
         resolved_path = str(path.resolve())
         key = resolved_path.lower()
-        signature = f"{file_stat.st_size}:{file_stat.st_mtime_ns}"
+        signature = ':'.join(str(value) for value in (
+            file_stat.st_size, file_stat.st_mtime_ns, file_stat.st_dev,
+            file_stat.st_ino, file_stat.st_ctime_ns))
         return {
             "key": key,
             "path": resolved_path,
             "name": path.name,
             "size": str(file_stat.st_size),
             "mtime_ns": str(file_stat.st_mtime_ns),
+            "device": str(file_stat.st_dev),
+            "inode": str(file_stat.st_ino),
+            "ctime_ns": str(file_stat.st_ctime_ns),
             "extension": path.suffix.lower(),
             "signature": signature,
         }
 
     def _walk(self, root: Path):
+        try:
+            root_stat = root.stat()
+            if not stat_module.S_ISDIR(root_stat.st_mode):
+                raise ObservationUnavailable('watched-root-not-directory')
+        except OSError as exc:
+            raise ObservationUnavailable('watched-root-unavailable') from exc
         if not self.recursive:
             try:
                 with os.scandir(root) as entries:
                     for entry in sorted(entries, key=lambda item: item.path.casefold()):
                         yield Path(entry.path)
-            except OSError:
-                return
+            except OSError as exc:
+                raise ObservationUnavailable('directory-enumeration-unavailable') from exc
             return
 
-        for current_root, dirs, files in os.walk(root):
+        def failed_walk(error):
+            raise ObservationUnavailable('directory-enumeration-unavailable') from error
+        for current_root, dirs, files in os.walk(root, onerror=failed_walk):
             dirs[:] = sorted(
                 (directory for directory in dirs if not directory.startswith(".")),
                 key=str.casefold,
@@ -179,5 +212,8 @@ class FileChangeSensor:
                 "size": int(item["size"]),
                 "extension": item["extension"],
                 "mtime_ns": int(item["mtime_ns"]),
+                "device": int(item["device"]),
+                "inode": int(item["inode"]),
+                "ctime_ns": int(item["ctime_ns"]),
             },
         )

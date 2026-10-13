@@ -65,7 +65,6 @@ async function createApp() {
   const coordinator = new OscarTurnCoordinator({
     persistentStore,
     volatileStore: new InMemoryOscarTurnStore(),
-    agentRuntime: null,
     answerExecutor: async () => answerStream(),
     persistMessage: async () => undefined,
   });
@@ -73,7 +72,6 @@ async function createApp() {
     workspaceRoot: root,
     enabledModules: [],
     enableLocalSystemRouter: false,
-    enableAgentRuntimeV2: false,
     oscarTurnCoordinator: coordinator,
   });
   await app.start();

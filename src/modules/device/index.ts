@@ -4,13 +4,10 @@ import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
   MonarchExecutionControl,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
-  MonarchRouteDecision,
 } from '../../core';
-import { permissionModeForRisk } from '../../core';
 import { classifyVoiceBrightnessIntent } from './device-brightness';
 import {
   classifyVoiceVolumeIntent,
@@ -22,16 +19,16 @@ import {
 } from './device-volume';
 import {
   rankInstalledApplications,
-  resolveInstalledApplication,
   resolveRankedInstalledApplications,
   sanitizeInstalledApplicationCatalog,
   type InstalledApplicationCatalogEntry,
   type RankedInstalledApplication,
 } from './application-resolver';
+import { resolveSemanticApplicationTarget } from './semantic-target-resolver';
 import { deviceManifest } from './manifest';
 
 const execFileAsync = promisify(execFile);
-const APPLICATION_CATALOG_CACHE_TTL_MS = 5 * 60_000;
+const APPLICATION_CATALOG_CACHE_TTL_MS = 15 * 60_000;
 
 export type DevicePowerShellRunner = (
   script: string,
@@ -44,6 +41,10 @@ export interface DeviceIntentAction {
   risk: 'read' | 'device-control' | 'delete';
   input: Record<string, unknown>;
   confidence: number;
+}
+
+export interface DeviceModuleOptions {
+  warmApplicationCatalog?: boolean;
 }
 
 /**
@@ -98,11 +99,13 @@ export class DeviceModule implements MonarchModule {
     entries: InstalledApplicationCatalogEntry[];
     expiresAt: number;
   } | null = null;
+  private applicationCatalogLoad: Promise<InstalledApplicationCatalogEntry[]> | null = null;
 
   constructor(
     private readonly runPowerShell: DevicePowerShellRunner = runPowerShellCommand,
     private readonly now: () => Date = () => new Date(),
     private readonly runVolume: (action: VoiceVolumeAction) => Promise<VoiceVolumeState> = runWindowsVolumeAction,
+    private readonly options: DeviceModuleOptions = {},
   ) {}
 
   async activate(context: MonarchKernelContext): Promise<void> {
@@ -110,6 +113,9 @@ export class DeviceModule implements MonarchModule {
       platform: process.platform,
       supported: process.platform === 'win32',
     });
+    if (process.platform === 'win32' && this.options.warmApplicationCatalog === true) {
+      void this.readInstalledApplicationCatalog().catch(() => undefined);
+    }
   }
 
   async health(): Promise<MonarchExecutionResult> {
@@ -122,12 +128,6 @@ export class DeviceModule implements MonarchModule {
     };
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const action = resolveDeviceIntentAction(intent.text);
-    return action
-      ? route(intent, action.capabilityId, action.risk, action.input, action.confidence)
-      : null;
-  }
 
   async executeCapability(
     request: MonarchExecutionRequest,
@@ -451,12 +451,12 @@ if ($closed) {
         },
       };
     }
-    let resolution = resolveInstalledApplication(app, catalog);
+    let resolution = resolveSemanticApplicationTarget(app, catalog);
     if (resolution.status === 'missing' && reusedCachedCatalog) {
       // A recent installation or update may have changed the Start catalog.
       // Refresh once before returning a stable missing result.
       catalog = await this.readInstalledApplicationCatalog(signal, true);
-      resolution = resolveInstalledApplication(app, catalog);
+      resolution = resolveSemanticApplicationTarget(app, catalog);
     }
     if (resolution.status !== 'unique') {
       const candidates = publicApplicationCandidates(resolution.candidates);
@@ -477,6 +477,7 @@ if ($closed) {
           matchCount: candidates.length,
           candidates,
           resolution: resolution.status,
+          semanticRole: resolution.role,
           catalogSize: catalog.length,
         },
       };
@@ -519,6 +520,7 @@ if ($closed) {
       resolvedName: selected.name,
       resolutionScore: selected.score,
       resolutionMatchKind: selected.matchKind,
+      semanticRole: resolution.role,
       performed: true,
       verified: true,
       authoritative: true,
@@ -623,9 +625,31 @@ do {
     forceRefresh = false,
   ): Promise<InstalledApplicationCatalogEntry[]> {
     signal?.throwIfAborted();
-    if (!forceRefresh && this.applicationCatalogCache && this.applicationCatalogCache.expiresAt > Date.now()) {
+    if (!forceRefresh && this.applicationCatalogCache) {
+      if (this.applicationCatalogCache.expiresAt <= Date.now() && !this.applicationCatalogLoad) {
+        const refresh = this.loadInstalledApplicationCatalog();
+        this.applicationCatalogLoad = refresh;
+        void refresh.catch(() => undefined).finally(() => {
+          if (this.applicationCatalogLoad === refresh) this.applicationCatalogLoad = null;
+        });
+      }
       return this.applicationCatalogCache.entries;
     }
+    if (!forceRefresh && this.applicationCatalogLoad) {
+      const entries = await this.applicationCatalogLoad;
+      signal?.throwIfAborted();
+      return entries;
+    }
+    const load = this.loadInstalledApplicationCatalog(signal);
+    if (!forceRefresh && !signal) this.applicationCatalogLoad = load;
+    try {
+      return await load;
+    } finally {
+      if (this.applicationCatalogLoad === load) this.applicationCatalogLoad = null;
+    }
+  }
+
+  private async loadInstalledApplicationCatalog(signal?: AbortSignal): Promise<InstalledApplicationCatalogEntry[]> {
     const output = await this.runPowerShell(APPLICATION_CATALOG_SCRIPT, {}, signal);
     const payload = parsePowerShellJson(output);
     const entries = sanitizeInstalledApplicationCatalog(payload.entries);
@@ -673,6 +697,46 @@ foreach ($root in $registryRoots) {
         launchId = $file.FullName
         source = 'app-path'
         executableName = $file.Name
+      })
+    } catch {
+      continue
+    }
+  }
+}
+$shortcutRoots = @(
+  [Environment]::GetFolderPath('StartMenu'),
+  [Environment]::GetFolderPath('CommonStartMenu'),
+  [Environment]::GetFolderPath('Desktop'),
+  [Environment]::GetFolderPath('CommonDesktopDirectory')
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } | Select-Object -Unique
+$shell = New-Object -ComObject WScript.Shell
+$blockedLaunchers = @('cmd.exe', 'powershell.exe', 'pwsh.exe', 'wscript.exe', 'cscript.exe', 'mshta.exe', 'rundll32.exe', 'regsvr32.exe')
+foreach ($root in $shortcutRoots) {
+  foreach ($file in @(Get-ChildItem -LiteralPath $root -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.lnk', '.url') })) {
+    try {
+      if ($file.Extension -ieq '.lnk') {
+        $shortcut = $shell.CreateShortcut($file.FullName)
+        $target = ([string]$shortcut.TargetPath).Trim().Trim('"')
+        if (-not $target -or -not (Test-Path -LiteralPath $target -PathType Leaf)) { continue }
+        $targetFile = Get-Item -LiteralPath $target -ErrorAction Stop
+        if ($targetFile.Extension -ine '.exe' -or $blockedLaunchers -contains $targetFile.Name.ToLowerInvariant()) { continue }
+        [void]$entries.Add([pscustomobject]@{
+          name = $file.BaseName
+          launchId = $file.FullName
+          source = 'shortcut'
+          executableName = $targetFile.Name
+        })
+        continue
+      }
+      $urlLine = Get-Content -LiteralPath $file.FullName -ErrorAction Stop | Where-Object { $_ -match '^URL=' } | Select-Object -First 1
+      $targetUrl = if ($urlLine) { ([string]$urlLine).Substring(4).Trim() } else { '' }
+      $uri = $null
+      if (-not [Uri]::TryCreate($targetUrl, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -notin @('http', 'https') -or $uri.UserInfo) { continue }
+      [void]$entries.Add([pscustomobject]@{
+        name = $file.BaseName
+        launchId = $uri.AbsoluteUri
+        source = 'web-shortcut'
+        executableName = ''
       })
     } catch {
       continue
@@ -751,6 +815,34 @@ try {
     $launchProcess = Start-Process -FilePath 'explorer.exe' -ArgumentList @("shell:AppsFolder\$([string]$candidate.launchId)") -PassThru -ErrorAction Stop
   } elseif ([string]$candidate.source -eq 'app-path') {
     $launchProcess = Start-Process -FilePath ([string]$candidate.launchId) -PassThru -ErrorAction Stop
+  } elseif ([string]$candidate.source -eq 'shortcut') {
+    $shortcutPath = [IO.Path]::GetFullPath([string]$candidate.launchId)
+    $allowedRoots = @(
+      [Environment]::GetFolderPath('StartMenu'),
+      [Environment]::GetFolderPath('CommonStartMenu'),
+      [Environment]::GetFolderPath('Desktop'),
+      [Environment]::GetFolderPath('CommonDesktopDirectory')
+    ) | Where-Object { $_ }
+    $insideAllowedRoot = @($allowedRoots | Where-Object {
+      $rootPath = [IO.Path]::GetFullPath([string]$_).TrimEnd('\') + '\'
+      $shortcutPath.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase)
+    }).Count -gt 0
+    if (-not $insideAllowedRoot -or -not (Test-Path -LiteralPath $shortcutPath -PathType Leaf) -or [IO.Path]::GetExtension($shortcutPath) -ine '.lnk') {
+      throw 'Shortcut escaped the trusted Start/Desktop roots.'
+    }
+    $resolvedShortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
+    $resolvedTarget = ([string]$resolvedShortcut.TargetPath).Trim().Trim('"')
+    $blockedLaunchers = @('cmd.exe', 'powershell.exe', 'pwsh.exe', 'wscript.exe', 'cscript.exe', 'mshta.exe', 'rundll32.exe', 'regsvr32.exe')
+    if (-not (Test-Path -LiteralPath $resolvedTarget -PathType Leaf) -or [IO.Path]::GetExtension($resolvedTarget) -ine '.exe' -or $blockedLaunchers -contains [IO.Path]::GetFileName($resolvedTarget).ToLowerInvariant()) {
+      throw 'Shortcut target is not an allowed application executable.'
+    }
+    $launchProcess = Start-Process -FilePath $shortcutPath -PassThru -ErrorAction Stop
+  } elseif ([string]$candidate.source -eq 'web-shortcut') {
+    $targetUri = $null
+    if (-not [Uri]::TryCreate([string]$candidate.launchId, [UriKind]::Absolute, [ref]$targetUri) -or $targetUri.Scheme -notin @('http', 'https') -or $targetUri.UserInfo) {
+      throw 'Web shortcut is not a safe HTTP(S) target.'
+    }
+    $launchProcess = Start-Process -FilePath $targetUri.AbsoluteUri -PassThru -ErrorAction Stop
   } else {
     throw 'Unsupported application catalog source.'
   }
@@ -815,24 +907,6 @@ function publicApplicationCandidates(
     matchKind: entry.matchKind,
     source: entry.source,
   }));
-}
-
-function route(
-  intent: MonarchIntent,
-  capabilityId: string,
-  risk: 'read' | 'delete' | 'device-control',
-  input: Record<string, unknown>,
-  confidence: number
-): MonarchRouteDecision {
-  return {
-    intentId: intent.id,
-    targetModuleId: 'device',
-    capabilityId,
-    confidence,
-    reason: 'Explicit supported Windows device action detected.',
-    permissionMode: permissionModeForRisk(risk),
-    input,
-  };
 }
 
 async function runPowerShellCommand(
@@ -1083,6 +1157,8 @@ const APPLICATION_ALIASES: Readonly<Record<string, string>> = Object.freeze({
   'telegram desktop': 'telegram',
   'телеграм': 'telegram',
   'телеграмм': 'telegram',
+  'тг': 'telegram',
+  'tg': 'telegram',
   'калькулятор': 'calculator',
   'calc': 'calculator',
   'блокнот': 'notepad',
@@ -1129,6 +1205,8 @@ function isAbortError(error: unknown): boolean {
 }
 
 export function createDeviceModule(): MonarchModule {
+  // Enumerate installed apps only when an app-related request needs the
+  // catalog. An ordinary chat startup must not scan shortcuts or spawn PS.
   return new DeviceModule();
 }
 

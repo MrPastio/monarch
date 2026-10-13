@@ -6,6 +6,7 @@ import {
   formatPairingTime,
   normalizeSkillDraftValues,
   normalizeSettingsTab,
+  renderEpisodeSummary,
   resolveSettingsHeaderCompactState,
   splitSettingsLines,
   unwrapCapabilityPayload,
@@ -16,6 +17,15 @@ const settingsSource = readFileSync('src/ui/public/modules/settings-pane.js', 'u
 const settingsHtml = readFileSync('src/ui/public/index.html', 'utf8');
 
 describe('Monarch Settings UI helpers', () => {
+  it('shows an automatic memory episode as the request line plus an escaped outcome excerpt', () => {
+    const html = renderEpisodeSummary('Запрос: погода <b>Варна</b>\nИтог: Уточни город.');
+    expect(html).toContain('<span>Ты спросил</span><b>погода &lt;b&gt;Варна&lt;/b&gt;</b>');
+    expect(html).toContain('<details class="memory-derived-outcome">');
+    expect(html).toContain('Уточни город.');
+    expect(renderEpisodeSummary('старый формат')).toBe('<p class="memory-derived-text">старый формат</p>');
+  });
+
+
   it('normalizes editable style rules', () => {
     expect(splitSettingsLines('  На ты.\n\n Сначала результат.  ')).toEqual([
       'На ты.',
@@ -40,6 +50,22 @@ describe('Monarch Settings UI helpers', () => {
       .toBe('Действует ещё 10 мин');
     expect(formatPairingTime('2030-01-01T00:00:00.000Z', Date.parse('2030-01-01T00:01:00.000Z')))
       .toBe('Код истёк');
+  });
+
+  it('shows durable Telegram delivery backlog instead of a fake confirmation count', () => {
+    expect(settingsHtml).toContain('id="telegram-pending-summary">Доставок: 0');
+    expect(settingsHtml).toContain('id="telegram-photo-summary">Вложения: проверка');
+    expect(settingsHtml).toContain('Оскар принимает сообщения, изображения и текстовые документы. Для действий, требующих разрешения, он спросит тебя.');
+    expect(settingsSource).toContain("`Вложения: ${Math.round(attachmentMaxBytes / 1024 / 1024)} МиБ · текст ${Math.round(textDocumentMaxBytes / 1024)} КиБ`");
+    expect(settingsSource).toContain('Number(status.pendingTaskDeliveries || 0)');
+    expect(settingsSource).toContain('`Доставок: ${Math.max(0, Number(status.pendingTaskDeliveries || 0))} · файлов: ${artifactOffers}`');
+    expect(settingsSource).not.toContain('`Подтверждений: ${Number(status.pendingConfirmations || 0)}`');
+    expect(settingsHtml).toContain('id="telegram-toggle-connection">Подключить бота');
+    expect(settingsHtml).toContain('нажми «Подключить бота»');
+    expect(settingsSource).toContain("controlTelegram(paused ? 'resume' : 'pause')");
+    expect(settingsSource).toContain("controlTelegram('revoke-all')");
+    expect(settingsSource).toContain("await confirmAction('Отозвать все Telegram-привязки");
+    expect(settingsSource).toContain("controlTelegram('rotate-pairing')");
   });
 
   it('filters skills and keeps workspace workflows first', () => {
@@ -101,8 +127,13 @@ describe('Monarch Settings UI helpers', () => {
     expect(normalizeSettingsTab('telegram')).toBe('telegram');
     expect(normalizeSettingsTab('images')).toBe('images');
     expect(normalizeSettingsTab('models')).toBe('models');
+    expect(normalizeSettingsTab('integrations')).toBe('integrations');
     expect(normalizeSettingsTab('dev')).toBe('dev');
-    expect(normalizeSettingsTab('unknown')).toBe('general');
+    expect(normalizeSettingsTab('voice')).toBe('voice');
+    expect(normalizeSettingsTab('style')).toBe('style');
+    // Links to the old combined tab land on the answer style.
+    expect(normalizeSettingsTab('general')).toBe('style');
+    expect(normalizeSettingsTab('unknown')).toBe('models');
   });
 
   it('keeps the compact header stable until the feed returns to the top', () => {

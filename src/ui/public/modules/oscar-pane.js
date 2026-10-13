@@ -1,5 +1,9 @@
+import { confirmAction, promptValue } from './ui-dialogs.js';
 import { state } from './state.js';
+import { animateUserMessageArrivals, markUserMessageOrigin, reducedUiMotion } from './ui-motion.js';
+import { plainActivity } from './ui-language.js';
 import { copyTextToClipboard } from './clipboard.js';
+import { closeOscarComposerMenu } from './oscar-plus-menu.js';
 import { createOscarGreeting } from './oscar-greetings.js';
 import {
   armAgentTaskApproval,
@@ -9,6 +13,8 @@ import {
   createOscarIncognitoConversation,
   createOscarDataEgressConsent,
   createOscarTurn,
+  createOscarAstraTurn,
+  sendOscarAstraInput,
   decideOscarDataEgressConsent,
   discardOscarIncognitoConversation,
   executeCapability,
@@ -50,6 +56,7 @@ import {
   readOscarSources,
   readUserFacingFailure,
   renderOscarMessage,
+  oscarResearchStep,
   syncThreadDOM,
   sanitizeVisibleAssistantContent,
   formatOscarWorkDuration,
@@ -85,6 +92,9 @@ import {
   readOscarFunctionQuery,
 } from './oscar-functions.js';
 import { ensureComputerUseReady } from './computer-use-control.js';
+import { astraCardInput, astraHumanIssue, astraTurnView } from './astra-turn-panel.js';
+import { readOscarTaskReport } from './oscar-task-report.js';
+import { findOscarStarterPrompt, renderOscarStarterPrompts, selectOscarStarterPrompts } from './oscar-starter-prompts.js';
 
 const MAX_OSCAR_NEW_TOKENS = 65_536;
 const MAX_OSCAR_ATTACHMENTS = 3;
@@ -145,6 +155,7 @@ const elements = {
   oscarGemmaTier: document.querySelector('#oscar-gemma-tier'),
   oscarConversationList: document.querySelector('#oscar-conversation-list'),
   oscarHistoryPanel: document.querySelector('#oscar-history-panel'),
+  oscarChatTitle: document.querySelector('#oscar-chat-title'),
   oscarHistoryToggle: document.querySelector('#oscar-history-toggle'),
   oscarHistoryOpen: document.querySelector('#oscar-history-open'),
   oscarHistoryClose: document.querySelector('#oscar-history-close'),
@@ -196,7 +207,6 @@ const oscarConversationListOwner = createLatestRequestOwner();
 const animatedOscarUserMessages = new Set();
 let lastOscarHistoryTrigger = null;
 let oscarSpeechController = null;
-let activeOscarRouteConsent = null;
 let oscarWorkTimerInterval = null;
 let activeOscarAgentTaskId = '';
 let activeOscarTurnId = '';
@@ -215,7 +225,29 @@ let oscarSessionRestoreAttempted = false;
 const expandedOscarMissions = new Set();
 const armedOscarMissionApprovals = new Set();
 
-export function initOscarPane(appRenderCallback) {
+/** Explicit isolated bootstrap only; ordinary init never imports/mounts V3. */
+export async function mountOscarAstraPane(container, options, lifecycle = {}) {
+  const { mountAstraTurnPanel } = await import('./astra-turn-panel.js');
+  return mountAstraTurnPanel(container, options, lifecycle);
+}
+
+let oscarPaneOwner = null;
+let oscarNativeAstra = null;
+let oscarMaxMode = null;
+export function initOscarPane(appRenderCallback, options = {}) {
+  oscarMaxMode = options.maxMode || options.astra?.maxMode || null;
+  window.addEventListener('monarch-max-selection-change', () => { syncOscarControlsToDom(); renderApp?.(); });
+  // Explicit host injection only. It must run BEFORE legacy listeners, Safe,
+  // model onboarding, voice/image/web routing or normal history discovery.
+  if (options.astra) {
+    if (oscarPaneOwner || options.astra.deployment !== 'isolated-validation' || !options.astra.bridge)
+      throw Error('Oscar требует единственный явно подключённый изолированный host Astra.');
+    oscarPaneOwner = 'astra';
+    return import('./oscar-astra-composer.js').then(({ mountOscarAstraComposer }) =>
+      mountOscarAstraComposer(elements, options.astra.bridge, options.astra.maxMode));
+  }
+  if (oscarPaneOwner === 'astra') throw Error('Нельзя подключить второй исполнитель к composer Astra.');
+  oscarPaneOwner = 'legacy';
   renderApp = appRenderCallback;
   oscarSpeechController = createOscarSpeechController({
     desktop: window.monarchDesktop,
@@ -364,16 +396,26 @@ export function initOscarPane(appRenderCallback) {
         void openOscarAttachment(messageId, Number(rawIndex), attachmentButton);
         return;
       }
-      const routeDecisionButton = event.target.closest('[data-oscar-route-decision]');
-      if (routeDecisionButton) {
+      const starterButton = event.target.closest('[data-oscar-starter]');
+      if (starterButton) {
         event.preventDefault();
-        event.stopPropagation();
-        settleOscarRouteConsent(routeDecisionButton.getAttribute('data-oscar-route-decision') === 'allow' ? 'allow' : 'deny');
+        applyOscarStarterPrompt(starterButton.getAttribute('data-oscar-starter'));
+        return;
+      }
+      const starterRefreshButton = event.target.closest('[data-oscar-starters-refresh]');
+      if (starterRefreshButton) {
+        event.preventDefault();
+        refreshOscarStarterPrompts(starterRefreshButton);
         return;
       }
       const loadOlderButton = event.target.closest('[data-oscar-load-older]');
       if (loadOlderButton) {
         void loadOlderOscarMessages();
+        return;
+      }
+      const memorySourceButton = event.target.closest('[data-source-open-memory]');
+      if (memorySourceButton) {
+        openMemorySettingsFromSource();
         return;
       }
       const copyButton = event.target.closest('[data-message-copy]');
@@ -402,11 +444,24 @@ export function initOscarPane(appRenderCallback) {
         void armOscarMessageAction(messageId, armButton);
         return;
       }
+      const runtimeButton = event.target.closest('[data-oscar-runtime-action]');
+      if (runtimeButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        const messageId = runtimeButton.getAttribute('data-message-id') || '';
+        const action = runtimeButton.getAttribute('data-oscar-runtime-action') === 'cancel' ? 'cancel' : 'resume';
+        void settleOscarRuntimeWait(messageId, action, appRenderCallback);
+        return;
+      }
       const button = event.target.closest('[data-oscar-confirm-action]');
       if (!button) return;
       event.preventDefault();
       event.stopPropagation();
       const messageId = button.getAttribute('data-message-id') || '';
+      if (button.hasAttribute('data-oscar-astra-decision')) {
+        void settleOscarAstraApproval(messageId, button.getAttribute('data-oscar-astra-decision'));
+        return;
+      }
       const grantScope = button.getAttribute('data-grant-scope') === 'task' ? 'task' : 'once';
       const agentTaskId = button.getAttribute('data-agent-task-id') || '';
       const agentApprovalId = button.getAttribute('data-agent-approval-id') || '';
@@ -473,7 +528,25 @@ export function initOscarPane(appRenderCallback) {
     else void encryptOscarConversation(state.oscar.conversationId || '');
   });
 
+  bindOscarHistoryHoverIntent();
+  const historyMenu = document.querySelector('.sidebar-history-menu');
+  document.addEventListener('click', (event) => {
+    if (historyMenu?.open && (!historyMenu.contains(event.target) || event.target.closest('.sidebar-history-menu-item'))) {
+      historyMenu.open = false;
+    }
+  });
+  historyMenu?.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && historyMenu.open) {
+      event.stopPropagation();
+      historyMenu.open = false;
+      historyMenu.querySelector('summary')?.focus();
+    }
+  });
   elements.oscarHistorySearch?.addEventListener('input', () => renderConversationList());
+  document.querySelector('#oscar-history-telegram')?.addEventListener('change', () => renderConversationList());
+  document.querySelector('#oscar-history-archived')?.addEventListener('change', () => {
+    void loadOscarConversations({ supersede: true });
+  });
   for (const historyButton of [elements.oscarHistoryToggle, elements.oscarHistoryOpen]) {
     historyButton?.addEventListener('click', () => {
       const nextOpen = !state.oscar.historyPanelOpen;
@@ -491,6 +564,15 @@ export function initOscarPane(appRenderCallback) {
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && state.oscar.historyPanelOpen) {
       setOscarHistoryOpen(false, { restoreFocus: true });
+    }
+    if (event.key !== 'Escape' || event.defaultPrevented || document.querySelector('dialog[open]')) return;
+    if (state.oscar.memoryPanelOpen) {
+      state.oscar.memoryPanelOpen = false;
+      renderOscar();
+      elements.oscarMemoryManager?.focus({ preventScroll: true });
+    } else if (oscarMissionsOpen) {
+      setOscarMissionsOpen(false);
+      elements.oscarMissionsToggle?.focus({ preventScroll: true });
     }
   });
 
@@ -608,6 +690,12 @@ export function initOscarPane(appRenderCallback) {
         void encryptOscarConversation(encryptButton.getAttribute('data-conversation-encrypt') || '');
         return;
       }
+      const unarchiveButton = event.target.closest('[data-conversation-unarchive]');
+      if (unarchiveButton) {
+        event.stopPropagation();
+        void unarchiveOscarConversation(unarchiveButton.getAttribute('data-conversation-unarchive') || '');
+        return;
+      }
       const conversationButton = event.target.closest('[data-conversation-open]');
       if (conversationButton) {
         void openOscarConversation(conversationButton.getAttribute('data-conversation-open') || '');
@@ -618,6 +706,8 @@ export function initOscarPane(appRenderCallback) {
   if (elements.oscarMemoryManager) {
     elements.oscarMemoryManager.addEventListener('click', () => {
       state.oscar.memoryPanelOpen = !state.oscar.memoryPanelOpen;
+      // One topbar panel at a time: both anchor to the same corner.
+      if (state.oscar.memoryPanelOpen) setOscarMissionsOpen(false);
       renderOscar();
       if (state.oscar.memoryPanelOpen) void loadOscarMemoryItems();
     });
@@ -627,6 +717,13 @@ export function initOscarPane(appRenderCallback) {
     elements.oscarMemoryClose.addEventListener('click', () => {
       state.oscar.memoryPanelOpen = false;
       renderOscar();
+    });
+  }
+
+  if (elements.oscarContext) {
+    elements.oscarContext.addEventListener('click', (event) => {
+      const memorySource = event.target.closest('[data-source-open-memory]');
+      if (memorySource) openMemorySettingsFromSource();
     });
   }
 
@@ -655,13 +752,6 @@ export function initOscarPane(appRenderCallback) {
     });
   }
 
-  if (elements.oscarWebToggle) {
-    elements.oscarWebToggle.addEventListener('change', () => {
-      state.oscar.web = elements.oscarWebToggle.checked;
-      renderOscar();
-    });
-  }
-
   if (elements.oscarGemmaTier) {
     elements.oscarGemmaTier.addEventListener('change', () => {
       state.oscar.gemmaTier = elements.oscarGemmaTier.value;
@@ -677,7 +767,12 @@ export function initOscarPane(appRenderCallback) {
   }
 
   elements.oscarMissionsToggle?.addEventListener('click', () => {
-    setOscarMissionsOpen(!oscarMissionsOpen);
+    const open = !oscarMissionsOpen;
+    if (open && state.oscar.memoryPanelOpen) {
+      state.oscar.memoryPanelOpen = false;
+      renderOscar();
+    }
+    setOscarMissionsOpen(open);
   });
   elements.oscarMissionsClose?.addEventListener('click', () => setOscarMissionsOpen(false));
   elements.oscarMissionsRefresh?.addEventListener('click', () => void loadOscarMissions());
@@ -696,7 +791,20 @@ export function initOscarPane(appRenderCallback) {
     const action = actionButton.getAttribute('data-mission-action') || '';
     if (taskId && action) void runOscarMissionAction(taskId, action, actionButton);
   });
+  if (options.nativeAstra) return import('./oscar-astra-native.js').then(({ mountOscarAstraNative }) => {
+    oscarNativeAstra = mountOscarAstraNative(elements, options.nativeAstra, {
+      state: () => state.oscar, ensureConversation: () => ensureActiveConversation(),
+      error: message => { state.oscar.error = message; renderOscar(); },
+    });
+  });
 }
+
+// A status read that fails while the local server is still starting (or
+// restarting) used to leave Oscar marked unreachable until some later action
+// happened to read status again. It is retried with backoff until it answers.
+const OSCAR_STATUS_RETRY_DELAYS_MS = [1500, 3000, 6000, 12000, 30000];
+let oscarStatusRetryTimer = 0;
+let oscarStatusRetryAttempt = 0;
 
 export async function loadOscarStatus(appRenderCallback, { captureContextForConversation = '' } = {}) {
   if (state.oscar.statusBusy) {
@@ -710,6 +818,7 @@ export async function loadOscarStatus(appRenderCallback, { captureContextForConv
   try {
     const result = await executeOscarCapabilityAction('oscar.status', {}, false);
     state.oscar.status = result.output;
+    oscarStatusRetryAttempt = 0;
     const captureConversationId = String(captureContextForConversation || '').trim();
     const activeConversationId = String(state.oscar.conversationId || '').trim();
     const contextWindow = readOscarModelStatus(state.oscar)?.last_context_window;
@@ -729,6 +838,14 @@ export async function loadOscarStatus(appRenderCallback, { captureContextForConv
     }
   } catch (error) {
     state.oscar.error = formatOscarStatusError(error);
+    if (!oscarStatusRetryTimer) {
+      const delay = OSCAR_STATUS_RETRY_DELAYS_MS[Math.min(oscarStatusRetryAttempt, OSCAR_STATUS_RETRY_DELAYS_MS.length - 1)];
+      oscarStatusRetryAttempt += 1;
+      oscarStatusRetryTimer = window.setTimeout(() => {
+        oscarStatusRetryTimer = 0;
+        void loadOscarStatus(appRenderCallback);
+      }, delay);
+    }
   } finally {
     state.oscar.statusBusy = false;
     appRenderCallback();
@@ -737,13 +854,16 @@ export async function loadOscarStatus(appRenderCallback, { captureContextForConv
 
 async function submitOscarMessage(appRenderCallback) {
   enforceOscarOwnerDevState();
-  if (requiredModelBlocksChat()) {
+  const astraSelection = oscarNativeAstra?.capture();
+  const astraContinuation = waitingOscarTurn?.conversationId === state.oscar.conversationId && waitingOscarTurn?.astra;
+  const nativeAstraRequest = Boolean(astraSelection || astraContinuation);
+  if (requiredModelBlocksChat() && !nativeAstraRequest) {
     renderGenerationStatus();
     return;
   }
   const ownerDev = readOscarOwnerDevSettings();
   const attachments = [...(state.oscar.attachments || [])];
-  const enteredText = elements.oscarInput.value.trim();
+  const enteredText = nativeAstraRequest ? elements.oscarInput.value : elements.oscarInput.value.trim();
   const visibleText = enteredText || (attachments.length ? 'Опиши прикреплённое изображение.' : '');
   const selectedSkillName = ownerDev.skillsEnabled === false
     ? ''
@@ -754,8 +874,16 @@ async function submitOscarMessage(appRenderCallback) {
   const text = selectedSkillName && !hasExplicitSkill && !explicitComputerUse
     ? `$${selectedSkillName} ${visibleText}`.trim()
     : visibleText;
-  if (!visibleText || state.oscar.busy || oscarSubmitInFlight) {
+  if (!visibleText.trim() || state.oscar.busy || oscarSubmitInFlight) {
     return;
+  }
+  if (nativeAstraRequest && (attachments.length || selectedSkillName || state.oscar.incognito || state.oscar.encrypted)) {
+    state.oscar.error = 'Отправь выбранный файл отдельным сообщением в обычном чате, без фото и навыка.';
+    appRenderCallback(); return;
+  }
+  if (astraSelection && astraContinuation) {
+    state.oscar.error = 'Сначала ответь на уточнение текущей задачи или останови её.';
+    appRenderCallback(); return;
   }
   oscarSubmitInFlight = true;
   if (explicitComputerUse) {
@@ -768,7 +896,7 @@ async function submitOscarMessage(appRenderCallback) {
       return;
     }
   }
-  reserveOscarImageProviderWindow(visibleText);
+  if (!nativeAstraRequest) reserveOscarImageProviderWindow(visibleText);
   const submissionController = new AbortController();
   activeOscarSubmissionController = submissionController;
   const submissionSignal = submissionController.signal;
@@ -812,7 +940,9 @@ async function submitOscarMessage(appRenderCallback) {
     streamEvents: [{
       kind: 'status',
       label: 'маршрутизация',
-      detail: state.oscar.web ? 'web-поиск включен' : 'подбираю модель',
+      detail: attachments.length && oscarMaxMode?.selected()
+        ? 'изображение анализирует MAX · Qwen 3.8'
+        : state.oscar.web ? 'web-поиск включен' : 'подбираю модель',
       at: new Date().toISOString(),
     }],
   });
@@ -828,6 +958,7 @@ async function submitOscarMessage(appRenderCallback) {
   state.oscar.selectedSkill = null;
   state.oscar.attachments = [];
   state.oscar.stopRequested = false;
+  if (editingIndex < 0) markUserMessageOrigin(elements.oscarInput);
   elements.oscarInput.value = '';
   setSkillPickerOpen(false);
   setFunctionPickerOpen(false);
@@ -840,7 +971,7 @@ async function submitOscarMessage(appRenderCallback) {
 
   try {
     try {
-      const imageIntent = await evaluateImageGenerationIntent(visibleText, { signal: submissionSignal });
+      const imageIntent = nativeAstraRequest ? null : await evaluateImageGenerationIntent(visibleText, { signal: submissionSignal });
       if (imageIntent?.isImageGeneration) {
         const handoff = await handoffOscarImageGeneration(imageIntent, {
           privacyMode: state.oscar.incognito ? 'incognito' : 'persistent',
@@ -911,18 +1042,23 @@ async function submitOscarMessage(appRenderCallback) {
       .filter((message) => message.id !== userMessage.id && !message.pending && !message.error)
       .slice(-12)
       .map((message) => ({ role: message.role, content: message.content }));
-    let webSearch = ownerDev.internetEnabled !== false && state.oscar.web === true;
+    // The Internet switch is permission: with it on, Oscar searches only when
+    // the request needs fresh data; with it off, nothing leaves the computer.
+    const webAllowed = ownerDev.internetEnabled !== false && state.oscar.web === true;
+    let webSearch = false;
     let researchMode = ['auto', 'off', 'deep'].includes(state.oscar.researchMode) ? state.oscar.researchMode : 'auto';
-    if (ownerDev.internetEnabled === false) researchMode = 'off';
+    if (!webAllowed) researchMode = 'off';
     let dataEgressConsentId = '';
     let externalResearchRequired = false;
-    if (!continuation) {
-      const disposition = await fetchOscarRequestDisposition(text, history, { signal: submissionSignal });
+    if (nativeAstraRequest) { webSearch = false; researchMode = 'off'; }
+    if (!continuation && !nativeAstraRequest) {
+      const disposition = await fetchOscarRequestDisposition(text, history, { signal: submissionSignal, webAllowed,
+        ...(privacyMode === 'persistent' ? { conversationId } : {}),
+        requestedModel: readOscarRequestedModel({ vision: attachments.length > 0 }) });
       externalResearchRequired = disposition?.requiresExternalResearch === true;
-      if (externalResearchRequired) webSearch = true;
-      if (ownerDev.internetEnabled === false) webSearch = false;
+      webSearch = webAllowed && (externalResearchRequired || disposition?.wantsWeb === true);
     }
-    if (!continuation && (webSearch || researchMode === 'deep')) {
+    if (!continuation && webAllowed && (webSearch || researchMode === 'deep')) {
       const consentRequest = {
         conversationId,
         privacyMode,
@@ -941,28 +1077,14 @@ async function submitOscarMessage(appRenderCallback) {
         id: String(consent.id || ''),
         canonicalBindingHash: String(consent.canonicalBindingHash || ''),
       };
-      const decision = await requestOscarRouteConsent({
-        webSearch: true,
-        deepResearch: researchMode === 'deep',
-        messageId: pendingMessage.id,
-        presentation: proposal?.presentation || {},
-        signal: submissionSignal,
-      });
-      await decideOscarDataEgressConsent(
-        consent.id,
-        decision === 'allow' ? 'grant' : 'deny',
-        consent.canonicalBindingHash,
-        { signal: submissionSignal },
-      );
-      if (decision === 'allow') {
-        dataEgressConsentId = String(consent.id || '');
-      } else {
-        webSearch = false;
-        researchMode = 'off';
-      }
+      // The person's own Internet switch is the consent (owner decision
+      // 2026-09-23): the per-turn record is granted from it, bound to this
+      // exact request, with no second question.
+      await decideOscarDataEgressConsent(consent.id, 'grant', consent.canonicalBindingHash, { signal: submissionSignal });
+      dataEgressConsentId = String(consent.id || '');
     }
     throwIfOscarSubmissionAborted(submissionSignal);
-    const requestedModel = readOscarRequestedModel();
+    const requestedModel = readOscarRequestedModel({ vision: attachments.length > 0 });
     turnCreationStarted = true;
     submissionState.turnCreationStarted = true;
     submissionState.privacyMode = privacyMode;
@@ -973,7 +1095,12 @@ async function submitOscarMessage(appRenderCallback) {
       clientRequestId,
       text,
     });
-    const created = await createOscarTurn({
+    const created = astraContinuation
+      ? await sendOscarAstraInput(astraContinuation.turn, astraCardInput(astraContinuation.card, text,
+        { messageId: userMessage.id, requestId: clientRequestId }), { signal: submissionSignal })
+      : astraSelection ? await createOscarAstraTurn(oscarNativeAstra.request(astraSelection, text,
+        { clientRequestId, inputMessageId: userMessage.id }, oscarMaxMode?.selected()), { signal: submissionSignal })
+      : await createOscarTurn({
       conversationId,
       text,
       privacyMode,
@@ -981,7 +1108,7 @@ async function submitOscarMessage(appRenderCallback) {
       history,
       modifiers: {
         requestedModel: requestedModel || undefined,
-        reasoningEffort: resolveModelReasoningEffort(requestedModel),
+        reasoningEffort: resolveModelReasoningEffort(requestedModel, state.oscar.reasoningEffort),
         webSearch,
         researchMode,
         ...(dataEgressConsentId ? { dataEgressConsentId } : {}),
@@ -999,6 +1126,7 @@ async function submitOscarMessage(appRenderCallback) {
     }
     const turnId = String(created?.turn?.id || continuation?.turnId || '');
     if (!turnId) throw new Error('Monarch Turn Coordinator не вернул turn id.');
+    if (astraSelection) oscarNativeAstra.submitted(astraSelection);
     activeSubmissionTurnId = turnId;
     submissionState.turnId = turnId;
     userMessage.turnId = turnId;
@@ -1033,7 +1161,8 @@ async function submitOscarMessage(appRenderCallback) {
       appRenderCallback,
       after: continuation?.after || 0,
     });
-    if (!state.oscar.incognito && !state.oscar.encrypted) {
+    if (!state.oscar.incognito && !state.oscar.encrypted
+      && !['waiting-for-user', 'waiting-for-approval', 'waiting-for-runtime'].includes(turnResult?.status)) {
       await refreshActiveConversationMessages();
       void loadOscarConversations({ supersede: true });
     }
@@ -1079,6 +1208,22 @@ async function submitOscarMessage(appRenderCallback) {
       activeOscarSubmissionController = null;
     }
     if (activeOscarSubmission === submissionState) activeOscarSubmission = null;
+    if (oscarPendingMessageExists(pendingMessage.id)) {
+      const reconciled = activeSubmissionTurnId
+        ? await settlePendingOscarTurnFromDurableState({
+          pendingMessageId: pendingMessage.id,
+          turnId: activeSubmissionTurnId,
+          showTrace: showDebugTrace,
+        })
+        : false;
+      if (!reconciled) {
+        settleLocalOscarError({
+          error: new Error('Oscar завершил обработку без отображаемого результата. Повтори запрос или открой чат заново.'),
+          pendingMessageId: pendingMessage.id,
+          turnId: activeSubmissionTurnId,
+        });
+      }
+    }
     oscarSubmitInFlight = false;
     setOscarBusy(false);
     appRenderCallback();
@@ -1091,7 +1236,9 @@ async function executeOscarCapabilityAction(capabilityId, input, confirmed) {
     return executeConfirmedCapability('oscar', capabilityId, input, 'ui:oscar');
   }
 
-  const result = await executeCapability('oscar', capabilityId, input, 'ui:oscar', confirmed);
+  // Only the capability result is used; building the whole application state
+  // for the reply cost up to two seconds on every chat switch.
+  const result = await executeCapability('oscar', capabilityId, input, 'ui:oscar', confirmed, '', { includeState: false });
   if (!result.ok && !result.result?.ok) {
     const err = readUserFacingFailure(
       result.result || result,
@@ -1102,6 +1249,14 @@ async function executeOscarCapabilityAction(capabilityId, input, confirmed) {
   return result.result || result;
 }
 
+/** Archived chats are withheld by the backend unless asked for, so the toggle
+ * has to reload rather than filter what is already in hand. Clearing history
+ * archives every chat bound to a поручение, and without this they were kept
+ * but unreachable: the product said "moved to archive" and showed no archive. */
+function oscarHistoryArchiveShown() {
+  return document.querySelector('#oscar-history-archived')?.checked === true;
+}
+
 export async function loadOscarConversations(options = {}) {
   if (state.oscar.historyBusy && options.supersede !== true) return;
   const requestId = oscarConversationListOwner.begin();
@@ -1109,7 +1264,10 @@ export async function loadOscarConversations(options = {}) {
   state.oscar.historyError = '';
   renderConversationList();
   try {
-    const result = await executeOscarCapabilityAction('oscar.conversations.manage', { action: 'list' }, false);
+    const result = await executeOscarCapabilityAction('oscar.conversations.manage', {
+      action: 'list',
+      ...(oscarHistoryArchiveShown() ? { include_archived: true, limit: 200 } : {}),
+    }, false);
     const persistent = Array.isArray(result.output?.conversations)
       ? result.output.conversations
       : [];
@@ -1204,7 +1362,7 @@ async function encryptOscarConversation(conversationId) {
       state.oscar.error = 'Разблокируй Monarch Safe и снова нажми кнопку шифрования.';
       return;
     }
-    const accepted = window.confirm(
+    const accepted = await confirmAction(
       'Перенести этот чат в Monarch Safe? Обычная копия будет удалена из Oscar SQLite после проверенной записи в Safe.',
     );
     if (!accepted) return;
@@ -1386,16 +1544,11 @@ export async function startNewOscarConversation() {
     if (discardedIncognitoId) {
       await discardOscarIncognitoConversation(discardedIncognitoId).catch(() => undefined);
     }
-    if (!state.oscar.incognito) {
-      const result = await executeOscarCapabilityAction('oscar.conversations.manage', {
-        action: 'create',
-        title: 'Новый чат',
-      }, false);
-      if (transitionId !== oscarConversationTransitionId) return;
-      state.oscar.conversationId = result.output?.id || null;
-      rememberActiveOscarSession({ conversationId: state.oscar.conversationId });
-      await loadOscarConversations({ supersede: true });
-    }
+    // The chat is saved together with its first message (ensureActiveConversation).
+    // Creating it here left an empty "Новый чат" behind every time, and when
+    // the first message outran this request the late id replaced the chat
+    // that message had actually started.
+    renderConversationList();
   } catch (error) {
     if (transitionId === oscarConversationTransitionId) {
       state.oscar.error = error instanceof Error ? error.message : String(error);
@@ -1478,21 +1631,31 @@ function rememberActiveOscarSession({
     return;
   }
   try {
-    window.sessionStorage.setItem(OSCAR_ACTIVE_SESSION_KEY, JSON.stringify({
+    const session = {
       conversationId: normalizedConversationId.slice(0, 256),
       turnId: String(turnId || '').trim().slice(0, 256),
       clientRequestId: String(clientRequestId || '').trim().slice(0, 256),
       text: String(text || '').slice(0, 20_000),
       cancelRequested: cancelRequested === true,
+    };
+    window.sessionStorage.setItem(OSCAR_ACTIVE_SESSION_KEY, JSON.stringify(session));
+    // Browser sessionStorage is cleared when Electron exits. Persist only the
+    // opaque durable pointers needed to fetch the authoritative Turn again;
+    // raw user text stays session-only and is recovered from the Turn Store.
+    window.localStorage.setItem(OSCAR_ACTIVE_SESSION_KEY, JSON.stringify({
+      conversationId: session.conversationId,
+      turnId: session.turnId,
+      clientRequestId: session.clientRequestId,
+      cancelRequested: session.cancelRequested,
     }));
   } catch {
-    // Reload recovery is best-effort; the durable Turn remains server-side.
+    // Recovery remains best-effort; the durable Turn itself stays server-side.
   }
 }
 
-function readActiveOscarSession() {
+function readStoredOscarSession(storage) {
   try {
-    const parsed = JSON.parse(window.sessionStorage.getItem(OSCAR_ACTIVE_SESSION_KEY) || 'null');
+    const parsed = JSON.parse(storage.getItem(OSCAR_ACTIVE_SESSION_KEY) || 'null');
     if (!parsed || typeof parsed !== 'object') return null;
     const conversationId = String(parsed.conversationId || '').trim();
     if (!conversationId) return null;
@@ -1508,9 +1671,19 @@ function readActiveOscarSession() {
   }
 }
 
+function readActiveOscarSession() {
+  return readStoredOscarSession(window.sessionStorage)
+    || readStoredOscarSession(window.localStorage);
+}
+
 function forgetActiveOscarSession() {
   try {
     window.sessionStorage.removeItem(OSCAR_ACTIVE_SESSION_KEY);
+  } catch {
+    // Continue so an unavailable session store cannot leave a durable pointer behind.
+  }
+  try {
+    window.localStorage.removeItem(OSCAR_ACTIVE_SESSION_KEY);
   } catch {
     // The current in-memory conversation remains usable when storage is unavailable.
   }
@@ -1578,6 +1751,12 @@ async function restoreActiveOscarSession() {
     }
   }
 
+  if (recoverableTurn && ['succeeded', 'failed', 'cancelled', 'blocked'].includes(recoverableTurn.status)) {
+    // A finished turn has nothing to resume: replaying its stream showed a
+    // settled answer as "Готовит ответ" and held the chat busy for no reason.
+    await openOscarConversation(recoverableTurn.conversationId);
+    return;
+  }
   if (recoverableTurn) {
     const turn = recoverableTurn;
     const userMessage = createOscarMessage('user', recoverableText, 'ты', { turnId: turn.id });
@@ -1609,7 +1788,9 @@ async function restoreActiveOscarSession() {
           appRenderCallback: renderApp,
           after: 0,
         });
-        await refreshActiveConversationMessages();
+        if (!['waiting-for-user', 'waiting-for-approval', 'waiting-for-runtime'].includes(restoredTurn?.status)) {
+          await refreshActiveConversationMessages();
+        }
         if (restoredTurn?.status === 'succeeded') {
           await loadOscarStatus(renderApp, { captureContextForConversation: turn.conversationId });
         }
@@ -1623,6 +1804,21 @@ async function restoreActiveOscarSession() {
         await refreshActiveConversationMessages();
       }
     } finally {
+      if (oscarPendingMessageExists(pendingMessage.id)) {
+        const reconciled = await settlePendingOscarTurnFromDurableState({
+          pendingMessageId: pendingMessage.id,
+          turnId: turn.id,
+          showTrace: false,
+        });
+        if (!reconciled) {
+          settleLocalOscarError({
+            error: new Error('Oscar не смог восстановить итоговое состояние Turn.'),
+            pendingMessageId: pendingMessage.id,
+            turnId: turn.id,
+            label: 'Oscar · восстановление',
+          });
+        }
+      }
       setOscarBusy(false);
       renderApp();
     }
@@ -1660,8 +1856,56 @@ function settleLocalOscarError({ error, pendingMessageId, turnId = '', label = '
   return true;
 }
 
+function oscarPendingMessageExists(messageId) {
+  return state.oscar.messages.some((message) => message.id === messageId && message.pending === true);
+}
+
+async function settlePendingOscarTurnFromDurableState({ pendingMessageId, turnId, showTrace = false }) {
+  if (!oscarPendingMessageExists(pendingMessageId)) return true;
+  let checkpoint;
+  try {
+    checkpoint = await fetchOscarTurn(turnId);
+  } catch {
+    return false;
+  }
+  if (!isOscarTurnTerminal(checkpoint)) return false;
+  const turn = checkpoint.turn;
+  const outcome = String(turn?.outcome?.kind || (turn?.status === 'failed' ? 'failed' : turn?.status || 'failed'));
+  const rawSummary = String(turn?.outcome?.summary || '').trim() || 'Turn завершён без отображаемого текста.';
+  const summary = presentOscarHistoryContent(rawSummary, outcome);
+  const verification = outcome === 'verified'
+    ? 'kernel-verified'
+    : outcome === 'partial' ? 'kernel-partial'
+    : outcome === 'answered:source-grounded' ? 'source-grounded'
+    : ['blocked', 'failed', 'cancelled'].includes(outcome) ? 'system-state' : 'unverified-model';
+  const origin = verification === 'kernel-verified' || verification === 'kernel-partial'
+    ? 'kernel'
+    : verification === 'system-state' ? 'system' : 'model';
+  const replaced = replacePendingOscarMessage(createOscarMessage('assistant', summary, outcome === 'failed' ? 'Oscar · ошибка' : 'Oscar', {
+    turnId,
+    taskId: String(turn?.taskId || ''),
+    outcome,
+    provenance: { origin, verification },
+    integrityWarning: String(turn?.outcome?.warning || ''),
+    error: outcome === 'failed',
+    showTrace,
+  }), pendingMessageId);
+  if (!replaced) return false;
+  state.oscar.context = { summary, request: { turnId }, sources: [], outcome, provenance: verification };
+  setMascotState(outcome === 'failed' ? 'error' : outcome === 'cancelled' ? 'idle' : 'success', { detail: summary });
+  return true;
+}
+
 async function openOscarConversation(conversationId) {
-  if (!conversationId || state.oscar.busy || oscarNewConversationInFlight) return;
+  if (!conversationId) return;
+  if (state.oscar.busy || oscarSubmitInFlight || oscarNewConversationInFlight) {
+    // The answer in progress belongs to the open chat, so the switch waits for
+    // it instead of being dropped without a word. Stop ends the wait at once.
+    state.oscar.queuedConversationId = conversationId === state.oscar.conversationId ? null : conversationId;
+    renderConversationList();
+    return;
+  }
+  state.oscar.queuedConversationId = null;
   const selected = state.oscar.conversations.find((conversation) => conversation.id === conversationId);
   if (selected?.encrypted === true) {
     await openEncryptedOscarConversation(conversationId);
@@ -1669,7 +1913,7 @@ async function openOscarConversation(conversationId) {
   }
   oscarSpeechController?.stop();
   const transitionId = ++oscarConversationTransitionId;
-  state.oscar.historyBusy = true;
+  state.oscar.openingConversationId = conversationId;
   renderConversationList();
   try {
     const result = await executeOscarCapabilityAction('oscar.conversations.manage', {
@@ -1698,7 +1942,7 @@ async function openOscarConversation(conversationId) {
     }
   } finally {
     if (transitionId === oscarConversationTransitionId) {
-      state.oscar.historyBusy = false;
+      state.oscar.openingConversationId = null;
       renderApp();
     }
   }
@@ -1757,15 +2001,17 @@ async function refreshActiveConversationMessages() {
   if (state.oscar.incognito || state.oscar.encrypted) return;
   const conversationId = state.oscar.conversationId;
   if (!conversationId) return;
+  const existingMessages = state.oscar.messages;
   try {
     const result = await executeOscarCapabilityAction('oscar.conversations.manage', {
       action: 'get',
       id: conversationId,
       message_limit: OSCAR_HISTORY_PAGE_SIZE,
     }, false);
+    if (state.oscar.conversationId !== conversationId || state.oscar.incognito || state.oscar.encrypted
+      || state.oscar.messages !== existingMessages) return;
     if (Array.isArray(result.output?.messages)) {
       const hydratedMessages = mapConversationMessages(result.output.messages);
-      const existingMessages = state.oscar.messages;
       const existingPage = state.oscar.messagePage || {};
       const hydratedTail = appendUnhydratedLocalAssistant(existingMessages, hydratedMessages);
       const hydratedWithPreviews = hydratedTail.map((message) => inheritAttachmentPreviews(existingMessages, message));
@@ -1845,7 +2091,9 @@ function mapConversationMessages(messages) {
           elapsed_ms: Number(message.elapsed_ms || 0),
           model_tier: message.model_tier || '',
           estimated: true,
+          ...(message.max_fallback_code ? { max_fallback: 'local', max_failure_code: message.max_fallback_code } : {}),
         },
+        researchSteps: Array.isArray(message.research_steps) ? message.research_steps : [],
         turnId: message.turn_id || '',
         taskId: message.task_id || '',
         provenance: message.provenance || null,
@@ -1929,7 +2177,7 @@ function cancelOscarMessageEdit() {
 
 async function renameOscarConversation(conversationId) {
   const conversation = state.oscar.conversations.find((item) => item.id === conversationId);
-  const title = window.prompt('Название чата', conversation?.title || 'Новый чат');
+  const title = await promptValue('Название чата', conversation?.title || 'Новый чат');
   if (!title?.trim()) return;
   if (conversation?.encrypted === true) {
     const payload = await requireSafeChatBridge().readSafeChat(conversationId, 'oscar');
@@ -1949,15 +2197,25 @@ async function renameOscarConversation(conversationId) {
   await loadOscarConversations({ supersede: true });
 }
 
+async function unarchiveOscarConversation(conversationId) {
+  if (!conversationId) return;
+  await executeOscarCapabilityAction('oscar.conversations.manage', {
+    action: 'update',
+    id: conversationId,
+    archived: false,
+  }, false);
+  await loadOscarConversations({ supersede: true });
+}
+
 async function deleteOscarConversation(conversationId) {
-  if (!conversationId || !window.confirm('Удалить этот чат и все его сообщения?')) return;
+  if (!conversationId || !await confirmAction('Удалить этот чат и все его сообщения?')) return;
   const conversation = state.oscar.conversations.find((item) => item.id === conversationId);
   try {
     if (conversation?.encrypted === true) {
       const bridge = requireSafeChatBridge();
       const payload = await bridge.readSafeChat(conversationId, 'oscar');
       if (hasActionLinkedConversationEvidence(payload?.record)) {
-        throw new Error('Чат связан с поручением и не может быть удалён. Его можно только архивировать в Agent Runtime.');
+        throw new Error('Чат связан с поручением и не может быть удалён. Его можно архивировать.');
       }
       await bridge.deleteSafeChat(conversationId, 'oscar');
       if (state.oscar.conversationId === conversationId) {
@@ -2005,7 +2263,7 @@ async function openOscarAttachment(messageId, attachmentIndex, button) {
       });
       const resolved = payload?.attachment || {};
       if (resolved.id !== attachment.id || (attachment.digest && resolved.digest !== attachment.digest)) {
-        throw new Error('Monarch отклонил изображение: immutable receipt не совпал.');
+        throw new Error('Не удалось проверить изображение. Прикрепи его заново.');
       }
       source = `data:${resolved.mimeType};base64,${resolved.dataBase64}`;
       if (!isRenderableAttachmentPreview(source)) throw new Error('Хранилище вернуло неподдерживаемый формат изображения.');
@@ -2107,7 +2365,7 @@ async function toggleOscarMemoryItem(itemId) {
 
 async function deleteOscarMemoryItem(itemId) {
   if (state.oscar.incognito || state.oscar.encrypted) return;
-  if (!itemId || !window.confirm('Удалить эту запись памяти?')) return;
+  if (!itemId || !await confirmAction('Удалить эту запись памяти?')) return;
   const saved = await writeLocalSettings('memory.delete', { id: itemId }, {
     expectedRevision: oscarMemoryRevision,
   });
@@ -2121,7 +2379,9 @@ function applyOscarMemoryContext(context) {
   state.oscar.memoryItems = Array.isArray(context?.value?.records) ? context.value.records : [];
 }
 
-function readOscarRequestedModel() {
+function readOscarRequestedModel({ vision = false } = {}) {
+  const max = oscarMaxMode?.selected();
+  if (max) return max.role || 'max-gpt-oss-120b';
   return resolveOscarRequestedModel({
     intelligenceEnabled: state.oscar.intelligenceEnabled,
     modelSelection: state.oscar.modelSelection,
@@ -2130,7 +2390,8 @@ function readOscarRequestedModel() {
 
 function syncOscarControls() {
   state.oscar.useMemory = true;
-  state.oscar.web = null;
+  // `state.oscar.web` is the person's own Internet switch; resetting it here on
+  // every submit meant a switched-on search was cleared before it was read.
 
   if (elements.oscarReasoning) {
     state.oscar.reasoning = elements.oscarReasoning.value;
@@ -2142,6 +2403,7 @@ function syncOscarControls() {
 
 function syncOscarControlsToDom() {
   enforceOscarOwnerDevState();
+  oscarNativeAstra?.sync();
   if (elements.oscarReasoning) elements.oscarReasoning.value = state.oscar.reasoning;
   if (elements.oscarGemmaTier) elements.oscarGemmaTier.value = state.oscar.gemmaTier;
   const isIncognito = state.oscar.incognito === true;
@@ -2182,6 +2444,7 @@ function setOscarBusy(isBusy) {
   setOscarWorkTimerRunning(isBusy);
   clearTimeout(mascotResetTimer);
   if (!isBusy) {
+    window.dispatchEvent(new CustomEvent('monarch:oscar-turn-settled'));
     state.oscar.messages = state.oscar.messages.map((message) => (
       message.sendActive ? { ...message, sendActive: false } : message
     ));
@@ -2196,6 +2459,8 @@ function setOscarBusy(isBusy) {
       setMascotState('listening', { detail: 'Жду точное разрешение' });
     } else if (outcome === 'waiting-for-user') {
       setMascotState('listening', { detail: 'Жду уточнение' });
+    } else if (outcome === 'waiting-for-runtime') {
+      setMascotState('idle', { detail: 'Задача ждёт восстановления модели или инструмента' });
     } else if (outcome === 'cancelled' || outcome === 'blocked') {
       setMascotState('idle');
     } else {
@@ -2204,13 +2469,20 @@ function setOscarBusy(isBusy) {
     }
   } else {
     state.oscar.streamTokens = 0;
-    setGenerationPhase('Подключаю runtime', 'Подготовка локальной модели');
+    setGenerationPhase('Подготавливается', '');
     setMascotState('listening', { detail: 'Готовлю запрос' });
   }
   elements.oscarComposer.setAttribute('aria-busy', String(isBusy));
   elements.oscarComposer.classList.toggle('is-generating', isBusy);
   syncOscarComposerState();
   renderGenerationStatus();
+  if (!isBusy && state.oscar.queuedConversationId) {
+    // Let the finished submission settle its own chat first.
+    setTimeout(() => {
+      const queued = state.oscar.queuedConversationId;
+      if (queued && !state.oscar.busy) void openOscarConversation(queued);
+    }, 0);
+  }
 }
 
 function readOscarOwnerDevSettings() {
@@ -2280,7 +2552,7 @@ async function clearOscarHistory() {
   const safeMessage = encrypted.length > 0
     ? ' Зашифрованные чаты в Safe будут удалены только после проверки доступности Safe.'
     : '';
-  if (!window.confirm(
+  if (!await confirmAction(
     `Очистить историю чатов? Обычные чаты будут удалены, а связанные с поручениями — перемещены в архив.${safeMessage}`,
   )) return;
 
@@ -2381,7 +2653,7 @@ function renderOscarMissions() {
       : `${active.length} активных · ${oscarMissionTasks.length} всего`;
   }
   if (!oscarMissionTasks.length) {
-    elements.oscarMissionsList.innerHTML = '<div class="oscar-missions-empty">Здесь появятся только реальные Agent Tasks.<br>Обычные вопросы остаются обычным чатом.</div>';
+    elements.oscarMissionsList.innerHTML = '<div class="oscar-missions-empty">Здесь появятся задачи, которые Oscar выполняет сам: шаг за шагом, с проверкой.<br>Обычные вопросы остаются в чате.</div>';
     return;
   }
   elements.oscarMissionsList.innerHTML = oscarMissionTasks.map((task) => renderOscarMission(task)).join('');
@@ -2402,7 +2674,8 @@ function renderOscarMission(task) {
   const expanded = expandedOscarMissions.has(task.id) || (!terminal && steps.length > 1);
   const compact = steps.length <= 1;
   const actions = [];
-  if (task.status === 'paused' || task.status === 'interrupted' || task.status === 'created') {
+  if (task.status === 'paused' || task.status === 'interrupted' || task.status === 'created'
+    || task.status === 'waiting-for-runtime') {
     actions.push(missionActionButton(task.id, 'resume', 'Продолжить'));
   } else if (!terminal && task.status !== 'waiting-for-approval' && task.status !== 'waiting-for-user' && task.status !== 'cancelling') {
     actions.push(missionActionButton(task.id, 'pause', 'Пауза'));
@@ -2433,7 +2706,7 @@ function renderOscarMission(task) {
           <strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong>
           <small>${escapeHtml(formatOscarMissionTime(task.updatedAt || task.createdAt))}${task.parentTaskId ? ' · повтор' : ''}</small>
         </div>
-        <button class="oscar-mission-toggle-detail" type="button" data-mission-detail="${escapeHtml(task.id)}" aria-label="${expanded ? 'Свернуть' : 'Развернуть'}">${expanded ? '⌃' : '⌄'}</button>
+        <button class="oscar-mission-toggle-detail" type="button" data-mission-detail="${escapeHtml(task.id)}" aria-label="${expanded ? 'Свернуть' : 'Развернуть'}"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${expanded ? 'm6 15 6-6 6 6' : 'm6 9 6 6 6-6'}"/></svg></button>
       </div>
       <div class="oscar-mission-detail" ${expanded ? '' : 'hidden'}>
         ${current ? `<div class="oscar-mission-current"><span>Текущий шаг</span><br>${escapeHtml(current.title || current.expectedEffects?.[0]?.description || 'Проверяю состояние')}</div>` : ''}
@@ -2521,8 +2794,9 @@ function renderOscarMissionApproval(approval) {
   </div>`;
 }
 
+/** Astra archives blocked and partial tasks too: they are finished, not paused. */
 function isTerminalOscarMission(task) {
-  return ['completed', 'failed', 'cancelled'].includes(task?.status);
+  return ['completed', 'failed', 'cancelled', 'blocked', 'partial'].includes(task?.status);
 }
 
 function oscarMissionStatusLabel(status) {
@@ -2532,7 +2806,10 @@ function oscarMissionStatusLabel(status) {
     running: 'в работе',
     'waiting-for-user': 'уточнение',
     'waiting-for-approval': 'доступ',
-    'waiting-for-runtime': 'runtime',
+    'waiting-for-runtime': 'ждёт модель',
+    'awaiting-input': 'ждёт ответа',
+    blocked: 'остановлено',
+    partial: 'частично',
     paused: 'пауза',
     cancelling: 'отмена',
     interrupted: 'прервано',
@@ -2565,7 +2842,16 @@ async function consumeOscarTurn({
   let content = '';
   let lastSequence = Number(after || 0);
   const progress = [];
+  // Research steps outlive the eight-event window: answer tokens push them
+  // out of `progress`, and the finished answer still shows how it searched.
+  const researchSteps = [];
   const remember = (kind, label, detail = '', activity = null) => {
+    const step = oscarResearchStep(kind, detail || label);
+    const lastStep = researchSteps[researchSteps.length - 1];
+    if (step && !(lastStep && lastStep.kind === step.kind && lastStep.detail === step.detail)) {
+      researchSteps.push(step);
+      if (researchSteps.length > 40) researchSteps.shift();
+    }
     progress.push({
       kind,
       label,
@@ -2582,13 +2868,14 @@ async function consumeOscarTurn({
       showTrace,
       streamPhase: phase,
       streamEvents: [...progress],
+      researchSteps: [...researchSteps],
       turnId,
     }), pendingMessageId);
-    setGenerationPhase(label, detail || 'Turn Coordinator');
+    setGenerationPhase(plainActivity(phase, activity?.operation), '');
     setMascotState(/kernel|task|approval|observation/i.test(phase) ? 'listening' : 'thinking', { detail: label });
     renderOscarStreamFrame();
   };
-  renderProgress('turn-routing', 'Маршрут · Задача', 'Определяю безопасный контур');
+  renderProgress('turn-routing', 'Думает');
   try {
     for await (const envelope of await streamOscarTurn(turnId, after, { signal: streamController.signal })) {
       const event = envelope?.data?.event || {};
@@ -2597,15 +2884,20 @@ async function consumeOscarTurn({
       switch (envelope.type) {
       case 'turn.routed':
         renderProgress(payload.disposition === 'agent' ? 'turn-agent' : 'turn-answer',
-          payload.disposition === 'agent' ? 'Запуск · Задача' : 'Ответ · Локально',
-          payload.disposition === 'agent' ? 'Подготавливаю проверяемые действия' : 'Формирую ответ');
+          payload.disposition === 'agent' ? 'Работает' : 'Думает');
         break;
       case 'task.linked':
         activeOscarAgentTaskId = String(payload.taskId || '');
         scheduleOscarMissionsRefresh();
-        renderProgress('turn-task', 'Подготовка · Инструменты', 'Задача принята Agent Runtime');
+        renderProgress('turn-task', 'Работает');
         break;
       case 'agent.progress':
+        // A host fault is not "thinking": say so, or a stuck task looks alive.
+        if (payload.runtimeIssue) {
+          renderProgress('agent-blocked', 'Задача застряла',
+            'Исполнитель остановился и сам не продолжит. Нажми «Стоп» и повтори запрос.');
+          break;
+        }
         renderProgress(
           `agent-${String(payload.phase || 'running')}`,
           String(payload.label || 'Agent выполняет задачу'),
@@ -2617,15 +2909,18 @@ async function consumeOscarTurn({
         const delta = typeof payload.content === 'string' ? payload.content : '';
         if (delta) content += delta;
         state.oscar.streamTokens += delta ? 1 : 0;
-        renderProgress('turn-answer', 'Ответ · Проверка', 'Проверяю видимый текст');
+        renderProgress('turn-answer', 'Готовит ответ');
         break;
       }
       case 'answer.replace': {
         content = typeof payload.content === 'string' ? payload.content : '';
-        renderProgress('turn-answer', 'Ответ · Обновление', 'Применяю проверенную версию');
+        renderProgress('turn-answer', 'Готовит ответ');
         break;
       }
       case 'approval.required': {
+        if (payload.runtime === 'astra-v3') {
+          return await presentOscarAstraCard(turnId, text, pendingMessageId, lastSequence, appRenderCallback);
+        }
         const taskId = String(payload.taskId || '');
         const approvalId = String(payload.approvalId || '');
         replacePendingOscarMessage(createOscarMessage('assistant', [
@@ -2662,6 +2957,9 @@ async function consumeOscarTurn({
         return { status: 'waiting-for-approval', turnId, sequence: lastSequence };
       }
       case 'user.input.required':
+        if (payload.runtime === 'astra-v3') {
+          return await presentOscarAstraCard(turnId, text, pendingMessageId, lastSequence, appRenderCallback);
+        }
         waitingOscarTurn = {
           turnId,
           conversationId: state.oscar.conversationId,
@@ -2678,8 +2976,33 @@ async function consumeOscarTurn({
         activeOscarAgentTaskId = '';
         appRenderCallback();
         return { status: 'waiting-for-user', turnId, sequence: lastSequence };
+      case 'runtime.waiting': {
+        const taskId = String(payload.taskId || '');
+        const summary = String(payload.summary || '').trim()
+          || 'Нужно восстановить модель или инструмент, чтобы продолжить задачу.';
+        replacePendingOscarMessage(createOscarMessage('assistant', summary, 'Oscar · ожидание', {
+          turnId,
+          taskId,
+          outcome: 'waiting-for-runtime',
+          provenance: { origin: 'system', verification: 'system-state' },
+          action: {
+            kind: 'runtime-retry',
+            label: 'Повторить',
+            agentTaskId: taskId,
+            oscarTurnId: turnId,
+            oscarTurnAfter: lastSequence,
+            originatingUserText: text,
+            showTrace,
+          },
+        }), pendingMessageId);
+        activeOscarTurnId = '';
+        activeOscarAgentTaskId = '';
+        setMascotState('idle', { detail: 'Задача ждёт восстановления модели или инструмента' });
+        appRenderCallback();
+        return { status: 'waiting-for-runtime', turnId, sequence: lastSequence };
+      }
       case 'non-authoritative-confirmation':
-        renderProgress('turn-approval', 'Текст не является подтверждением', 'Фокусирую текущую action-card');
+        renderProgress('turn-approval', 'Текст не является подтверждением', 'Открываю запрос разрешения');
         break;
       case 'turn.outcome': {
         const checkpoint = await fetchOscarTurn(turnId, { signal: streamController.signal });
@@ -2693,14 +3016,22 @@ async function consumeOscarTurn({
         const evidence = Array.isArray(checkpoint?.turn?.outcome?.evidenceRefs)
           ? checkpoint.turn.outcome.evidenceRefs
           : [];
-        const sources = evidence
+        // The outcome event carries what the cards show (title, date, origin);
+        // provenance references are the fallback for an older runtime.
+        const shownSources = Array.isArray(payload.sources) ? payload.sources.filter((entry) => entry && typeof entry === 'object') : [];
+        const sources = shownSources.length ? shownSources.map((entry) => {
+          const reference = String(entry.url || '');
+          return reference.startsWith('memory://')
+            ? { title: 'Из памяти', detail: String(entry.title || 'Сведения из твоей памяти'), url: reference, kind: 'memory' }
+            : { ...entry };
+        }) : evidence
           .filter((entry) => entry?.evidenceClass === 'external-source')
           .map((entry) => {
             const reference = String(entry.reference || '');
             const memory = reference.startsWith('memory://');
             return {
               title: memory ? 'Из памяти' : entry.summary || 'Источник',
-              detail: memory ? String(entry.summary || 'Локальный контекст Memory V4') : '',
+              detail: memory ? String(entry.summary || 'Сведения из твоей памяти') : '',
               url: reference,
               ...(memory ? { kind: 'memory' } : {}),
             };
@@ -2720,10 +3051,13 @@ async function consumeOscarTurn({
           outcome,
           provenance: { origin, verification },
           integrityWarning: checkpoint?.turn?.outcome?.warning || '',
+          taskReport: readOscarTaskReport(checkpoint?.events),
           sources,
+          usage: payload.usage && typeof payload.usage === 'object' ? payload.usage : null,
           error: outcome === 'failed',
           showTrace,
           streamEvents: [...progress],
+          researchSteps: [...researchSteps],
         }), pendingMessageId);
         state.oscar.context = { summary, request: { turnId }, sources, outcome, provenance: verification };
         setMascotState(outcome === 'failed' ? 'error' : outcome === 'cancelled' ? 'idle' : 'success');
@@ -2770,6 +3104,149 @@ async function consumeOscarTurn({
     if (activeOscarTurnId === turnId) activeOscarTurnId = '';
     if (activeOscarTurnStreamController === streamController) activeOscarTurnStreamController = null;
   }
+}
+
+function describeOscarAstraComputerAction(action = {}) {
+  if (action.kind === 'type') return `${action.textMode === 'replace' ? 'Заменить значение' : 'Вставить текст'}: ${String(action.text ?? '')}`;
+  if (action.kind === 'click') return `Клик: ${action.button}, ${action.clicks} раз`;
+  if (action.kind === 'scroll') return `Прокрутка: ${action.deltaY}`;
+  if (action.kind === 'key') return `Клавиша: ${[...(action.modifiers || []), action.key].join(' + ')}`;
+  return action.kind === 'close' ? 'Закрыть окно' : 'Неизвестное действие';
+}
+
+function describeOscarAstraCapabilityApproval(data = {}) {
+  const capability = data.capability && typeof data.capability === 'object' ? data.capability : {};
+  const args = data.args && typeof data.args === 'object' && !Array.isArray(data.args) ? data.args : {};
+  const lines = [];
+  if (data.warningReason) lines.push(String(data.warningReason));
+  if (capability.description) lines.push(String(capability.description));
+  if (typeof args.command === 'string' && args.command) lines.push(`Команда: ${args.command}`);
+  if (Array.isArray(args.paths)) {
+    lines.push(`Количество целей: ${args.paths.length}`);
+    const sample = args.paths.filter(item => typeof item === 'string').slice(0, 5);
+    if (sample.length) lines.push(`Первые цели:\n${sample.map(item => `• ${item}`).join('\n')}`);
+  }
+  if (/^workspace\..*(?:write|create|append)$/i.test(String(capability.id || ''))
+    && typeof args.content === 'string') {
+    const content = args.content.length > 2_000 ? `${args.content.slice(0, 2_000)}…` : args.content;
+    lines.push(`Содержимое:\n${content}`);
+  }
+  if (data.reason && data.reason !== data.warningReason) lines.push(`Почему Oscar выбрал действие: ${data.reason}`);
+  return lines.join('\n\n').slice(0, 6_000);
+}
+
+function readOscarAstraCapabilityTarget(data = {}) {
+  const args = data.args && typeof data.args === 'object' && !Array.isArray(data.args) ? data.args : {};
+  if (Array.isArray(args.paths)) return `${args.paths.length} целей`;
+  for (const key of ['path', 'targetPath', 'destinationPath', 'target', 'destination', 'url', 'app', 'command']) {
+    if (typeof args[key] === 'string' && args[key]) return args[key].slice(0, 1_000);
+  }
+  return '';
+}
+
+function oscarAstraRiskLabel(value) {
+  return ({
+    delete: 'удаление',
+    'security-sensitive': 'настройки безопасности',
+    execute: 'выполнение команды',
+    'device-control': 'управление устройством',
+    network: 'внешняя сеть',
+    write: 'изменение данных',
+  })[String(value || '')] || String(value || 'локальное действие');
+}
+
+// One line naming the rule that stopped the action; the kinds come from the
+// Kernel evidence (`policyReasonKind`), never from guessing at the action.
+const OSCAR_DECISION_REASONS = Object.freeze({
+  mode: 'Так настроен режим самостоятельности: такое действие Оскар делает только с твоего разрешения.',
+  security: 'Monarch Security счёл действие рискованным и остановил его до твоего решения.',
+  'security-confirm-all': 'В Security включено «Подтверждать всё»: каждое действие Оскара ждёт твоего ответа.',
+  irreversible: 'Действие нельзя отменить, поэтому оно всегда подтверждается.',
+  intent: 'Не видно, что ты просил именно это действие, поэтому Оскар спрашивает.',
+  command: 'Команды терминала всегда показываются перед запуском.',
+  'red-zone': 'Цель в красной зоне: туда Оскар не заходит.',
+  'protected-path': 'Цель защищена системой: Windows, программы, ключи и Safe закрыты всегда.',
+  window: 'Действия с окнами других программ всегда подтверждаются.',
+  'new-file': 'Перед сохранением нового файла Оскар показывает его содержимое.',
+  policy: 'Так требуют правила Monarch для этого действия.',
+});
+export function oscarDecisionReasonText(kind) {
+  return OSCAR_DECISION_REASONS[kind] || OSCAR_DECISION_REASONS.policy;
+}
+
+async function presentOscarAstraCard(turnId, text, messageId, after, appRenderCallback) {
+  const view = astraTurnView(await fetchOscarTurn(turnId));
+  // Name the actual host issue; "state changed, refresh" gave the person
+  // nothing to act on while the task sat behind a card it could not show.
+  if (view.issue) throw Error(astraHumanIssue(view.issue));
+  if (!view.card) throw Error('Состояние задачи изменилось. Обнови её перед ответом.');
+  const card = view.card, data = card.payload, turn = view.turn;
+  const binding = { turn: { id: turn.id, conversationId: turn.conversationId, inputMessageId: turn.inputMessageId }, card };
+  if (card.type === 'user.input.required') {
+    waitingOscarTurn = { turnId, conversationId: turn.conversationId, after, originalText: text, astra: binding };
+    replacePendingOscarMessage(createOscarMessage('assistant', data.text || 'Что нужно уточнить?', 'Oscar', {
+      turnId, outcome: 'waiting-for-user', provenance: { origin: 'system', verification: 'system-state' },
+    }), messageId);
+  } else {
+    const computer = data.approvalKind === 'computer-action';
+    const capabilityApproval = data.approvalKind === 'capability-action';
+    const critical = capabilityApproval && data.critical === true;
+    const capability = capabilityApproval && data.capability && typeof data.capability === 'object' ? data.capability : {};
+    replacePendingOscarMessage(createOscarMessage('assistant', computer
+      ? 'Проверь действие с выбранным окном.'
+      : capabilityApproval
+        ? critical
+          ? 'Monarch Security приостановил потенциально опасное действие. Проверь точную цель и реши, разрешать ли его.'
+          : 'Monarch Security просит проверить точное действие перед выполнением.'
+        : 'Проверь содержимое нового файла перед сохранением.', 'Oscar', {
+      turnId, outcome: 'waiting-for-approval', provenance: { origin: 'system', verification: 'system-state' },
+      action: { astra: binding,
+        text: computer ? 'Действие с окном' : capabilityApproval
+          ? String(capability.title || capability.id || 'Действие Oscar') : 'Создание файла',
+        risk: capabilityApproval ? oscarAstraRiskLabel(capability.risk) : 'один раз',
+        target: computer ? data.windowTitle : capabilityApproval ? readOscarAstraCapabilityTarget(data) : data.basename,
+        expiresAt: new Date(data.expiresAt).toLocaleString('ru-RU'),
+        preview: computer ? describeOscarAstraComputerAction(data.action) : capabilityApproval
+          ? describeOscarAstraCapabilityApproval(data) : String(data.content ?? ''),
+        ...(capabilityApproval && data.warningReason ? { warning: String(data.warningReason) } : {}),
+        reason: oscarDecisionReasonText(capabilityApproval ? data.decisionReason : computer ? 'window' : 'new-file'),
+        ...(critical ? { critical: true, label: 'Подтвердить действие' } : {}),
+        oscarTurnId: turnId, oscarTurnAfter: after, originatingUserText: text },
+    }), messageId);
+  }
+  activeOscarTurnId = ''; activeOscarAgentTaskId = ''; appRenderCallback();
+  return { status: turn.status, turnId, sequence: after };
+}
+
+async function settleOscarAstraApproval(messageId, answer) {
+  const message = state.oscar.messages.find(item => item.id === messageId), action = message?.action;
+  if (!action?.astra || !['approve', 'reject'].includes(answer) || state.oscar.busy) return;
+  const { turn, card } = action.astra;
+  if (turn.conversationId !== state.oscar.conversationId) return;
+  // Retain the exact input if a transport response is lost. A retry never authors
+  // another decision identity or falls through to the legacy approval endpoint.
+  action.astraInput ||= astraCardInput(card, answer, { messageId: crypto.randomUUID() });
+  if (action.astraInput.decision.decision !== answer) return;
+  action.settling = true; activeOscarTurnId = turn.id; setOscarBusy(true); renderOscar();
+  try {
+    await sendOscarAstraInput(turn, action.astraInput);
+    message.pending = true; message.action = null;
+    await consumeOscarTurn({ turnId: turn.id, text: action.originatingUserText || '',
+      pendingMessageId: messageId, showTrace: false, appRenderCallback: renderApp, after: action.oscarTurnAfter || 0 });
+  } catch (error) {
+    const checkpoint = await fetchOscarTurn(turn.id).catch(() => null);
+    const current = checkpoint && astraTurnView(checkpoint);
+    if (current && (current.terminal || current.card?.payload.digest !== card.payload.digest)) {
+      message.pending = true; message.action = null;
+      await consumeOscarTurn({ turnId: turn.id, text: action.originatingUserText || '', pendingMessageId: messageId,
+        showTrace: false, appRenderCallback: renderApp, after: action.oscarTurnAfter || 0 }).catch(cause => {
+        state.oscar.error = cause.message || String(cause);
+      });
+    } else {
+      action.settling = false; message.action = action; message.pending = false;
+      state.oscar.error = error.message || String(error);
+    }
+  } finally { if (activeOscarTurnId === turn.id) activeOscarTurnId = ''; setOscarBusy(false); renderApp(); }
 }
 
 function settleLocalOscarCancellation({ pendingMessageId, turnId = '', showTrace = false, streamEvents = [] }) {
@@ -2819,6 +3296,48 @@ function isOscarTurnCancellationConfirmed(checkpoint) {
 
 function isOscarTurnTerminal(checkpoint) {
   return ['succeeded', 'failed', 'blocked', 'cancelled'].includes(String(checkpoint?.turn?.status || ''));
+}
+
+async function settleOscarRuntimeWait(messageId, desired, appRenderCallback) {
+  if (state.oscar.busy) return;
+  const message = state.oscar.messages.find((entry) => entry.id === messageId);
+  const action = message?.action;
+  if (action?.kind !== 'runtime-retry' || !action.agentTaskId || !action.oscarTurnId) return;
+  const originalContent = message.content;
+  message.pending = true;
+  message.action = { ...action, settling: true };
+  message.content = desired === 'cancel'
+    ? 'Останавливаю сохранённую задачу…'
+    : 'Проверяю готовность модели или инструмента…';
+  setOscarBusy(true);
+  activeOscarTurnId = action.oscarTurnId;
+  activeOscarAgentTaskId = action.agentTaskId;
+  appRenderCallback();
+  try {
+    if (desired === 'cancel') await cancelOscarTurn(action.oscarTurnId);
+    else await resumeAgentTask(action.agentTaskId);
+    const result = await consumeOscarTurn({
+      turnId: action.oscarTurnId,
+      text: action.originatingUserText || '',
+      pendingMessageId: messageId,
+      showTrace: action.showTrace === true,
+      appRenderCallback,
+      after: Number(action.oscarTurnAfter || 0),
+    });
+    if (result?.status === 'succeeded') {
+      await loadOscarStatus(appRenderCallback, { captureContextForConversation: state.oscar.conversationId });
+    }
+  } catch (error) {
+    message.pending = false;
+    message.content = originalContent;
+    message.action = { ...action, settling: false };
+    state.oscar.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (activeOscarTurnId === action.oscarTurnId) activeOscarTurnId = '';
+    if (activeOscarAgentTaskId === action.agentTaskId) activeOscarAgentTaskId = '';
+    setOscarBusy(false);
+    appRenderCallback();
+  }
 }
 
 async function armOscarMessageAction(messageId, button) {
@@ -3049,7 +3568,6 @@ async function stopOscarGeneration(appRenderCallback) {
         throw new Error('Monarch не вернул подтверждённое состояние остановки approval Turn.');
       }
     } else if (activeOscarSubmissionController) {
-      settleOscarRouteConsent('deny', { immediate: true });
       const submission = activeOscarSubmission;
       if (submission?.turnCreationStarted) {
         const cancelled = submission.turnId
@@ -3207,7 +3725,7 @@ async function startOscarBackend(appRenderCallback) {
 
   state.oscar.statusBusy = true;
   state.oscar.error = '';
-  setMascotState('thinking', { title: 'Oscar', detail: 'Запускаю backend...' });
+  setMascotState('thinking', { title: 'Oscar', detail: 'Запускаю Оскара…' });
   renderOscar();
 
   try {
@@ -3234,6 +3752,40 @@ async function startOscarBackend(appRenderCallback) {
 }
 
 let emptyOscarGreeting = createOscarGreeting();
+let visibleOscarStarterPrompts = null;
+let visibleOscarStarterPromptWebEnabled = null;
+let previousOscarStarterPromptIds = [];
+
+function currentOscarStarterPrompts({ refresh = false } = {}) {
+  const webEnabled = readOscarOwnerDevSettings().internetEnabled !== false && state.oscar.web === true;
+  if (refresh || !visibleOscarStarterPrompts || visibleOscarStarterPromptWebEnabled !== webEnabled) {
+    const previousIds = visibleOscarStarterPrompts?.map(prompt => prompt.id) || previousOscarStarterPromptIds;
+    visibleOscarStarterPrompts = selectOscarStarterPrompts({ webEnabled, previousIds });
+    visibleOscarStarterPromptWebEnabled = webEnabled;
+    previousOscarStarterPromptIds = visibleOscarStarterPrompts.map(prompt => prompt.id);
+  }
+  return visibleOscarStarterPrompts;
+}
+
+function refreshOscarStarterPrompts(button) {
+  const container = elements.oscarThread?.querySelector('.oscar-starters');
+  if (!container) return;
+  const template = document.createElement('template');
+  template.innerHTML = renderOscarStarterPrompts(currentOscarStarterPrompts({ refresh: true }), escapeHtml);
+  const replacement = template.content.firstElementChild;
+  if (!replacement) return;
+  container.replaceWith(replacement);
+  button.focus({ preventScroll: true });
+}
+
+function applyOscarStarterPrompt(id) {
+  const prompt = findOscarStarterPrompt(id, currentOscarStarterPrompts());
+  if (!prompt || !elements.oscarInput || elements.oscarInput.disabled) return;
+  elements.oscarInput.value = prompt.text;
+  elements.oscarInput.dispatchEvent(new Event('input', { bubbles: true }));
+  elements.oscarInput.focus();
+  elements.oscarInput.setSelectionRange(prompt.text.length, prompt.text.length);
+}
 let previousOscarConversationEmpty = true;
 
 export function renderOscar() {
@@ -3244,6 +3796,7 @@ export function renderOscar() {
   const previousScrollTop = scrollTarget?.scrollTop || elements.oscarThread.scrollTop;
 
   syncOscarControlsToDom();
+  syncOscarChatTitle();
   renderOscarPriority();
   renderAssistantResources();
   renderOscarPills();
@@ -3262,7 +3815,10 @@ export function renderOscar() {
   elements.shell?.classList.toggle('mascot-dialog-active', !isEmptyConversation);
   elements.shell?.dispatchEvent(new Event('monarch:mascot-surface-changed'));
   if (isEmptyConversation) {
-    if (!previousOscarConversationEmpty) emptyOscarGreeting = createOscarGreeting();
+    if (!previousOscarConversationEmpty) {
+      emptyOscarGreeting = createOscarGreeting();
+      currentOscarStarterPrompts({ refresh: true });
+    }
     animatedOscarUserMessages.clear();
     elements.oscarThread.innerHTML = `
       <div class="oscar-empty-focus">
@@ -3270,6 +3826,8 @@ export function renderOscar() {
         <span class="empty-kicker">Oscar Workspace</span>
         <h1>${escapeHtml(emptyOscarGreeting.title)}</h1>
         ${emptyOscarGreeting.copy ? `<p>${escapeHtml(emptyOscarGreeting.copy)}</p>` : ''}
+        ${renderOscarStarterPrompts(currentOscarStarterPrompts(), escapeHtml)}
+        <button type="button" class="oscar-starter-more" data-oscar-starters-refresh aria-label="Показать другие примеры запросов">Другие примеры</button>
       </div>
     `;
   } else {
@@ -3404,7 +3962,7 @@ function scrollOscarToBottom(behavior = 'auto') {
 }
 
 function scheduleOscarScrollToBottom(behavior = 'auto') {
-  const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+  const prefersReducedMotion = reducedUiMotion.matches;
   const scrollBehavior = prefersReducedMotion ? 'auto' : behavior;
   const requestFrame = window.requestAnimationFrame?.bind(window);
   if (!requestFrame) {
@@ -3427,37 +3985,7 @@ function quickActionIcon(kind) {
 }
 
 function animateNewOscarUserMessages() {
-  if (!elements.oscarThread || window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
-    return;
-  }
-  elements.oscarThread.querySelectorAll('.oscar-message.user[data-send-active="true"][data-message-id]').forEach((item) => {
-    const messageId = item.getAttribute('data-message-id');
-    if (!messageId || animatedOscarUserMessages.has(messageId)) {
-      return;
-    }
-    animatedOscarUserMessages.add(messageId);
-    const card = item.querySelector('.oscar-message-card');
-    if (typeof item.animate === 'function') {
-      item.animate([
-        { opacity: 0, transform: 'translate3d(26px, 18px, 0) scale(0.985)' },
-        { opacity: 1, transform: 'translate3d(-2px, -1px, 0) scale(1.01)', offset: 0.72 },
-        { opacity: 1, transform: 'translate3d(0, 0, 0) scale(1)' },
-      ], {
-        duration: 520,
-        easing: 'cubic-bezier(0.18, 0.9, 0.18, 1)',
-      });
-    }
-    if (card && typeof card.animate === 'function') {
-      card.animate([
-        { boxShadow: '0 0 0 rgba(217, 119, 6, 0)', filter: 'saturate(1)' },
-        { boxShadow: '0 16px 38px rgba(217, 119, 6, 0.16)', filter: 'saturate(1.12)', offset: 0.48 },
-        { boxShadow: '0 8px 22px rgba(9, 9, 11, 0.04)', filter: 'saturate(1)' },
-      ], {
-        duration: 760,
-        easing: 'cubic-bezier(0.18, 0.9, 0.18, 1)',
-      });
-    }
-  });
+  animateUserMessageArrivals(elements.oscarThread, animatedOscarUserMessages);
 }
 
 function setAssistantResource(element, value, state = 'unknown', ariaValue = value) {
@@ -3552,37 +4080,37 @@ function renderOscarPriority() {
   const modelStatus = readOscarModelStatus(state.oscar);
   const generation = state.oscar.generationStatus;
   let tone = 'pending';
-  let title = 'Проверить локальный backend';
-  let detail = 'Oscar готов к работе после запуска backend. Модель и память останутся рядом с полем ввода.';
-  let action = 'Запустить backend';
+  let title = 'Проверить готовность Оскара';
+  let detail = 'Запусти Оскара, чтобы начать разговор.';
+  let action = 'Запустить Оскара';
 
   if (state.oscar.busy) {
     tone = 'working';
     title = generation?.title || 'Oscar работает';
-    detail = generation?.detail || 'Идет локальная генерация. Дождись ответа или останови поток.';
+    detail = generation?.detail || 'Дождись ответа или нажми «Остановить».';
     action = 'Дождаться ответа';
   } else if (state.oscar.error) {
     const offline = isOscarOfflineMessage(state.oscar.error);
     tone = offline ? 'pending' : 'danger';
-    title = offline ? 'Подними backend' : 'Нужна проверка Oscar';
+    title = offline ? 'Запусти Оскара' : 'Нужна проверка Oscar';
     detail = formatOscarUiError(state.oscar.error);
-    action = offline ? 'Запустить backend' : 'Диагностика';
+    action = offline ? 'Запустить Оскара' : 'Диагностика';
   } else if (state.oscar.statusBusy && !backend) {
     tone = 'working';
     title = 'Проверяю состояние';
-    detail = 'Собираю backend, модель, память и доступные тировые режимы.';
+    detail = 'Проверяю готовность к работе.';
     action = 'Подождать';
   } else if (backend?.connected) {
     tone = 'ready';
     title = 'Oscar готов к работе';
     detail = modelStatus?.loaded
       ? `Активная модель: ${formatOscarModelLabel(modelStatus.active_tier) || readOscarModeLabel(state.oscar, modelStatus)}.`
-      : 'Backend в сети. Модель загрузится под запрос или останется в Auto.';
+      : 'Всё подключено. Можно начать разговор.';
     action = state.oscar.messages.length ? 'Продолжить диалог' : 'Написать запрос';
   } else if (backend?.startupAttempted) {
     tone = 'danger';
-    title = 'Backend не запустился';
-    detail = backend.error || 'Запуск уже пробовали, но backend недоступен. Диагностика покажет причину.';
+    title = 'Оскар не запустился';
+    detail = backend.error || 'Не удалось запустить Оскара. Открой проверку, чтобы узнать причину.';
     action = 'Разобрать ошибку';
   }
 
@@ -3594,11 +4122,11 @@ function renderOscarPriority() {
   } else if (state.oscar.incognito && !state.oscar.busy) {
     tone = 'ready';
     const zeroRetention = readOscarOwnerDevSettings().zeroRetentionEnabled === true;
-    title = zeroRetention ? 'Нулевое хранение активно' : 'Инкогнито-чат';
+    title = zeroRetention ? 'История не сохраняется' : 'Инкогнито-чат';
     detail = zeroRetention
       ? 'Содержимое живёт только в RAM этой сессии: без истории, памяти, TurnStore, файлов и текстовых логов.'
       : 'Диалог не сохранится в истории. Oscar не читает и не записывает постоянную память.';
-    action = zeroRetention ? 'Owner DEV privacy' : 'Приватный диалог';
+    action = zeroRetention ? 'Настройки приватности' : 'Приватный диалог';
   }
 
   elements.oscarPriorityCard.dataset.tone = tone;
@@ -3614,7 +4142,7 @@ function renderOscarPriority() {
   }
   if (elements.oscarPriorityModel) {
     elements.oscarPriorityModel.textContent = modelStatus?.fallback_active
-      ? 'fallback'
+      ? 'запасная модель'
       : modelStatus?.mock
         ? 'mock'
         : modelStatus?.loaded
@@ -3638,10 +4166,10 @@ function formatOscarUiError(error) {
   const message = error instanceof Error ? error.message : String(error || '');
   if (!message.trim()) return 'Oscar пока не вернул состояние.';
   if (/Unexpected token|DOCTYPE|Unsupported method|Failed to fetch|Load failed|NetworkError/i.test(message)) {
-    return 'Нет связи с локальным Monarch/Oscar API. Запусти backend или открой UI через Monarch runtime.';
+    return 'Нет связи с Оскаром. Перезапусти Monarch и попробуй снова.';
   }
   if (/endpoint|404|not found/i.test(message)) {
-    return 'UI и локальный runtime смотрят в разные версии API. Перезапусти Monarch runtime.';
+    return 'Части Monarch не совпадают по версии. Перезапусти приложение после обновления.';
   }
   return message.length > 140 ? `${message.slice(0, 137)}...` : message;
 }
@@ -3649,7 +4177,7 @@ function formatOscarUiError(error) {
 function formatOscarStatusError(error) {
   const message = formatOscarUiError(error);
   if (/внутренней ошибкой|endpoint|версии API|Monarch API/i.test(message)) {
-    return 'Нет связи с Oscar. Запусти backend или открой UI через Monarch runtime.';
+    return 'Нет связи с Оскаром. Перезапусти Monarch.';
   }
   return message;
 }
@@ -3674,8 +4202,8 @@ function renderGenerationStatus() {
     const detail = elements.oscarGenerationStatus.querySelector('span:last-child');
     if (title) title.textContent = component.phase === 'failed'
       ? 'Модель требует восстановления'
-      : `Устанавливаю локальную модель · ${percent}%`;
-    if (detail) detail.textContent = component.error || 'Monarch скачивает, проверяет SHA-256 и активирует Fast автоматически.';
+      : `Подготовка Оскара · ${percent}%`;
+    if (detail) detail.textContent = component.error || 'Скачиваем и проверяем нужные файлы. Дождись завершения.';
     return;
   }
   const status = state.oscar.generationStatus;
@@ -3685,7 +4213,7 @@ function renderGenerationStatus() {
   const title = elements.oscarGenerationStatus.querySelector('strong');
   const detail = elements.oscarGenerationStatus.querySelector('span:last-child');
   if (title) title.textContent = status.title || 'Oscar работает';
-  if (detail) detail.textContent = status.detail || 'Локальная генерация';
+  if (detail) detail.textContent = status.detail || '';
 }
 
 function resolveGenerationStatusPhase(status) {
@@ -3784,21 +4312,29 @@ function restoreHistoryTriggerFocus(preferred = null) {
 
 function renderConversationList() {
   if (!elements.oscarConversationList || !elements.oscarHistoryPanel) return;
-  const conversations = state.oscar.conversations || [];
+  const telegramOnly = document.querySelector('#oscar-history-telegram')?.checked === true;
+  // A chat is saved with its first message; an empty shell (older builds made
+  // one on every "Новый чат") is noise, except the chat that is open now.
+  const conversations = (state.oscar.conversations || []).filter((conversation) => (
+    (!telegramOnly || conversation.telegram_origin === true)
+    && (conversation.encrypted === true || conversation.id === state.oscar.conversationId
+      || Number(conversation.message_count ?? conversation.messageCount ?? 1) > 0)
+  ));
   const query = String(elements.oscarHistorySearch?.value || '').trim().toLocaleLowerCase('ru');
   const visibleConversations = query
     ? conversations.filter((conversation) => `${formatConversationTitle(conversation)} ${formatConversationPreview(conversation)}`.toLocaleLowerCase('ru').includes(query))
     : conversations;
   const historyOpen = state.oscar.historyPanelOpen === true;
   const listState = resolveOscarHistoryListState({
-    busy: state.oscar.historyBusy,
+    // A refresh keeps the list in place; only the very first load has nothing to show.
+    busy: state.oscar.historyBusy && conversations.length === 0,
     error: state.oscar.historyError,
     conversationCount: conversations.length,
     visibleCount: visibleConversations.length,
     queryActive: Boolean(query),
   });
   syncHistoryPanelAnchor();
-  elements.oscarHistoryPanel.hidden = !historyOpen;
+  elements.oscarHistoryPanel.hidden = !historyOpen && !oscarHistoryClosing;
   syncHistoryToggleControls(historyOpen);
   if (elements.oscarHistoryCount) {
     elements.oscarHistoryCount.textContent = listState.kind === 'unavailable'
@@ -3808,34 +4344,42 @@ function renderConversationList() {
       : formatConversationCount(conversations.length);
   }
   if (listState.kind === 'loading') {
-    elements.oscarConversationList.innerHTML = '<div class="sidebar-history-empty">Загружаю…</div>';
+    setConversationListHtml('<div class="sidebar-history-empty">Загружаю…</div>');
     return;
   }
   if (listState.kind === 'unavailable') {
-    elements.oscarConversationList.innerHTML = renderOscarHistoryError(listState.historyError);
+    setConversationListHtml(renderOscarHistoryError(listState.historyError));
     return;
   }
   if (listState.kind === 'empty') {
-    elements.oscarConversationList.innerHTML = '<div class="sidebar-history-empty">История пока пуста</div>';
+    setConversationListHtml('<div class="sidebar-history-empty">Здесь появятся твои чаты</div>');
     return;
   }
   const historyError = listState.historyError ? renderOscarHistoryError(listState.historyError) : '';
   if (listState.kind === 'no-results') {
-    elements.oscarConversationList.innerHTML = `${historyError}<div class="sidebar-history-empty">Совпадений нет</div>`;
+    setConversationListHtml(`${historyError}<div class="sidebar-history-empty">Совпадений нет</div>`);
     return;
   }
-  elements.oscarConversationList.innerHTML = historyError + visibleConversations.map((conversation) => {
+  const opening = state.oscar.openingConversationId;
+  const queued = state.oscar.queuedConversationId;
+  setConversationListHtml(historyError + visibleConversations.map((conversation) => {
     const active = conversation.id === state.oscar.conversationId;
     const encrypted = conversation.encrypted === true;
+    const archived = conversation.archived === true;
     const title = formatConversationTitle(conversation);
     const preview = formatConversationPreview(conversation);
+    const status = conversation.id === opening ? 'Открываю…'
+      : conversation.id === queued ? 'Откроется, когда Оскар ответит' : '';
     return `
-      <div class="conversation-item ${active ? 'active' : ''} ${encrypted ? 'is-encrypted' : ''}" data-conversation-open="${escapeHtml(conversation.id)}">
-        <button type="button" class="conversation-main" data-conversation-open="${escapeHtml(conversation.id)}" title="${escapeHtml(`${title} - ${preview}`)}">
-          <strong class="conversation-title" title="${escapeHtml(title)}">${encrypted ? '<span class="conversation-safe-mark" aria-hidden="true">◆</span>' : ''}${escapeHtml(title)}</strong>
-          <span class="conversation-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}</span>
+      <div class="conversation-item ${active ? 'active' : ''} ${encrypted ? 'is-encrypted' : ''} ${status ? 'is-pending' : ''}" data-conversation-open="${escapeHtml(conversation.id)}">
+        <button type="button" class="conversation-main" data-conversation-open="${escapeHtml(conversation.id)}" title="${escapeHtml(`${title} - ${preview}`)}"${active ? ' aria-current="true"' : ''}>
+          <strong class="conversation-title" title="${escapeHtml(title)}">${encrypted ? '<span class="conversation-safe-mark" aria-hidden="true">◆</span>' : ''}${conversation.telegram_origin ? '<span class="conversation-safe-mark" title="Диалог продолжался в Telegram">ТГ · </span>' : ''}${archived ? '<span class="conversation-safe-mark" title="Чат в архиве: связан с поручением и пережил очистку истории">Архив · </span>' : ''}${escapeHtml(title)}</strong>
+          <span class="conversation-preview" title="${escapeHtml(preview)}">${escapeHtml(status || preview)}</span>
         </button>
         <div class="conversation-actions" aria-hidden="true">
+          ${archived ? `<button type="button" tabindex="-1" data-conversation-unarchive="${escapeHtml(conversation.id)}" aria-label="${escapeHtml(`Вернуть чат из архива: ${title}`)}" title="Вернуть из архива">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18v4H3z"></path><path d="M5 11v9h14v-9"></path><path d="M10 15h4"></path></svg>
+          </button>` : ''}
           ${encrypted ? '' : `<button type="button" tabindex="-1" data-conversation-encrypt="${escapeHtml(conversation.id)}" aria-label="${escapeHtml(`Зашифровать чат в Monarch Safe: ${title}`)}" title="Зашифровать в Safe">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
           </button>`}
@@ -3854,12 +4398,22 @@ function renderConversationList() {
         </div>
       </div>
     `;
-  }).join('');
+  }).join(''));
   syncConversationActionTabStops(
     elements.oscarConversationList.contains(document.activeElement)
       ? document.activeElement.closest('.conversation-item')
       : null
   );
+}
+
+let renderedConversationListHtml = null;
+
+/** Oscar re-renders on every status poll and stream frame. Rewriting the list
+ * each time dropped hover and focus and could swallow a click on a chat. */
+function setConversationListHtml(html) {
+  if (html === renderedConversationListHtml && elements.oscarConversationList.childElementCount > 0) return;
+  renderedConversationListHtml = html;
+  elements.oscarConversationList.innerHTML = html;
 }
 
 function renderOscarHistoryError(message) {
@@ -3925,11 +4479,108 @@ function cleanConversationSummary(value, limit = 96) {
   return chars.length > limit ? `${chars.slice(0, limit - 3).join('').trimEnd()}...` : normalized;
 }
 
+/* Chat history drops from the "Чат" item after a deliberate hover. The item
+ * fills a thin line while it waits, so the delay reads as intent, not lag.
+ * A hover-opened list closes when the pointer leaves it; one opened by a
+ * button, or used from the keyboard, stays until closed. */
+const OSCAR_HISTORY_HOVER_DELAY_MS = 1200;
+const OSCAR_HISTORY_HOVER_LEAVE_MS = 320;
+const OSCAR_HISTORY_CLOSE_MS = 220;
+let oscarHistoryHoverTimer = 0;
+let oscarHistoryLeaveTimer = 0;
+let oscarHistoryCloseTimer = 0;
+let oscarHistoryOpenedByHover = false;
+let oscarHistoryClosing = false;
+
+function oscarHistoryChatNavItem() {
+  return document.querySelector('.sidebar .nav-item[data-scroll-target="oscar-section"]');
+}
+
+function bindOscarHistoryHoverIntent() {
+  const navItem = oscarHistoryChatNavItem();
+  const panel = elements.oscarHistoryPanel;
+  if (!navItem || !panel) return;
+  const disarm = () => {
+    clearTimeout(oscarHistoryHoverTimer);
+    oscarHistoryHoverTimer = 0;
+    navItem.classList.remove('is-history-arming');
+  };
+  const scheduleLeave = () => {
+    if (!oscarHistoryOpenedByHover || !state.oscar.historyPanelOpen) return;
+    clearTimeout(oscarHistoryLeaveTimer);
+    oscarHistoryLeaveTimer = setTimeout(() => {
+      // Work in progress inside the list keeps it open: typing, its menu.
+      if (panel.matches(':hover') || navItem.matches(':hover')
+        || panel.contains(document.activeElement) && document.activeElement !== document.body
+        || panel.querySelector('.sidebar-history-menu[open]')) return;
+      setOscarHistoryOpen(false);
+    }, OSCAR_HISTORY_HOVER_LEAVE_MS);
+  };
+  navItem.addEventListener('pointerenter', (event) => {
+    if (event.pointerType === 'touch') return;
+    clearTimeout(oscarHistoryLeaveTimer);
+    if (state.oscar.historyPanelOpen) return;
+    disarm();
+    // Restart the fill from zero on the next frame so it always takes the full delay.
+    requestAnimationFrame(() => navItem.classList.add('is-history-arming'));
+    oscarHistoryHoverTimer = setTimeout(() => {
+      oscarHistoryHoverTimer = 0;
+      navItem.classList.remove('is-history-arming');
+      if (!navItem.matches(':hover')) return;
+      setOscarHistoryOpen(true, { trigger: navItem, hover: true });
+    }, OSCAR_HISTORY_HOVER_DELAY_MS);
+  });
+  navItem.addEventListener('pointerleave', () => { disarm(); scheduleLeave(); });
+  navItem.addEventListener('click', disarm);
+  panel.addEventListener('pointerenter', () => clearTimeout(oscarHistoryLeaveTimer));
+  panel.addEventListener('pointerleave', scheduleLeave);
+  document.addEventListener('pointerdown', (event) => {
+    if (!state.oscar.historyPanelOpen || !oscarHistoryOpenedByHover) return;
+    if (panel.contains(event.target) || navItem.contains(event.target)) return;
+    setOscarHistoryOpen(false);
+  });
+}
+
+function syncOscarChatTitle() {
+  if (!elements.oscarChatTitle) return;
+  const active = state.oscar.conversationId
+    ? (state.oscar.conversations || []).find((conversation) => conversation.id === state.oscar.conversationId)
+    : null;
+  const title = state.oscar.incognito ? 'Инкогнито-чат'
+    : active ? formatConversationTitle(active)
+      : state.oscar.conversationId ? cleanConversationSummary(state.oscar.messages.find((message) => message.role === 'user')?.content || '', 72) || 'Чат'
+        : 'Новый чат';
+  if (elements.oscarChatTitle.textContent !== title) elements.oscarChatTitle.textContent = title;
+  elements.oscarChatTitle.title = title;
+}
+
 function setOscarHistoryOpen(open, options = {}) {
   const wasOpen = state.oscar.historyPanelOpen === true;
   const nextOpen = Boolean(open);
+  const panel = elements.oscarHistoryPanel;
   if (nextOpen && options.trigger) {
     lastOscarHistoryTrigger = options.trigger;
+  }
+  clearTimeout(oscarHistoryCloseTimer);
+  clearTimeout(oscarHistoryLeaveTimer);
+  if (nextOpen) {
+    oscarHistoryOpenedByHover = options.hover === true;
+    oscarHistoryClosing = false;
+    if (panel && !wasOpen) {
+      // Interruptible: reopening mid-close simply plays the arrival again.
+      panel.dataset.state = 'opening';
+      oscarHistoryCloseTimer = setTimeout(() => { if (panel.dataset.state === 'opening') delete panel.dataset.state; }, 600);
+    }
+  } else if (wasOpen && panel) {
+    oscarHistoryOpenedByHover = false;
+    const reduced = reducedUiMotion.matches;
+    oscarHistoryClosing = !reduced;
+    panel.dataset.state = 'closing';
+    oscarHistoryCloseTimer = setTimeout(() => {
+      oscarHistoryClosing = false;
+      delete panel.dataset.state;
+      renderConversationList();
+    }, reduced ? 0 : OSCAR_HISTORY_CLOSE_MS);
   }
   state.oscar.historyPanelOpen = nextOpen;
   renderConversationList();
@@ -3943,8 +4594,15 @@ function setOscarHistoryOpen(open, options = {}) {
 function syncHistoryPanelAnchor() {
   if (!elements.oscarHistoryPanel) return;
   const trigger = resolveVisibleHistoryTrigger(lastOscarHistoryTrigger);
-  const anchor = trigger?.id === 'oscar-history-open' ? 'topbar' : 'sidebar';
+  const anchor = trigger?.id === 'oscar-history-open' ? 'topbar'
+    : trigger?.matches?.('.nav-item') ? 'nav' : 'sidebar';
   elements.oscarHistoryPanel.dataset.anchor = anchor;
+  if (anchor === 'nav') {
+    const top = Math.max(12, Math.round(trigger.getBoundingClientRect().top) - 8);
+    elements.oscarHistoryPanel.style.setProperty('--history-top', top + 'px');
+  } else {
+    elements.oscarHistoryPanel.style.removeProperty('--history-top');
+  }
 }
 
 function formatConversationCount(count) {
@@ -4065,8 +4723,8 @@ function syncOscarButtons() {
     elements.oscarStartBackend.textContent = state.oscar.statusBusy
       ? 'Проверяю...'
       : backend?.connected
-        ? 'Backend в сети'
-        : 'Запустить backend';
+        ? 'Оскар на связи'
+        : 'Запустить Оскара';
   }
 }
 
@@ -4139,7 +4797,7 @@ function renderOscarBackend() {
   if (state.oscar.statusBusy && !backend) {
     elements.oscarBackendLabel.textContent = 'проверка';
     elements.oscarBackendLabel.className = 'status-text pending';
-    elements.oscarBackend.innerHTML = '<div class="empty-state">Проверяю локальный backend Oscar...</div>';
+    elements.oscarBackend.innerHTML = '<div class="empty-state">Проверяю готовность Оскара…</div>';
     return;
   }
 
@@ -4188,7 +4846,7 @@ function readOscarBackendTone(backend) {
 
 function readOscarBackendLabel(backend) {
   if (backend?.connected) {
-    return 'бэкенд в сети';
+    return 'Оскар на связи';
   }
   if (backend?.startupAttempted) {
     return 'запуск не удался';
@@ -4198,7 +4856,7 @@ function readOscarBackendLabel(backend) {
 
 function readOscarBackendPillLabel(backend) {
   if (backend?.connected) {
-    return 'API';
+    return 'на связи';
   }
   if (backend?.startupAttempted) {
     return 'сбой';
@@ -4211,10 +4869,10 @@ function readOscarModelPillLabel(modelStatus) {
     return 'резерв';
   }
   if (modelStatus?.mock) {
-    return 'заглушка';
+    return 'пробный ответ';
   }
   if (modelStatus?.loaded) {
-    return modelStatus?.device_map?.backend === 'cuda' ? 'GPU' : 'модель';
+    return 'готов';
   }
   return 'модель ждёт';
 }
@@ -4253,7 +4911,7 @@ async function setSkillPickerOpen(open, options = {}) {
   state.oscar.skillPickerOpen = nextOpen;
   if (nextOpen) {
     setFunctionPickerOpen(false);
-    document.querySelector('#oscar-composer-menu')?.removeAttribute('open');
+    closeOscarComposerMenu({ immediate: true });
   }
   document.querySelector('.app-shell')?.classList.toggle('skill-picker-open', nextOpen);
   elements.oscarComposer?.classList.toggle('skill-picker-open', nextOpen);
@@ -4340,7 +4998,7 @@ function setFunctionPickerOpen(open, query = '') {
   elements.oscarComposer?.classList.toggle('function-picker-open', nextOpen);
   if (!nextOpen) return;
   void setSkillPickerOpen(false);
-  document.querySelector('#oscar-composer-menu')?.removeAttribute('open');
+  closeOscarComposerMenu({ immediate: true });
   renderFunctionPicker(query);
 }
 
@@ -4626,129 +5284,6 @@ function imageFilesFromTransfer(transfer) {
   return files.filter((file) => String(file.type || '').startsWith('image/'));
 }
 
-function requestOscarRouteConsent({
-  pro = false,
-  webSearch = false,
-  deepResearch = false,
-  messageId = '',
-  presentation = {},
-  signal,
-} = {}) {
-  return new Promise((resolve) => {
-    if (activeOscarRouteConsent) {
-      settleOscarRouteConsent('deny', { immediate: true });
-    }
-    if (signal?.aborted) {
-      resolve('deny');
-      return;
-    }
-    const researchRequested = webSearch && deepResearch;
-    const title = pro && researchRequested
-      ? 'Нужны Pro и интернет-исследование'
-      : pro && webSearch
-        ? 'Нужны Pro и интернет-поиск'
-      : pro
-        ? 'Для этого запроса выбран Pro'
-        : researchRequested
-          ? 'Нужно интернет-исследование'
-          : 'Нужен интернет-поиск';
-    const description = pro && researchRequested
-      ? 'Oscar будет дольше искать, проверять пробелы и пересобирать вывод. Разрешить для одного ответа?'
-      : pro
-        ? webSearch
-          ? 'Oscar использует Pro и публичные источники. Разрешить для одного ответа?'
-          : 'Pro работает глубже, но заметно дольше. Разрешить его для одного ответа?'
-        : researchRequested
-          ? 'Oscar изучит публичные источники и проверит вывод в несколько проходов. Разрешить для одного ответа?'
-          : 'Oscar проверит актуальные данные в публичных источниках. Разрешить для одного ответа?';
-    const denyLabel = researchRequested
-      ? 'Ответить без исследования'
-      : webSearch ? 'Ответить без интернета' : 'Остаться на Medium';
-    const allowLabel = researchRequested
-      ? 'Начать исследование'
-      : webSearch ? 'Искать в интернете' : 'Разрешить Pro';
-    const onKeyDown = (event) => {
-      if (event.key === 'Escape') settleOscarRouteConsent('deny');
-    };
-    const onAbort = () => settleOscarRouteConsent('deny', { immediate: true });
-    const pending = state.oscar.messages.find((message) => message.id === messageId && message.pending);
-    const compactSurface = findOscarMessageSurface(messageId);
-    const fromRect = compactSurface?.getBoundingClientRect?.() || null;
-    if (!pending) {
-      resolve('deny');
-      return;
-    }
-    pending.routeConsent = {
-      pro,
-      webSearch,
-      deepResearch: researchRequested,
-      title,
-      description,
-      denyLabel,
-      allowLabel,
-      target: String(presentation.target || ''),
-      dataClasses: Array.isArray(presentation.dataClasses) ? presentation.dataClasses.map(String) : [],
-      expiresAt: String(presentation.expiresAt || ''),
-      canonicalBindingHash: String(presentation.canonicalBindingHash || ''),
-      state: 'waiting',
-    };
-    pending.researchFlow = researchRequested;
-    pending.streamPhase = researchRequested ? 'research-consent' : 'route-consent';
-    activeOscarRouteConsent = {
-      messageId,
-      pro,
-      webSearch,
-      deepResearch: researchRequested,
-      resolve,
-      onKeyDown,
-      signal,
-      onAbort,
-      settled: false,
-    };
-    document.addEventListener('keydown', onKeyDown);
-    signal?.addEventListener('abort', onAbort, { once: true });
-    renderOscarStreamFrame();
-    animateOscarConsentExpansion(messageId, fromRect);
-    requestAnimationFrame(() => {
-      findOscarMessageNode(messageId)?.querySelector('[data-oscar-route-decision="allow"]')?.focus();
-    });
-  });
-}
-
-function settleOscarRouteConsent(decision, options = {}) {
-  const active = activeOscarRouteConsent;
-  if (!active || active.settled) return;
-  active.settled = true;
-  document.removeEventListener('keydown', active.onKeyDown);
-  active.signal?.removeEventListener('abort', active.onAbort);
-  const normalizedDecision = decision === 'allow' ? 'allow' : 'deny';
-  const pending = state.oscar.messages.find((message) => message.id === active.messageId && message.pending);
-  if (pending?.routeConsent) {
-    pending.routeConsent = {
-      ...pending.routeConsent,
-      state: normalizedDecision === 'allow' ? 'accepted' : 'denied',
-    };
-    pending.researchFlow = normalizedDecision === 'allow' && active.deepResearch;
-    renderOscarStreamFrame();
-  }
-
-  const finish = () => {
-    if (pending) {
-      pending.routeConsent = null;
-      pending.streamPhase = normalizedDecision === 'allow' && active.deepResearch ? 'research-plan' : 'route';
-      pending.researchFlow = normalizedDecision === 'allow' && active.deepResearch;
-      renderOscarStreamFrame();
-    }
-    activeOscarRouteConsent = null;
-    active.resolve(normalizedDecision);
-  };
-  if (options.immediate === true) {
-    finish();
-  } else {
-    window.setTimeout(finish, 260);
-  }
-}
-
 function findOscarMessageNode(messageId) {
   if (!elements.oscarThread || !messageId) return null;
   return Array.from(elements.oscarThread.querySelectorAll('[data-message-id]'))
@@ -4758,36 +5293,6 @@ function findOscarMessageNode(messageId) {
 function findOscarMessageSurface(messageId) {
   const messageNode = findOscarMessageNode(messageId);
   return messageNode?.querySelector('.oscar-message-card, .oscar-thinking-only') || messageNode;
-}
-
-function animateOscarConsentExpansion(messageId, fromRect) {
-  requestAnimationFrame(() => {
-    const card = findOscarMessageNode(messageId)?.querySelector('.oscar-message-card');
-    if (
-      !card
-      || !fromRect
-      || typeof card.animate !== 'function'
-      || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-    ) return;
-    const toRect = card.getBoundingClientRect();
-    if (!toRect.width || !toRect.height) return;
-    const translateX = fromRect.left - toRect.left;
-    const translateY = fromRect.top - toRect.top;
-    const scaleX = Math.max(0.52, Math.min(1, fromRect.width / toRect.width));
-    const scaleY = Math.max(0.48, Math.min(1, fromRect.height / toRect.height));
-    card.animate([
-      {
-        opacity: 0.76,
-        transform: `translate(${translateX}px, ${translateY}px) scale(${scaleX}, ${scaleY})`,
-        filter: 'blur(1.5px)',
-      },
-      { opacity: 1, transform: 'none', filter: 'none' },
-    ], {
-      duration: 520,
-      easing: 'cubic-bezier(.16, 1, .3, 1)',
-      fill: 'both',
-    });
-  });
 }
 
 function escapeRegExp(value) {
@@ -4801,14 +5306,30 @@ function renderOscarSource(source) {
   const title = source?.title || source?.url || source?.source || 'source';
   const memory = source?.kind === 'memory' || String(source?.url || '').startsWith('memory://');
   const detail = source?.detail || source?.url || source?.snippet || source?.path || '';
+  if (memory) {
+    return `
+      <button type="button" class="source-chip is-memory" data-source-open-memory title="Открыть память Oscar — ${escapeHtml(detail)}">
+        Из памяти
+      </button>
+    `;
+  }
   return `
-    <span class="source-chip ${memory ? 'is-memory' : ''}" title="${escapeHtml(detail)}">
-      ${escapeHtml(memory ? 'Из памяти' : title)}
+    <span class="source-chip" title="${escapeHtml(detail)}">
+      ${escapeHtml(title)}
     </span>
   `;
 }
 
+/** The chip only says a past turn or a saved fact was used; it carries no id
+ * back from the model's evidence reference, so it opens the review surface
+ * (Settings → Память) rather than pretending to jump to the exact record. */
+function openMemorySettingsFromSource() {
+  document.querySelector('.nav-item[data-scroll-target="settings-section"][data-settings-open="memory"]')?.click();
+}
+
 function requiredModelBlocksChat() {
+  if (oscarMaxMode?.selected()) return false;
+  if (oscarNativeAstra?.capture() || waitingOscarTurn?.astra) return false;
   const components = state.data?.components;
   return components?.autoRepairEnabled === true && components.ready !== true;
 }

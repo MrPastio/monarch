@@ -385,6 +385,22 @@ namespace MonarchLauncher
             startInfo.EnvironmentVariables["OSCAR_PROJECT_ROOT"] = Path.Combine(versionRoot, "oscar");
             startInfo.EnvironmentVariables["MONARCH_SECURITY_PYTHON"] = pythonExe;
             startInfo.EnvironmentVariables["MONARCH_STT_PYTHON"] = pythonExe;
+            startInfo.EnvironmentVariables["MONARCH_STT_PYTHONPATH"] = Path.Combine(
+                payloadRoot,
+                "runtimes",
+                "voice",
+                "one-shot",
+                "python-packages"
+            );
+            startInfo.EnvironmentVariables["MONARCH_FFMPEG_PATH"] = Path.Combine(
+                payloadRoot,
+                "runtimes",
+                "voice",
+                "one-shot",
+                "ffmpeg-8.1.1-essentials_build",
+                "bin",
+                "ffmpeg.exe"
+            );
             startInfo.EnvironmentVariables["MONARCH_VOICE_LITE_PYTHON"] = pythonExe;
             startInfo.EnvironmentVariables["MONARCH_SECURITY_ROOT"] = Path.Combine(versionRoot, "security");
             startInfo.EnvironmentVariables["MONARCH_SECURITY_SITE_PACKAGES"] =

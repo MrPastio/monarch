@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, rmdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -11,6 +11,37 @@ afterEach(async () => {
 });
 
 describe('LocalOwnerDevSettingsStore', () => {
+  it('does not publish an enabled policy or replay receipt when the disk write fails', async () => {
+    const root = await temporaryRoot(), store = new LocalOwnerDevSettingsStore(root);
+    const request = { schemaVersion: 1 as const, clientRequestId: 'disable', command: 'dev.update' as const,
+      scope: { type: 'chat' as const }, expectedRevision: 0, payload: { patch: { memoryEnabled: false } }, policyDecisionHash: 'a'.repeat(64) };
+    await store.execute(request);
+    const before = store.snapshotWithRevision();
+    const temp = path.join(root, 'settings', `owner-dev.v1.json.${process.pid}.tmp`);
+    await mkdir(temp); // Exact fixture-only obstruction: writeFileSync cannot write a directory.
+    const enable = { ...request, clientRequestId: 'enable', expectedRevision: 1, payload: { patch: { memoryEnabled: true } } };
+    await expect(store.execute(enable)).rejects.toThrow();
+    expect(store.snapshotWithRevision()).toEqual(before);
+    expect(new LocalOwnerDevSettingsStore(root).snapshotWithRevision()).toEqual(before);
+    await rmdir(temp);
+    const committed = await store.execute(enable);
+    expect(committed).toMatchObject({ replayed: false, revision: 2 });
+    expect(store.snapshot().memoryEnabled).toBe(true);
+    expect(new LocalOwnerDevSettingsStore(root).snapshotWithRevision()).toEqual(store.snapshotWithRevision());
+  });
+  it('does not expose mutable live policy through committed or replayed receipts', async () => {
+    const root = await temporaryRoot(), store = new LocalOwnerDevSettingsStore(root);
+    const request = { schemaVersion: 1 as const, clientRequestId: 'immutable', command: 'dev.update' as const,
+      scope: { type: 'chat' as const }, expectedRevision: 0, payload: { patch: { memoryEnabled: false } }, policyDecisionHash: 'a'.repeat(64) };
+    const first = await store.execute(request);
+    (first.result as any).value.memoryEnabled = true;
+    expect(store.snapshot().memoryEnabled).toBe(false);
+    const replay = await store.execute(request);
+    expect((replay.result as any).value.memoryEnabled).toBe(false);
+    (replay.result as any).value.memoryEnabled = true;
+    expect(store.snapshot().memoryEnabled).toBe(false);
+    expect((await store.execute(request)).result).toEqual({ value: store.snapshot() });
+  });
   it('commits boolean-only policy with CAS read-back and no chat content fields', async () => {
     const root = await temporaryRoot();
     const store = new LocalOwnerDevSettingsStore(root);

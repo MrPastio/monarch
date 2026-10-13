@@ -132,7 +132,7 @@ describe('SettingsCommandBus', () => {
     await expect(publicBus.read(request, 'desktop')).rejects.toMatchObject({ code: 'settings-owner-required' });
     await expect(ownerBus.read(request, 'desktop')).resolves.toMatchObject({ kind: 'prompts' });
     await expect(publicBus.read({ ...request, kind: 'owner-override' }, 'desktop'))
-      .rejects.toMatchObject({ code: 'settings-owner-required' });
+      .resolves.toMatchObject({ kind: 'owner-override' });
     await expect(ownerBus.read({ ...request, kind: 'owner-override' }, 'api'))
       .rejects.toMatchObject({ code: 'settings-desktop-required' });
     await expect(ownerBus.read({ ...request, kind: 'owner-override' }, 'desktop'))
@@ -147,7 +147,7 @@ describe('SettingsCommandBus', () => {
       payload: { enabled: true, lifetime: 'session', shellApprovalPolicy: 'risk-based' },
     };
     await expect(publicBus.execute(ownerOverrideWrite, 'desktop'))
-      .rejects.toMatchObject({ code: 'settings-owner-required' });
+      .resolves.toMatchObject({ command: 'owner-override.update', policyDecisionHash: HASH });
     await expect(ownerBus.execute(ownerOverrideWrite, 'api'))
       .rejects.toMatchObject({ code: 'settings-desktop-required' });
     await expect(ownerBus.execute(ownerOverrideWrite, 'desktop'))
@@ -164,10 +164,8 @@ describe('SettingsCommandBus', () => {
       path.join(process.cwd(), 'src', 'ui', 'public', 'modules', 'settings-pane.js'),
       'utf8',
     );
-    expect(source).toContain("writeLocalSettings('personality.profile.create'");
-    expect(source).toContain("writeLocalSettings('personality.profile.update'");
-    expect(source).toContain("writeLocalSettings('personality.profile.select'");
-    expect(source).toContain("writeLocalSettings('personality.personalization.set'");
+    // The answer style is saved in one typed command.
+    expect(source).toContain("writeLocalSettings('personality.style.set'");
     expect(source).toContain("writeLocalSettings('memory.create'");
     expect(source).not.toContain("runCapability('personality'");
     expect(source).not.toContain("runCapability('memory'");

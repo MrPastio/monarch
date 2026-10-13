@@ -1,29 +1,29 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
   MonarchExecutionControl,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
-  MonarchRouteDecision,
 } from '../../core';
-import { isPathWithinRoot, permissionModeForRisk, resolveMonarchRuntimePaths } from '../../core';
+import { isPathWithinRoot, resolveMonarchRuntimePaths } from '../../core';
 import { writeFileAtomically } from '../../core/durable-json-file';
 import { safeFetch } from '../custom-tools';
 import { coderManifest } from './manifest';
 import { CoderProjectStore } from './project-store';
 import { CoderSandboxRunner, sanitizedProcessEnvironment } from './sandbox-runner';
 import type { CoderProject } from './types';
+import { renameWithWindowsRetry } from '../../core/durable-json-file';
 
 const DEFAULT_READ_BYTES = 512 * 1024;
 const MAX_READ_BYTES = 2 * 1024 * 1024;
 const MAX_WRITE_BYTES = 2 * 1024 * 1024;
+const MAX_APPENDED_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024;
 const MAX_NETWORK_REQUEST_BODY_BYTES = 256 * 1024;
 const MAX_HF_TRANSFER_BYTES = 2 * 1024 * 1024 * 1024;
@@ -51,6 +51,7 @@ export class CoderModule implements MonarchModule {
   readonly manifest = coderManifest;
   readonly projects: CoderProjectStore;
   readonly monarchRoot: string;
+  readonly runsRoot: string;
   readonly sandbox: CoderSandboxRunner;
   private readonly huggingFaceExecutablePath: string;
   private readonly fileMutationQueues = new Map<string, Promise<void>>();
@@ -58,14 +59,17 @@ export class CoderModule implements MonarchModule {
   constructor(options: CoderModuleOptions = {}) {
     this.monarchRoot = path.resolve(options.monarchRoot || process.cwd());
     const runtimePaths = resolveMonarchRuntimePaths(this.monarchRoot);
+    this.runsRoot = path.join(runtimePaths.stateRoot, 'coder', 'runs');
     this.projects = new CoderProjectStore({
       monarchRoot: this.monarchRoot,
       registryPath: options.registryPath || path.join(runtimePaths.stateRoot, 'coder', 'projects.json'),
       workspaceCoderRoot: options.workspaceCoderRoot || runtimePaths.coderWorkspaceRoot,
     });
+    const sandboxRuntimeRoot = options.sandboxRoot
+      || (runtimePaths.mode === 'installed' ? runtimePaths.coderSandboxRoot : undefined);
     this.sandbox = options.sandboxRunner || new CoderSandboxRunner({
       monarchRoot: this.monarchRoot,
-      runtimeRoot: options.sandboxRoot || runtimePaths.coderSandboxRoot,
+      ...(sandboxRuntimeRoot ? { runtimeRoot: sandboxRuntimeRoot } : {}),
     });
     const packagedEnvironmentRoot = String(process.env.MONARCH_BACKEND_ENVIRONMENT_ROOT || '').trim();
     this.huggingFaceExecutablePath = path.resolve(
@@ -122,27 +126,6 @@ export class CoderModule implements MonarchModule {
     return active;
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.trim();
-    const explicit = /^coder\.([a-z.]+)\s*(\{[\s\S]*\})?$/i.exec(text);
-    if (!explicit) return null;
-    const capabilityId = `coder.${explicit[1]}`;
-    const capability = this.manifest.capabilities.find((entry) => entry.id === capabilityId);
-    if (!capability) return null;
-    let input: unknown = {};
-    if (explicit[2]) {
-      try { input = JSON.parse(explicit[2]); } catch { input = {}; }
-    }
-    return {
-      intentId: intent.id,
-      targetModuleId: this.manifest.id,
-      capabilityId,
-      confidence: 1,
-      reason: 'Explicit Coder Mode capability.',
-      permissionMode: permissionModeForRisk(capability.risk),
-      input,
-    };
-  }
 
   async executeCapability(
     request: MonarchExecutionRequest,
@@ -290,12 +273,21 @@ export class CoderModule implements MonarchModule {
     const evaluation = await this.projects.policy.evaluatePath(readString(input, 'path'), 'write', project.root);
     if (!evaluation.allowed) return blocked(evaluation.message, evaluation);
     const overwrite = readBoolean(input, 'overwrite', false);
+    // The agent is told to write a long file in parts; without an append mode
+    // it improvised with a patch whose oldText was empty and failed (live).
+    const append = readBoolean(input, 'append', false);
     return this.withFileMutation(evaluation.resolvedPath, async () => {
       signal?.throwIfAborted();
-      if (!overwrite && existsSync(evaluation.resolvedPath)) throw new Error('Target already exists; set overwrite=true to replace it.');
-      await atomicWrite(evaluation.resolvedPath, content);
+      let next = content;
+      if (append) {
+        if (!existsSync(evaluation.resolvedPath)) throw new Error('Target does not exist yet; write its first part without append.');
+        const existing = await readFile(evaluation.resolvedPath, 'utf8');
+        next = existing + content;
+        if (Buffer.byteLength(next, 'utf8') > MAX_APPENDED_FILE_BYTES) throw new Error(`File would exceed the ${MAX_APPENDED_FILE_BYTES}-byte limit.`);
+      } else if (!overwrite && existsSync(evaluation.resolvedPath)) throw new Error('Target already exists; set overwrite=true to replace it, or append=true to add to it.');
+      await atomicWrite(evaluation.resolvedPath, next);
       const persisted = await readFile(evaluation.resolvedPath);
-      const expected = Buffer.from(content, 'utf8');
+      const expected = Buffer.from(next, 'utf8');
       if (!persisted.equals(expected)) throw new Error('Coder write verification failed after the atomic rename.');
       await context.emit('coder.file.written', this.manifest.id, { projectId: project.id, path: evaluation.resolvedPath });
       return ok(`Wrote and verified ${persisted.length} bytes.`, {
@@ -465,7 +457,9 @@ export class CoderModule implements MonarchModule {
     const initialBranch = readOptionalString(input, 'initialBranch') || 'main';
     await this.assertGitBranch(project, initialBranch, signal);
     const initialized = await this.runGitSandbox(project, ['init', '-b', initialBranch, '.'], 60_000, false, signal);
-    if (initialized.exitCode !== 0) return fail('Git repository initialization failed.', 'git-init-failed');
+    if (initialized.exitCode !== 0) {
+      return fail(`Git repository initialization failed: ${(initialized.stderr || initialized.stdout || `exit ${initialized.exitCode}`).trim().slice(0, 500)}`, 'git-init-failed');
+    }
     await ensureMonarchGitExclude(project.root);
     const verification = await this.runGitSandbox(project, ['rev-parse', '--is-inside-work-tree'], 30_000, false, signal);
     const verified = verification.exitCode === 0 && verification.stdout.trim() === 'true';
@@ -806,9 +800,12 @@ export class CoderModule implements MonarchModule {
     signal?.throwIfAborted();
     const hooksPath = path.join(this.sandbox.runtimeRoot, 'empty-git-hooks').replace(/\\/g, '/');
     await mkdir(hooksPath, { recursive: true });
+    // The hardening flags are Monarch's own and point into its runtime; the
+    // command policy judges only the git arguments the caller asked for.
     return this.runProjectCommand(project, {
       executable: 'git',
-      args: ['-c', `core.hooksPath=${hooksPath}`, '-c', 'diff.external=', ...args],
+      args,
+      trustedPrefixArgs: ['-c', `core.hooksPath=${hooksPath}`, '-c', 'diff.external='],
       timeoutMs,
       allowNetwork,
     }, signal);
@@ -915,7 +912,7 @@ export class CoderModule implements MonarchModule {
         }
       }
       signal?.throwIfAborted();
-      await rename(draft, target);
+      await renameWithWindowsRetry(draft, target);
       await context.emit('coder.skill.validated', this.manifest.id, { projectId: project.id, skill: slug, path: target });
       return ok(`Skill '${slug}' validated and activated.`, { skill: slug, path: target, validation: validationResult });
     } catch (error) {
@@ -959,7 +956,8 @@ export class CoderModule implements MonarchModule {
 
   private async runProjectCommand(
     project: CoderProject,
-    command: { executable: string; args: string[]; cwd?: string; timeoutMs: number; allowNetwork?: boolean },
+    command: { executable: string; args: string[]; trustedPrefixArgs?: readonly string[]; cwd?: string; timeoutMs: number;
+      allowNetwork?: boolean },
     signal?: AbortSignal,
   ): Promise<ProcessResult> {
     signal?.throwIfAborted();
@@ -974,7 +972,7 @@ export class CoderModule implements MonarchModule {
     return this.sandbox.execute({
       projectRoot: project.root,
       executable: command.executable,
-      args: command.args,
+      args: [...(command.trustedPrefixArgs ?? []), ...command.args],
       cwd: cwdEvaluation.resolvedPath,
       timeoutMs: clamp(command.timeoutMs, 1_000, 10 * 60_000),
       allowNetwork: command.allowNetwork !== false,

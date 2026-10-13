@@ -1,11 +1,9 @@
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
-  MonarchRouteDecision,
 } from '../../core';
 import {
   LocalMonarchSharingClient,
@@ -37,22 +35,6 @@ export class SharingModule implements MonarchModule {
     };
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.toLowerCase();
-    if (!mentionsSharing(text)) {
-      return null;
-    }
-    if (/(status|health|ready|работает|статус|доступен)/i.test(text)) {
-      return decision(intent.id, 'sharing.status', 'User asks for Monarch Sharing runtime status.');
-    }
-    if (/(connect|connection|endpoint|base url|api key|подключ|адрес|ключ|куда)/i.test(text)) {
-      return decision(intent.id, 'sharing.connection.get', 'User asks how to connect to Monarch Sharing.');
-    }
-    if (/(model|models|модел)/i.test(text)) {
-      return decision(intent.id, 'sharing.models.list', 'User asks which local models Sharing exposes.');
-    }
-    return decision(intent.id, 'sharing.connection.get', 'User asks how to connect to Monarch Sharing.');
-  }
 
   async executeCapability(request: MonarchExecutionRequest): Promise<MonarchExecutionResult> {
     switch (request.capabilityId) {
@@ -94,27 +76,6 @@ export class SharingModule implements MonarchModule {
       };
     }
   }
-}
-
-function mentionsSharing(text: string): boolean {
-  return /\b(monarch sharing|sharing (?:api|server|models?|status|endpoint)|shared model|local (?:ai|model) api|openai compatible|api server)\b/i.test(text)
-    || /(monarch\s+sharing|расшар|шаринг.{0,24}(?:api|сервер|модел|статус|подключ)|подключить.{0,24}(?:модел|нейрон)|локальн.{0,12}api|api.{0,12}модел)/i.test(text);
-}
-
-function decision(
-  intentId: string,
-  capabilityId: string,
-  reason: string
-): MonarchRouteDecision {
-  return {
-    intentId,
-    targetModuleId: sharingManifest.id,
-    capabilityId,
-    confidence: 0.9,
-    reason,
-    permissionMode: 'allow',
-    input: {},
-  };
 }
 
 export function createSharingModule(): MonarchModule {

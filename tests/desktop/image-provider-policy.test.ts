@@ -10,7 +10,7 @@ import {
 import { readFileSync } from 'node:fs';
 
 const mainSource = readFileSync('desktop/electron/main.mjs', 'utf8');
-const preloadSource = readFileSync('desktop/electron/preload.mjs', 'utf8');
+const preloadSource = readFileSync('desktop/electron/preload.cjs', 'utf8');
 
 describe('interactive image provider navigation policy', () => {
   it('allows only HTTPS Perchance origins', () => {
@@ -70,7 +70,11 @@ describe('interactive image provider navigation policy', () => {
   });
 
   it('keeps the native Windows frame while removing only the Electron menu bar', () => {
-    expect(mainSource).not.toContain("titleBarStyle: 'hidden'");
+    // A hidden title bar is allowed only with the native Windows caption overlay
+    // (synchronized chrome): the system still draws minimize/maximize/close.
+    for (const match of mainSource.matchAll(/titleBarStyle: 'hidden'/gu)) {
+      expect(mainSource.slice(match.index!, match.index! + 200)).toMatch(/titleBarOverlay: \{/u);
+    }
     expect(mainSource).toMatch(/mainWindow = new BrowserWindow\(\{[\s\S]*?autoHideMenuBar: true,[\s\S]*?\}\);\s*mainWindow\.setMenu\(null\);/);
     expect(preloadSource).not.toContain('desktopShell');
   });

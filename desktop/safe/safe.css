@@ -284,3 +284,38 @@ dialog[open]::backdrop{animation:backdropIn .24s ease both}
 .safe-settings-dialog menu{justify-content:flex-end}
 @media(max-width:1180px){.safe-policy-grid{grid-template-columns:1fr}.safe-toolbar{gap:6px}.safe-toolbar button{padding-inline:9px}.file-table th:nth-child(4),.file-table td:nth-child(4){display:none}}
 @media(prefers-reduced-motion:reduce){.classic-lock,.classic-lock-shackle{transition-duration:.01ms}}
+
+/* Shared Monarch visual hierarchy; vault authority and data flows stay in the host. */
+.safe-workspace { grid-template-rows: auto minmax(0,1fr) 45px; }
+.safe-sidebar { background: linear-gradient(180deg, #171819d9, #0b0c0de6); }
+.safe-toolbar { flex-wrap: wrap; min-height: 72px; gap: 10px; padding: 14px 18px; background: #171819bd; }
+.safe-toolbar .search-control { flex: 1 1 180px; max-width: 300px; }
+.safe-toolbar .search-control input { width: 100%; }
+.safe-toolbar button, .safe-toolbar select, .safe-toolbar input { min-height: 42px; font-size: 13px; border-radius: 11px; }
+#new-file { color: #201505; border-color: #ffbc38; background: linear-gradient(135deg,#ffce58,#ff9a24); }
+#new-file:hover { background: #ffd16a; }
+#section-list button { min-height: 44px; border-radius: 12px; }
+#section-list button.active { color: var(--text); background: #ffffff0b; border-color: #ffffff1c; }
+.file-region { padding: 20px; }
+.file-table th { height: 42px; font-size: 12px; color: #b1b1ae; }
+.file-table td { font-size: 13px; }
+.editor-region { background: linear-gradient(150deg,#18191a80,#0d0e0f80); }
+.empty-state, .editor-empty { line-height: 1.65; font-size: 14px; }
+.empty-state strong, .editor-empty strong { font-size: 21px; font-weight: 550; letter-spacing: -.025em; }
+.empty-state span { max-width: 500px; }
+.auth-form { border-radius: 22px; background: linear-gradient(145deg,#1d1d1bd4,#101112df); }
+dialog { border-radius: 20px; max-height: calc(100dvh - 32px); overflow: auto; background: linear-gradient(145deg,#20201e,#111214); }
+dialog form { padding: 24px; }
+dialog h2 { font-weight: 550; font-size: 22px; letter-spacing: -.025em; }
+dialog label, .policy-toggle small { font-size: 13px; line-height: 1.55; }
+dialog input, dialog select { border-radius: 10px; min-height: 44px; }
+button:disabled { cursor: not-allowed; }
+@media(max-width:1200px) {
+  .safe-content { grid-template-columns: minmax(0,1fr) minmax(280px,.8fr); }
+}
+@media(max-width:900px) {
+  .safe-content { grid-template-columns: minmax(0,1fr); }
+  .safe-toolbar label:nth-of-type(3), .safe-toolbar #new-folder, .safe-toolbar select { display: block; }
+  .safe-toolbar .search-control { max-width: none; }
+  .safe-toolbar { gap: 8px; padding: 10px; }
+}

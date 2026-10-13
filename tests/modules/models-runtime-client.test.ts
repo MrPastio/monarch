@@ -233,6 +233,12 @@ describe('model runtime Oscar fallback bridge', () => {
         purpose: 'agent-decision',
         agentSessionId: 'agent_task_fixture_session',
         responseFormat: 'json',
+        responseJsonSchema: {
+          type: 'object',
+          required: ['kind'],
+          properties: { kind: { const: 'act' } },
+          additionalProperties: false,
+        },
         messages: [
           { role: 'system', content: 'Return JSON.' },
           { role: 'user', content: '{"goal":"open Telegram"}' },
@@ -256,7 +262,56 @@ describe('model runtime Oscar fallback bridge', () => {
         response_format: { type: 'json_object' },
         agent_session_id: 'agent_task_fixture_session',
       });
+      expect(rawRequest.response_format).not.toHaveProperty('schema');
+      const responseContract = rawRequest.messages.find((message: any) =>
+        message.role === 'system' && message.content.includes('<monarch_response_contract>'));
+      expect(responseContract?.content).toContain('"required":["kind"]');
+      expect(responseContract?.content).toContain('"kind":{"const":"act"}');
+      expect(rawRequest.messages.at(-1)).toEqual({ role: 'user', content: '{"goal":"open Telegram"}' });
       expect(conversationalRouteCalled).toBe(false);
+    } finally {
+      await close(server);
+      restoreEnv('OSCAR_API_BASE', previousOscarBase);
+    }
+  });
+
+  it('keeps an explicitly selected Agent model exact instead of switching through Fast', async () => {
+    let rawRequest: any = null;
+    const server = http.createServer((request, response) => {
+      if (request.method === 'POST' && request.url === '/v1/chat/completions') {
+        let body = '';
+        request.on('data', chunk => { body += chunk; });
+        request.on('end', () => {
+          rawRequest = JSON.parse(body);
+          sendJson(response, 200, {
+            model: rawRequest.model,
+            choices: [{ message: { content: '{"kind":"fail","code":"done","reason":"done"}' }, finish_reason: 'stop' }],
+          });
+        });
+        return;
+      }
+      sendJson(response, 404, { error: 'not-found' });
+    });
+    const baseUrl = await listen(server);
+    const previousOscarBase = process.env.OSCAR_API_BASE;
+    process.env.OSCAR_API_BASE = baseUrl;
+    try {
+      const result = await completeWithModelRole(createCatalog(), {
+        role: 'gemma4-balanced',
+        requestedModel: 'gemma4-balanced',
+        selectionSource: 'user-explicit',
+        fallbackRoles: [],
+        purpose: 'agent-decision',
+        agentDecisionModel: 'monarch-fast',
+        agentSessionId: 'agent_task_exact_model_fixture',
+        responseFormat: 'json',
+        messages: [{ role: 'user', content: '{"goal":"read file"}' }],
+        maxTokens: 64,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(rawRequest.model).toBe('monarch-balanced');
+      expect(result.model).toBe('monarch-balanced');
     } finally {
       await close(server);
       restoreEnv('OSCAR_API_BASE', previousOscarBase);
@@ -310,6 +365,8 @@ describe('model runtime Oscar fallback bridge', () => {
         agent_session_id: 'agent_task_response_fixture',
       });
       expect(rawRequest).not.toHaveProperty('response_format');
+      expect(rawRequest.messages.some((message: any) =>
+        message.content.includes('<monarch_response_contract>'))).toBe(false);
       expect(conversationalRouteCalled).toBe(false);
     } finally {
       await close(server);
@@ -885,17 +942,23 @@ describe('model runtime Oscar fallback bridge', () => {
 
   it('routes to a local loopback endpoint without MONARCH_ALLOW_EXTERNAL_MODEL_ENDPOINTS when model weights are missing', async () => {
     let calledLocalEndpoint = false;
+    let localRequest: any = null;
     const server = http.createServer((request, response) => {
       if (request.method === 'POST' && request.url === '/v1/chat/completions') {
         calledLocalEndpoint = true;
-        sendJson(response, 200, {
-          choices: [
-            {
-              message: {
-                content: 'Local loopback output',
+        let body = '';
+        request.on('data', chunk => { body += chunk; });
+        request.on('end', () => {
+          localRequest = JSON.parse(body);
+          sendJson(response, 200, {
+            choices: [
+              {
+                message: {
+                  content: '{"answer":"Local loopback output"}',
+                },
               },
-            },
-          ],
+            ],
+          });
         });
         return;
       }
@@ -933,13 +996,22 @@ describe('model runtime Oscar fallback bridge', () => {
       const result = await completeWithModelRole(catalog, {
         role: 'weak',
         messages: [{ role: 'user', content: 'hello local loopback' }],
+        responseFormat: 'json',
+        responseJsonSchema: {
+          type: 'object',
+          required: ['answer'],
+          properties: { answer: { type: 'string' } },
+          additionalProperties: false,
+        },
         maxTokens: 32,
       });
 
       expect(result.ok).toBe(true);
       expect(result.adapter).toBe('transformers-compatible');
-      expect(result.rawText).toBe('Local loopback output');
+      expect(result.rawText).toBe('{"answer":"Local loopback output"}');
       expect(calledLocalEndpoint).toBe(true);
+      expect(localRequest.response_format).toEqual({ type: 'json_object' });
+      expect(localRequest.response_format).not.toHaveProperty('schema');
     } finally {
       await close(server);
       restoreEnv('MONARCH_CHAT_MODEL_ENDPOINT', previousChatEndpoint);

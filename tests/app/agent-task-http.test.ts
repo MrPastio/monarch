@@ -2,10 +2,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Server } from 'node:http';
-import { afterEach, describe, expect, it } from 'vitest';
+import { createHmac } from 'node:crypto';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MonarchApplication } from '../../src/app/application';
 import { createMonarchHttpServer } from '../../src/app/http-server';
-import { InMemoryAgentTaskStore, ReplayAgentDecisionProvider } from '../../src/agent';
 
 const roots: string[] = [];
 
@@ -15,7 +15,7 @@ afterEach(async () => {
 
 describe('Agent Task API v1', () => {
   it('is disabled by default and does not replace legacy routes', async () => {
-    const { app, server, baseUrl } = await setup(false);
+    const { app, server, baseUrl } = await setupWithoutV3();
     try {
       const response = await fetch(`${baseUrl}/api/agent/tasks`);
       expect(response.status).toBe(404);
@@ -29,584 +29,296 @@ describe('Agent Task API v1', () => {
     }
   });
 
-  it('derives API source server-side, exposes versioned JSON replay, and streams durable dotted terminal events', async () => {
-    const { app, server, baseUrl } = await setup(true);
+  it('has no internal V2 runtime surface and cannot expose one through the public Agent Task API', async () => {
+    const { app, server, baseUrl } = await setupWithoutV3();
     try {
-      const invalidVersion = await fetch(`${baseUrl}/api/agent/tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ version: 2, request: 'test' }),
-      });
-      expect(invalidVersion.status).toBe(400);
-      await expect(invalidVersion.json()).resolves.toMatchObject({
-        version: 1,
-        ok: false,
-        error: 'unsupported-version',
-      });
-
-      const createdResponse = await fetch(`${baseUrl}/api/agent/tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          request: 'Create a paused API task.',
-          clientRequestId: 'http-agent-task-1',
-          autoStart: false,
-        }),
-      });
-      expect(createdResponse.status).toBe(202);
-      const created = await createdResponse.json() as {
-        task: {
-          id: string;
-          source: { surface: string };
-          goal: unknown;
-          budgets: unknown;
-        };
-      };
-      expect(created.task.source.surface).toBe('api');
-      const replayedCreate = await fetch(`${baseUrl}/api/agent/tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          request: 'Create a paused API task.',
-          clientRequestId: 'http-agent-task-1',
-          autoStart: false,
-        }),
-      });
-      expect(replayedCreate.status).toBe(202);
-      await expect(replayedCreate.json()).resolves.toMatchObject({ task: { id: created.task.id } });
-
-      const replay = await fetch(`${baseUrl}/api/agent/tasks/${created.task.id}/events?format=json`);
-      const replayBody = await replay.json() as { events: Array<{ version: number; type: string; sequence: number }> };
-      expect(replayBody.events.map((event) => event.type)).toEqual(['task.created', 'plan.created']);
-      expect(replayBody.events.every((event) => event.version === 1)).toBe(true);
-
-      const stream = await fetch(`${baseUrl}/api/agent/tasks/${created.task.id}/events`, {
-        headers: { Accept: 'text/event-stream', 'Last-Event-ID': '1' },
-      });
-      expect(stream.status).toBe(200);
-      const bodyPromise = stream.text();
-      const cancelled = await fetch(`${baseUrl}/api/agent/tasks/${created.task.id}/cancel`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ version: 1 }),
-      });
-      expect(cancelled.status).toBe(200);
-      const streamBody = await bodyPromise;
-      expect(streamBody).toContain('id: 2\nevent: plan.created');
-      expect(streamBody).toContain('event: task.status.changed');
-      expect(streamBody).toContain('event: task.cancelled');
-      expect(streamBody).toContain('"traceId"');
-
-      const repeatedResponse = await fetch(`${baseUrl}/api/agent/tasks/${created.task.id}/repeat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          version: 1,
-          clientRequestId: 'http-agent-repeat-1',
-          autoStart: false,
-        }),
-      });
-      expect(repeatedResponse.status).toBe(202);
-      const repeated = await repeatedResponse.json() as {
-        task: {
-          id: string;
-          parentTaskId: string;
-          source: { surface: string; requestId?: string };
-          goal: unknown;
-          budgets: unknown;
-          observations: unknown[];
-          artifacts: unknown[];
-          approvals: unknown[];
-        };
-      };
-      expect(repeated.task.id).not.toBe(created.task.id);
-      expect(repeated.task.parentTaskId).toBe(created.task.id);
-      expect(repeated.task.source).toEqual({ surface: 'api', remote: true });
-      expect(repeated.task.goal).toEqual(created.task.goal);
-      expect(repeated.task.budgets).toEqual(created.task.budgets);
-      expect(repeated.task.observations).toEqual([]);
-      expect(repeated.task.artifacts).toEqual([]);
-
-      const desktopOriginal = await app.createAgentTask({
-        request: 'Create a paused Desktop task.',
-        source: { surface: 'desktop', remote: false },
-        autoStart: false,
-      });
-      await app.agentRuntime!.cancel(desktopOriginal.task.id);
-      const apiRepeatedDesktop = await fetch(
-        `${baseUrl}/api/agent/tasks/${desktopOriginal.task.id}/repeat`,
-        {
+      expect('agentRuntime' in app).toBe(false);
+      expect('createAgentTask' in app).toBe(false);
+      for (const request of [
+        fetch(`${baseUrl}/api/agent/tasks`),
+        fetch(`${baseUrl}/api/agent/tasks`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ version: 1, autoStart: false }),
-        },
-      );
-      expect(apiRepeatedDesktop.status).toBe(404);
-      await expect(apiRepeatedDesktop.json()).resolves.toMatchObject({
-        version: 1,
-        error: 'task-not-found',
-      });
-      expect(repeated.task.approvals).toEqual([]);
-    } finally {
-      await close(server);
-      await app.stop();
-    }
-  }, 30_000);
-
-  it('resolves an Incognito task by id without exposing it in the persistent task list', async () => {
-    const { app, server, baseUrl } = await setup(true);
-    try {
-      const volatile = await app.incognitoAgentRuntime!.createTask({
-        request: 'Plan a disposable Incognito operation.',
-        source: { surface: 'desktop', remote: false },
-        planningMode: 'model-first',
-        autoStart: false,
-      });
-
-      const externalAttempt = await fetch(`${baseUrl}/api/agent/tasks/${volatile.task.id}`);
-      expect(externalAttempt.status).toBe(404);
-
-      const detail = await fetch(`${baseUrl}/api/agent/tasks/${volatile.task.id}`, {
-        headers: {
-          Origin: 'http://127.0.0.1:4317',
-          'X-Monarch-Desktop-Attestation': 'agent-http-desktop-test-token',
-        },
-      });
-      expect(detail.status).toBe(200);
-      await expect(detail.json()).resolves.toMatchObject({
-        checkpoint: { task: { id: volatile.task.id, planningMode: 'model-first' } },
-      });
-
-      const list = await fetch(`${baseUrl}/api/agent/tasks`);
-      expect(list.status).toBe(200);
-      const body = await list.json() as { tasks: Array<{ id: string }> };
-      expect(body.tasks.some((task) => task.id === volatile.task.id)).toBe(false);
-      await app.stop();
-      expect(await app.incognitoAgentRuntime!.store.listTasks()).toEqual([]);
-    } finally {
-      await close(server);
-      await app.stop();
-    }
-  });
-
-  it.each([
-    ['public API principal', false],
-    ['API-token principal', true],
-  ])('keeps persistent Desktop checkpoints private from a %s while retaining local Desktop access', async (_label, requireApiToken) => {
-    const { app, server, baseUrl } = await setup(true, new ReplayAgentDecisionProvider([]), requireApiToken);
-    const apiHeaders = requireApiToken
-      ? { 'X-Monarch-Session': 'agent-http-test-token' }
-      : {};
-    const desktopHeaders = {
-      Origin: 'http://127.0.0.1:4317',
-      'X-Monarch-Desktop-Attestation': 'agent-http-desktop-test-token',
-    };
-    try {
-      const desktopTask = await app.createAgentTask({
-        request: 'Keep this local Desktop checkpoint private.',
-        source: { surface: 'desktop', remote: false },
-        autoStart: false,
-      });
-      const apiTask = await app.createAgentTask({
-        request: 'Keep this API checkpoint visible to its API principal.',
-        source: { surface: 'api', remote: true },
-        autoStart: false,
-      });
-
-      const publicList = await fetch(`${baseUrl}/api/agent/tasks`, { headers: apiHeaders });
-      expect(publicList.status).toBe(200);
-      const publicListBody = await publicList.json() as { tasks: Array<{ id: string }> };
-      expect(publicListBody.tasks.map((task) => task.id)).toContain(apiTask.task.id);
-      expect(publicListBody.tasks.map((task) => task.id)).not.toContain(desktopTask.task.id);
-
-      for (const suffix of ['', '/events?format=json']) {
-        const response = await fetch(`${baseUrl}/api/agent/tasks/${desktopTask.task.id}${suffix}`, {
-          headers: apiHeaders,
-        });
-        expect(response.status, suffix || 'checkpoint').toBe(404);
-        await expect(response.json()).resolves.toMatchObject({ version: 1, error: 'task-not-found' });
-      }
-
-      const publicCancel = await fetch(`${baseUrl}/api/agent/tasks/${desktopTask.task.id}/cancel`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...apiHeaders },
-        body: JSON.stringify({ version: 1 }),
-      });
-      expect(publicCancel.status).toBe(404);
-      expect((await app.agentRuntime!.getTask(desktopTask.task.id))?.task.status).toBe('created');
-
-      const desktopList = await fetch(`${baseUrl}/api/agent/tasks`, { headers: desktopHeaders });
-      const desktopListBody = await desktopList.json() as { tasks: Array<{ id: string }> };
-      expect(desktopListBody.tasks.map((task) => task.id)).toEqual(expect.arrayContaining([
-        desktopTask.task.id,
-        apiTask.task.id,
-      ]));
-
-      const desktopDetail = await fetch(`${baseUrl}/api/agent/tasks/${desktopTask.task.id}`, {
-        headers: desktopHeaders,
-      });
-      expect(desktopDetail.status).toBe(200);
-      await expect(desktopDetail.json()).resolves.toMatchObject({
-        checkpoint: { task: { id: desktopTask.task.id, source: { surface: 'desktop' } } },
-      });
-
-      const apiDetail = await fetch(`${baseUrl}/api/agent/tasks/${apiTask.task.id}`, { headers: apiHeaders });
-      expect(apiDetail.status).toBe(200);
-    } finally {
-      await close(server);
-      await app.stop();
-    }
-  });
-
-  it('rejects privileged HTTP source spoofing and accepts desktop only from the trusted loopback UI origin', async () => {
-    const { app, server, baseUrl } = await setup(true);
-    try {
-      const spoofed = await postJson(`${baseUrl}/api/agent/tasks`, {
-        version: 1,
-        request: 'Do not trust this claimed desktop source.',
-        source: 'desktop',
-        autoStart: false,
-      });
-      expect(spoofed.status).toBe(403);
-      await expect(spoofed.json()).resolves.toMatchObject({
-        version: 1,
-        error: 'untrusted-agent-source',
-      });
-
-      const sameOriginWithoutAttestation = await fetch(`${baseUrl}/api/agent/tasks`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Origin: 'http://127.0.0.1:4317',
-        },
-        body: JSON.stringify({
-          version: 1,
-          request: 'A spoofed Origin header is not desktop attestation.',
-          source: 'desktop',
-          autoStart: false,
+          body: JSON.stringify({ version: 1, request: 'This must not reach Agent Runtime V2.' }),
         }),
-      });
-      expect(sameOriginWithoutAttestation.status).toBe(403);
-      await expect(sameOriginWithoutAttestation.json()).resolves.toMatchObject({
-        error: 'untrusted-agent-source',
-      });
-
-      for (const source of ['system', 'smoke', 'coder']) {
-        const forbidden = await fetch(`${baseUrl}/api/agent/tasks`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Origin: 'http://127.0.0.1:4317',
-          },
-          body: JSON.stringify({
-            version: 1,
-            request: `Reject ${source}.`,
-            source,
-            autoStart: false,
-          }),
-        });
-        expect(forbidden.status, source).toBe(403);
-      }
-
-      const trusted = await fetch(`${baseUrl}/api/agent/tasks`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Origin: 'http://127.0.0.1:4317',
-          'X-Monarch-Desktop-Attestation': 'agent-http-desktop-test-token',
-        },
-        body: JSON.stringify({
-          version: 1,
-          request: 'Create a trusted desktop task.',
-          source: 'desktop',
-          autoStart: false,
-        }),
-      });
-      expect(trusted.status).toBe(202);
-      await expect(trusted.json()).resolves.toMatchObject({
-        task: { source: { surface: 'desktop' } },
-      });
-
-      const trustedVoice = await fetch(`${baseUrl}/api/agent/tasks`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Origin: 'http://127.0.0.1:4317',
-          'X-Monarch-Desktop-Attestation': 'agent-http-desktop-test-token',
-        },
-        body: JSON.stringify({
-          version: 1,
-          request: 'Create a local voice Agent Task.',
-          source: 'voice',
-          autoStart: false,
-        }),
-      });
-      expect(trustedVoice.status).toBe(202);
-      await expect(trustedVoice.json()).resolves.toMatchObject({
-        task: { source: { surface: 'voice', remote: false } },
-      });
-    } finally {
-      await close(server);
-      await app.stop();
-    }
-  });
-
-  it('rejects mistyped optional, nested, and budget fields before creating a task', async () => {
-    const { app, server, baseUrl } = await setup(true);
-    try {
-      const invalidBodies: Array<Record<string, unknown>> = [
-        { version: 1, request: 'Invalid client id.', clientRequestId: 42 },
-        { version: 1, request: 'Invalid auto start.', autoStart: 'false' },
-        {
-          version: 1,
-          request: 'Public API cannot inject a trusted Coder execution profile.',
-          executionProfile: {
-            schemaVersion: 'monarch.agent-execution-profile.v1',
-            kind: 'coder-project',
-            projectId: 'forged-project',
-            projectRoot: 'E:\\ForgedProject',
-            permissionProfile: { sandboxMode: 'danger-full-access', approvalPolicy: 'never' },
-          },
-        },
-        { version: 1, request: 'Invalid output container.', expectedOutputs: {} },
-        {
-          version: 1,
-          request: 'Invalid nested output.',
-          expectedOutputs: [{ description: 'Return a report.', required: 'false' }],
-        },
-        {
-          version: 1,
-          request: 'Invalid nested constraint.',
-          constraints: [{ description: 'Stay in scope.', required: true }],
-        },
-        { version: 1, request: 'Invalid preferences.', userPreferences: ['concise', 42] },
-        { version: 1, request: 'Invalid budget type.', budgets: { maxSteps: '1' } },
-        { version: 1, request: 'Invalid budget range.', budgets: { maxSteps: 513 } },
-        { version: 1, request: 'Invalid budget key.', budgets: { extraTurns: 2 } },
-        { version: 1, request: 'Invalid source type.', source: { surface: 'telegram' } },
-      ];
-
-      for (const body of invalidBodies) {
-        const response = await postJson(`${baseUrl}/api/agent/tasks`, body);
-        expect(response.status, JSON.stringify(body)).toBe(400);
-        await expect(response.json()).resolves.toMatchObject({ version: 1, ok: false });
-      }
-
-      const listBeforeValid = await fetch(`${baseUrl}/api/agent/tasks`);
-      await expect(listBeforeValid.json()).resolves.toMatchObject({ tasks: [] });
-
-      const valid = await postJson(`${baseUrl}/api/agent/tasks`, {
-        version: 1,
-        request: 'Create a strictly validated task.',
-        clientRequestId: 'strict-agent-task-1',
-        expectedOutputs: [{ id: 'report', description: 'Return a report.', kind: 'artifact', required: true }],
-        constraints: [{ id: 'scope', description: 'Stay in the workspace.', kind: 'scope' }],
-        successCriteria: [{ id: 'verified', description: 'The report is verified.', verificationHint: 'Use a file receipt.' }],
-        userPreferences: ['concise'],
-        budgets: { maxSteps: 4, maxWallTimeMs: 2_000, maxComputeClass: 'light' },
-        autoStart: false,
-      });
-      expect(valid.status).toBe(202);
-      await expect(valid.json()).resolves.toMatchObject({
-        version: 1,
-        task: {
-          status: 'created',
-          source: { surface: 'api' },
-          budgets: { maxSteps: 4, maxWallTimeMs: 2_000, maxComputeClass: 'light' },
-          goal: {
-            expectedOutputs: [{ id: 'report', kind: 'artifact', required: true }],
-            constraints: [{ id: 'scope', kind: 'scope' }],
-            successCriteria: [{ id: 'verified', verificationHint: 'Use a file receipt.' }],
-            userPreferences: ['concise'],
-          },
-        },
-      });
-    } finally {
-      await close(server);
-      await app.stop();
-    }
-  });
-
-  it('returns versioned 400 errors for malformed IDs and validates mutation optionals', async () => {
-    const { app, server, baseUrl } = await setup(true);
-    try {
-      for (const encodedId of ['bad%24id', 'bad%ZZ']) {
-        const response = await fetch(`${baseUrl}/api/agent/tasks/${encodedId}`);
-        expect(response.status).toBe(400);
+      ]) {
+        const response = await request;
+        expect(response.status).toBe(404);
         await expect(response.json()).resolves.toMatchObject({
           version: 1,
           ok: false,
-          error: 'invalid-id',
+          error: 'agent-runtime-disabled',
         });
       }
-
-      const missing = await fetch(`${baseUrl}/api/agent/tasks/missing_task`);
-      expect(missing.status).toBe(404);
-      await expect(missing.json()).resolves.toMatchObject({ version: 1, error: 'task-not-found' });
-
-      const method = await fetch(`${baseUrl}/api/agent/tasks`, { method: 'PUT' });
-      expect(method.status).toBe(405);
-      await expect(method.json()).resolves.toMatchObject({ version: 1, error: 'method-not-allowed' });
-
-      const createdResponse = await postJson(`${baseUrl}/api/agent/tasks`, {
-        version: 1,
-        request: 'Exercise strict mutation optionals.',
-        autoStart: false,
-      });
-      const created = await createdResponse.json() as { task: { id: string } };
-
-      const invalidMessage = await postJson(`${baseUrl}/api/agent/tasks/${created.task.id}/messages`, {
-        version: 1,
-        content: 'Keep this message idempotent.',
-        messageId: 42,
-      });
-      expect(invalidMessage.status).toBe(400);
-      await expect(invalidMessage.json()).resolves.toMatchObject({ version: 1, error: 'invalid-id' });
-
-      const invalidApproval = await postJson(`${baseUrl}/api/agent/tasks/${created.task.id}/approvals/fake_approval`, {
-        version: 1,
-        decision: 'approve',
-        reason: 42,
-      });
-      expect(invalidApproval.status).toBe(400);
-      await expect(invalidApproval.json()).resolves.toMatchObject({ version: 1, ok: false });
-
-      const unboundApproval = await postJson(`${baseUrl}/api/agent/tasks/${created.task.id}/approvals/fake_approval`, {
-        version: 1,
-        decision: 'approve',
-      });
-      expect(unboundApproval.status).toBe(400);
-      await expect(unboundApproval.json()).resolves.toMatchObject({
-        version: 1,
-        error: 'approval-binding-required',
-      });
-
-      const mismatchedApproval = await postJson(`${baseUrl}/api/agent/tasks/${created.task.id}/approvals/fake_approval`, {
-        version: 1,
-        decision: 'approve',
-        canonicalProposalHash: 'fixture-proposal-hash',
-        capabilityId: 'workspace.files.write',
-      });
-      expect(mismatchedApproval.status).toBe(409);
-      await expect(mismatchedApproval.json()).resolves.toMatchObject({
-        version: 1,
-        error: 'approval-binding-mismatch',
-      });
-
-      const checkpointResponse = await fetch(`${baseUrl}/api/agent/tasks/${created.task.id}`);
-      const checkpoint = await checkpointResponse.json() as { checkpoint: { task: { messages: unknown[] } } };
-      expect(checkpoint.checkpoint.task.messages).toHaveLength(1);
     } finally {
       await close(server);
       await app.stop();
     }
   });
 
-  it('keeps session and origin guard failures inside the versioned Agent API envelope', async () => {
-    const { app, server, baseUrl } = await setup(true, new ReplayAgentDecisionProvider([]), true);
-    try {
-      const unauthenticatedRead = await fetch(`${baseUrl}/api/agent/tasks`);
-      expect(unauthenticatedRead.status).toBe(401);
-      await expect(unauthenticatedRead.json()).resolves.toMatchObject({
-        version: 1,
-        ok: false,
-        error: 'invalid-api-token',
-      });
-
-      const untrustedMutation = await fetch(`${baseUrl}/api/agent/tasks`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Monarch-Session': 'agent-http-test-token',
-          Origin: 'https://attacker.invalid',
+  it('keeps Astra V3 approval decisions exact-bound and treats arm as validation only', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-agent-astra-approval-'));
+    roots.push(root);
+    const apiToken = 'agent-v3-approval-api-token';
+    const actor = {
+      source: 'api' as const,
+      id: 'sha256:' + createHmac('sha256', apiToken)
+        .update('monarch.astra-v3.http-actor.v1/api').digest('hex'),
+    };
+    const app = new MonarchApplication({
+      workspaceRoot: root,
+      enabledModules: ['workspace'],
+      enableLocalSystemRouter: false,
+    });
+    await app.start();
+    const originalPilot = app.astraProductPilot;
+    const taskId = 'astra_agent_http_fixture';
+    const approvalId = 'approval_http_fixture';
+    const proposalHash = 'a'.repeat(64);
+    const approvalDigest = `sha256:${'b'.repeat(64)}`;
+    const expiresAt = Date.now() + 60_000;
+    const checkpoint = {
+      turn: {
+        id: 'turn_astra_http_fixture',
+        status: 'waiting-input',
+        source: 'api',
+        request: { astra: { actor, goal: { kind: 'agent' } } },
+      },
+    };
+    const find = vi.spyOn(app.oscarTurnCoordinator, 'findTurnByTaskId').mockResolvedValue(checkpoint as never);
+    const submit = vi.spyOn(app.oscarTurnCoordinator, 'submitAstraInput').mockResolvedValue({
+      turn: { ...checkpoint.turn, status: 'running' },
+    } as never);
+    app.astraProductPilot = {
+      bridge: { find: () => ({
+        id: taskId,
+        modelJobs: 2,
+        capabilityJobs: 1,
+        approval: {
+          id: approvalId,
+          digest: approvalDigest,
+          proposalHash,
+          expiresAt,
+          capability: { id: 'coder.files.write' },
         },
-        body: JSON.stringify({ version: 1, request: 'This request must be blocked.' }),
-      });
-      expect(untrustedMutation.status).toBe(403);
-      await expect(untrustedMutation.json()).resolves.toMatchObject({
+      }) },
+    } as never;
+    const server = createMonarchHttpServer({
+      app,
+      publicDirectory: path.join(process.cwd(), 'src', 'ui', 'public'),
+      host: '127.0.0.1',
+      port: 4317,
+      apiToken,
+      desktopAttestationToken: 'agent-v3-approval-desktop-attestation',
+      requireApiToken: true,
+      astraOscarTurns: true,
+    });
+    const baseUrl = await listen(server);
+    const headers = { 'X-Monarch-Session': apiToken };
+    try {
+      const mismatch = await postJson(`${baseUrl}/api/agent/tasks/${taskId}/approvals/${approvalId}`, {
         version: 1,
-        ok: false,
-        error: 'untrusted-origin',
-      });
+        decision: 'approve',
+        grantScope: 'once',
+        canonicalProposalHash: 'c'.repeat(64),
+        capabilityId: 'coder.files.write',
+      }, headers);
+      expect(mismatch.status).toBe(409);
+      await expect(mismatch.json()).resolves.toMatchObject({ error: 'approval-binding-mismatch' });
+      expect(submit).not.toHaveBeenCalled();
 
-      const authenticatedRead = await fetch(`${baseUrl}/api/agent/tasks`, {
-        headers: { 'X-Monarch-Session': 'agent-http-test-token' },
+      const arm = await postJson(`${baseUrl}/api/agent/tasks/${taskId}/approvals/${approvalId}`, {
+        version: 1,
+        decision: 'arm',
+        grantScope: 'once',
+        canonicalProposalHash: proposalHash,
+        capabilityId: 'coder.files.write',
+      }, headers);
+      expect(arm.status).toBe(200);
+      await expect(arm.json()).resolves.toMatchObject({
+        astraVersion: 3,
+        arm: { exactOneShot: true, expiresAt: new Date(expiresAt).toISOString() },
       });
-      expect(authenticatedRead.status).toBe(200);
+      expect(submit).not.toHaveBeenCalled();
+
+      const approve = await postJson(`${baseUrl}/api/agent/tasks/${taskId}/approvals/${approvalId}`, {
+        version: 1,
+        decision: 'approve',
+        grantScope: 'once',
+        requestId: 'astra_http_approve',
+        canonicalProposalHash: proposalHash,
+        capabilityId: 'coder.files.write',
+      }, headers);
+      expect(approve.status).toBe(200);
+      expect(submit).toHaveBeenCalledOnce();
+      expect(submit).toHaveBeenCalledWith(checkpoint.turn.id, 'api', {
+        kind: 'decide',
+        decision: {
+          approvalId,
+          approvalDigest,
+          messageId: expect.stringMatching(/^astra_decision_[a-f0-9]{48}$/u),
+          decision: 'approve',
+        },
+      });
     } finally {
+      find.mockRestore();
+      submit.mockRestore();
+      app.astraProductPilot = originalPilot;
       await close(server);
       await app.stop();
     }
   });
 
-  it('keeps SSE open through the durable runner release tail', async () => {
-    const provider = new ReplayAgentDecisionProvider([
-      JSON.stringify({ kind: 'fail', code: 'fixture-stop', reason: 'Terminal SSE fixture.' }),
-    ]);
-    const { app, server, baseUrl } = await setup(true, provider);
+  it('lets the attested Desktop Coder surface decide its exact Astra V3 approval', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-coder-astra-approval-'));
+    roots.push(root);
+    const desktopAttestationToken = 'coder-astra-desktop-attestation';
+    const app = new MonarchApplication({ workspaceRoot: root, enabledModules: ['workspace'], enableLocalSystemRouter: false });
+    await app.start();
+    const originalPilot = app.astraProductPilot;
+    const taskId = 'astra_coder_http_fixture';
+    const approvalId = 'approval_coder_http_fixture';
+    const proposalHash = 'd'.repeat(64);
+    const approvalDigest = `sha256:${'e'.repeat(64)}`;
+    const coderActor = { source: 'coder' as const, id: 'sha256:' + createHmac('sha256', desktopAttestationToken)
+      .update('monarch.astra-v3.http-actor.v1/coder').digest('hex') };
+    const checkpoint = { turn: { id: 'turn_astra_coder_http_fixture', status: 'waiting-input', source: 'coder',
+      request: { astra: { actor: coderActor, goal: { kind: 'agent' } } } } };
+    const find = vi.spyOn(app.oscarTurnCoordinator, 'findTurnByTaskId').mockResolvedValue(checkpoint as never);
+    const submit = vi.spyOn(app.oscarTurnCoordinator, 'submitAstraInput').mockResolvedValue({
+      turn: { ...checkpoint.turn, status: 'running' },
+    } as never);
+    app.astraProductPilot = { bridge: { find: () => ({ id: taskId, modelJobs: 2, capabilityJobs: 1,
+      approval: { id: approvalId, digest: approvalDigest, proposalHash, expiresAt: Date.now() + 60_000,
+        capability: { id: 'coder.files.write' } } }) } } as never;
+    const server = createMonarchHttpServer({ app, publicDirectory: path.join(process.cwd(), 'src', 'ui', 'public'),
+      host: '127.0.0.1', port: 4317, desktopAttestationToken, requireApiToken: false, astraOscarTurns: true });
+    const baseUrl = await listen(server);
     try {
-      const createdResponse = await fetch(`${baseUrl}/api/agent/tasks`, {
+      const response = await fetch(`${baseUrl}/api/agent/tasks/${taskId}/approvals/${approvalId}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ version: 1, request: 'Exercise the terminal event tail.', autoStart: false }),
+        headers: { 'Content-Type': 'application/json', Origin: 'http://127.0.0.1:4317',
+          'X-Monarch-Desktop-Attestation': desktopAttestationToken },
+        body: JSON.stringify({ version: 1, decision: 'approve', grantScope: 'once', requestId: 'coder_approval_request',
+          canonicalProposalHash: proposalHash, capabilityId: 'coder.files.write' }),
       });
-      const created = await createdResponse.json() as { task: { id: string } };
-      const stream = await fetch(`${baseUrl}/api/agent/tasks/${created.task.id}/events`, {
-        headers: { Accept: 'text/event-stream' },
-      });
-      const streamBody = stream.text();
-      const resumed = await fetch(`${baseUrl}/api/agent/tasks/${created.task.id}/resume`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ version: 1 }),
-      });
-      expect(resumed.status).toBe(200);
-
-      const body = await streamBody;
-      expect(body).toContain('event: task.failed');
-      expect(body).toContain('event: runner.released');
-      expect(body.indexOf('event: runner.released')).toBeGreaterThan(body.indexOf('event: task.failed'));
-
-      const replay = await fetch(`${baseUrl}/api/agent/tasks/${created.task.id}/events?format=json`);
-      const replayBody = await replay.json() as { events: Array<{ sequence: number; type: string }> };
-      const terminalSequence = replayBody.events.find((event) => event.type === 'task.failed')!.sequence;
-      const releasedSequence = replayBody.events.find((event) => event.type === 'runner.released')!.sequence;
-
-      const terminalReconnect = await fetch(`${baseUrl}/api/agent/tasks/${created.task.id}/events`, {
-        headers: { Accept: 'text/event-stream', 'Last-Event-ID': String(terminalSequence) },
-      });
-      const terminalTail = await readWithin(terminalReconnect, 2_000);
-      expect(terminalTail).toContain('event: runner.released');
-
-      const settledReconnect = await fetch(`${baseUrl}/api/agent/tasks/${created.task.id}/events`, {
-        headers: { Accept: 'text/event-stream', 'Last-Event-ID': String(releasedSequence) },
-      });
-      await expect(readWithin(settledReconnect, 2_000)).resolves.toBe('');
+      expect(response.status).toBe(200);
+      expect(submit).toHaveBeenCalledWith(checkpoint.turn.id, 'coder', { kind: 'decide', decision: {
+        approvalId, approvalDigest, messageId: expect.stringMatching(/^astra_decision_[a-f0-9]{48}$/u), decision: 'approve',
+      } });
     } finally {
-      await close(server);
-      await app.stop();
+      find.mockRestore(); submit.mockRestore(); app.astraProductPilot = originalPilot;
+      await close(server); await app.stop();
     }
-  }, 30_000);
+  });
+
+  it('binds exact MAX/local models to V3 tasks and preserves MAX across repeat without fallback', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-agent-model-binding-'));
+    roots.push(root);
+    const desktopAttestationToken = 'agent-model-desktop-attestation';
+    const app = new MonarchApplication({ workspaceRoot: root, enabledModules: ['workspace'], enableLocalSystemRouter: false });
+    await app.start();
+    const originalPilot = app.astraProductPilot;
+    const actor = { source: 'desktop' as const, id: 'sha256:' + createHmac('sha256', desktopAttestationToken)
+      .update('monarch.astra-v3.http-actor.v1/desktop').digest('hex') };
+    const specification = { schemaVersion: 'monarch.astra-v3-agent-task-specification.v1' as const };
+    const turn = { id: 'turn_agent_model_binding', clientRequestId: 'agent_model_request',
+      conversationId: 'agent_model_conversation', inputMessageId: 'agent_model_message', status: 'running',
+      source: 'desktop', privacyMode: 'persistent', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      request: { text: 'Проверь подключённую почту.', attachmentIds: [], modifiers: { requestedModel: 'max-gpt-oss-120b' },
+        explicitAgentTask: specification, astra: { actor, goal: { kind: 'agent' } } } };
+    const submit = vi.spyOn(app.oscarTurnCoordinator, 'submit').mockResolvedValue({ turn } as never);
+    const getTurn = vi.spyOn(app.oscarTurnCoordinator, 'getTurn').mockResolvedValue({ turn, events: [] } as never);
+    app.astraProductPilot = { bridge: { find: () => ({ id: 'agent_task_model_binding', status: 'running',
+      modelJobs: 0, capabilityJobs: 0, nativeCompletionCertified: false }) } } as never;
+    const server = createMonarchHttpServer({ app, publicDirectory: path.join(process.cwd(), 'src', 'ui', 'public'),
+      host: '127.0.0.1', port: 4317, desktopAttestationToken, requireApiToken: false, astraOscarTurns: true });
+    const baseUrl = await listen(server);
+    const headers = { 'Content-Type': 'application/json', Origin: 'http://127.0.0.1:4317',
+      'X-Monarch-Desktop-Attestation': desktopAttestationToken };
+    try {
+      const created = await fetch(`${baseUrl}/api/agent/tasks`, { method: 'POST', headers, body: JSON.stringify({
+        version: 1, request: 'Проверь подключённую почту.', clientRequestId: 'agent_model_request',
+        conversationId: 'agent_model_conversation', source: 'desktop', model: 'max-gpt-oss-120b',
+      }) });
+      expect(created.status).toBe(202);
+      await expect(created.json()).resolves.toMatchObject({ astraVersion: 3, task: { model: 'max-gpt-oss-120b' } });
+      expect(submit).toHaveBeenCalledWith(expect.objectContaining({ modifiers: { requestedModel: 'max-gpt-oss-120b' },
+        authenticatedAgentActor: actor }));
+
+      const local = await fetch(`${baseUrl}/api/agent/tasks`, { method: 'POST', headers, body: JSON.stringify({
+        version: 1, request: 'Use the exact local agent model.', model: 'qwen3-coder-30b-a3b-instruct',
+      }) });
+      expect(local.status).toBe(202);
+      expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({
+        modifiers: { requestedModel: 'qwen3-coder-30b-a3b-instruct' }, authenticatedAgentActor: actor,
+      }));
+
+      const invalid = await fetch(`${baseUrl}/api/agent/tasks`, { method: 'POST', headers, body: JSON.stringify({
+        version: 1, request: 'Do not silently fall back.', model: 'invented-local-model',
+      }) });
+      expect(invalid.status).toBe(400);
+      await expect(invalid.json()).resolves.toMatchObject({ error: 'invalid-agent-model' });
+      expect(submit).toHaveBeenCalledTimes(2);
+
+      const repeated = await fetch(`${baseUrl}/api/agent/tasks/${turn.id}/repeat`, { method: 'POST', headers,
+        body: JSON.stringify({ version: 1, clientRequestId: 'agent_model_repeat' }) });
+      expect(repeated.status).toBe(202);
+      expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({
+        clientRequestId: 'agent_model_repeat', modifiers: { requestedModel: 'max-gpt-oss-120b' },
+        authenticatedAgentActor: actor,
+      }));
+    } finally {
+      submit.mockRestore(); getTurn.mockRestore(); app.astraProductPilot = originalPilot;
+      await close(server); await app.stop();
+    }
+  });
+
+  it('projects Astra partial and its bounded reason instead of outer Oscar succeeded', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-agent-partial-http-'));
+    roots.push(root);
+    const apiToken = 'agent-v3-partial-api-token';
+    const actor = { source: 'api' as const, id: 'sha256:' + createHmac('sha256', apiToken)
+      .update('monarch.astra-v3.http-actor.v1/api').digest('hex') };
+    const turn = { id: 'turn_agent_partial', clientRequestId: 'agent_partial_request',
+      conversationId: 'agent_partial_conversation', inputMessageId: 'agent_partial_message', status: 'succeeded',
+      source: 'api', privacyMode: 'persistent', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      request: { text: 'Inspect live integrations.', attachmentIds: [],
+        explicitAgentTask: { schemaVersion: 'monarch.astra-v3-agent-task-specification.v1' },
+        astra: { actor, goal: { kind: 'agent' } } } };
+    const app = new MonarchApplication({ workspaceRoot: root, enabledModules: ['workspace'], enableLocalSystemRouter: false });
+    await app.start();
+    const originalPilot = app.astraProductPilot;
+    const getTurn = vi.spyOn(app.oscarTurnCoordinator, 'getTurn').mockResolvedValue({ turn, events: [] } as never);
+    app.astraProductPilot = { bridge: { find: () => ({ id: 'agent_task_partial', status: 'partial',
+      modelJobs: 5, capabilityJobs: 1, nativeCompletionCertified: false,
+      failureReason: 'context-capacity-insufficient' }) } } as never;
+    const server = createMonarchHttpServer({ app, publicDirectory: path.join(process.cwd(), 'src', 'ui', 'public'),
+      host: '127.0.0.1', port: 4317, apiToken, requireApiToken: true, astraOscarTurns: true });
+    const baseUrl = await listen(server);
+    try {
+      const response = await fetch(`${baseUrl}/api/agent/tasks/${turn.id}`, {
+        headers: { 'X-Monarch-Session': apiToken },
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ astraVersion: 3, task: {
+        id: turn.id, status: 'partial', failureReason: 'context-capacity-insufficient',
+        nativeCompletionCertified: false, modelTurns: 5, capabilityCalls: 1,
+      } });
+    } finally {
+      getTurn.mockRestore(); app.astraProductPilot = originalPilot;
+      await close(server); await app.stop();
+    }
+  });
 });
 
-async function setup(
-  enabled: boolean,
-  provider = new ReplayAgentDecisionProvider([]),
-  requireApiToken = false,
-): Promise<{ app: MonarchApplication; server: Server; baseUrl: string }> {
+async function setupWithoutV3(): Promise<{ app: MonarchApplication; server: Server; baseUrl: string }> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-agent-http-'));
   roots.push(root);
   const app = new MonarchApplication({
     workspaceRoot: root,
     enabledModules: ['workspace'],
     enableLocalSystemRouter: false,
-    enableAgentRuntimeV2: enabled,
-    ...(enabled ? {
-      agentTaskStore: new InMemoryAgentTaskStore(),
-      agentDecisionProvider: provider,
-    } : {}),
   });
   await app.start();
   const server = createMonarchHttpServer({
@@ -616,7 +328,7 @@ async function setup(
     port: 4317,
     apiToken: 'agent-http-test-token',
     desktopAttestationToken: 'agent-http-desktop-test-token',
-    requireApiToken,
+    requireApiToken: false,
   });
   const baseUrl = await listen(server);
   return { app, server, baseUrl };
@@ -638,26 +350,10 @@ function close(server: Server): Promise<void> {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
-function postJson(url: string, body: unknown): Promise<Response> {
+function postJson(url: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
   return fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify(body),
-  });
-}
-
-function readWithin(response: Response, timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`SSE response did not settle within ${timeoutMs}ms.`)), timeoutMs);
-    void response.text().then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
   });
 }

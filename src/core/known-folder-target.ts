@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { buildWorkspaceFileArguments, extractWorkspaceObjectName } from './argument-builder';
-import { resolveKnownUserFolder } from './filesystem-policy';
+import { extractDriveRoot, resolveKnownUserFolder } from './filesystem-policy';
 
 export type MonarchWritableKnownFolder = 'desktop' | 'downloads';
 
@@ -17,6 +17,13 @@ export interface MonarchKnownFolderTarget {
   basename: string;
   root: string;
   path: string;
+}
+
+/** Drive-letter write destination when the request is not a Desktop/Downloads known-folder write. */
+export function extractDriveWriteDestination(textInput: string): string {
+  const text = String(textInput || '').trim();
+  if (!text || parseKnownFolderFileRequest(text)) return '';
+  return extractDriveRoot(text);
 }
 
 export function parseKnownFolderFileRequest(textInput: string): MonarchKnownFolderFileRequest | null {

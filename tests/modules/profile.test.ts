@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { MonarchKernel } from '../../src/core';
 import { ProfileModule } from '../../src/modules/profile';
 import { MonarchProfileStore } from '../../src/modules/profile/store';
+import { executeTypedCapability } from '../helpers/typed-capability';
 
 describe('Profile Module', () => {
   it('should persist profile across module restarts', async () => {
@@ -46,16 +47,16 @@ describe('Profile Module', () => {
       secondKernel.registerModule(new ProfileModule({ storePath: filePath }));
       await secondKernel.start();
 
-      const read = await secondKernel.submitIntent('show profile', 'smoke');
+      const read = await executeTypedCapability(secondKernel, 'profile.read');
       await secondKernel.stop();
       secondKernel = undefined;
 
       const profile = (
-        read.execution?.output as { profile?: { displayName?: unknown; styleRules?: unknown[]; preferences?: { tone?: unknown } } } | undefined
+        read.output as { profile?: { displayName?: unknown; styleRules?: unknown[]; preferences?: { tone?: unknown } } } | undefined
       )?.profile;
       
-      if (!read.execution?.ok) throw new Error(read.summary);
-      expect(read.execution?.ok).toBe(true);
+      if (!read.ok) throw new Error(read.summary);
+      expect(read.ok).toBe(true);
       expect(profile?.displayName).toBe('Monarch Smoke');
       expect(profile?.styleRules?.includes('be concise')).toBe(true);
       expect(profile?.preferences?.tone).toBe('direct');

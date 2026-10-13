@@ -1,11 +1,19 @@
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { buildMonarchLogo3D, exportToGLTF, exportToMTL, exportToOBJ, exportToSTL } from '../../scripts/export-logo-3d.mjs';
 
-const studioHtmlPath = new URL('../../src/ui/public/logo-3d.html', import.meta.url);
-const studioJsPath = new URL('../../src/ui/public/startup/monarch-3d-studio.js', import.meta.url);
+const removedStudioPaths = [
+  '../../src/ui/public/logo-3d.html',
+  '../../src/ui/public/logo-3d.css',
+  '../../src/ui/public/startup/monarch-3d-studio.js',
+  '../../src/ui/public/startup/monarch-logo-3d.js',
+  '../../src/ui/public/assets/brand/3d/monarch-logo.gltf',
+  '../../src/ui/public/assets/brand/3d/monarch-logo.mtl',
+  '../../src/ui/public/assets/brand/3d/monarch-logo.obj',
+  '../../src/ui/public/assets/brand/3d/monarch-logo.stl',
+].map(relative => new URL(relative, import.meta.url));
 
-describe('Monarch 3D Logo Generation and Studio', () => {
+describe('Monarch 3D logo generation', () => {
   it('generates a multi-part 3D geometry structure with accurate layers', () => {
     const parts = buildMonarchLogo3D();
     expect(parts.length).toBeGreaterThanOrEqual(10);
@@ -66,23 +74,9 @@ describe('Monarch 3D Logo Generation and Studio', () => {
     expect(gltf.buffers[0].uri).toMatch(/^data:application\/octet-stream;base64,/);
   });
 
-  it('includes complete 3D studio markup and controller', async () => {
-    const [html, js] = await Promise.all([
-      readFile(studioHtmlPath, 'utf8'),
-      readFile(studioJsPath, 'utf8'),
-    ]);
-
-    expect(html).toContain('id="canvas-container"');
-    expect(html).toContain('id="explode-slider"');
-    expect(html).toContain('id="btn-autorotate"');
-    expect(html).toContain('/assets/brand/3d/monarch-logo.obj');
-    expect(html).toContain('/assets/brand/3d/monarch-logo.stl');
-    expect(html).toContain('/assets/brand/3d/monarch-logo.gltf');
-
-    expect(js).toContain('export function init3DStudio');
-    expect(js).toContain('createInteractiveLogoGroup');
-    expect(js).toContain('setExplode');
-    expect(js).toContain('setPreset');
-    expect(js).toContain('setWireframe');
+  it('does not expose the removed Studio page, controller, or generated downloads', async () => {
+    await Promise.all(removedStudioPaths.map(async file => {
+      await expect(access(file)).rejects.toMatchObject({ code: 'ENOENT' });
+    }));
   });
 });

@@ -1,4 +1,6 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { setStoreProtectionForTesting } from '../../src/core/store-protection';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -41,6 +43,33 @@ function turn(overrides: Partial<OscarTurnV1> = {}): OscarTurnV1 {
   };
 }
 
+/** A damaged store is moved aside byte for byte, nothing in it is used, the
+ * move is reported, and the store accepts new work from an empty document. */
+async function expectQuarantined<R>(filePath: string, corruptBytes: string,
+  call: (store: LocalJsonOscarTurnStore) => Promise<R>, expected: R,
+  code: 'invalid-json' | 'invalid-document' = 'invalid-document') {
+  const reports: Array<Record<string, string | number>> = [];
+  const store = new LocalJsonOscarTurnStore(filePath, undefined, (entry) => { reports.push(entry); });
+  await expect(call(store)).resolves.toEqual(expected);
+  const names = await readdir(path.dirname(filePath));
+  const aside = names.filter((name) => name.startsWith('turns.v1.json.corrupt-'));
+  expect(aside).toHaveLength(1);
+  await expect(readFile(path.join(path.dirname(filePath), aside[0]!), 'utf8')).resolves.toBe(corruptBytes);
+  expect(names).not.toContain('turns.v1.json');
+  expect(reports).toEqual([{ diagnostic: 'oscar-turn-store-quarantined', code, file: aside[0] }]);
+  await expect(store.createTurn(turn())).resolves.toMatchObject({ turn: { id: 'turn_test_1' } });
+}
+
+function ordinaryAgentBinding(selectionId = 'selection_agent') {
+  return {
+    version: 'astra-oscar-isolated-v1' as const,
+    actor: { id: 'sha256:' + 'a'.repeat(64), source: 'desktop' as const },
+    selectionId,
+    goal: { kind: 'agent' as const, modelMode: 'local' as const },
+    admission: 'ordinary-agent-v1' as const,
+  };
+}
+
 describe.each([
   ['memory', () => new InMemoryOscarTurnStore()],
   ['json', async () => {
@@ -48,6 +77,20 @@ describe.each([
     return new LocalJsonOscarTurnStore(path.join(root, 'turns.v1.json'));
   }],
 ])('OscarTurnStore (%s)', (_name, createStore) => {
+  it('persists bounded append-only Astra recovery IDs and rejects malformed or reset budgets', async () => {
+    const store = await createStore(), base = turn();
+    const source: OscarTurnV1 = { ...base, request: { ...base.request, astra: { version: 'astra-oscar-isolated-v1',
+      actor: { id: 'sha256:' + 'a'.repeat(64), source: 'desktop' }, selectionId: 'selection', goal: { kind: 'observe', targets: ['selected'] } } },
+      astraRecoveryRequests: ['original'] };
+    const admitted = await store.createTurn(source);
+    for (const requests of [[], ['replacement'], ['original', 'original'], ['original', 'bad/id'],
+      Array.from({ length: 9 }, (_, index) => index ? 'request_' + index : 'original')]) {
+      await expect(store.saveTurn({ ...admitted.turn, astraRecoveryRequests: requests }, { expectedRevision: admitted.turn.revision })).rejects.toThrow();
+    }
+    const next = await store.saveTurn({ ...admitted.turn, astraRecoveryRequests: ['original', 'next'] }, { expectedRevision: admitted.turn.revision });
+    expect(next.turn.astraRecoveryRequests).toEqual(['original', 'next']);
+    await expect(store.createTurn(turn({ id: 'plain_turn', clientRequestId: 'plain_request', astraRecoveryRequests: ['forbidden'] }))).rejects.toThrow();
+  });
   it('creates one idempotent turn and rejects client request reuse with different content', async () => {
     const store = await createStore();
     const created = await store.createTurn(turn(), {
@@ -173,6 +216,144 @@ describe.each([
     await expect(store.saveTurn(routed.turn, {
       expectedRevision: created.turn.revision,
     })).rejects.toMatchObject({ code: 'turn-revision-conflict' });
+  });
+
+  it('atomically binds one semantic V3 agent during routing without making request identity mutable', async () => {
+    const store = await createStore();
+    const created = await store.createTurn(turn());
+    const routing = await store.saveTurn({ ...created.turn, status: 'routing' }, {
+      expectedRevision: created.turn.revision,
+    });
+    const binding = ordinaryAgentBinding();
+    const bound = await store.bindOrdinaryAgent(routing.turn.id, binding, {
+      expectedRevision: routing.turn.revision,
+    });
+
+    expect(bound.turn.request.astra).toEqual(binding);
+    expect(bound.turn.revision).toBe(routing.turn.revision + 1);
+    const replay = await store.bindOrdinaryAgent(bound.turn.id, binding, {
+      expectedRevision: bound.turn.revision,
+    });
+    expect(replay.replayed).toBe(true);
+    expect(replay.turn.revision).toBe(bound.turn.revision);
+
+    await expect(store.bindOrdinaryAgent(bound.turn.id, ordinaryAgentBinding('selection_replacement'), {
+      expectedRevision: bound.turn.revision,
+    })).rejects.toMatchObject({ code: 'immutable-turn-field' });
+    await expect(store.saveTurn({ ...bound.turn, request: { ...bound.turn.request, astra: undefined } }, {
+      expectedRevision: bound.turn.revision,
+    })).rejects.toMatchObject({ code: 'immutable-turn-field' });
+  });
+
+  it('rejects agent binding outside an eligible authenticated ordinary routing seam', async () => {
+    const store = await createStore();
+    const created = await store.createTurn(turn());
+    await expect(store.bindOrdinaryAgent(created.turn.id, ordinaryAgentBinding(), {
+      expectedRevision: created.turn.revision,
+    })).rejects.toMatchObject({ code: 'invalid-agent-binding' });
+
+    const routing = await store.saveTurn({ ...created.turn, status: 'routing' }, {
+      expectedRevision: created.turn.revision,
+    });
+    await expect(store.bindOrdinaryAgent(routing.turn.id, {
+      ...ordinaryAgentBinding(),
+      admission: 'ordinary-exact-read-v1',
+    }, { expectedRevision: routing.turn.revision })).rejects.toMatchObject({ code: 'invalid-agent-binding' });
+    await expect(store.bindOrdinaryAgent(routing.turn.id, {
+      ...ordinaryAgentBinding(),
+      actor: { ...ordinaryAgentBinding().actor, source: 'api' },
+    }, { expectedRevision: routing.turn.revision })).rejects.toThrow();
+  });
+
+  it.each(['voice', 'system'] as const)('binds a trusted local %s semantic Turn to V3', async source => {
+    const store = await createStore();
+    const created = await store.createTurn(turn({ id: `turn_${source}_v3`, clientRequestId: `client_${source}_v3`, source }));
+    const routing = await store.saveTurn({ ...created.turn, status: 'routing' }, { expectedRevision: created.turn.revision });
+    const binding = { ...ordinaryAgentBinding(`selection_${source}_v3`),
+      actor: { id: 'sha256:' + 'c'.repeat(64), source } };
+    expect((await store.bindOrdinaryAgent(routing.turn.id, binding, {
+      expectedRevision: routing.turn.revision,
+    })).turn.request.astra).toEqual(binding);
+  });
+
+  it('requires the exact durable API principal before binding an API semantic Turn', async () => {
+    const store = await createStore();
+    const actor = { id: 'sha256:' + 'd'.repeat(64), source: 'api' as const };
+    const created = await store.createTurn(turn({ id: 'turn_api_v3', clientRequestId: 'client_api_v3', source: 'api',
+      request: { text: 'Выполни API-задачу.', attachmentIds: [], modifiers: {}, authenticatedAgentActor: actor } }));
+    const routing = await store.saveTurn({ ...created.turn, status: 'routing' }, { expectedRevision: created.turn.revision });
+    const binding = { ...ordinaryAgentBinding('selection_api_v3'), actor };
+    const bound = await store.bindOrdinaryAgent(routing.turn.id, binding, {
+      expectedRevision: routing.turn.revision,
+    });
+    expect(bound.turn.request.astra).toEqual(binding);
+
+    await expect(store.saveTurn({ ...bound.turn,
+      request: { ...bound.turn.request, authenticatedAgentActor: { ...actor, id: 'sha256:' + 'e'.repeat(64) } } },
+    { expectedRevision: bound.turn.revision })).rejects.toMatchObject({ code: 'immutable-turn-field' });
+  });
+
+  it('binds Telegram only when its authenticated pairing envelope is durable', async () => {
+    const store = await createStore();
+    const telegramActor = { ownerUserId: 7, controlChatId: 7, botId: 123456, threadId: 11, pairingEpoch: 'test-epoch' };
+    const created = await store.createTurn(turn({ id: 'turn_telegram_v3', clientRequestId: 'client_telegram_v3', source: 'telegram',
+      request: { text: 'Выполни Telegram-задачу.', attachmentIds: [], modifiers: {}, telegramActor } }));
+    const routing = await store.saveTurn({ ...created.turn, status: 'routing' }, { expectedRevision: created.turn.revision });
+    const binding = { ...ordinaryAgentBinding('selection_telegram_v3'),
+      actor: { id: 'sha256:' + 'f'.repeat(64), source: 'telegram' as const } };
+    expect((await store.bindOrdinaryAgent(routing.turn.id, binding, {
+      expectedRevision: routing.turn.revision,
+    })).turn.request.astra).toEqual(binding);
+  });
+
+  it('binds a semantic V3 Coder Turn only with its durable project execution profile', async () => {
+    const store = await createStore();
+    const executionProfile = {
+      schemaVersion: 'monarch.agent-execution-profile.v1' as const,
+      kind: 'coder-project' as const,
+      projectId: 'coder_project_selected',
+      projectRoot: 'D:\\MonarchCoderTests\\selected',
+      permissionProfile: {
+        sandboxMode: 'workspace-write' as const,
+        approvalPolicy: 'on-request' as const,
+        autonomyMode: 'workspace-autonomous' as const,
+      },
+    };
+    const created = await store.createTurn(turn({
+      id: 'turn_coder_v3',
+      clientRequestId: 'client_coder_v3',
+      source: 'coder',
+      request: {
+        text: 'Измени выбранный проект и проверь результат.',
+        attachmentIds: [],
+        modifiers: { requestedModel: 'qwen3-coder-30b-a3b-instruct' },
+        executionProfile,
+      },
+    }));
+    const routing = await store.saveTurn({ ...created.turn, status: 'routing' }, {
+      expectedRevision: created.turn.revision,
+    });
+    const binding = {
+      ...ordinaryAgentBinding('selection_coder_v3'),
+      actor: { id: 'sha256:' + 'b'.repeat(64), source: 'coder' as const },
+    };
+    const bound = await store.bindOrdinaryAgent(routing.turn.id, binding, {
+      expectedRevision: routing.turn.revision,
+    });
+    expect(bound.turn.request).toMatchObject({ executionProfile, astra: binding });
+
+    const missing = await store.createTurn(turn({
+      id: 'turn_coder_without_profile',
+      clientRequestId: 'client_coder_without_profile',
+      source: 'coder',
+      request: { text: 'Не имеет права привязаться.', attachmentIds: [], modifiers: {} },
+    }));
+    const missingRouting = await store.saveTurn({ ...missing.turn, status: 'routing' }, {
+      expectedRevision: missing.turn.revision,
+    });
+    await expect(store.bindOrdinaryAgent(missingRouting.turn.id, binding, {
+      expectedRevision: missingRouting.turn.revision,
+    })).rejects.toMatchObject({ code: 'invalid-agent-binding' });
   });
 
   it('never revises a terminal Turn or appends terminal events twice', async () => {
@@ -496,7 +677,7 @@ describe('LocalJsonOscarTurnStore document', () => {
     ['non-string error', (item: Record<string, unknown>) => { item.lastError = 42; }],
     ['oversized error', (item: Record<string, unknown>) => { item.lastError = 'x'.repeat(2_001); }],
     ['missing supersession target', (item: Record<string, unknown>) => { item.supersededBy = 'outbox_missing'; }],
-  ])('fails closed on a persisted outbox with %s without rewriting the evidence', async (_case, corrupt) => {
+  ])('sets a persisted outbox with %s aside unchanged and never runs it', async (_case, corrupt) => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-oscar-outbox-invalid-'));
     const filePath = path.join(root, 'turns.v1.json');
     const store = new LocalJsonOscarTurnStore(filePath);
@@ -513,9 +694,7 @@ describe('LocalJsonOscarTurnStore document', () => {
     const corruptBytes = JSON.stringify(document, null, 2);
     await writeFile(filePath, corruptBytes, 'utf8');
 
-    await expect(new LocalJsonOscarTurnStore(filePath).listPendingOutbox())
-      .rejects.toMatchObject({ code: 'invalid-document' });
-    await expect(readFile(filePath, 'utf8')).resolves.toBe(corruptBytes);
+    await expectQuarantined(filePath, corruptBytes, (reopened) => reopened.listPendingOutbox(), []);
   });
 
   it.each([
@@ -523,7 +702,7 @@ describe('LocalJsonOscarTurnStore document', () => {
     ['invalid fingerprint', (document: MutableTurnStoreFixture) => { document.clientRequests.client_test_1.fingerprint = 'not-a-digest'; }],
     ['missing Turn target', (document: MutableTurnStoreFixture) => { document.clientRequests.client_test_1.turnId = 'turn_missing'; }],
     ['invalid receipt time', (document: MutableTurnStoreFixture) => { document.clientRequests.client_test_1.createdAt = 'eventually'; }],
-  ])('fails closed on a persisted idempotency map with %s and preserves its bytes', async (_case, corrupt) => {
+  ])('sets a persisted idempotency map with %s aside unchanged and trusts none of it', async (_case, corrupt) => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-oscar-receipt-invalid-'));
     const filePath = path.join(root, 'turns.v1.json');
     const store = new LocalJsonOscarTurnStore(filePath);
@@ -533,12 +712,19 @@ describe('LocalJsonOscarTurnStore document', () => {
     const corruptBytes = JSON.stringify(document, null, 2);
     await writeFile(filePath, corruptBytes, 'utf8');
 
-    await expect(new LocalJsonOscarTurnStore(filePath).getTurnByClientRequestId('client_test_1'))
-      .rejects.toMatchObject({ code: 'invalid-document' });
-    await expect(readFile(filePath, 'utf8')).resolves.toBe(corruptBytes);
+    await expectQuarantined(filePath, corruptBytes, (reopened) => reopened.getTurnByClientRequestId('client_test_1'), null);
   });
 
-  it('rejects a cross-linked outbox supersession cycle instead of hiding both operations', async () => {
+  it('sets an unreadable store aside, reports it, and accepts new Turns', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-oscar-store-torn-'));
+    const filePath = path.join(root, 'turns.v1.json');
+    await new LocalJsonOscarTurnStore(filePath).createTurn(turn());
+    const corruptBytes = (await readFile(filePath, 'utf8')).slice(0, 40);
+    await writeFile(filePath, corruptBytes, 'utf8');
+    await expectQuarantined(filePath, corruptBytes, (reopened) => reopened.listTurns(), [], 'invalid-json');
+  });
+
+  it('sets a cross-linked outbox supersession cycle aside instead of running either operation', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-oscar-outbox-cycle-'));
     const filePath = path.join(root, 'turns.v1.json');
     const store = new LocalJsonOscarTurnStore(filePath);
@@ -554,9 +740,7 @@ describe('LocalJsonOscarTurnStore document', () => {
     const corruptBytes = JSON.stringify(document, null, 2);
     await writeFile(filePath, corruptBytes, 'utf8');
 
-    await expect(new LocalJsonOscarTurnStore(filePath).listPendingOutbox())
-      .rejects.toMatchObject({ code: 'invalid-document' });
-    await expect(readFile(filePath, 'utf8')).resolves.toBe(corruptBytes);
+    await expectQuarantined(filePath, corruptBytes, (reopened) => reopened.listPendingOutbox(), []);
   });
 
   it('validates a long acyclic supersession chain iteratively and schedules only its live tail', async () => {
@@ -640,6 +824,158 @@ describe('LocalJsonOscarTurnStore document', () => {
       supersededBy: repair.outbox.id,
     });
     expect(normalized.outbox[historicalOutboxId].nextAttemptAt).toBeUndefined();
+  });
+});
+
+describe('LocalJsonOscarTurnStore settled-Turn archive', () => {
+  async function storeWithTurns(count: number, options: {
+    status?: OscarTurnV1['status']; retention?: { highWaterTurns: number; lowWaterTurns: number };
+  } = {}) {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'monarch-turn-archive-'));
+    const filePath = path.join(directory, 'turns.v1.json');
+    const store = new LocalJsonOscarTurnStore(filePath,
+      options.retention ?? { highWaterTurns: 4, lowWaterTurns: 2 });
+    const created: OscarTurnV1[] = [];
+    for (let index = 0; index < count; index++) {
+      const value = turn({
+        id: `turn_archive_${index}`,
+        clientRequestId: `client_archive_${index}`,
+        status: options.status ?? 'succeeded',
+        createdAt: `2026-08-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+        updatedAt: `2026-08-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+      });
+      await store.createTurn(value);
+      created.push(value);
+    }
+    return { store, filePath, created,
+      document: async () => JSON.parse(await readFile(filePath, 'utf8')) as {
+        turns: Record<string, unknown>; clientRequests: Record<string, unknown>; outbox: Record<string, unknown> } };
+  }
+
+  it('keeps settled Turns out of the document that every change rewrites', async () => {
+    // One JSON document rewritten per event means the cost of recording an
+    // event is the size of the whole history, which is what made submitting a
+    // greeting block for seconds on a real store.
+    const { store, document } = await storeWithTurns(6);
+
+    const live = await document();
+    // Compaction runs on the high-water mark and drains to the low-water one,
+    // so the document holds what was created after the last drain, never the
+    // whole history.
+    expect(Object.keys(live.turns)).toHaveLength(3);
+    // Nothing is lost: reads still answer for every Turn ever created.
+    expect((await store.listTurns()).map((entry) => entry.id)).toEqual([
+      'turn_archive_0', 'turn_archive_1', 'turn_archive_2',
+      'turn_archive_3', 'turn_archive_4', 'turn_archive_5',
+    ]);
+    expect(await store.getTurn('turn_archive_0')).toMatchObject({ turn: { id: 'turn_archive_0' } });
+    // An archived receipt still answers a replayed request, or the same
+    // clientRequestId would be admitted a second time as new work.
+    expect(await store.getTurnByClientRequestId('client_archive_0'))
+      .toMatchObject({ turn: { id: 'turn_archive_0' } });
+    expect(Object.keys(live.clientRequests)).toHaveLength(3);
+  });
+
+  it('never archives a Turn that is not settled', async () => {
+    const { store, document } = await storeWithTurns(6, { status: 'answering' });
+
+    expect(Object.keys((await document()).turns)).toHaveLength(6);
+    expect(await store.listTurns()).toHaveLength(6);
+  });
+
+  it('keeps a settled Turn whose message has not been delivered', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'monarch-turn-archive-pending-'));
+    const filePath = path.join(directory, 'turns.v1.json');
+    const store = new LocalJsonOscarTurnStore(filePath, { highWaterTurns: 4, lowWaterTurns: 2 });
+    for (let index = 0; index < 6; index++) {
+      const value = turn({ id: `turn_pending_${index}`, clientRequestId: `client_pending_${index}`,
+        status: 'succeeded', createdAt: `2026-08-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+        updatedAt: `2026-08-01T00:00:${String(index).padStart(2, '0')}.000Z` });
+      await store.createTurn(value, index === 0 ? { outbox: [{ id: 'outbox_pending_0',
+        turnId: value.id, kind: 'persist-message', payload: { conversationId: value.conversationId } }] } : {});
+    }
+
+    const document = JSON.parse(await readFile(filePath, 'utf8')) as { turns: Record<string, unknown> };
+    // Undelivered work is live work, whatever the Turn's own status says.
+    expect(Object.keys(document.turns)).toContain('turn_pending_0');
+    expect(await store.readOutboxItem('outbox_pending_0')).toMatchObject({ status: 'pending' });
+  });
+
+  it('sets a large archive aside under a dated name before appending', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'monarch-turn-archive-rotate-'));
+    const filePath = path.join(directory, 'turns.v1.json');
+    await writeFile(`${filePath}.archive.jsonl`, 'x'.repeat(2048), 'utf8');
+    const store = new LocalJsonOscarTurnStore(filePath, { highWaterTurns: 4, lowWaterTurns: 2, archiveRotateBytes: 1024 });
+    for (let index = 0; index < 6; index++) {
+      const value = turn({ id: `turn_rotate_${index}`, clientRequestId: `client_rotate_${index}`, status: 'succeeded',
+        createdAt: `2026-08-01T00:00:${String(index).padStart(2, '0')}.000Z`, updatedAt: `2026-08-01T00:00:${String(index).padStart(2, '0')}.000Z` });
+      await store.createTurn(value);
+    }
+    const names = await readdir(directory);
+    const rotated = names.filter(name => /^turns\.v1\.json\.archive\..+\.jsonl$/u.test(name));
+    expect(rotated).toHaveLength(1);
+    expect(await readFile(path.join(directory, rotated[0]!), 'utf8')).toBe('x'.repeat(2048));
+    expect(await store.listTurns()).toHaveLength(6);
+  });
+
+  it('refuses to report a deletion it cannot perform on the append-only archive', async () => {
+    const { store } = await storeWithTurns(6);
+
+    await expect(store.deleteTurn('turn_archive_0')).rejects.toMatchObject({ code: 'turn-archived' });
+    expect(await store.deleteTurn('turn_archive_absent')).toBe(false);
+  });
+
+  it('keeps the readable archive when one record is damaged, and a torn tail never swallows the next record', async () => {
+    // One bad line used to make every lookup of an old Turn fail with archive-corrupt.
+    const { filePath } = await storeWithTurns(6);
+    const archivePath = `${filePath}.archive.jsonl`;
+    const lines = (await readFile(archivePath, 'utf8')).trim().split('\n');
+    const archivedIds = lines.map((line) => (JSON.parse(line) as { turn: { id: string } }).turn.id);
+    expect(archivedIds.length).toBeGreaterThan(1);
+    // A damaged record in the middle and a record torn by a crash at the end.
+    await writeFile(archivePath, [lines[0], '{"turn":', ...lines.slice(1)].join('\n') + '\n{"turn":{"id"', 'utf8');
+
+    const reports: Array<Record<string, string | number>> = [];
+    const store = new LocalJsonOscarTurnStore(filePath, { highWaterTurns: 4, lowWaterTurns: 2 }, (entry) => { reports.push(entry); });
+    for (const id of archivedIds) expect(await store.getTurn(id)).toMatchObject({ turn: { id } });
+    expect(reports).toEqual([{ diagnostic: 'oscar-turn-archive-records-skipped', count: 1 }]);
+
+    // More Turns archive more records; the first new one starts on its own line.
+    for (let index = 6; index < 9; index++) {
+      await store.createTurn(turn({ id: `turn_archive_${index}`, clientRequestId: `client_archive_${index}`,
+        status: 'succeeded', createdAt: `2026-08-01T00:00:0${index}.000Z`, updatedAt: `2026-08-01T00:00:0${index}.000Z` }));
+    }
+    const after = (await readFile(archivePath, 'utf8')).trim().split('\n');
+    const readable = after.flatMap((line) => { try { return [(JSON.parse(line) as { turn: { id: string } }).turn.id]; } catch { return []; } });
+    expect(readable.length).toBe(after.length - 2);
+    for (const id of readable) expect(await store.getTurn(id)).toMatchObject({ turn: { id } });
+  });
+
+  it('seals the document and every archive line under storage protection, replacing plain lines', async () => {
+    const { filePath } = await storeWithTurns(6);
+    const archivePath = `${filePath}.archive.jsonl`;
+    const archivedId = JSON.parse((await readFile(archivePath, 'utf8')).trim().split('\n')[0]!).turn.id as string;
+    setStoreProtectionForTesting({ mode: 'sealed', key: randomBytes(32) });
+    try {
+      const store = new LocalJsonOscarTurnStore(filePath, { highWaterTurns: 4, lowWaterTurns: 2 });
+      expect(await store.getTurn(archivedId)).toMatchObject({ turn: { id: archivedId } });
+      for (let index = 6; index < 9; index++) {
+        await store.createTurn(turn({ id: `turn_archive_${index}`, clientRequestId: `client_archive_${index}`,
+          status: 'succeeded', createdAt: `2026-08-01T00:00:0${index}.000Z`, updatedAt: `2026-08-01T00:00:0${index}.000Z` }));
+      }
+      const plainLeft = async () => {
+        const files = await readdir(path.dirname(filePath));
+        const texts = await Promise.all(files.map(name => readFile(path.join(path.dirname(filePath), name), 'utf8')));
+        return texts.some(text => text.includes('turn_archive_'));
+      };
+      for (let attempt = 0; attempt < 100 && await plainLeft(); attempt++) await new Promise(resolve => setTimeout(resolve, 20));
+      expect(await plainLeft()).toBe(false);
+      for (const line of (await readFile(archivePath, 'utf8')).trim().split('\n')) expect(line.startsWith('MSF1:')).toBe(true);
+      expect(await store.getTurn(archivedId)).toMatchObject({ turn: { id: archivedId } });
+      expect(await store.getTurn('turn_archive_8')).toMatchObject({ turn: { id: 'turn_archive_8' } });
+    } finally {
+      setStoreProtectionForTesting(undefined);
+    }
   });
 });
 

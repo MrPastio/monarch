@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { findAgentContextSecretPath } from '../../agent/context-compiler';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { findAgentContextSecretPath } from '../../agent-protocol';
 import type { AgentSkillMetadata } from './agent-skills';
 import { AgentSkillRegistry, getAgentSkillRegistry } from './agent-skills';
+import { renameWithWindowsRetry } from '../../core/durable-json-file';
 
 const MAX_PURPOSE_LENGTH = 2_000;
 const MAX_INSTRUCTIONS_LENGTH = 8_000;
@@ -342,7 +343,7 @@ export class AgentSkillAuthoringService {
       await writeFile(path.join(staging, 'SKILL.md'), skillMarkdown, { encoding: 'utf8', flag: 'wx' });
       await writeFile(path.join(staging, 'agents', 'openai.yaml'), openAiYaml, { encoding: 'utf8', flag: 'wx' });
       throwIfAborted(options.signal);
-      await rename(staging, target);
+      await renameWithWindowsRetry(staging, target);
       committed = true;
     } catch (error) {
       if (!committed) await rm(staging, { recursive: true, force: true }).catch(() => undefined);

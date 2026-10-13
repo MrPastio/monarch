@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
+
+from . import secure_db
 import threading
 import uuid
 from collections import OrderedDict, Counter
@@ -16,8 +19,10 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .memory import make_fts_query
+from .memory import make_fts_query, purge_orphan_derived_memory
 from .semantic_memory import SemanticMemoryReranker
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -59,13 +64,12 @@ class MemoryV4Service:
         self._init_db()
 
     @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
-        con = sqlite3.connect(self.db_path, timeout=10.0)
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA foreign_keys=ON")
-        con.execute("PRAGMA secure_delete=ON")
-        con.execute("PRAGMA synchronous=NORMAL")
+    def _connection(self, *, timeout: float = 10.0) -> Iterator[sqlite3.Connection]:
+        con = secure_db.connect(self.db_path, timeout=timeout)
         try:
+            con.execute("PRAGMA foreign_keys=ON")
+            con.execute("PRAGMA secure_delete=ON")
+            con.execute("PRAGMA synchronous=NORMAL")
             yield con
             con.commit()
         except Exception:
@@ -77,6 +81,8 @@ class MemoryV4Service:
     def _init_db(self) -> None:
         with self._connection() as con:
             con.execute("PRAGMA journal_mode=WAL")
+            con.execute("CREATE TABLE IF NOT EXISTS memory_v4_identity (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), corpus_id TEXT NOT NULL)")
+            con.execute("INSERT OR IGNORE INTO memory_v4_identity(singleton, corpus_id) VALUES (1, ?)", (uuid.uuid4().hex,))
             con.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS memory_episodes (
@@ -196,6 +202,14 @@ class MemoryV4Service:
                 "INSERT INTO memory_capsules_fts(capsule_id, scope_type, scope_id, topic, text) "
                 "SELECT id, scope_type, scope_id, topic, summary FROM memory_capsules"
             )
+            # Builds before this one kept episodes of deleted chats forever.
+            # Startup is the migration point: retention now follows the chat.
+            purged = purge_orphan_derived_memory(con)
+        if purged["episodes"] or purged["capsules"]:
+            LOGGER.info(
+                "Removed derived memory left by deleted conversations: %d episodes, %d capsules",
+                purged["episodes"], purged["capsules"],
+            )
 
     def start_background(self) -> None:
         if self._background_started:
@@ -207,6 +221,145 @@ class MemoryV4Service:
     def close(self) -> None:
         self.reranker.close()
         self._background.shutdown(wait=False, cancel_futures=True)
+
+    def list_derived_memory(self, scope: dict[str, str | None]) -> dict[str, Any]:
+        """Everything Memory V4 remembered about a scope without being asked.
+
+        Explicit memories already have full CRUD through /api/memory/items;
+        this is the missing counterpart for the automatic side (episodes and
+        the capsules they compact into), so an owner can see and remove what
+        was captured from their conversations instead of only being told
+        "Из памяти" with no way to look at or delete the source.
+        """
+        scope_type, scope_id = normalize_scope(scope)
+        with self._connection() as con:
+            episode_rows = con.execute(
+                "SELECT id, conversation_id, turn_id, source, title, summary, created_at "
+                "FROM memory_episodes WHERE scope_type = ? AND scope_id = ? AND state = 'hot' "
+                "ORDER BY created_at DESC",
+                (scope_type, scope_id),
+            ).fetchall()
+            capsule_rows = con.execute(
+                "SELECT id, topic, summary, children_json, updated_at "
+                "FROM memory_capsules WHERE scope_type = ? AND scope_id = ? "
+                "ORDER BY updated_at DESC",
+                (scope_type, scope_id),
+            ).fetchall()
+        episodes = [
+            {
+                "id": row["id"],
+                "conversationId": row["conversation_id"],
+                "turnId": row["turn_id"],
+                "source": row["source"],
+                "title": row["title"],
+                "summary": row["summary"],
+                "createdAt": row["created_at"],
+            }
+            for row in episode_rows
+        ]
+        capsules = [
+            {
+                "id": row["id"],
+                "topic": row["topic"],
+                "summary": row["summary"],
+                "childCount": len(json.loads(row["children_json"])),
+                "updatedAt": row["updated_at"],
+            }
+            for row in capsule_rows
+        ]
+        return {"scope": render_scope(scope_type, scope_id), "episodes": episodes, "capsules": capsules}
+
+    def forget_episode(self, episode_id: str, scope: dict[str, str | None]) -> bool:
+        """Remove a single automatically captured episode.
+
+        A capsule that already compacted this episode keeps its own summary
+        text; that summary is deleted as a whole once none of its children
+        remain, the same rule startup and conversation deletion apply, so a
+        one-off forget here cannot leave the same content readable through
+        the capsule it was folded into.
+        """
+        scope_type, scope_id = normalize_scope(scope)
+        with self._connection() as con:
+            cursor = con.execute(
+                "DELETE FROM memory_episodes WHERE id = ? AND scope_type = ? AND scope_id = ?",
+                (episode_id, scope_type, scope_id),
+            )
+            removed = cursor.rowcount > 0
+            if removed:
+                con.execute("DELETE FROM memory_episodes_fts WHERE episode_id = ?", (episode_id,))
+                self._drop_empty_capsules(con, scope_type, scope_id)
+                self._bump_revision(con, scope_type, scope_id)
+        if removed:
+            self._clear_cache()
+        return removed
+
+    def forget_capsule(self, capsule_id: str, scope: dict[str, str | None]) -> bool:
+        scope_type, scope_id = normalize_scope(scope)
+        with self._connection() as con:
+            cursor = con.execute(
+                "DELETE FROM memory_capsules WHERE id = ? AND scope_type = ? AND scope_id = ?",
+                (capsule_id, scope_type, scope_id),
+            )
+            removed = cursor.rowcount > 0
+            if removed:
+                con.execute("DELETE FROM memory_capsules_fts WHERE capsule_id = ?", (capsule_id,))
+                self._bump_revision(con, scope_type, scope_id)
+        if removed:
+            self._clear_cache()
+        return removed
+
+    def forget_all_derived_memory(self, scope: dict[str, str | None]) -> dict[str, int]:
+        """"Забыть всё автоматическое" for one scope: every episode and capsule."""
+        scope_type, scope_id = normalize_scope(scope)
+        with self._connection() as con:
+            episode_ids = [
+                row["id"] for row in con.execute(
+                    "SELECT id FROM memory_episodes WHERE scope_type = ? AND scope_id = ?",
+                    (scope_type, scope_id),
+                ).fetchall()
+            ]
+            capsule_ids = [
+                row["id"] for row in con.execute(
+                    "SELECT id FROM memory_capsules WHERE scope_type = ? AND scope_id = ?",
+                    (scope_type, scope_id),
+                ).fetchall()
+            ]
+            con.execute("DELETE FROM memory_episodes WHERE scope_type = ? AND scope_id = ?", (scope_type, scope_id))
+            con.execute("DELETE FROM memory_capsules WHERE scope_type = ? AND scope_id = ?", (scope_type, scope_id))
+            if episode_ids:
+                placeholders = ",".join("?" for _ in episode_ids)
+                con.execute(f"DELETE FROM memory_episodes_fts WHERE episode_id IN ({placeholders})", episode_ids)
+            if capsule_ids:
+                placeholders = ",".join("?" for _ in capsule_ids)
+                con.execute(f"DELETE FROM memory_capsules_fts WHERE capsule_id IN ({placeholders})", capsule_ids)
+            if episode_ids or capsule_ids:
+                self._bump_revision(con, scope_type, scope_id)
+        if episode_ids or capsule_ids:
+            self._clear_cache()
+        return {"episodes": len(episode_ids), "capsules": len(capsule_ids)}
+
+    def _drop_empty_capsules(self, con: sqlite3.Connection, scope_type: str, scope_id: str) -> None:
+        stale = con.execute(
+            "SELECT c.id AS id FROM memory_capsules c, json_each(c.children_json) child "
+            "WHERE c.scope_type = ? AND c.scope_id = ? "
+            "AND NOT EXISTS (SELECT 1 FROM memory_episodes e WHERE e.id = child.value) "
+            "GROUP BY c.id",
+            (scope_type, scope_id),
+        ).fetchall()
+        if not stale:
+            return
+        identifiers = [row["id"] for row in stale]
+        placeholders = ",".join("?" for _ in identifiers)
+        con.execute(f"DELETE FROM memory_capsules WHERE id IN ({placeholders})", identifiers)
+        con.execute(f"DELETE FROM memory_capsules_fts WHERE capsule_id IN ({placeholders})", identifiers)
+
+    def invalidate_cache(self) -> None:
+        """Drop retrieved snapshots held in memory after a deletion.
+
+        A bumped scope revision already makes stale entries unreachable; this
+        also stops the deleted text from sitting in this process' cache.
+        """
+        self._clear_cache()
 
     def index_turn(self, *, conversation_id: str, turn_id: str, source: str) -> dict[str, Any]:
         if source != "desktop":
@@ -221,7 +374,7 @@ class MemoryV4Service:
             assistant = next((row for row in reversed(messages) if row["role"] == "assistant"), None)
             if not user_text or not assistant:
                 return {"ok": False, "indexed": False, "reason": "turn-messages-incomplete"}
-            if assistant["outcome"] not in {"answered", "answered:source-grounded"} or assistant["task_id"]:
+            if not episode_outcome_indexable(assistant["outcome"], assistant["task_id"]):
                 return {"ok": False, "indexed": False, "reason": "turn-outcome-excluded"}
             conversation = con.execute(
                 "SELECT title FROM conversations WHERE id = ?",
@@ -270,27 +423,44 @@ class MemoryV4Service:
                 created_at=utc_now(),
             )
 
-    def retrieve(self, query: str, scope: dict[str, str | None]) -> dict[str, Any]:
+    def retrieve(
+        self,
+        query: str,
+        scope: dict[str, str | None],
+        *,
+        exclude_conversation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """`exclude_conversation_id` names the chat being answered: its turns are
+        already in the prompt as history, so recalling them again only repeats
+        Oscar's own earlier replies back to it as "a past chat" — a refusal
+        recalled that way was answered with the same refusal, turn after turn."""
         query = normalize_query(query)
         scope_type, scope_id = normalize_scope(scope)
-        cross_chat_enabled = self._cross_chat_enabled(scope_type, scope_id)
+        stamp = self._retrieval_stamp(scope_type, scope_id)
+        revision, cross_chat_enabled, _next_expiry, _identity = stamp
         if not query:
-            return empty_context(
+            result = empty_context(
                 scope_type,
                 scope_id,
                 "empty-query",
                 self.prompt_budget_chars,
                 cross_chat_enabled,
             )
-        revision = self._index_revision(scope_type, scope_id)
+            return {**result, **self._validity(scope_type, scope_id, stamp)}
         cache_key = hashlib.sha256(
-            f"{scope_type}\0{scope_id}\0{revision}\0{query.casefold()}".encode("utf-8")
+            f"{scope_type}\0{scope_id}\0{canonical_json(stamp)}\0{exclude_conversation_id or ''}\0{query.casefold()}".encode("utf-8")
         ).hexdigest()
         cached = self._cache_get(cache_key)
         if cached is not None:
-            return {**cached, "cache": "hit"}
+            if self._retrieval_stamp(scope_type, scope_id) == stamp:
+                return {**cached, "cache": "hit"}
+            return self._changed_context(scope_type, scope_id)
 
-        candidates = self._candidates(query, scope_type, scope_id, cross_chat_enabled)
+        candidates = [
+            candidate for candidate in self._candidates(query, scope_type, scope_id, cross_chat_enabled)
+            if not (exclude_conversation_id and candidate.kind == "episode"
+                    and candidate.conversation_id == exclude_conversation_id)
+        ]
         reranked = self.reranker.rerank(query, [candidate.text for candidate in candidates])
         if reranked.scores is not None and len(reranked.scores) == len(candidates):
             best_semantic = max(reranked.scores, default=0.0)
@@ -303,13 +473,20 @@ class MemoryV4Service:
                 candidate for candidate in candidates
                 if (candidate.semantic_score or 0.0) >= semantic_floor
                 or candidate.pinned
+                or candidate.kind == "explicit"
                 or candidate.lexical_score >= 0.45
             ]
+            retrieval_reason = "reranker-ready"
         else:
             for candidate in candidates:
                 candidate.final_score = candidate.lexical_score
-                candidate.reason = "pinned" if candidate.pinned and candidate.lexical_score < 0.45 else "fts"
-            relevant = [candidate for candidate in candidates if candidate.lexical_score > 0.0]
+                candidate.reason = "pinned" if candidate.pinned and candidate.lexical_score < 0.45 \
+                    else "owner-approved" if candidate.kind == "explicit" and candidate.lexical_score < 0.45 else "fts"
+            relevant = [candidate for candidate in candidates
+                        if candidate.pinned or candidate.kind == "explicit" or candidate.lexical_score >= 0.45]
+            retrieval_reason = "lexical-floor-fallback"
+        reranker_status = "reranker-ready" if reranked.scores is not None \
+            else "reranker-timeout" if reranked.timed_out else "reranker-unavailable"
         relevant.sort(key=lambda item: (item.final_score, item.created_at), reverse=True)
         context = self._bounded_context(
             relevant,
@@ -319,9 +496,52 @@ class MemoryV4Service:
             reranked.engine,
             reranked.timed_out,
             cross_chat_enabled,
+            retrieval_reason,
+            reranker_status,
         )
+        # Reranking may run concurrently with deletion, a consent change, or an
+        # item's expiry. Never publish a result prepared under a stale scope.
+        if self._retrieval_stamp(scope_type, scope_id) != stamp:
+            return self._changed_context(scope_type, scope_id)
+        context.update(self._validity(scope_type, scope_id, stamp))
         self._cache_put(cache_key, context)
         return context
+
+    def read_context_validity(self, scope: dict[str, str | None], *, lock_timeout: float = 10.0) -> dict[str, Any]:
+        """Content-free live check. No search, reranking or background model work."""
+        scope_type, scope_id = normalize_scope(scope)
+        if not 0 < lock_timeout <= 10.0:
+            raise ValueError("memory-validity-lock-timeout")
+        return self._validity(scope_type, scope_id, self._retrieval_stamp(scope_type, scope_id, lock_timeout=lock_timeout))
+
+    @staticmethod
+    def _validity(scope_type: str, scope_id: str, stamp: tuple[str, bool, float | None, str]) -> dict[str, Any]:
+        token = hashlib.sha256(canonical_json([scope_type, scope_id, *stamp]).encode("utf-8")).hexdigest()
+        return {"schemaVersion": 1, "scope": render_scope(scope_type, scope_id), "revision": stamp[0],
+                "crossChatEnabled": stamp[1], "validityToken": "sha256:" + token}
+
+    def _retrieval_stamp(self, scope_type: str, scope_id: str, *, lock_timeout: float = 10.0) -> tuple[str, bool, float | None, str]:
+        # One SQLite statement gives one read snapshot for revision, consent and
+        # the next expiry. Time passing invalidates cache keys without a write.
+        with self._connection(timeout=lock_timeout) as con:
+            row = con.execute(
+                "SELECT (SELECT corpus_id FROM memory_v4_identity WHERE singleton = 1) AS corpus_identity, "
+                "COALESCE((SELECT revision FROM settings_scope_revisions WHERE kind = 'memory' AND scope_type = ? AND scope_id = ?), 0) AS explicit_revision, "
+                "COALESCE((SELECT revision FROM memory_v4_scope_revisions WHERE scope_type = ? AND scope_id = ?), 0) AS episode_revision, "
+                "COALESCE((SELECT cross_chat_enabled FROM memory_scope_preferences WHERE scope_type = ? AND scope_id = ?), 1) AS cross_chat_enabled, "
+                "(SELECT MIN(julianday(expires_at)) FROM memory_items WHERE scope_type = ? AND scope_id = ? "
+                "AND deleted_at IS NULL AND enabled = 1 AND closed_at IS NULL AND julianday(expires_at) > julianday(?)) AS next_expiry",
+                (scope_type, scope_id) * 4 + (utc_now(),),
+            ).fetchone()
+        if not row["corpus_identity"]:
+            raise ValueError("memory-corpus-identity-missing")
+        return (f"{row['explicit_revision']}:{row['episode_revision']}", bool(row["cross_chat_enabled"]), row["next_expiry"], row["corpus_identity"])
+
+    def _changed_context(self, scope_type: str, scope_id: str) -> dict[str, Any]:
+        stamp = self._retrieval_stamp(scope_type, scope_id)
+        result = empty_context(scope_type, scope_id, "scope-changed", self.prompt_budget_chars, stamp[1])
+        result.update(self._validity(scope_type, scope_id, stamp))
+        return result
 
     def _index_episode_in_connection(
         self,
@@ -340,6 +560,8 @@ class MemoryV4Service:
     ) -> dict[str, Any]:
         if re.match(r"^(?:запомни|сохрани\s+в\s+память|remember\b)", user_text.strip(), re.I):
             return {"ok": True, "indexed": False, "reason": "explicit-memory-command"}
+        if not episode_has_content(user_text):
+            return {"ok": True, "indexed": False, "reason": "request-without-content"}
         existing = con.execute(
             "SELECT id FROM memory_episodes WHERE source = ? AND turn_id = ?",
             (source, turn_id),
@@ -393,7 +615,7 @@ class MemoryV4Service:
                     self._append_capsule_fts(con, candidates, fts_query, scope_type, scope_id)
             recent_items = con.execute(
                 "SELECT * FROM memory_items WHERE scope_type = ? AND scope_id = ? AND deleted_at IS NULL "
-                "AND enabled = 1 AND closed_at IS NULL AND (expires_at IS NULL OR expires_at > ?) "
+                "AND enabled = 1 AND closed_at IS NULL AND (expires_at IS NULL OR julianday(expires_at) > julianday(?)) "
                 "ORDER BY pinned DESC, updated_at DESC LIMIT ?",
                 (scope_type, scope_id, utc_now(), self.CANDIDATE_LIMIT),
             ).fetchall()
@@ -434,9 +656,10 @@ class MemoryV4Service:
         rows = con.execute(
             "SELECT m.*, bm25(memory_items_fts) AS rank FROM memory_items_fts f "
             "JOIN memory_items m ON m.id = f.item_id WHERE memory_items_fts MATCH ? "
-            "AND m.scope_type = ? AND m.scope_id = ? AND m.deleted_at IS NULL AND m.enabled = 1 "
+            "AND m.scope_type = ? AND m.scope_id = ? AND m.deleted_at IS NULL AND m.enabled = 1 AND m.closed_at IS NULL "
+            "AND (m.expires_at IS NULL OR julianday(m.expires_at) > julianday(?)) "
             "ORDER BY rank LIMIT ?",
-            (query, scope_type, scope_id, self.CANDIDATE_LIMIT),
+            (query, scope_type, scope_id, utc_now(), self.CANDIDATE_LIMIT),
         ).fetchall()
         for index, row in enumerate(rows):
             candidates[("explicit", row["id"])] = explicit_candidate(row, rank_score(index))
@@ -476,6 +699,8 @@ class MemoryV4Service:
         engine: str,
         timed_out: bool,
         cross_chat_enabled: bool,
+        retrieval_reason: str,
+        reranker_status: str,
     ) -> dict[str, Any]:
         explicit: list[dict[str, Any]] = []
         episodes: list[dict[str, Any]] = []
@@ -517,6 +742,8 @@ class MemoryV4Service:
             "usedChars": used,
             "engine": engine,
             "semanticTimedOut": timed_out,
+            "retrievalReason": retrieval_reason,
+            "rerankerStatus": reranker_status,
             "crossChatEnabled": cross_chat_enabled,
             "cache": "miss",
         }
@@ -613,7 +840,7 @@ class MemoryV4Service:
                     ).fetchall()
                     user_text = next((item["content"] for item in messages if item["role"] == "user"), "")
                     assistant = next((item for item in reversed(messages) if item["role"] == "assistant"), None)
-                    if user_text and assistant:
+                    if user_text and assistant and episode_outcome_indexable(assistant["outcome"], assistant["task_id"]):
                         conversation = con.execute(
                             "SELECT title FROM conversations WHERE id = ?", (row["conversation_id"],)
                         ).fetchone()
@@ -716,6 +943,23 @@ def capsule_candidate(row: sqlite3.Row, lexical: float) -> RetrievalCandidate:
 
 def rank_score(index: int) -> float:
     return max(0.35, 1.0 - index * 0.035)
+
+
+MIN_EPISODE_REQUEST_CHARS = 4
+
+
+def episode_outcome_indexable(outcome: Any, task_id: Any) -> bool:
+    """Only plain answers become episodes: agent tasks, failures and blocked
+    turns are not something the owner said or learned. The live path and the
+    backfill of older chats apply the same rule."""
+    return outcome in {"answered", "answered:source-grounded"} and not task_id
+
+
+def episode_has_content(user_text: str) -> bool:
+    """A request like "1" or "ок" carries nothing to recall later: it would only
+    crowd real episodes out of retrieval. Counts letters and digits, so the
+    rule does not depend on any language or phrase list."""
+    return sum(1 for char in user_text if char.isalnum()) >= MIN_EPISODE_REQUEST_CHARS
 
 
 def episode_summary(user_text: str, assistant_text: str) -> str:

@@ -1,4 +1,4 @@
-import { rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { createMonarchHttpServer, MonarchApplication } from './app';
@@ -11,13 +11,35 @@ import {
   selectModelRouteForText,
   type MonarchExecutionRequest,
   type MonarchExecutionResult,
-  type MonarchIntent,
   type MonarchModule,
   type MonarchModulePackage,
-  type MonarchRouteDecision,
 } from './core';
 import { MemoryModule } from './modules/memory';
 import { OscarClient } from './modules/oscar/client';
+
+let smokeExecutionSequence = 0;
+
+async function executeSmokeCapability(
+  kernel: MonarchKernel,
+  capabilityId: string,
+  input: Record<string, unknown> = {},
+  confirmed = false,
+): Promise<MonarchExecutionResult> {
+  const capability = kernel.getCapability(capabilityId);
+  if (!capability) throw new Error(`Smoke capability is unavailable: ${capabilityId}`);
+  smokeExecutionSequence += 1;
+  return kernel.execute({
+    id: `exec_smoke_typed_${smokeExecutionSequence}`,
+    intentId: `intent_smoke_typed_${smokeExecutionSequence}`,
+    moduleId: capability.moduleId,
+    capabilityId,
+    input,
+    createdAt: new Date(0).toISOString(),
+    requestedBy: 'smoke',
+    source: 'smoke',
+    confirmed,
+  });
+}
 
 
 async function main(): Promise<void> {
@@ -29,11 +51,24 @@ async function main(): Promise<void> {
     `smoke-default-memory-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
   );
 
+  // Applications started by the smoke must not reconcile the owner's source
+  // turns, outbox or settings: give them their own data and state roots.
+  const isolationParent = path.join(process.cwd(), 'runtime');
+  await mkdir(isolationParent, { recursive: true });
+  const isolationRoot = await mkdtemp(path.join(isolationParent, 'smoke-isolation-'));
+  const previousRoots = { MONARCH_DATA_ROOT: process.env.MONARCH_DATA_ROOT, MONARCH_STATE_ROOT: process.env.MONARCH_STATE_ROOT };
+  process.env.MONARCH_DATA_ROOT = path.join(isolationRoot, 'data');
+  process.env.MONARCH_STATE_ROOT = path.join(isolationRoot, 'state');
   process.env.MONARCH_MEMORY_STORE_PATH = smokeMemoryPath;
   process.env.MONARCH_SMOKE_TEST = '1';
   try {
     await runSmokeSuite();
   } finally {
+    for (const [key, value] of Object.entries(previousRoots)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(isolationRoot, { recursive: true, force: true, maxRetries: 3 });
     if (previousMemoryPath === undefined) {
       delete process.env.MONARCH_MEMORY_STORE_PATH;
     } else {
@@ -60,10 +95,6 @@ async function runSmokeSuite(): Promise<void> {
   await assertKnowledgePolicyRoutesFreshness();
   assertModelOutputNormalizer();
   await assertModelsCompletionUsesOpenAiCompatibleEndpoint();
-  await assertFallbackCandidateRouting();
-  await assertAmbiguousStatusLikeRequestDoesNotRoute();
-  await assertRiskThresholdBlocksLowConfidenceAction();
-  await assertRouteTraceIsGenerated();
   await assertVoiceBridgeModuleStatusAndMissingCommand();
   await assertPluginRegistryModuleRoutes();
   await assertAstraSkillLayerRoutes();
@@ -74,24 +105,14 @@ async function runSmokeSuite(): Promise<void> {
   await assertApplicationLayerAssemblesProgram();
   await assertUnifiedMemoryBridgeFlow();
   await assertStreamCompletionAndCancellationFlow();
-  await assertClarificationRequiredFlow();
 
   const kernel = createMonarchKernel();
-  kernel.registerModule(createThrowingRouterModule());
   kernel.registerModule(createThrowingExecutionModule());
   await kernel.start();
 
 
-  const diagnosticsModules = await kernel.submitIntent('Покажи модули ядра');
-  const diagnosticsCapabilities = await kernel.execute({
-    id: 'exec_smoke_diagnostics_capabilities',
-    intentId: 'intent_smoke_diagnostics_capabilities',
-    moduleId: 'diagnostics',
-    capabilityId: 'diagnostics.capabilities.list',
-    input: {},
-    createdAt: new Date(0).toISOString(),
-    requestedBy: 'smoke',
-  });
+  const diagnosticsModules = await executeSmokeCapability(kernel, 'diagnostics.modules.list');
+  const diagnosticsCapabilities = await executeSmokeCapability(kernel, 'diagnostics.capabilities.list');
   const thrownExecution = await kernel.execute({
     id: 'exec_smoke_throw',
     intentId: 'intent_smoke_throw',
@@ -102,7 +123,7 @@ async function runSmokeSuite(): Promise<void> {
     requestedBy: 'smoke',
   });
 
-  if (!diagnosticsModules.execution?.ok) {
+  if (!diagnosticsModules.ok) {
     throw new Error(`Diagnostics module list smoke failed: ${diagnosticsModules.summary}`);
   }
 
@@ -126,14 +147,6 @@ async function runSmokeSuite(): Promise<void> {
   const snapshot = kernel.getSnapshot();
   if (snapshot.audit.length === 0 || snapshot.events.length === 0) {
     throw new Error('Observability smoke failed: expected audit and event history.');
-  }
-
-  if (!snapshot.events.some((event) => event.type === 'module.route_failed')) {
-    throw new Error('Router isolation smoke failed: expected failed route event.');
-  }
-
-  if (!snapshot.audit.some((entry) => entry.category === 'routing')) {
-    throw new Error('Router audit smoke failed: expected routing audit entry.');
   }
 
   await kernel.stop();
@@ -265,11 +278,11 @@ async function assertBootstrapCanSelectModules(): Promise<void> {
   }
 
   await memoryOnlyRuntime.kernel.start();
-  const diagnosticsResult = await memoryOnlyRuntime.kernel.submitIntent('Покажи модули ядра');
+  const diagnosticsCapability = memoryOnlyRuntime.kernel.getCapability('diagnostics.modules.list');
   await memoryOnlyRuntime.kernel.stop();
 
-  if (diagnosticsResult.route) {
-    throw new Error('Bootstrap selection smoke failed: disabled diagnostics should not route intents.');
+  if (diagnosticsCapability) {
+    throw new Error('Bootstrap selection smoke failed: disabled diagnostics capability was registered.');
   }
 }
 
@@ -329,13 +342,11 @@ async function assertAssistantPlainChatRoutes(): Promise<void> {
 
   await runtime.kernel.start();
   try {
-    const result = await runtime.kernel.submitIntent('hello, explain Monarch briefly');
+    const result = await executeSmokeCapability(runtime.kernel, 'assistant.reply', {
+      text: 'hello, explain Monarch briefly',
+    });
 
-    if (
-      result.route?.targetModuleId !== 'assistant'
-      || result.route.capabilityId !== 'assistant.reply'
-      || !result.execution?.ok
-    ) {
+    if (!result.ok) {
       throw new Error(`Assistant route smoke failed: ${result.summary}`);
     }
   } finally {
@@ -351,14 +362,14 @@ async function assertKnowledgePolicyRoutesFreshness(): Promise<void> {
 
   await runtime.kernel.start();
   try {
-    const fresh = await runtime.kernel.submitIntent('should search web for latest news about Monarch');
+    const fresh = await executeSmokeCapability(runtime.kernel, 'knowledge.policy.evaluate', {
+      text: 'should search web for latest news about Monarch',
+    });
     const freshDecision = (
-      fresh.execution?.output as { decision?: { policy?: unknown } } | undefined
+      fresh.output as { decision?: { policy?: unknown } } | undefined
     )?.decision;
     if (
-      fresh.route?.targetModuleId !== 'knowledge'
-      || fresh.route.capabilityId !== 'knowledge.policy.evaluate'
-      || !fresh.execution?.ok
+      !fresh.ok
       || freshDecision?.policy !== 'web_required'
     ) {
       throw new Error(`Knowledge freshness smoke failed: ${fresh.summary}`);
@@ -540,86 +551,6 @@ async function assertModelsCompletionUsesOpenAiCompatibleEndpoint(): Promise<voi
   }
 }
 
-async function assertFallbackCandidateRouting(): Promise<void> {
-  const kernel = new MonarchKernel();
-  kernel.registerModule(createFallbackOnlyNotesModule());
-
-  await kernel.start();
-  const result = await kernel.submitIntent('show notes');
-  await kernel.stop();
-
-  if (
-    result.route?.targetModuleId !== 'smoke-notes'
-    || result.route.capabilityId !== 'smoke.notes.list'
-  ) {
-    throw new Error('Router v0.2 fallback smoke failed: expected metadata candidate selection.');
-  }
-
-  if (!result.execution?.ok) {
-    throw new Error(`Router v0.2 fallback execution smoke failed: ${result.summary}`);
-  }
-}
-
-async function assertAmbiguousStatusLikeRequestDoesNotRoute(): Promise<void> {
-  const kernel = new MonarchKernel();
-  kernel.registerModule(createStatusCandidateModule('smoke-status-a'));
-  kernel.registerModule(createStatusCandidateModule('smoke-status-b'));
-
-  await kernel.start();
-  const result = await kernel.submitIntent('show status');
-  const snapshot = kernel.getSnapshot();
-  await kernel.stop();
-
-  if (result.route) {
-    throw new Error(`Router v0.2 ambiguity smoke failed: selected ${result.route.targetModuleId}.${result.route.capabilityId || 'no-capability'}.`);
-  }
-
-  if (!snapshot.events.some((event) => event.type === 'router.route_trace')) {
-    throw new Error('Router v0.2 ambiguity smoke failed: expected route trace event.');
-  }
-}
-
-async function assertRiskThresholdBlocksLowConfidenceAction(): Promise<void> {
-  const kernel = new MonarchKernel();
-  kernel.registerModule(createLowConfidenceDeviceModule());
-
-  await kernel.start();
-  const route = await kernel.routeIntent(createSmokeIntent('intent_smoke_low_confidence_device', 'unlock lock'));
-  await kernel.stop();
-
-  if (route) {
-    throw new Error('Router v0.2 risk threshold smoke failed: low-confidence device-control route should be blocked.');
-  }
-}
-
-async function assertRouteTraceIsGenerated(): Promise<void> {
-  const kernel = createMonarchKernel({
-    enabledModules: ['memory'],
-  });
-
-  await kernel.start();
-  await kernel.submitIntent('list memory');
-  const snapshot = kernel.getSnapshot();
-  await kernel.stop();
-
-  const routeTrace = snapshot.events.find((event) => event.type === 'router.route_trace');
-  if (!routeTrace) {
-    throw new Error('Router v0.3 trace smoke failed: expected route trace event.');
-  }
-
-  if (!hasLlmRouterStage(routeTrace.payload)) {
-    throw new Error('Router v0.3 trace smoke failed: expected LLM router stage summary.');
-  }
-
-  if (!hasRouterAnalysis(routeTrace.payload)) {
-    throw new Error('Router v0.3 trace smoke failed: expected classifier and model router metadata.');
-  }
-
-  if (!snapshot.audit.some((entry) => entry.category === 'routing' && entry.message === 'Router v0.3 route trace.')) {
-    throw new Error('Router v0.3 trace smoke failed: expected route trace audit entry.');
-  }
-}
-
 async function assertVoiceBridgeModuleStatusAndMissingCommand(): Promise<void> {
   const previousStt = process.env.MONARCH_STT_COMMAND;
   const previousTts = process.env.MONARCH_TTS_COMMAND;
@@ -633,12 +564,8 @@ async function assertVoiceBridgeModuleStatusAndMissingCommand(): Promise<void> {
 
   try {
     await runtime.kernel.start();
-    const status = await runtime.kernel.submitIntent('voice status');
-    if (
-      status.route?.targetModuleId !== 'voice'
-      || status.route.capabilityId !== 'voice.status'
-      || !status.execution?.ok
-    ) {
+    const status = await executeSmokeCapability(runtime.kernel, 'voice.status');
+    if (!status.ok) {
       throw new Error(`Voice status smoke failed: ${status.summary}`);
     }
 
@@ -676,17 +603,24 @@ async function assertPluginRegistryModuleRoutes(): Promise<void> {
   });
 
   await runtime.kernel.start();
-  const result = await runtime.kernel.submitIntent('Покажи плагины');
+  const result = await runtime.kernel.execute({
+    id: 'exec_smoke_plugins_catalog',
+    intentId: 'intent_smoke_plugins_catalog',
+    moduleId: 'plugins',
+    capabilityId: 'plugins.catalog.list',
+    input: {},
+    createdAt: new Date(0).toISOString(),
+    requestedBy: 'smoke',
+    source: 'smoke',
+  });
   await runtime.kernel.stop();
 
   const modules = (
-    result.execution?.output as { modules?: Array<{ id?: unknown }> } | undefined
+    result.output as { modules?: Array<{ id?: unknown }> } | undefined
   )?.modules || [];
 
   if (
-    result.route?.targetModuleId !== 'plugins'
-    || result.route.capabilityId !== 'plugins.catalog.list'
-    || !result.execution?.ok
+    !result.ok
     || !modules.some((module) => module.id === 'plugins')
   ) {
     throw new Error(`Plugins registry smoke failed: ${result.summary}`);
@@ -701,33 +635,31 @@ async function assertAstraSkillLayerRoutes(): Promise<void> {
 
   await runtime.kernel.start();
   try {
-    const indexResult = await runtime.kernel.submitIntent('Покажи навыки Astra');
-    const slotResult = await runtime.kernel.submitIntent('preview slot for memory.search');
-    const bridgeResult = await runtime.kernel.submitIntent('oscar bridge');
+    const indexResult = await executeSmokeCapability(runtime.kernel, 'astra.skills.index');
+    const slotResult = await executeSmokeCapability(runtime.kernel, 'astra.slot.preview', {
+      capabilityId: 'memory.search',
+    });
+    const bridgeResult = await executeSmokeCapability(runtime.kernel, 'astra.oscar.bridge.describe');
 
     const cards = (
-      indexResult.execution?.output as { cards?: Array<{ capabilityId?: unknown }> } | undefined
+      indexResult.output as { cards?: Array<{ capabilityId?: unknown }> } | undefined
     )?.cards || [];
     const slot = (
-      slotResult.execution?.output as { slot?: { capabilityId?: unknown; moduleId?: unknown } } | undefined
+      slotResult.output as { slot?: { capabilityId?: unknown; moduleId?: unknown } } | undefined
     )?.slot;
     const bridge = (
-      bridgeResult.execution?.output as { oscar?: { apiBase?: unknown } } | undefined
+      bridgeResult.output as { oscar?: { apiBase?: unknown } } | undefined
     );
 
     if (
-      indexResult.route?.targetModuleId !== 'astra'
-      || indexResult.route.capabilityId !== 'astra.skills.index'
-      || !indexResult.execution?.ok
+      !indexResult.ok
       || !cards.some((card) => card.capabilityId === 'memory.search')
     ) {
       throw new Error(`Astra skill index smoke failed: ${indexResult.summary}`);
     }
 
     if (
-      slotResult.route?.targetModuleId !== 'astra'
-      || slotResult.route.capabilityId !== 'astra.slot.preview'
-      || !slotResult.execution?.ok
+      !slotResult.ok
       || slot?.capabilityId !== 'memory.search'
       || slot.moduleId !== 'memory'
     ) {
@@ -735,9 +667,7 @@ async function assertAstraSkillLayerRoutes(): Promise<void> {
     }
 
     if (
-      bridgeResult.route?.targetModuleId !== 'astra'
-      || bridgeResult.route.capabilityId !== 'astra.oscar.bridge.describe'
-      || !bridgeResult.execution?.ok
+      !bridgeResult.ok
       || typeof bridge?.oscar?.apiBase !== 'string'
     ) {
       throw new Error(`Astra Oscar bridge smoke failed: ${bridgeResult.summary}`);
@@ -758,53 +688,45 @@ async function assertOscarPortRoutes(): Promise<void> {
 
   try {
     await runtime.kernel.start();
-    const statusResult = await runtime.kernel.submitIntent('oscar status');
-    const startBackendResult = await runtime.kernel.submitIntent('oscar start backend');
-    const unloadResult = await runtime.kernel.submitIntent('oscar unload model');
-    const stopBackendResult = await runtime.kernel.submitIntent('oscar stop backend');
-    const webSearchResult = await runtime.kernel.submitIntent('oscar search Monarch');
+    const statusResult = await executeSmokeCapability(runtime.kernel, 'oscar.status');
+    const startBackendResult = await executeSmokeCapability(runtime.kernel, 'oscar.backend.start');
+    const unloadResult = await executeSmokeCapability(runtime.kernel, 'oscar.model.unload');
+    const stopBackendResult = await executeSmokeCapability(runtime.kernel, 'oscar.backend.stop');
+    const webSearchResult = await executeSmokeCapability(runtime.kernel, 'oscar.search.ingest', {
+      query: 'Monarch',
+    });
 
-    const statusOutput = statusResult.execution?.output as {
+    const statusOutput = statusResult.output as {
       backend?: { connected?: unknown };
     } | undefined;
 
     if (
-      statusResult.route?.targetModuleId !== 'oscar'
-      || statusResult.route.capabilityId !== 'oscar.status'
-      || !statusResult.execution?.ok
+      !statusResult.ok
       || statusOutput?.backend?.connected !== false
     ) {
       throw new Error(`Oscar status smoke failed: ${statusResult.summary}`);
     }
 
     if (
-      startBackendResult.route?.targetModuleId !== 'oscar'
-      || startBackendResult.route.capabilityId !== 'oscar.backend.start'
-      || startBackendResult.execution?.error !== 'confirmation-required'
+      startBackendResult.error !== 'confirmation-required'
     ) {
       throw new Error(`Oscar backend start permission smoke failed: ${startBackendResult.summary}`);
     }
 
     if (
-      unloadResult.route?.targetModuleId !== 'oscar'
-      || unloadResult.route.capabilityId !== 'oscar.model.unload'
-      || unloadResult.execution?.error !== 'confirmation-required'
+      unloadResult.error !== 'confirmation-required'
     ) {
       throw new Error(`Oscar unload permission smoke failed: ${unloadResult.summary}`);
     }
 
     if (
-      stopBackendResult.route?.targetModuleId !== 'oscar'
-      || stopBackendResult.route.capabilityId !== 'oscar.backend.stop'
-      || stopBackendResult.execution?.error !== 'confirmation-required'
+      stopBackendResult.error !== 'confirmation-required'
     ) {
       throw new Error(`Oscar backend stop permission smoke failed: ${stopBackendResult.summary}`);
     }
 
     if (
-      webSearchResult.route?.targetModuleId !== 'oscar'
-      || webSearchResult.route.capabilityId !== 'oscar.search.ingest'
-      || webSearchResult.execution?.error !== 'confirmation-required'
+      webSearchResult.error !== 'confirmation-required'
     ) {
       throw new Error(`Oscar permission smoke failed: ${webSearchResult.summary}`);
     }
@@ -871,26 +793,22 @@ async function assertSecurityModuleRoutes(): Promise<void> {
 
   try {
     await runtime.kernel.start();
-    const statusResult = await runtime.kernel.submitIntent('security status');
-    const startResult = await runtime.kernel.submitIntent('start security protection');
+    const statusResult = await executeSmokeCapability(runtime.kernel, 'security.status');
+    const startResult = await executeSmokeCapability(runtime.kernel, 'security.protection.start');
 
-    const statusOutput = statusResult.execution?.output as {
+    const statusOutput = statusResult.output as {
       payload?: { running?: unknown };
     } | undefined;
 
     if (
-      statusResult.route?.targetModuleId !== 'security'
-      || statusResult.route.capabilityId !== 'security.status'
-      || !statusResult.execution?.ok
+      !statusResult.ok
       || typeof statusOutput?.payload?.running !== 'boolean'
     ) {
       throw new Error(`Security status smoke failed: ${statusResult.summary}`);
     }
 
     if (
-      startResult.route?.targetModuleId !== 'security'
-      || startResult.route.capabilityId !== 'security.protection.start'
-      || startResult.execution?.error !== 'confirmation-required'
+      startResult.error !== 'confirmation-required'
     ) {
       throw new Error(`Security permission smoke failed: ${startResult.summary}`);
     }
@@ -909,8 +827,10 @@ async function assertApplicationLayerAssemblesProgram(): Promise<void> {
   try {
     const state = await app.getState('show plugin capability map');
     const profile = app.getSystemProfile();
-    const result = await app.submitIntent({
-      text: 'Покажи плагины',
+    const result = await app.executeCapability({
+      moduleId: 'plugins',
+      capabilityId: 'plugins.catalog.list',
+      input: {},
       source: 'smoke',
     });
 
@@ -927,9 +847,7 @@ async function assertApplicationLayerAssemblesProgram(): Promise<void> {
     }
 
     if (
-      result.route?.targetModuleId !== 'plugins'
-      || result.route.capabilityId !== 'plugins.catalog.list'
-      || !result.execution?.ok
+      !result.ok
     ) {
       throw new Error(`Application layer smoke failed: ${result.summary}`);
     }
@@ -1052,15 +970,19 @@ async function assertHttpMutationApiRequiresSessionToken(): Promise<void> {
         input: { value: 'original-direct-request' },
       }),
     });
-    const directBlockedPayload = await directBlocked.json() as { accepted?: boolean; successor?: string };
+    const directBlockedPayload = await directBlocked.json() as {
+      ok?: boolean;
+      result?: { ok?: boolean; error?: string };
+    };
     if (
-      directBlocked.status !== 202
-      || directBlockedPayload.accepted !== true
-      || directBlockedPayload.successor !== '/api/oscar/turns'
+      directBlocked.status !== 200
+      || directBlockedPayload.ok !== false
+      || directBlockedPayload.result?.ok !== false
+      || directBlockedPayload.result?.error !== 'confirmation-required'
       || directBlocked.headers.get('deprecation') !== 'true'
       || JSON.stringify(directBlockedPayload).includes('confirmationToken')
     ) {
-      throw new Error('HTTP direct authority smoke failed: effectful execute did not become a token-free Turn adapter.');
+      throw new Error('HTTP direct authority smoke failed: exact effectful capability did not retain the Kernel confirmation boundary.');
     }
 
     const directConfirmed = await fetch(`${baseUrl}/api/execute`, {
@@ -1166,39 +1088,6 @@ async function assertHttpMutationApiRequiresSessionToken(): Promise<void> {
   }
 }
 
-function hasLlmRouterStage(payload: unknown): boolean {
-  if (!payload || typeof payload !== 'object') {
-    return false;
-  }
-
-  const llmRouter = (payload as { llmRouter?: unknown }).llmRouter;
-  if (!llmRouter || typeof llmRouter !== 'object') {
-    return false;
-  }
-
-  return typeof (llmRouter as { status?: unknown }).status === 'string'
-    && typeof (llmRouter as { candidates?: unknown }).candidates === 'number';
-}
-
-function hasRouterAnalysis(payload: unknown): boolean {
-  if (!payload || typeof payload !== 'object') {
-    return false;
-  }
-
-  const record = payload as {
-    classification?: unknown;
-    parentRouter?: unknown;
-    modelRouter?: unknown;
-  };
-  const classification = record.classification as { kind?: unknown } | undefined;
-  const parentRouter = record.parentRouter as { action?: unknown } | undefined;
-  const modelRouter = record.modelRouter as { selectedRole?: unknown } | undefined;
-
-  return typeof classification?.kind === 'string'
-    && typeof parentRouter?.action === 'string'
-    && typeof modelRouter?.selectedRole === 'string';
-}
-
 function createLifecycleOrderModule(
   id: string,
   dependencies: string[],
@@ -1273,30 +1162,10 @@ function createSmokeConfirmationModule(): MonarchModule {
           // Effectful legacy calls must become Agent Turns; text tokens never
           // authorize this capability.
           risk: 'execute',
-          routing: {
-            aliases: ['smoke confirm write'],
-            keywords: ['smoke', 'confirm', 'write'],
-            intentKinds: ['smoke.confirm'],
-          },
         },
       ],
     },
     async activate(): Promise<void> {},
-    async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-      if (!/smoke confirm write/i.test(intent.text)) {
-        return null;
-      }
-
-      return {
-        intentId: intent.id,
-        targetModuleId: 'smoke-confirm-risk',
-        capabilityId: 'smoke.confirm.write',
-        confidence: 0.99,
-        reason: 'Smoke-only confirmation route.',
-        permissionMode: 'confirm',
-        input: { value: intent.text },
-      };
-    },
     async executeCapability(request: MonarchExecutionRequest): Promise<MonarchExecutionResult> {
       if (request.capabilityId === 'smoke.confirm.read') {
         return {
@@ -1327,153 +1196,6 @@ function createSmokeConfirmationModule(): MonarchModule {
   };
 }
 
-function createSmokeIntent(id: string, text: string): MonarchIntent {
-  return {
-    id,
-    source: 'desktop',
-    text,
-    createdAt: new Date(0).toISOString(),
-  };
-}
-
-function createFallbackOnlyNotesModule(): MonarchModule {
-  return {
-    manifest: {
-      id: 'smoke-notes',
-      name: 'Smoke Notes',
-      version: '0.1.0',
-      kind: 'tooling',
-      description: 'Smoke-only fallback routing module.',
-      owns: ['notes'],
-      permissions: ['read'],
-      capabilities: [
-        {
-          id: 'smoke.notes.list',
-          moduleId: 'smoke-notes',
-          title: 'List notes',
-          description: 'List smoke notes through manifest routing metadata.',
-          risk: 'read',
-          routing: {
-            aliases: ['show notes'],
-            keywords: ['notes', 'list'],
-            examples: ['show notes'],
-            intentKinds: ['notes.read'],
-          },
-          inputSchema: {
-            type: 'object',
-            properties: {},
-            additionalProperties: false,
-          },
-        },
-      ],
-    },
-    async activate(): Promise<void> {},
-    async executeCapability(
-      request: MonarchExecutionRequest
-    ): Promise<MonarchExecutionResult> {
-      if (request.capabilityId !== 'smoke.notes.list') {
-        return {
-          ok: false,
-          summary: `Unsupported notes capability: ${request.capabilityId}`,
-          error: 'unsupported-capability',
-        };
-      }
-
-      return {
-        ok: true,
-        summary: 'Smoke notes listed.',
-        output: {
-          notes: [],
-        },
-      };
-    },
-  };
-}
-
-function createStatusCandidateModule(id: string): MonarchModule {
-  return {
-    manifest: {
-      id,
-      name: id,
-      version: '0.1.0',
-      kind: 'system',
-      description: 'Smoke-only status candidate for ambiguity checks.',
-      owns: ['status'],
-      permissions: ['read'],
-      capabilities: [
-        {
-          id: `${id}.status`,
-          moduleId: id,
-          title: 'Show status',
-          risk: 'read',
-          routing: {
-            aliases: ['show status'],
-            keywords: ['status'],
-            intentKinds: ['status.read'],
-          },
-        },
-      ],
-    },
-    async activate(): Promise<void> {},
-    async executeCapability(): Promise<MonarchExecutionResult> {
-      return {
-        ok: true,
-        summary: `${id} status read.`,
-      };
-    },
-  };
-}
-
-function createLowConfidenceDeviceModule(): MonarchModule {
-  return {
-    manifest: {
-      id: 'smoke-low-confidence-device',
-      name: 'Smoke Low Confidence Device',
-      version: '0.1.0',
-      kind: 'tooling',
-      description: 'Smoke-only route threshold module.',
-      owns: ['lock'],
-      permissions: ['device-control'],
-      capabilities: [
-        {
-          id: 'smoke.lock.unlock',
-          moduleId: 'smoke-low-confidence-device',
-          title: 'Unlock lock',
-          description: 'Unlock a smoke-only lock.',
-          risk: 'device-control',
-          routing: {
-            aliases: ['unlock lock'],
-            keywords: ['unlock', 'lock'],
-            examples: ['unlock lock'],
-            intentKinds: ['device-control'],
-          },
-          inputSchema: {
-            type: 'object',
-            properties: {},
-            additionalProperties: false,
-          },
-        },
-      ],
-    },
-    async activate(): Promise<void> {},
-    async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-      if (!/unlock/i.test(intent.text)) {
-        return null;
-      }
-
-      return {
-        intentId: intent.id,
-        targetModuleId: 'smoke-low-confidence-device',
-        capabilityId: 'smoke.lock.unlock',
-        confidence: 0.72,
-        reason: 'Smoke module reports a low-confidence device-control route.',
-        permissionMode: 'confirm',
-        input: {},
-      };
-    },
-  };
-}
-
 function createThrowingRouterModule(): MonarchModule {
   return {
     manifest: {
@@ -1487,9 +1209,6 @@ function createThrowingRouterModule(): MonarchModule {
       capabilities: [],
     },
     async activate(): Promise<void> {},
-    async handleIntent(): Promise<null> {
-      throw new Error('smoke route failure');
-    },
   };
 }
 
@@ -1727,91 +1446,3 @@ async function assertStreamCompletionAndCancellationFlow(): Promise<void> {
   }
 }
 
-async function assertClarificationRequiredFlow(): Promise<void> {
-  const kernel = new MonarchKernel();
-
-  // Register two mock modules with identical routing keywords to trigger ambiguity
-  kernel.registerModule({
-    manifest: {
-      id: 'mock-module-a',
-      name: 'Mock Module A',
-      version: '0.1.0',
-      kind: 'system',
-      description: 'Mock A',
-      owns: ['ambiguity trigger'],
-      permissions: ['read'],
-      capabilities: [
-        {
-          id: 'mock.capability.a',
-          moduleId: 'mock-module-a',
-          title: 'Capability A',
-          risk: 'read',
-          routing: {
-            aliases: ['trigger ambiguity'],
-            keywords: ['ambiguity'],
-            intentKinds: ['mock.a'],
-          }
-        }
-      ]
-    },
-    async activate(): Promise<void> {},
-    async executeCapability(): Promise<MonarchExecutionResult> {
-      return { ok: true, summary: 'A done' };
-    }
-  });
-
-  kernel.registerModule({
-    manifest: {
-      id: 'mock-module-b',
-      name: 'Mock Module B',
-      version: '0.1.0',
-      kind: 'system',
-      description: 'Mock B',
-      owns: ['ambiguity trigger'],
-      permissions: ['read'],
-      capabilities: [
-        {
-          id: 'mock.capability.b',
-          moduleId: 'mock-module-b',
-          title: 'Capability B',
-          risk: 'read',
-          routing: {
-            aliases: ['trigger ambiguity'],
-            keywords: ['ambiguity'],
-            intentKinds: ['mock.b'],
-          }
-        }
-      ]
-    },
-    async activate(): Promise<void> {},
-    async executeCapability(): Promise<MonarchExecutionResult> {
-      return { ok: true, summary: 'B done' };
-    }
-  });
-
-  await kernel.start();
-  try {
-    const result = await kernel.submitIntent('trigger ambiguity');
-
-    if (result.route !== null) {
-      throw new Error('Ambiguity clarification test failed: expected route to be null.');
-    }
-
-    const execution = result.execution as any;
-    if (!execution || execution.ok !== false || execution.error !== 'clarification-required') {
-      throw new Error(`Ambiguity clarification test failed: expected clarification-required execution error, got ${JSON.stringify(execution)}`);
-    }
-
-    const output = execution.output;
-    if (
-      output.mode !== 'clarification-required' ||
-      output.clarificationMode !== 'ambiguous' ||
-      !Array.isArray(output.candidates) ||
-      output.candidates.length < 2
-    ) {
-      throw new Error('Ambiguity clarification response output payload is invalid.');
-    }
-  } finally {
-    await kernel.stop();
-  }
-}

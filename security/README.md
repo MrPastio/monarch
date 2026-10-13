@@ -111,6 +111,31 @@ OS-authenticated boundary, and a process running as the same Windows account can
 still terminate a user-mode process directly. Service identity, enrollment, and
 installed-package acceptance remain separate release gates.
 
+### Verified Runtime Health
+
+Supervisor and background-host heartbeats use separate HMAC purposes and a
+versioned telemetry schema. The reader checks a 256 KiB limit before parsing,
+rejects duplicate fields and non-finite values, verifies the existing integrity
+key, and checks PID and freshness. A status read never creates or migrates a
+telemetry key. Old unsigned runtime records cannot establish protection; a
+normal runtime restart publishes the new format.
+
+`running` means a process exists. `protected` additionally requires verified
+complete sensor health and no pending evidence. Failed, stalled, overdue and
+limited sensors produce `degraded`. The tasklist process backend is explicitly
+limited because it lacks command lines and process ancestry. Pending evidence
+is preserved and reported until it has been durably processed. The UI never
+infers full protection merely from a running process.
+
+Startup is correlated with a fresh launch identifier in the signed heartbeat.
+This supports Windows venv redirectors, whose interpreter PID differs from the
+initial launcher PID, while preventing another runtime's status from confirming
+the launch. The identifier is correlation metadata, not an action capability.
+
+The larger reliability program, remaining invariants and acceptance gates are
+tracked in `docs/security/RELIABILITY_ROADMAP.md`. Thread recovery, complete
+Windows-query coverage and installed/service boundaries remain open.
+
 ## Scanning and Control
 
 File scans collect cheap deep metadata without external services:
@@ -335,6 +360,156 @@ PIN and all recovery codes, invalidating every old code. Recovery attempts use a
 separate exponential rate limit, so failed recovery does not unlock or weaken the
 normal PIN verifier.
 
+## Polling process ownership
+
+The supervisor polls through three reusable worker processes. Requests/results
+use bounded strict JSON and a 70-second deadline enforced by a per-worker monitor;
+expiry and result delivery continue when controller ticks pause. Signed state, assessment and
+checkpoint acknowledgments remain in the controller. An invalid/failed result
+cannot advance the baseline. Profile changes discard the previous pool.
+
+On Windows each worker and its descendants belong to an owned Job Object with
+kill-on-close and a 512 MiB aggregate committed-memory ceiling. Stop and timeout
+terminate only these owned workers. This is resource/lifetime containment, not
+a reduced-privilege sandbox. The worker uses the actual runtime interpreter and
+explicit dependency paths with site customization disabled. Exact packaged
+runtime compatibility still requires separate acceptance.
+
+## Observation completeness and baseline safety
+
+Sensor protocol 2 reports complete, partial or unavailable observation. Registry
+and filesystem failures retain the previous checkpoint; a failed self-file read
+does not imply deletion. Paging and unavailable process/posture details remain
+partial. Healthy runtime evidence requires explicit completeness, including when
+its signature is valid. Older signed runtime health requires a normal restart
+before it can establish complete protection.
+
+Baseline writes and persistence preview require complete results for every
+selected query. Failed/partial reads preserve existing known and approved
+baselines. Query errors cannot authorize an empty baseline through a matching
+preview digest. The UI explains partial observation and retained prior data.
+
+## Isolated file parser lifecycle
+
+Parser protocol 2 uses a fresh controller-owned process for each file, launched
+through the base interpreter with site customization disabled. Reads are bounded
+to 64 KiB requests and 1 MiB responses while receiving frames. Three concurrent
+requests are admitted without a waiting queue. Windows parent-owned jobs impose
+an aggregate memory ceiling and kill-on-close; the existing low-integrity and
+per-process memory setup still runs before file content is inspected.
+
+Four allowlisted progress stages identify the last observed stage on failure;
+they never renew the deadline or establish a successful inspection. Timeout,
+malformed replies, wrong target and cleanup failure remain incomplete evidence.
+An unresolved cleanup blocks new parser launches for that controller lifetime,
+retaining the owned job instead of accumulating replacements. Normal calls reap
+the entire job before returning. OS process creation and cleanup have separate
+costs; this is not an independent watchdog for all controller work.
+
+The intermittent five-second ZIP expiry remains open. Source tests do not prove
+exact installed payload behavior. No retry, budget increase or local unisolated
+parsing fallback was added.
+
+## Worker deadline and observation timing
+
+Watched-file content and signature inspection now run in two owned asynchronous
+wrapper jobs, so pending file reads do not occupy the heartbeat/stop loop. The
+mandatory low-integrity parser retains its configured deadline. Signed batches
+record attempts before launch and results before handling/acknowledgement;
+three attempts use backoff. Stop/profile changes cancel owned jobs and preserve
+unacknowledged source events. File identity/version checks reject changed targets.
+
+Terminal incomplete files remain in a signed bounded coverage registry after
+event acknowledgement. Status distinguishes waiting events from incomplete
+files and stays degraded until a newer successful same-path observation closes
+the gap. Registry overflow stays degraded until a complete explicit recovery
+inventory is verified. Immutable-handle validation remains open; this does not
+prove installed acceptance or remove blocking model/actions/storage work.
+
+One monitor per owned worker enforces query expiry independently of controller
+ticks. The controller alone validates/stages results and writes signed state.
+Stop coordinates monitors and transport threads, reaps each job once, and blocks
+replacement on cleanup failure. Completion callbacks run outside lifecycle locks;
+pool creation and close are synchronized so a new worker cannot escape close.
+
+Delayed controller collection retains historical events in the signed backlog
+while using their actual transport completion time for health. It cannot make an
+old observation freshly protected. A due sensor is scheduled for immediate
+refresh after its backlog permits it. This is query deadline independence, not
+recovery from process-wide suspension, GIL starvation, blocked OS process creation
+or every controller action. Those acceptance items remain open.
+
+## Recovering incomplete file inspection
+
+The Security coverage details offer a retry for the currently configured watched
+folders. `inspection-retry` creates an idempotent signed request only for an
+already enrolled runtime with active monitoring and unresolved file coverage.
+It does not start protection, change its profile or accept caller-supplied paths.
+Heartbeat reports queued/running/complete/incomplete and accepted file counts,
+without exposing watch roots through the recovery projection.
+
+The existing owned queue rechecks every current file with its normal bounded
+parser and persists results before acknowledgement. Recovery uses local policy
+and diagnostic reporting; it triggers neither model requests nor automatic
+emergency actions. Ordinary monitoring retains its own policy.
+
+After the paged inventory, an owned full metadata query must agree with accepted
+file versions. Changes are inspected before another verification; three
+nonmatching passes or three consecutive unavailable polls finish incomplete.
+Transport/output/memory limits remain enforced. Stable successful coverage can
+clear sticky overflow, but missing named files and gaps outside the current
+scope stay unresolved. Restart preserves progress and required verification.
+This is point-in-time metadata agreement, not an immutable content or
+transactional filesystem guarantee. Large or changing folders may remain
+incomplete. Exact packaged/installed UI acceptance is still required.
+
+## Controller lifetime and recovery
+
+The ordinary `start` route launches a separate guardian, which starts the
+controller behind an anonymous gate and assigns an exact Windows Job before
+configuration loading or descendant creation. The Job owns lifetime only;
+existing sensor/parser memory and integrity limits remain intact. Private
+progress frames are capped at 512 bytes, bound to launch ID, native creation
+identity and exact sequence. Only completed controller iterations emit progress.
+The guardian's 45-second monotonic startup/progress lease cannot be renewed by
+an independent heartbeat timer inside a stalled controller. EOF, malformed,
+replayed or late progress is terminal. Ordinary startup retains the existing
+6-second readiness gate and must match both launch ID and the launched guardian.
+
+On Windows, expiry or guardian death closes only its held owned Job, including
+nested workers. Checked cleanup waits for Job active-process count zero;
+failure retains the guardian ownership lock and blocks replacement. The
+guardian does not restart itself, read signed stores, hold PINs, or invoke native
+responses. The existing enabled/requested/profile lifecycle authorizes a later
+background restart after old runtime ownership is released. Persisted events
+and inspection attempts are replayed through the normal durable queue.
+
+Authorized stop persists signed `requested=false` even when startup owns the
+lifecycle lock. The controller's fresh settings read respects it, and background
+recovery cannot override the pause. `durable_pause_requested` is distinct from
+authenticated control-file delivery. PIN/purpose/one-use authorization remains
+at the existing CLI/Kernel boundary.
+
+Status requires the existing OS runtime lock and native process creation
+identity before reporting fresh protection. A live unrelated/reused PID alone
+cannot hold protection running or authorize marker cleanup; cleanup acquires
+the runtime owner lock. Unknown lock access/creation identity remains partial.
+Old signed telemetry without creation metadata remains degraded until an
+ordinary authorized restart. Direct foreground `protect` is a diagnostic route
+without this separate guardian; it is never adopted or killed by PID.
+
+Windows subtree/death guarantees follow the
+[Job Objects contract](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
+Creation identity uses
+[GetProcessTimes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)
+FILETIME; Linux uses procfs start ticks plus boot ID. POSIX process-group cleanup
+is weaker than Windows Job ownership: nested worker groups can outlive abrupt
+parent death while blocked, and platforms without supported native creation
+identity cannot admit guarded startup. Guardian suspension, machine-wide
+resource starvation, action replay/reconciliation, logging/storage durability
+and exact package/installed/VM/release acceptance remain separate requirements.
+The existing stderr diagnostic log still needs bounded retention/redaction work.
+
 ## Model
 
 Default model path:
@@ -363,6 +538,31 @@ To install the short `monarch_sec` command for new terminals:
 ```powershell
 .\scripts\setup_runtime.ps1 -InstallCommand
 ```
+
+### Durable response lifecycle
+
+The response executor holds an OS-owned per-ledger operation lock across approval,
+reservation, system effects and cleanup. A signed, flushed pending action record
+reserves each grant before any command is sent. Fresh ledger reads reject replay
+after restart or from another service instance, including failed and rolled-back
+actions. Legacy consumed-grant state is read fresh and never overwritten. A
+fresh proposal comparison after PIN verification permits only one approval;
+the executor revalidates current incident evidence before dispatch. Journal flush
+failure prevents dispatch; an interrupted journal requires checked recovery.
+
+Failed cleanup remains pending and is retried during service life. Legacy failed
+records are also revisited. Emergency release/continue and service removal cannot
+claim success while cleanup is unconfirmed. Repeated emergency containment keeps
+the existing matching active action and expiry. Cleanup errors store exception
+types, without raw command output or exception text. The heartbeat is degraded
+when cleanup is pending or reconciliation is unavailable.
+
+This is source and disposable state/native-process evidence with inert command
+runners. It does not prove firewall effects or TTL/reboot behavior on an exact
+package. Native effects require isolated VM acceptance. Whole-journal rollback,
+torn-append recovery, legacy writer-lock migration, bounded journal retention,
+request-channel deadlines/service identity and complete metadata/log privacy
+remain open.
 
 Optional local inference runtimes:
 

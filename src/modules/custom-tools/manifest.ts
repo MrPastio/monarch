@@ -5,49 +5,16 @@ export const customToolsManifest: MonarchModuleManifest = {
   name: 'Monarch Tools',
   version: '0.1.0',
   kind: 'domain',
-  description: 'Dynamic custom tools engine and auto-creation registry.',
-  owns: ['custom tools', 'tools', 'create tool', 'run tool', 'auto create tool', 'инструменты', 'создай инструмент', 'запусти инструмент'],
+  description: 'Built-in host tools with fixed risk; saved script tools are kept only as disabled records.',
+  owns: ['custom tools', 'tools', 'run tool', 'инструменты', 'запусти инструмент'],
   permissions: ['read', 'write', 'execute', 'network'],
   capabilities: [
     {
       id: 'custom-tools.list',
       moduleId: 'custom-tools',
       title: 'List custom tools',
-      description: 'List all dynamically created custom tools.',
+      description: 'List built-in tools and disabled saved tools.',
       risk: 'read'
-    },
-    {
-      id: 'custom-tools.create',
-      moduleId: 'custom-tools',
-      title: 'Create custom tool',
-      description: 'Create and register a new custom tool with explicit manifest and script.',
-      risk: 'execute',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: { type: 'string' },
-          title: { type: 'string' },
-          description: { type: 'string' },
-          risk: { type: 'string', enum: ['none', 'read', 'write', 'execute', 'network'] },
-          script: { type: 'string' },
-          inputSchema: { type: 'object' }
-        },
-        required: ['id', 'title', 'description', 'script']
-      }
-    },
-    {
-      id: 'custom-tools.auto-create',
-      moduleId: 'custom-tools',
-      title: 'Auto-create custom tool',
-      description: 'Automatically generate and register a new custom tool from natural language prompt.',
-      risk: 'execute',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          prompt: { type: 'string' }
-        },
-        required: ['prompt']
-      }
     },
     {
       id: 'custom-tools.delete',
@@ -67,7 +34,7 @@ export const customToolsManifest: MonarchModuleManifest = {
       id: 'custom-tools.execute',
       moduleId: 'custom-tools',
       title: 'Execute custom tool',
-      description: 'Execute a dynamically registered custom tool with inputs.',
+      description: 'Run a built-in tool with inputs; its risk is fixed by the host.',
       risk: 'execute',
       inputSchema: {
         type: 'object',

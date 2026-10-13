@@ -24,7 +24,7 @@ describe('Monarch Security AgentActionGuard', () => {
     expect(equivalent.inputHash).toBe(first.inputHash);
   });
 
-  it('returns an allow fact for an intended delete but blocks an intent mismatch', () => {
+  it('returns an allow fact for an intended delete and makes an intent mismatch confirmable', () => {
     const guard = new AgentActionGuard(workspaceRoot);
     const intended = guard.assess(request({
       intentText: 'удали runtime/temp.txt',
@@ -41,11 +41,11 @@ describe('Monarch Security AgentActionGuard', () => {
 
     expect(intended.status).toBe('allowed');
     expect(intended.evidenceCodes).not.toContain('risk.requires-confirmation');
-    expect(mismatch.status).toBe('blocked');
+    expect(mismatch).toMatchObject({ status: 'approval_required', disposition: 'owner-confirmable' });
     expect(mismatch.evidenceCodes).toContain('intent.delete.mismatch');
   });
 
-  it('blocks workspace escape and catastrophic commands without exposing raw input', () => {
+  it('hard-blocks immutable path escape but makes catastrophic commands owner-confirmable', () => {
     const guard = new AgentActionGuard(workspaceRoot);
     const escaped = guard.assess(request({
       intentText: 'создай файл',
@@ -63,7 +63,7 @@ describe('Monarch Security AgentActionGuard', () => {
 
     expect(escaped).toMatchObject({ status: 'blocked', disposition: 'hard-deny' });
     expect(escaped.evidenceCodes).toContain('workspace.path.escape');
-    expect(catastrophic).toMatchObject({ status: 'blocked', disposition: 'hard-deny' });
+    expect(catastrophic).toMatchObject({ status: 'approval_required', disposition: 'owner-confirmable' });
     expect(catastrophic.evidenceCodes).toContain('command.catastrophic');
     expect(JSON.stringify(catastrophic)).not.toContain('Remove-Item');
   });
@@ -221,7 +221,7 @@ describe('Monarch Security AgentActionGuard', () => {
     }
   });
 
-  it('records remote Telegram provenance and security-tamper evidence', () => {
+  it('records remote Telegram provenance and makes security tampering confirmable', () => {
     const guard = new AgentActionGuard(workspaceRoot);
     const decision = guard.assess(request({
       intentText: 'выполни настройку защиты',
@@ -232,12 +232,12 @@ describe('Monarch Security AgentActionGuard', () => {
       requestedBy: 'telegram',
     }));
 
-    expect(decision).toMatchObject({ status: 'blocked', disposition: 'hard-deny' });
+    expect(decision).toMatchObject({ status: 'approval_required', disposition: 'owner-confirmable' });
     expect(decision.evidenceCodes).toEqual(expect.arrayContaining([
       'command.security-tamper',
       'source.telegram.remote',
     ]));
-    expect(guard.snapshot()).toMatchObject({ checks: 1, blocked: 1, lastStatus: 'blocked' });
+    expect(guard.snapshot()).toMatchObject({ checks: 1, approvals: 1, lastStatus: 'approval_required' });
   });
 
   it('uses Kernel-owned Computer Use target context for command and commit boundaries', () => {
@@ -268,7 +268,7 @@ describe('Monarch Security AgentActionGuard', () => {
       trustedActionContext: computerTarget('browser.exe', 'Checkout', 'Pay now'),
     }));
 
-    expect(terminal).toMatchObject({ status: 'blocked', disposition: 'hard-deny' });
+    expect(terminal).toMatchObject({ status: 'approval_required', disposition: 'owner-confirmable' });
     expect(terminal.evidenceCodes).toContain('command.catastrophic');
     expect(editor).toMatchObject({ ok: true, status: 'allowed' });
     expect(editor.evidenceCodes).not.toContain('command.catastrophic');
@@ -289,6 +289,53 @@ describe('Monarch Security AgentActionGuard', () => {
     expect(decision).toMatchObject({ status: 'approval_required', disposition: 'owner-confirmable' });
     expect(decision.evidenceCodes).toContain('computer.target.unverified');
     expect(decision.evidenceCodes).not.toContain('command.catastrophic');
+  });
+
+  it('lets Direct Access perform unforeseen ordinary work but pauses a large delete', () => {
+    const guard = new AgentActionGuard(workspaceRoot);
+    const ordinary = guard.assess(request({
+      intentText: 'проверь проект',
+      actionModule: 'device',
+      actionCapability: 'device.command.execute',
+      actionInput: '{"command":"npm test"}',
+      actionRisk: 'execute',
+      directAccess: true,
+      agentSecurityMode: 'guard',
+    }));
+    const bulk = guard.assess(request({
+      intentText: 'проверь проект',
+      actionCapability: 'workspace.files.delete',
+      actionInput: JSON.stringify({ paths: Array.from({ length: 120 }, (_, index) => `cache/${index}.tmp`) }),
+      actionRisk: 'delete',
+      directAccess: true,
+      agentSecurityMode: 'guard',
+    }));
+    const smallRecursive = guard.assess(request({
+      intentText: 'удали небольшую тестовую папку',
+      actionCapability: 'workspace.files.delete',
+      actionInput: JSON.stringify({ path: 'scratch/small-cache', recursive: true }),
+      actionRisk: 'delete',
+      directAccess: true,
+      agentSecurityMode: 'guard',
+      filesystemAuthority: 'full-local',
+    }));
+    const strict = guard.assess(request({
+      intentText: 'проверь проект',
+      actionModule: 'device',
+      actionCapability: 'device.command.execute',
+      actionInput: '{"command":"npm test"}',
+      actionRisk: 'execute',
+      directAccess: true,
+      agentSecurityMode: 'strict',
+    }));
+
+    expect(ordinary).toMatchObject({ ok: true, status: 'allowed' });
+    expect(bulk).toMatchObject({ status: 'approval_required', disposition: 'owner-confirmable' });
+    expect(bulk.evidenceCodes).toContain('delete.large-scope');
+    expect(smallRecursive).toMatchObject({ ok: true, status: 'allowed' });
+    expect(smallRecursive.evidenceCodes).not.toContain('delete.large-scope');
+    expect(strict).toMatchObject({ status: 'approval_required', disposition: 'owner-confirmable' });
+    expect(strict.evidenceCodes).toContain('intent.execute.weak-match');
   });
 
   it('hard-blocks capabilities missing from the live Kernel registry', () => {

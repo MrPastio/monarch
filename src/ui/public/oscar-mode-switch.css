@@ -1,0 +1,57 @@
+/* Shared Oscar control: preserve its established appearance independently of Coder. */
+.chat-mode-switch {
+  --chat-mode-padding: 4px;
+  --chat-mode-indicator-x: 0%;
+  position: relative;
+  isolation: isolate;
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  padding: var(--chat-mode-padding);
+  border: 1px solid rgba(var(--theme-line-rgb, 255, 255, 255), 0.12);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(var(--theme-wash-rgb, 255, 255, 255), 0.08), rgba(var(--theme-wash-rgb, 255, 255, 255), 0.025)), rgba(var(--theme-plane-rgb, 12, 12, 12), 0.72);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, calc(0.2 * var(--theme-shadow-strength, 1))), inset 0 1px rgba(255, 255, 255, .08);
+  backdrop-filter: blur(20px) saturate(125%);
+}
+
+.chat-mode-switch::before {
+  box-sizing: border-box;
+  position: absolute;
+  z-index: -1;
+  inset: var(--chat-mode-padding) auto var(--chat-mode-padding) var(--chat-mode-padding);
+  width: calc(50% - var(--chat-mode-padding));
+  content: '';
+  border: 1px solid rgba(var(--theme-line-rgb, 255, 244, 221), 0.72);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(var(--theme-wash-rgb, 255, 245, 221), 1) 0%, #ffd17b 46%, #ff8a3d 100%);
+  box-shadow: 0 7px 18px rgba(255, 126, 45, calc(0.28 * var(--theme-shadow-strength, 1))), inset 0 1px rgba(255, 255, 255, .72);
+  transform: translateX(var(--chat-mode-indicator-x));
+  transition: transform .42s cubic-bezier(.22, 1, .36, 1);
+}
+
+.chat-mode-switch[data-active-mode="coder"] { --chat-mode-indicator-x: 100%; }
+
+.chat-mode-switch button {
+  position: relative;
+  z-index: 1;
+  min-width: 58px;
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, .52);
+  background: transparent;
+  font: 650 12px/1 inherit;
+  cursor: pointer;
+  transition: color .2s ease;
+}
+
+.chat-mode-switch button[aria-selected="true"] { color: #17110d; }
+.chat-mode-switch button:not([aria-selected="true"]):hover { color: rgba(var(--theme-ink-rgb, 255, 255, 255), max(0.88, var(--theme-text-alpha, 0))); }
+.chat-mode-switch button:focus-visible { outline: 2px solid #f8c95c; outline-offset: 2px; }
+#oscar-section.coder-mode-active .chat-mode-switch { justify-self: end; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-mode-switch::before { transition: none; }
+}

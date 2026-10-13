@@ -1,10 +1,13 @@
 import path from 'node:path';
+import { flushCompileCache } from 'node:module';
 import { MonarchApplication } from './app/application';
+import { installUnhandledRejectionGuard } from './core/background-work';
 import { startMonarchHttpServer } from './app/http-server';
 import type { MonarchIntentSource } from './core';
 import { readModelCatalog } from './modules/models/model-catalog';
 import { createModelRuntimeReport } from './modules/models/runtime-adapters';
 import { resolveOwnerAuthorityFromEnvironment } from './authority/owner-authority';
+import { traceMonarchStartup } from './core/startup-timing';
 
 const workspaceRoot = process.cwd();
 
@@ -50,23 +53,45 @@ async function main(): Promise<void> {
 }
 
 async function runServe(): Promise<void> {
+  installUnhandledRejectionGuard();
+  traceMonarchStartup('entrypoint');
   const app = new MonarchApplication({
     workspaceRoot,
-    enableAgentRuntimeV2: true,
     authorityContext: resolveOwnerAuthorityFromEnvironment(),
   });
   const requestedPort = readNumberFlag('--port') || Number(process.env.MONARCH_UI_PORT || process.env.PORT || 4317);
+  traceMonarchStartup('application-constructed');
   const host = readStringFlag('--host') || process.env.MONARCH_HOST || '127.0.0.1';
   const publicDirectory = path.join(workspaceRoot, 'src', 'ui', 'public');
   const handle = await startServeWithPortFallback(app, publicDirectory, host, requestedPort);
+  traceMonarchStartup('http-ready');
+  // Persist the opt-in compile cache once imports have settled,
+  // even if Windows later terminates this long-lived server abruptly.
+  if (process.env.NODE_COMPILE_CACHE) flushCompileCache();
 
   console.log(`Monarch listening at ${handle.url}`);
 
+  let stopping = false;
   const shutdown = async (): Promise<void> => {
+    if (stopping) return;
+    stopping = true;
+    // A stop that hangs must not leave the port and the task lease held.
+    setTimeout(() => process.exit(0), 10_000).unref();
     await handle.close().catch(() => undefined);
     await app.stop().catch(() => undefined);
     process.exit(0);
   };
+
+  // Desktop keeps this pipe open for the server's whole life. Windows has no
+  // SIGTERM for a child: kill() is TerminateProcess, so the application never
+  // stopped (task lease, stores, model hosts) on an ordinary quit. Closing the
+  // pipe is the graceful stop; it also closes if Electron itself dies.
+  if (process.env.MONARCH_PARENT_LIFELINE === 'stdin') {
+    process.stdin.on('end', () => { void shutdown(); });
+    process.stdin.on('close', () => { void shutdown(); });
+    process.stdin.on('error', () => { void shutdown(); });
+    process.stdin.resume();
+  }
 
   process.once('SIGINT', () => {
     void shutdown();
@@ -91,6 +116,8 @@ async function startServeWithPortFallback(
         publicDirectory,
         host,
         port,
+        ...(app.astraProductPilot ? { astraTasks: app.astraProductPilot.facade, astraOscarTurns: true,
+          astraSelections: app.astraProductPilot.selections, astraHost: app.astraProductPilot } : {}),
       });
     } catch (error) {
       lastError = error;

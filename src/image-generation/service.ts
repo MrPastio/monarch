@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { parseExactFileCreate } from '../core/exact-file-command';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   AiHordeProvider,
@@ -23,6 +24,7 @@ import type {
   IncognitoImagePersistenceV1,
 } from './contracts';
 import { IMAGE_PROVIDER_AGREEMENT_VERSION } from './provider-agreement';
+import { renameWithWindowsRetry } from '../core/durable-json-file';
 
 const POLICY_FILE = 'policy.v1.json';
 const LIBRARY_FILE = 'library.v1.json';
@@ -831,7 +833,7 @@ export class ImageGenerationService {
     const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
     try {
-      await rename(temporary, target);
+      await renameWithWindowsRetry(temporary, target);
     } catch (error) {
       await rm(temporary, { force: true }).catch(() => undefined);
       throw error;
@@ -869,6 +871,7 @@ export function classifyImagePrompt(value: string): 'safe' | 'nsfw' | 'prohibite
 }
 
 export function looksLikeImageGenerationRequest(value: string): boolean {
+  if (parseExactFileCreate(String(value || '').trim())) return false;
   const text = String(value || '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
   if (!text) return false;
   if (/(?:сгенерируй|создай|сделай|generate|create|make)(?:\s|$)[^.!?]{0,60}(?:сайт|код|страниц\p{L}*|макет|компонент|описан\p{L}*|промпт|website|code|page|layout|component|description|prompt)[^.!?]{0,60}(?:изображен\p{L}*|картин\p{L}*|image|picture)/iu.test(text)) return false;

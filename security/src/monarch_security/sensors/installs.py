@@ -4,6 +4,7 @@ from typing import Any
 import sys
 
 from monarch_security.events import SecurityEvent
+from monarch_security.observation import ObservedSensor, ObservationUnavailable
 
 if sys.platform == "win32":
     import winreg
@@ -18,7 +19,7 @@ UNINSTALL_KEYS = [
 ]
 
 
-class InstallSensor:
+class InstallSensor(ObservedSensor):
     def __init__(
         self,
         include_existing: bool = False,
@@ -33,8 +34,9 @@ class InstallSensor:
         return set(self._seen)
 
     def snapshot(self) -> list[dict[str, Any]]:
+        self.begin_observation()
         if winreg is None:
-            return []
+            raise ObservationUnavailable('registry-backend-unavailable')
 
         items: list[dict[str, Any]] = []
         for hive_name, key_path in UNINSTALL_KEYS:
@@ -48,12 +50,14 @@ class InstallSensor:
                             item = self._read_uninstall_item(
                                 root, subkey_name, hive_name, key_path
                             )
-                        except OSError:
-                            continue
+                        except OSError as exc:
+                            raise ObservationUnavailable('registry-enumeration-incomplete') from exc
                         if item is not None:
                             items.append(item)
-            except OSError:
+            except FileNotFoundError:
                 continue
+            except OSError as exc:
+                raise ObservationUnavailable('registry-read-unavailable') from exc
         return items
 
     def poll(self) -> list[SecurityEvent]:
@@ -96,7 +100,7 @@ class InstallSensor:
     def _query_string(key, name: str) -> str | None:
         try:
             value, _ = winreg.QueryValueEx(key, name)
-        except OSError:
+        except FileNotFoundError:
             return None
         return str(value).strip() if value is not None else None
 

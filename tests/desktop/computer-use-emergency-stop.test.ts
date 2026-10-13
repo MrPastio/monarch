@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const main = readFileSync('desktop/electron/main.mjs', 'utf8');
-const preload = readFileSync('desktop/electron/preload.mjs', 'utf8');
+const preload = readFileSync('desktop/electron/preload.cjs', 'utf8');
 const http = readFileSync('src/app/http-server.ts', 'utf8');
 const api = readFileSync('src/ui/public/modules/api.js', 'utf8');
 const computerUseControl = readFileSync('src/ui/public/modules/computer-use-control.js', 'utf8');
@@ -15,6 +15,18 @@ const nativeBuilder = readFileSync('scripts/build-computer-use-native.mjs', 'utf
 const offlinePayloadBuilder = readFileSync('installer/build-offline-payload.ps1', 'utf8');
 
 describe('Computer Use emergency stop and own cursor', () => {
+  it('closes the exact window without moving the physical cursor or requiring focus', () => {
+    const close = native.slice(native.indexOf('private static Dictionary<string, object> DispatchClose('),
+      native.indexOf('private static bool WaitForWindowClosed('));
+    expect(close).toContain('NativeMethods.PostMessage(window, NativeMethods.WindowCloseMessage');
+    expect(close).toContain('expectedProcessInstanceId');
+    expect(close).toContain('expectedBounds');
+    expect(close).toContain('control.Verify()');
+    expect(close).not.toContain('SetCursorPos');
+    expect(close).not.toContain('SystemCursorMovedByUser');
+    expect(close).not.toContain('RequireExactForeground');
+    expect(native).toContain('if (kind == "close") return true;');
+  });
   it('owns a global shortcut in Electron and unregisters it during shutdown', () => {
     expect(main).toContain("globalShortcut.register(accelerator");
     expect(main).toContain("const accelerator = 'Control+Alt+Escape'");

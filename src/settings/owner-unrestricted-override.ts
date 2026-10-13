@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { MonarchOwnerUnrestrictedOverride } from '../core/contracts';
 import type {
@@ -9,6 +9,7 @@ import type {
   MonarchSettingsReadResultV1,
   MonarchSettingsWriteReceiptV1,
 } from './contracts';
+import { renameWithWindowsRetrySync } from '../core/durable-json';
 
 interface StoredOwnerOverrideV1 {
   schemaVersion: 1;
@@ -19,13 +20,14 @@ interface StoredOwnerOverrideV1 {
 
 export const DEFAULT_OWNER_UNRESTRICTED_OVERRIDE: Readonly<MonarchOwnerUnrestrictedOverride> = Object.freeze({
   enabled: false,
-  lifetime: 'session',
+  lifetime: 'persistent',
   shellApprovalPolicy: 'always',
 });
 
 /**
- * Local Owner-only control state. Session grants are deliberately cleared on
- * process construction; task grants remain inert outside their exact task id.
+ * Local Owner-only control state. Direct Access is normally persistent and
+ * remains an explicit Owner choice. Legacy session grants are still cleared
+ * on process construction; task grants remain inert outside their exact id.
  */
 export class LocalOwnerUnrestrictedOverrideStore implements MonarchSettingsBackend {
   private readonly filePath: string;
@@ -134,7 +136,7 @@ export class LocalOwnerUnrestrictedOverrideStore implements MonarchSettingsBacke
     mkdirSync(path.dirname(this.filePath), { recursive: true });
     const temporary = `${this.filePath}.${process.pid}.tmp`;
     writeFileSync(temporary, `${JSON.stringify(this.state, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    renameSync(temporary, this.filePath);
+    renameWithWindowsRetrySync(temporary, this.filePath);
   }
 }
 

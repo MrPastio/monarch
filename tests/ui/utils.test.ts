@@ -20,11 +20,33 @@ import {
   readUserFacingFailure,
   resolveOscarLiveStatus,
   formatAgentTaskFailure,
+  formatOscarSourceDate,
+  oscarResearchStep,
 } from '../../src/ui/public/modules/utils.js';
 import { state } from '../../src/ui/public/modules/state.js';
 import { isHydratedOscarFailure } from '../../src/ui/public/modules/oscar-history-reconciliation.js';
 
 describe('Oscar UI utils', () => {
+  it('preserves underscores inside file content and identifiers while keeping explicit emphasis', () => {
+    const html = formatOscarContent('ASTRA_RENDERER_OWNED and field__name. _курсив_ and __bold__.');
+    expect(html).toContain('ASTRA_RENDERER_OWNED');
+    expect(html).toContain('field__name');
+    expect(html).toContain('<em>курсив</em>');
+    expect(html).toContain('<strong>bold</strong>');
+  });
+
+  it('renders an exact Astra approval inside the ordinary message with an escaped literal preview', () => {
+    const turnId = 'oscar_turn_' + 'a'.repeat(32);
+    const message = createOscarMessage('assistant', 'Проверь файл.', 'Oscar', { turnId,
+      action: { astra: { turn: { id: turnId }, card: { type: 'approval.required', payload: { expiresAt: Date.now() + 30000 } } },
+        text: 'Создание файла', target: 'owned.txt', preview: '  <script>not executable</script>\n' } });
+    const html = renderOscarMessage(message);
+    expect(html).toContain('oscar-message assistant');
+    expect(html).toContain('data-oscar-astra-decision="approve"');
+    expect(html).toContain('data-oscar-astra-decision="reject"');
+    expect(html).toContain('&lt;script&gt;not executable&lt;/script&gt;');
+    expect(html).not.toContain('data-agent-task-id');
+  });
   it('prefers the safe execution message over internal diagnostics', () => {
     expect(readUserFacingFailure({
       summary: 'Traceback: local secret',
@@ -195,6 +217,37 @@ describe('Oscar UI utils', () => {
   });
 
   describe('formatOscarContent', () => {
+    it('shows a reply that was stored with doubly escaped line breaks as separate blocks', () => {
+      const stored = 'Привет!\\n\\n**Итог**\\n- раз\\n- два';
+      const result = formatOscarContent(stored);
+      expect(result).not.toContain('\\n');
+      expect(result).toContain('<ul>');
+      expect(result).toContain('<li>раз</li>');
+    });
+
+    it('leaves a reply with real line breaks or a lone escape sequence as written', () => {
+      expect(formatOscarContent('Символ \\n переводит строку')).toContain('\\n');
+      expect(formatOscarContent('a\\nb\\nc\\nd\ne')).toContain('\\n');
+    });
+
+    it('links [n] to the source page, leaves indexes and unknown numbers alone', () => {
+      const sources = [{ id: 1, title: 'Flight 14', url: 'https://news.example/f14' }, { id: 2, title: 'Memo', url: 'memory://chat/x' }];
+      const html = formatOscarContent('Корабль вышел на орбиту [1]. В `items[1]` и arr[1] — индекс; [2] и [7] без ссылки.', { sources });
+      expect(html).toContain('<a class="oscar-cite" href="https://news.example/f14" target="_blank" rel="noopener noreferrer" title="news.example — Flight 14" data-cite-n="1">1</a>');
+      expect((html.match(/class="oscar-cite"/g) || []).length).toBe(1);
+      expect(html).toContain('arr[1]');
+      expect(html).toContain('[2]');
+      expect(html).toContain('[7]');
+      expect(formatOscarContent('Без источников [1].')).not.toContain('oscar-cite');
+    });
+
+    it('hides browsing-citation tokens that some models print', () => {
+      expect(sanitizeVisibleAssistantContent('Курс 85,42 ₽【{"id":0,"cursor":0,"loc":0}】.')).toBe('Курс 85,42 ₽.');
+      expect(sanitizeVisibleAssistantContent('Факт 【3†source】 и ещё【12†L4-L9】.')).toBe('Факт и ещё.');
+      expect(sanitizeVisibleAssistantContent('Цитата 【Толстой】 остаётся.')).toBe('Цитата 【Толстой】 остаётся.');
+      expect(sanitizeVisibleAssistantContent('```\n【{"id":1}】\n```')).toContain('【{"id":1}】');
+    });
+
     it('escapes HTML properly', () => {
       const input = '<div onclick="alert(1)">test</div>';
       const result = formatOscarContent(input);
@@ -299,15 +352,40 @@ describe('Oscar UI utils', () => {
     });
   });
 
+  it('reports the whole Turn, not just model generation time, once the work is done', () => {
+    const message = createOscarMessage('assistant', 'Ответ', 'Medium', {
+      usage: { model_tier: 'gemma4-fast', elapsed_ms: 3_000, turn_elapsed_ms: 35_600 },
+    });
+    const html = renderOscarMessage(message);
+
+    // The running timer counts the wall clock, so the finished label must not
+    // jump down to the model's own 3 seconds.
+    expect(html).toContain('Завершено за 35с');
+    expect(html).not.toContain('Завершено за 3с');
+  });
+
   it('shows the concrete model next to answer usage', () => {
     const message = createOscarMessage('assistant', 'Ответ', 'Medium', {
       usage: { model_tier: 'gemma4-balanced', total_tokens: 321, elapsed_ms: 2400 },
     });
     const html = renderOscarMessage(message);
 
-    expect(html).toContain('Medium · 321 токен');
+    expect(html).not.toContain('токен');
     expect(html).toContain('Завершено за 2с');
     expect(html).not.toContain('Medium · 321 токенов ·');
+  });
+
+  it.each([
+    ['max-qwen-3.8-27b', 'MAX · Qwen 3.8'],
+    ['max-gpt-oss-120b', 'MAX · GPT-OSS 120B'],
+  ])('shows an explicit completion boundary for %s', (model, label) => {
+    const message = createOscarMessage('assistant', 'Законченный ответ.', 'Oscar', {
+      usage: { provider: 'groq-max', model_tier: model, completion_state: 'complete', elapsed_ms: 1200 },
+    });
+    const html = renderOscarMessage(message);
+    expect(html).toContain('oscar-max-completion');
+    expect(html).toContain('Ответ завершён');
+    expect(html).toContain(label);
   });
 
   it('formats the live work timer from seconds through days', () => {
@@ -471,8 +549,8 @@ describe('Oscar UI utils', () => {
       expect(html).toContain('Копировать ответ Oscar');
       expect(html).toContain(`data-message-speak="${msg.id}"`);
       expect(html).toContain('Озвучить весь ответ Oscar');
-      expect(html).toContain('oscar-message-usage');
-      expect(html).toContain('≈1\u00a0536 токенов');
+      expect(html).not.toContain('oscar-message-usage');
+      expect(html).not.toContain('токенов');
       expect(html).toContain('Завершено за 2с');
     });
 
@@ -613,8 +691,8 @@ describe('Oscar UI utils', () => {
       expect(html).toContain('data-orb-motion="breathing"');
       expect(html).not.toContain('oscar-work-timer');
       expect(html).toContain('oscar-live-copy');
-      expect(html).toContain('<strong>Подбираю маршрут</strong>');
-      expect(html).toContain('Выбираю лучший путь ответа');
+      expect(html).toContain('<strong>Думает</strong>');
+      expect(html).not.toContain('маршрут');
     });
 
     it('keeps truthful compact status copy for ordinary and search activity', () => {
@@ -631,11 +709,11 @@ describe('Oscar UI utils', () => {
 
       expect(ordinary).not.toContain('oscar-orb-only-status');
       expect(ordinary).toContain('oscar-live-copy');
-      expect(ordinary).toContain('Пишу ответ');
+      expect(ordinary).toContain('Готовит ответ');
       expect(ordinary).not.toContain('oscar-stream-trace');
       expect(ordinary).not.toContain('data-oscar-work-timer');
       expect(search).toContain('oscar-live-copy');
-      expect(search).toContain('Ищу источники');
+      expect(search).toContain('Ищет');
       expect(search).toContain('data-oscar-work-timer');
     });
 
@@ -661,12 +739,12 @@ describe('Oscar UI utils', () => {
       const html = renderOscarMessage(message);
 
       expect(status).toEqual({
-        label: 'Поиск · Интернет',
+        label: 'Ищет',
         detail: 'Monarch release notes',
         motion: 'breathing',
         visualPhase: 'search',
       });
-      expect(html).toContain('<strong>Поиск · Интернет</strong>');
+      expect(html).toContain('<strong>Ищет</strong>');
       expect(html).toContain('Monarch release notes');
       expect(html).toContain('data-orb-phase="search"');
       expect(html).toContain('data-orb-motion="breathing"');
@@ -691,27 +769,27 @@ describe('Oscar UI utils', () => {
       const html = renderOscarMessage(message);
 
       expect(status).toMatchObject({
-        label: 'Перемещаю курсор',
+        label: 'Работает',
         motion: 'heartbeat',
         visualPhase: 'write',
       });
-      expect(html).toContain('<strong>Перемещаю курсор</strong>');
+      expect(html).toContain('<strong>Работает</strong>');
       expect(html).toContain('data-orb-motion="heartbeat"');
     });
 
     it('renders bounded deep-research phases as visible activity, not hidden reasoning', () => {
       const phases = [
-        ['research-reflect', 'Проверяю полноту', 'Ищу пробелы и противоречия'],
-        ['research-revise', 'Пересобираю вывод', 'Уточняю ответ с новым контекстом'],
-        ['research-finalize', 'Формирую итог', 'Собираю полный детальный ответ'],
-        ['research-plan', 'Планирую исследование', 'Разделяю вопрос на проверяемые направления'],
-        ['research-search', 'Исследую источники', 'Ищу независимые подтверждения'],
-        ['research-read', 'Читаю материалы', 'Собираю факты и противоречия'],
-        ['research-synthesize', 'Синтезирую вывод', 'Отделяю факты от сценариев'],
-        ['research-verify', 'Проверяю вывод', 'Сверяю утверждения и ссылки'],
+        ['research-reflect', 'Проверяет'],
+        ['research-revise', 'Готовит ответ'],
+        ['research-finalize', 'Готовит ответ'],
+        ['research-plan', 'Думает'],
+        ['research-search', 'Ищет'],
+        ['research-read', 'Изучает'],
+        ['research-synthesize', 'Готовит ответ'],
+        ['research-verify', 'Проверяет'],
       ];
 
-      for (const [streamPhase, label, hint] of phases) {
+      for (const [streamPhase, label] of phases) {
         const html = renderOscarMessage(createOscarMessage('assistant', '', 'Pro', {
           pending: true,
           streamPhase,
@@ -721,53 +799,79 @@ describe('Oscar UI utils', () => {
         expect(html).toContain('class="monarch-thinking-orb"');
         expect(html).toContain(`data-orb-phase="${streamPhase}"`);
         expect(html).toContain(label);
-        expect(html).toContain(hint);
+        expect(html).not.toContain('runtime');
         expect(html).not.toContain('oscar-reasoning-block');
       }
     });
 
-    it('renders route consent inside the pending Oscar answer with the full research timeline', () => {
-      const html = renderOscarMessage(createOscarMessage('assistant', '', 'Oscar', {
-        pending: true,
-        streamPhase: 'research-consent',
-        researchFlow: true,
-        routeConsent: {
-          webSearch: true,
-          pro: false,
-          title: 'Нужно интернет-исследование',
-          description: 'Oscar проверит вывод в несколько проходов.',
-          denyLabel: 'Ответить без исследования',
-          allowLabel: 'Начать исследование',
-          state: 'waiting',
-        },
-      }));
+    it('shows the research steps that happened, open while searching and folded when done', () => {
+      const researchSteps = [
+        oscarResearchStep('agent-research-plan', 'Вопрос требует разбора — исследую глубже'),
+        oscarResearchStep('agent-search', 'ноутбук до 1000 · MacBook Air vs ThinkPad'),
+        oscarResearchStep('agent-research-read', 'Изучаю 3 источника: vc.ru, manbolo.com'),
+        oscarResearchStep('agent-research-verify', 'Не хватает: цены'),
+        oscarResearchStep('agent-turn-answer', 'Готовит ответ'),
+      ].filter(Boolean);
+      expect(researchSteps.map((step) => step.kind)).toEqual(['plan', 'search', 'read', 'verify']);
 
-      expect(html).toContain('route-consent research-flow');
-      expect(html).toContain('oscar-inline-consent');
-      expect(html).toContain('class="monarch-thinking-orb"');
-      expect(html).toContain('data-orb-phase="search"');
-      expect(html).toContain('data-oscar-route-decision="deny"');
-      expect(html).toContain('data-oscar-route-decision="allow"');
-      expect(html).toContain('aria-label="Этапы исследования"');
-      expect(html).toContain('Публичные источники');
-      expect(html).toContain('Только один ответ');
-      expect(html).not.toContain('aria-modal="true"');
+      const live = renderOscarMessage(createOscarMessage('assistant', '', 'Oscar', {
+        pending: true, streamPhase: 'agent-research-verify', researchSteps,
+      }));
+      expect(live).toContain('class="oscar-research-trace" data-live="true" open');
+      expect(live).toContain('Исследую');
+      expect(live).toMatch(/data-step-kind="verify" aria-current="step"/);
+      expect(live).not.toContain('oscar-research-timeline');
+
+      const done = renderOscarMessage(createOscarMessage('assistant', 'Итог [1].', 'Oscar', {
+        researchSteps,
+        sources: [{ title: 'Laptops', url: 'https://vc.ru/laptops', snippet: 'x' }],
+      }));
+      expect(done).toContain('class="oscar-research-trace" data-live="false">');
+      expect(done).toContain('Как искал');
+      expect(done).toContain('<span>Запросы</span> <b>2</b>');
+      expect(done).toContain('<span>Источники</span> <b>1</b>');
+      expect(done).toContain('<span>Дозапросы</span> <b>1</b>');
+      expect(done).not.toContain('aria-current="step"');
     });
 
-    it('keeps completed, current and upcoming research stages visible in one stable card', () => {
-      const html = renderOscarMessage(createOscarMessage('assistant', '', 'Medium', {
-        pending: true,
-        researchFlow: true,
-        streamPhase: 'research-reflect',
-      }));
+    it('renders numbered source cards with site, date and origin that open the page', () => {
+      const sources = [
+        { id: 1, title: 'Starship flight 14', url: 'https://www.spacex.com/updates', excerpt: 'x', published: '2026-09-28', origin: 'engine' },
+        { title: 'Starship', url: 'https://ru.wikipedia.org/wiki/Starship', snippet: 'x', origin: 'wikipedia' },
+        { title: 'Old page', url: 'https://old.example/p', snippet: 'x', origin: 'saved', savedAt: '2026-09-30' },
+        { title: '<b>x</b>', url: 'javascript:alert(1)', snippet: 'x' },
+      ];
+      const html = renderOscarMessage(createOscarMessage('assistant', 'Ответ', 'Oscar', { sources }));
+      expect(html).toContain('<a class="oscar-source-card" href="https://www.spacex.com/updates" target="_blank" rel="noopener noreferrer" data-source-n="1"');
+      expect(html).toContain('<span class="oscar-source-host" data-no-i18n>spacex.com</span>');
+      expect(html).toContain('<time datetime="2026-09-28">');
+      expect(html).toContain('data-source-n="2"');
+      expect(html).toContain('>Википедия<');
+      expect(html).toContain('>Прочитано раньше<');
+      // Not a web link: shown, never clickable, and escaped.
+      expect(html).toContain('<span class="oscar-source-card" data-source-n="4">');
+      expect(html).not.toContain('href="javascript:');
+      expect(html).toContain('&lt;b&gt;x&lt;/b&gt;');
+      expect(html).not.toContain('source-list');
+    });
 
-      expect(html).toContain('assistant pending  research-flow');
-      expect(html).toContain('data-step-state="complete"');
-      expect(html).toContain('data-step-state="current" aria-current="step"');
-      expect(html).toContain('data-step-state="upcoming"');
-      expect(html).toContain('Проверяю полноту');
-      expect(html).toContain('План');
-      expect(html).toContain('Итог');
+    it('folds sources past the first six under one control', () => {
+      const sources = Array.from({ length: 9 }, (_, index) => ({ title: `S${index + 1}`, url: `https://s${index + 1}.example/`, snippet: 'x' }));
+      const html = renderOscarMessage(createOscarMessage('assistant', 'Ответ', 'Oscar', { sources }));
+      const [shown, more] = html.split('<details class="oscar-sources-more">');
+      expect((shown.match(/class="oscar-source-card"/g) || []).length).toBe(6);
+      expect(more).toContain('<span>Ещё источники</span> <b>3</b>');
+      expect((more.match(/class="oscar-source-card"/g) || []).length).toBe(3);
+    });
+
+    it('formats source dates for the interface and rejects anything that is not one', () => {
+      const now = new Date('2026-10-09T12:00:00Z');
+      expect(formatOscarSourceDate('2026-09-28', now)).toMatch(/28/);
+      expect(formatOscarSourceDate('2026-09-28', now)).not.toMatch(/2026/);
+      expect(formatOscarSourceDate('2024-08-21T10:00:00Z', now)).toMatch(/2024/);
+      expect(formatOscarSourceDate('2026-02-31', now)).toBe('');
+      expect(formatOscarSourceDate('вчера', now)).toBe('');
+      expect(formatOscarSourceDate('', now)).toBe('');
     });
 
     it('does not render a legacy token as a Security override action', () => {

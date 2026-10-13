@@ -33,6 +33,7 @@ describe('direct browser PCM transport', () => {
       partialAgeMs: 20,
     }));
     const telemetry = vi.fn();
+    const onPartial = vi.fn();
     const stream = await createVoicePcmStream({
       windowObject: harness.win,
       mediaStream: {},
@@ -42,6 +43,7 @@ describe('direct browser PCM transport', () => {
       finishSession: finish,
       cancelSession: vi.fn(),
       onTelemetry: telemetry,
+      onPartial,
     });
     harness.node.port.emitPcm(new ArrayBuffer(320));
     await flushPromises();
@@ -63,6 +65,11 @@ describe('direct browser PCM transport', () => {
       type: 'partial',
       partialLength: 'частичный текст'.length,
     }));
+    expect(onPartial).toHaveBeenCalledWith({
+      transcript: 'частичный текст',
+      sequence: 0,
+      enginePath: 'direct-pcm/test',
+    });
     expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({
       type: 'final',
       captureStopToFinalMs: 41,
@@ -86,6 +93,42 @@ describe('direct browser PCM transport', () => {
 
     await expect(stream.stop(5_000)).rejects.toMatchObject({ code: 'voice-stt-queue-overflow' });
     expect(cancel).toHaveBeenCalledWith({ sessionId: 'session_123456789012345678901234' });
+  });
+
+  it('rotates a resident STT segment without closing the microphone graph', async () => {
+    const harness = createAudioWorkletHarness();
+    const start = vi.fn()
+      .mockResolvedValueOnce({ sessionId: 'session_111111111111111111111111' })
+      .mockResolvedValueOnce({ sessionId: 'session_222222222222222222222222' });
+    const push = vi.fn(async ({ sequence }: { sequence: number }) => ({ sequence, partial: '' }));
+    const cancel = vi.fn(async () => undefined);
+    const stream = await createVoicePcmStream({
+      windowObject: harness.win,
+      mediaStream: {},
+      startSession: start,
+      pushSession: push,
+      finishSession: vi.fn(),
+      cancelSession: cancel,
+    });
+
+    harness.node.port.emitPcm(new ArrayBuffer(320));
+    await flushPromises();
+    await stream.reset();
+    harness.node.port.emitPcm(new ArrayBuffer(320));
+    await flushPromises();
+
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenCalledWith({ sessionId: 'session_111111111111111111111111' });
+    expect(push).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      sessionId: 'session_111111111111111111111111',
+      sequence: 0,
+    }));
+    expect(push).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      sessionId: 'session_222222222222222222222222',
+      sequence: 0,
+    }));
+    expect(harness.context.close).not.toHaveBeenCalled();
+    expect(stream.snapshot()).toMatchObject({ sequence: 1, stopped: false, resetting: false });
   });
 });
 

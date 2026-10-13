@@ -1,0 +1,28 @@
+# Disposable VM fixture: only labelled synthetic incidents enter the test.
+[model]
+path = "disabled-test-model.gguf"
+
+[file_watch]
+enabled = false
+paths = []
+
+[network]
+enabled = false
+active_probe_enabled = false
+
+[persistence]
+enabled = false
+
+[posture]
+enabled = false
+
+[notifications]
+enabled = false
+
+[runtime]
+process_monitor_enabled = false
+device_monitor_enabled = false
+install_monitor_enabled = false
+self_protection_enabled = false
+emergency_auto_lock_enabled = true
+emergency_recovery_seconds = 120

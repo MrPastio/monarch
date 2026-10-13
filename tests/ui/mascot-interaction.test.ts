@@ -3,9 +3,26 @@ import {
   clampMascotLayout,
   createDefaultMascotLayout,
   hasSentOscarMessage,
+  deriveOscarMascotRuntime,
 } from '../../src/ui/public/modules/mascot-controller.js';
 
 describe('Oscar mascot interaction layout', () => {
+  it('exposes the current failure reason even when the backend is connected', () => {
+    expect(deriveOscarMascotRuntime({status: {backend: {connected: true}},
+      context: {outcome: 'failed', summary: 'Голос недоступен'}})).toMatchObject({errored: true, detail: 'Голос недоступен'});
+    expect(deriveOscarMascotRuntime({status: {backend: {connected: true}}, context: null})).toMatchObject({errored: false});
+  });
+
+  it('keeps an old completed code reply from impersonating active work', () => {
+    expect(deriveOscarMascotRuntime({messages: [{role: 'assistant', content: '```js\n42\n```'}]})).toMatchObject({busy: false, coding: false});
+  });
+
+  it('reports backend failure and recovers when the current state is healthy', () => {
+    expect(deriveOscarMascotRuntime({status: {backend: {connected: false, startupAttempted: true, error: 'Runtime отсутствует'}}}))
+      .toMatchObject({errored: true, detail: 'Runtime отсутствует'});
+    expect(deriveOscarMascotRuntime({busy: true, context: {outcome: 'failed', summary: 'Предыдущий сбой'}}))
+      .toMatchObject({busy: true, errored: false});
+  });
   it('starts as a mini companion above the lower-right composer area', () => {
     const layout = createDefaultMascotLayout({ width: 1920, height: 960 });
     expect(layout.x).toBeGreaterThan(1700);

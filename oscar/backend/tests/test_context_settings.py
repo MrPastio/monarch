@@ -344,6 +344,9 @@ def test_voice_preferences_presets_and_input_are_durable(tmp_path: Path) -> None
     initial = store.read("voice", {"type": "chat"})
     assert initial["value"]["preferences"]["voice"] == "oscar"
     assert initial["value"]["input"]["autoSendAfterDictation"] is False
+    assert initial["value"]["input"]["simplifiedModeEnabled"] is True
+    assert initial["value"]["input"]["backgroundWakeEnabled"] is True
+    assert initial["value"]["input"]["informationProvidersEnabled"] is False
 
     saved = execute(
         store,
@@ -360,7 +363,16 @@ def test_voice_preferences_presets_and_input_are_durable(tmp_path: Path) -> None
                 "pauseMs": 120,
                 "volume": 84,
             },
-            "input": {"autoSendAfterDictation": True},
+            "input": {
+                "autoSendAfterDictation": True,
+                "simplifiedModeEnabled": False,
+                "backgroundWakeEnabled": False,
+                "informationProvidersEnabled": True,
+                "informationProviderAgreementVersion": "2026-08-29.1",
+                "informationProviderConsentedAt": "2026-08-29T12:00:00.000Z",
+                "weatherLocationMode": "device",
+                "weatherLocation": "Киев",
+            },
             "legacyPreferences": {"voice": "oscar-clear", "speed": 96},
         },
     )
@@ -378,6 +390,17 @@ def test_voice_preferences_presets_and_input_are_durable(tmp_path: Path) -> None
         "activePresetId": None,
     }
     assert context["value"]["input"]["autoSendAfterDictation"] is True
+    assert context["value"]["input"] == {
+        "schemaVersion": 1,
+        "autoSendAfterDictation": True,
+        "simplifiedModeEnabled": False,
+        "backgroundWakeEnabled": False,
+        "informationProvidersEnabled": True,
+        "informationProviderAgreementVersion": "2026-08-29.1",
+        "informationProviderConsentedAt": "2026-08-29T12:00:00.000Z",
+        "weatherLocationMode": "device",
+        "weatherLocation": "Киев",
+    }
     backup = tmp_path / "data" / "migrations" / "context-v4-backup" / "voice-local-storage.json"
     assert backup.is_file()
 
@@ -465,3 +488,44 @@ def test_voice_pronunciation_is_whole_word_only_and_scope_is_global(tmp_path: Pa
         )
     with pytest.raises(ValueError, match="global"):
         store.read("voice", {"type": "coder-project", "projectId": "voice-project"})
+
+
+def test_personality_style_set_turns_on_a_style_in_one_write(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    initial = store.read("personality", {"type": "chat"})
+    execute(
+        store,
+        client_request_id="personality_style_1",
+        command="personality.style.set",
+        expected_revision=initial["revision"],
+        payload={
+            "enabled": True,
+            "dimensions": {"brevity": 85, "warmth": 50, "technicalDepth": 15},
+            "addressForm": "вы",
+            "language": "ru",
+            "customRules": ["Называй меня Антон."],
+        },
+    )
+    context = store.read("personality", {"type": "chat"})
+    value = context["value"]
+    selected = next(p for p in value["profiles"] if p["id"] == value["selectedProfileId"])
+
+    assert context["revision"] == initial["revision"] + 1
+    assert value["enabled"] is True
+    assert selected["dimensions"]["brevity"] == 85
+    assert selected["dimensions"]["technicalDepth"] == 15
+    assert selected["addressForm"] == "вы"
+    assert selected["customRules"] == ["Называй меня Антон."]
+    assert value["questionnaire"]["brevity"] == 85
+
+    execute(
+        store,
+        client_request_id="personality_style_2",
+        command="personality.style.set",
+        expected_revision=context["revision"],
+        payload={"enabled": False},
+    )
+    turned_off = store.read("personality", {"type": "chat"})["value"]
+    kept = next(p for p in turned_off["profiles"] if p["id"] == turned_off["selectedProfileId"])
+    assert turned_off["enabled"] is False
+    assert kept["dimensions"]["brevity"] == 85

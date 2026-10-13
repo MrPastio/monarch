@@ -139,7 +139,8 @@ export class CoderHostPolicy {
     const monarchRoot = this.monarchRoot.replace(/\//g, '\\').toLowerCase();
     const workspaceCoderRoot = this.workspaceCoderRoot.replace(/\//g, '\\').toLowerCase();
     const commandOutsideWorkspace = normalizedCommandText.split(workspaceCoderRoot).join('');
-    if (commandOutsideWorkspace.includes(monarchRoot)) {
+    // Whole-path match: E:\MonarchCoderSandbox is a sibling of E:\Monarch, not inside it.
+    if (mentionsPath(commandOutsideWorkspace, monarchRoot)) {
       throw new Error('Command arguments reference protected Monarch system files.');
     }
     if (/(?:%windir%|%systemroot%|\$env:(?:windir|systemroot|programfiles|programdata)|\\windows\\system32)/i.test(commandText)) {
@@ -247,6 +248,16 @@ function credentialProtectedPaths(): string[] {
 
 function isMutation(operation: MonarchFilesystemOperation): boolean {
   return operation !== 'read' && operation !== 'list' && operation !== 'search';
+}
+
+/** True when `root` occurs in `text` as a whole path, not as the prefix of a longer name. */
+function mentionsPath(text: string, root: string): boolean {
+  const base = root.replace(/\\+$/u, '');
+  for (let index = text.indexOf(base); index >= 0; index = text.indexOf(base, index + 1)) {
+    const next = text.charAt(index + base.length);
+    if (!next || next === '\\' || /[\s"'`;,|)]/u.test(next)) return true;
+  }
+  return false;
 }
 
 function samePath(left: string, right: string): boolean {

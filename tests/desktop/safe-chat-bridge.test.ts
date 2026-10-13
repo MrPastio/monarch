@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 const runtime = readFileSync('desktop/safe/runtime.mjs', 'utf8');
 const main = readFileSync('desktop/electron/main.mjs', 'utf8');
-const preload = readFileSync('desktop/electron/preload.mjs', 'utf8');
+const preload = readFileSync('desktop/electron/preload.cjs', 'utf8');
 
 describe('Monarch Safe chat bridge boundary', () => {
   it('exposes only chat-scoped Safe service actions to the main renderer', () => {

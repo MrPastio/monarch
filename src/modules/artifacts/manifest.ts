@@ -19,19 +19,14 @@ export const artifactsManifest: MonarchModuleManifest = {
       title: 'Write artifact',
       description: 'Write a generated html, markdown, text, or json artifact inside Monarch artifacts.',
       risk: 'write',
-      routing: {
-        aliases: ['write artifact', 'save artifact', 'create artifact'],
-        keywords: ['artifact', 'html', 'markdown', 'json', 'generated', 'save', 'write'],
-        examples: ['save markdown artifact', 'write html artifact'],
-        intentKinds: ['artifact.write', 'file.generation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
           type: { type: 'string' },
           content: {},
-          path: { type: 'string' },
-          fileName: { type: 'string' },
+          path: { type: 'string', description: 'File path, relative to the artifacts folder or absolute. With fileName, a path without an extension is the folder that receives the file.' },
+          fileName: { type: 'string', description: 'File name when path is omitted or names a folder.' },
           overwrite: { type: 'boolean' },
         },
         required: ['type', 'content'],
@@ -44,12 +39,7 @@ export const artifactsManifest: MonarchModuleManifest = {
       title: 'List artifacts',
       description: 'List recently generated artifact files.',
       risk: 'read',
-      routing: {
-        aliases: ['list artifacts', 'show artifacts'],
-        keywords: ['artifact', 'artifacts', 'list', 'show', 'generated'],
-        examples: ['list artifacts'],
-        intentKinds: ['artifact.read'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {

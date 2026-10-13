@@ -111,6 +111,7 @@ const LOCAL_SETTINGS_COMMANDS = new Set([
   'personality.profile.select',
   'personality.personalization.set',
   'personality.scope.copy',
+  'personality.style.set',
   'voice.update',
   'voice.preset.create',
   'voice.preset.update',
@@ -153,6 +154,12 @@ export class MonarchPolicyKernel {
     private readonly workspaceRoot = process.cwd(),
   ) {}
 
+  private ownerRedZoneRootsProvider: () => readonly string[] = () => [];
+
+  setOwnerRedZoneRootsProvider(provider: () => readonly string[]): void {
+    this.ownerRedZoneRootsProvider = provider;
+  }
+
   /**
    * Settings are local data, not capabilities and not model-proposed actions.
    * They still cross the same policy trust boundary so renderer/API input can
@@ -167,10 +174,6 @@ export class MonarchPolicyKernel {
     } else if (!LOCAL_SETTINGS_COMMANDS.has(input.command)) {
       outcome = 'deny';
       reason = 'Unknown local settings command.';
-    } else if (input.command.startsWith('owner-override.')
-      && (this.authority.tier !== 'owner' || this.authority.source !== 'signed-device-entitlement')) {
-      outcome = 'deny';
-      reason = 'Owner Unrestricted Override requires a verified signed local Owner entitlement.';
     } else if (
       (input.command.startsWith('prompts.') || input.command.startsWith('dev.'))
       && (this.authority.tier !== 'owner' || this.authority.source !== 'signed-device-entitlement')
@@ -202,15 +205,9 @@ export class MonarchPolicyKernel {
   }
 
   getEffectivePermissionProfile(request: MonarchExecutionRequest): MonarchPermissionProfile {
-    const profile = request.permissionProfileOverride
+    return request.permissionProfileOverride
       ? new MonarchPermissionGate(request.permissionProfileOverride).getProfile()
       : this.permissions.getProfile();
-    if (this.authorityTierForRequest(request) === 'owner'
-      && profile.sandboxMode === 'danger-full-access'
-      && profile.approvalPolicy === 'never') {
-      return { ...profile, autonomyMode: 'full-local', approvalPolicy: 'on-request' };
-    }
-    return profile;
   }
 
   authorityTierForRequest(request: MonarchExecutionRequest): MonarchAuthorityTier {
@@ -235,6 +232,17 @@ export class MonarchPolicyKernel {
     return request.approvalPurpose === 'policy';
   }
 
+  /** Deny-only source gate, applied after Security has finalized the policy hash.
+   * Checking the preflight hash here would reject a valid final-policy approval. */
+  enforceSourceConfirmation(request: MonarchExecutionRequest, policy: MonarchPolicyDecision): MonarchPolicyDecision {
+    if (request.requireExactConfirmation !== true || policy.outcome !== 'allow') return policy;
+    if (/^[a-f0-9]{64}$/u.test(request.proposalHash ?? '') && request.confirmed === true && request.approvalPurpose === 'policy'
+      && request.approvalPolicyDecisionHash === policy.policyDecisionHash && request.authorityTierAtApproval === policy.authorityTier) return policy;
+    return { ...policy, outcome: 'confirm', reason: 'The source requires exact confirmation of this action before dispatch.',
+      evidence: [...policy.evidence, { source: 'provenance', code: 'source.exact-confirmation-required', severity: 'warn',
+        message: 'Source-required action review has not been satisfied by an exact policy-bound answer.' }] };
+  }
+
   preflight(
     request: MonarchExecutionRequest,
     capability: MonarchCapability,
@@ -249,11 +257,74 @@ export class MonarchPolicyKernel {
     const profile = this.getEffectivePermissionProfile(request);
     const authorityTier = this.authorityTierForRequest(request);
     const modelOwnedProposal = isModelOwnedExecutionProposal(request);
-    // Agent Runtime always uses the adaptive danger policy. A persisted
-    // Security mode wins when present; otherwise Full Access defaults to
-    // Observe and narrower profiles default to Guard. Falling back to the
-    // legacy irreversible-action gate here would silently rebuild the old
-    // approval wall whenever Security has not emitted its startup event yet.
+    const ownerOverrideActive = isOwnerOverrideActive(runtimeFacts.ownerOverride, request);
+    const evidence: MonarchPolicyEvidence[] = [];
+    if (request.proposalId) {
+      evidence.push({
+        source: 'provenance',
+        code: 'proposal.typed.canonicalized',
+        severity: 'info',
+        message: `Typed action proposal ${request.proposalId} was normalized before policy evaluation.`,
+      });
+    }
+
+    const hardBoundary = deterministicHardBoundary(request, riskVector, {
+      profile,
+      ownerOverrideActive,
+      workspaceRoot: this.workspaceRoot,
+      ownerRedZoneRoots: this.ownerRedZoneRootsProvider(),
+    });
+    if (hardBoundary) {
+      evidence.push(hardBoundary);
+      return {
+        permission: denyPermission(effectiveRisk, hardBoundary.message),
+        decision: decision(
+          'deny', effectiveRisk, riskVector, evidence, hardBoundary.message, false,
+          request, authorityTier, undefined, undefined, ownerOverrideActive,
+        ),
+      };
+    }
+
+    const dangerGoverned = modelOwnedProposal || request.executionMode === 'agent-runtime';
+    if (ownerOverrideActive && dangerGoverned && request.moduleId !== 'security') {
+      // Direct Access keeps Kernel as the typed dispatcher, receipt ledger and
+      // verifier, but removes it as an ordinary action gate. The independent
+      // Monarch Security Action Guard receives the exact action next and may
+      // hold only a concrete critical action for an Owner decision.
+      const directEvidence: MonarchPolicyEvidence = {
+        source: 'permission',
+        code: 'owner-direct-access.security-observed',
+        severity: 'info',
+        message: 'Owner Direct Access bypasses ordinary Kernel approval policy; Monarch Security reviews the exact action.',
+      };
+      evidence.push(directEvidence);
+      const permission: MonarchPermissionDecision = {
+        mode: 'allow',
+        reason: directEvidence.message,
+        risk: effectiveRisk,
+        requiresUserConfirmation: false,
+      };
+      return {
+        permission,
+        decision: decision(
+          'allow',
+          effectiveRisk,
+          riskVector,
+          evidence,
+          directEvidence.message,
+          riskVector.effect !== 'none' && riskVector.effect !== 'read',
+          request,
+          authorityTier,
+          undefined,
+          undefined,
+          true,
+        ),
+      };
+    }
+
+    // Outside Direct Access, the ordinary Kernel policy may still use its
+    // risk profile. Direct actions never reach this assessment: their exact
+    // safety decision belongs to the independent Monarch Security guard.
     const adaptiveDangerPolicy = runtimeFacts.agentSecurityMode !== undefined
       || request.executionMode === 'agent-runtime';
     const agentSecurityMode = runtimeAgentSecurityMode(runtimeFacts, profile);
@@ -263,24 +334,18 @@ export class MonarchPolicyKernel {
       riskVector,
       ...(request.source ? { source: request.source } : {}),
     });
-    const ownerOverrideActive = isOwnerOverrideActive(runtimeFacts.ownerOverride, request, authorityTier);
     const baselineDangerResponse = dangerResponseForMode(agentSecurityMode, dangerAssessment.dangerProbability);
     const ownerShellPolicy = request.capabilityId === 'system.shell.run'
       ? runtimeFacts.ownerOverride?.shellApprovalPolicy || 'always'
       : null;
     let dangerResponse = baselineDangerResponse;
     if ((dangerResponse === 'confirm' || dangerResponse === 'block') && ownerOverrideActive) {
-      // Shell keeps an independent Owner policy. `risk-based` converts even a
-      // critical stop into an exact action-card; `never` is the explicit local
-      // choice that suppresses the card. The response stays stable after an
-      // approval so its durable policy hash cannot drift.
       dangerResponse = ownerShellPolicy === 'risk-based' ? 'confirm' : 'owner-override';
     }
     const dangerContext = { assessment: dangerAssessment, response: dangerResponse };
     const requiresSecurityReview = adaptiveDangerPolicy
       ? dangerResponse === 'enhanced-readback'
       : shouldRequestSecurityReview(request, effectiveCapability, riskVector, profile);
-    const evidence: MonarchPolicyEvidence[] = [];
     const makeDecision = (
       outcome: MonarchPolicyDecision['outcome'],
       reason: string,
@@ -298,27 +363,6 @@ export class MonarchPolicyKernel {
       dangerContext,
       ownerOverrideActive,
     );
-    if (request.proposalId) {
-      evidence.push({
-        source: 'provenance',
-        code: 'proposal.typed.canonicalized',
-        severity: 'info',
-        message: `Typed action proposal ${request.proposalId} was normalized before policy evaluation.`,
-      });
-    }
-
-    const hardBoundary = deterministicHardBoundary(request, riskVector, {
-      profile,
-      ownerOverrideActive,
-      workspaceRoot: this.workspaceRoot,
-    });
-    if (hardBoundary) {
-      evidence.push(hardBoundary);
-      return {
-        permission: denyPermission(effectiveRisk, hardBoundary.message),
-        decision: makeDecision('deny', hardBoundary.message, false),
-      };
-    }
 
     const coderExecution = request.executionMode === 'coder' && request.moduleId === 'coder';
     if (modelOwnedProposal && runtimeFacts.modelCommandsEnabled === false && !coderExecution) {
@@ -336,7 +380,6 @@ export class MonarchPolicyKernel {
       };
     }
 
-    const dangerGoverned = modelOwnedProposal || request.executionMode === 'agent-runtime';
     if (dangerGoverned && request.capabilityId === 'system.shell.run') {
       const shellPolicy = ownerOverrideActive
         ? ownerShellPolicy || 'always'
@@ -689,6 +732,7 @@ function deterministicHardBoundary(
     profile: MonarchPermissionProfile;
     ownerOverrideActive: boolean;
     workspaceRoot: string;
+    ownerRedZoneRoots?: readonly string[];
   },
 ): MonarchPolicyEvidence | null {
   if (risk.data === 'secret' && (risk.externality !== 'local' || risk.effect === 'network')) {
@@ -700,7 +744,9 @@ function deterministicHardBoundary(
       message: 'Secret-like data cannot be sent to an external destination through the general agent path.',
     };
   }
-  if (risk.novelty === 'arbitrary-code' && risk.privilege === 'security-control') {
+  if (risk.novelty === 'arbitrary-code'
+    && risk.privilege === 'security-control'
+    && !filesystem.ownerOverrideActive) {
     return {
       source: 'runtime',
       code: 'runtime.arbitrary-code.security-control',
@@ -730,6 +776,7 @@ function deterministicFilesystemBoundary(
     profile: MonarchPermissionProfile;
     ownerOverrideActive: boolean;
     workspaceRoot: string;
+    ownerRedZoneRoots?: readonly string[];
   },
 ): MonarchPolicyEvidence | null {
   if (request.executionMode !== 'agent-runtime') return null;
@@ -749,6 +796,7 @@ function deterministicFilesystemBoundary(
       allowFullDiskAccess: true,
       includeDefaultRedZones: !options.ownerOverrideActive,
       protectWorkspaceInternals: !options.ownerOverrideActive,
+      redZoneRoots: [...(options.ownerRedZoneRoots || [])],
       allowRoot: operation === 'read' || operation === 'list' || operation === 'search',
     });
     if (access.allowed) continue;
@@ -811,6 +859,9 @@ function decision(
       response: danger.response,
     } : null,
     ownerUnrestrictedOverride,
+    // Omission preserves legacy decision hashes. Removing the requirement from
+    // an approved replay changes its hash and cannot reuse that approval.
+    ...(request.requireExactConfirmation === true ? { requireExactConfirmation: true } : {}),
   }), 'utf8').digest('hex');
   return {
     outcome,
@@ -939,12 +990,18 @@ function runtimeAgentSecurityMode(
     : 'guard';
 }
 
+/** Direct Access is the base execution mode of the local owner surfaces
+ * (Desktop, Coder); remote surfaces never get it. It used to require a signed
+ * device entitlement as well, so on an unenrolled machine the control showed
+ * "on" while Kernel kept gating every action. Measured live, Direct Access
+ * removed a ~40 s classifier pass per turn and every approval stop, so the
+ * owner made it the base; the entitlement still governs owner-only powers such
+ * as overriding a blocking Security advisory, which stay denied without it. */
 function isOwnerOverrideActive(
   override: MonarchOwnerUnrestrictedOverride | undefined,
   request: MonarchExecutionRequest,
-  authorityTier: MonarchAuthorityTier,
 ): boolean {
-  if (!override?.enabled || authorityTier !== 'owner') return false;
+  if (!override?.enabled) return false;
   if (request.source !== 'desktop' && request.source !== 'coder') return false;
   if (override.lifetime !== 'task') return true;
   const taskId = request.requestedBy.startsWith('agent:') ? request.requestedBy.slice('agent:'.length) : '';

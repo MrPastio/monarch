@@ -1,5 +1,9 @@
+import { reducedUiMotion } from './ui-motion.js';
 import { state } from './state.js';
+import { plainActivity, containsTechnicalCopy } from './ui-language.js';
 import { parseSkillInvocation, skillUserFacingName } from './skill-ux.js';
+import { renderOscarTaskReport } from './oscar-task-report.js';
+import { currentUiLanguage } from './ui-i18n.js';
 
 export function escapeHtml(value) {
   return String(value ?? '')
@@ -16,7 +20,14 @@ export function readErrorMessage(error) {
     return 'Перезапусти Monarch, чтобы настройки снова стали доступны.';
   }
   if (/backend.+(?:unavailable|not reachable|did not respond)|runtime.+(?:unavailable|disconnected)/i.test(message)) {
-    return 'Сервис Oscar сейчас недоступен. Попробуй ещё раз через несколько секунд.';
+    return 'Оскар сейчас не отвечает. Попробуй ещё раз через несколько секунд.';
+  }
+  // Electron wraps desktop failures as "Error invoking remote method '…': …";
+  // a page that did not load is a network problem the person can act on.
+  if (/Error invoking remote method/i.test(message)) {
+    return /ERR_(?:ABORTED|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|CONNECTION|TIMED_OUT|NETWORK|ADDRESS_UNREACHABLE)/i.test(message)
+      ? 'Страница не загрузилась. Проверь интернет и попробуй ещё раз.'
+      : 'Действие не выполнилось. Попробуй ещё раз; если повторится — перезапусти Monarch.';
   }
   return message;
 }
@@ -139,7 +150,7 @@ function formatOscarTierLabel(tier) {
   case 'qwen3.8-27b-pro':
     return 'Pro';
   default:
-    return tier || 'локальный runtime';
+    return tier || 'Оскар';
   }
 }
 
@@ -222,8 +233,30 @@ export function readOscarSources(response) {
   });
 }
 
-export function formatOscarContent(content) {
-  let text = sanitizeVisibleAssistantContent(content);
+/** Replies stored before the adapter fix carry the two characters backslash and n where the model
+ * escaped its JSON string twice, and the chat shows them as text with every list glued into one
+ * paragraph. A text with real line breaks was decoded once and is left alone; so is a lone escape
+ * in an inline explanation. Same rule as `restoreDoubleEscapedLineBreaks` in the MAX adapter. */
+function restoreDoubleEscapedLineBreaks(text) {
+  if (text.includes('\n')) return text;
+  const escaped = text.match(/\\n/g)?.length ?? 0;
+  return escaped >= 3 ? text.replace(/\\n/g, '\n') : text;
+}
+
+let oscarCitationSources = null;
+
+/** `sources` turns the answer's [n] marks into links to those pages. */
+export function formatOscarContent(content, { sources = null } = {}) {
+  oscarCitationSources = Array.isArray(sources) && sources.length ? sources : null;
+  try {
+    return formatOscarContentText(content);
+  } finally {
+    oscarCitationSources = null;
+  }
+}
+
+function formatOscarContentText(content) {
+  let text = restoreDoubleEscapedLineBreaks(sanitizeVisibleAssistantContent(content));
   
   // Cut template phrases
   const templatePhrases = [
@@ -291,7 +324,10 @@ function sanitizeOutsideCodeFences(source, sanitizer) {
 function sanitizeVisibleAssistantSegment(segment) {
   const withoutHiddenCommands = segment
     .replace(/\s*\[\[(?:MONARCH_ACTION|MONARCH_COMMAND):[\s\S]*?\]\]\s*/gi, '\n')
-    .replace(/\s*\[\[(?:MONARCH_ACTION|MONARCH_COMMAND):[\s\S]*$/gi, '');
+    .replace(/\s*\[\[(?:MONARCH_ACTION|MONARCH_COMMAND):[\s\S]*$/gi, '')
+    // Browsing-citation tokens some models print (live, Nemotron 3 Super:
+    // 【{"id":0,"cursor":0,"loc":0}】, also 【3†source】); they point nowhere.
+    .replace(/[ \t]*【(?:\{[^【】\n]{0,240}\}|\d{1,3}(?:†[^【】\n]{0,120})?|†[^【】\n]{0,120})】/g, '');
   return hideServiceJsonBlocks(withoutHiddenCommands.replace(
     /<\|?\/?toolcall\|?>\s*call:\s*[a-z0-9_.-]+\s*(?:\{[^{}]*\})?\s*(?:<\|?\/?toolcall\|?>)?/gi,
     'Служебный вызов инструмента скрыт: действие должно выполняться через Monarch capability-роутер.'
@@ -537,12 +573,20 @@ function renderOscarInline(source) {
   text = text.replace(/\$(?!\$)([^$\n]+)\$/g, (_match, formula) => hold(`<span class="oscar-math-inline" role="math">${renderOscarMath(formula)}</span>`));
   text = text.replace(/\[([^\]\n]+)]\((https?:\/\/[^\s)]+)\)/g, (_match, label, url) =>
     hold(`<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`));
+  // `items[1]` in prose is an index, not a citation.
+  if (oscarCitationSources) text = text.replace(/(?<![\p{L}\p{N}_])\[(\d{1,2})\]/gu, (match, value) => {
+    const source = oscarCitationSources.find((item, index) => oscarSourceNumber(item, index) === Number(value));
+    const url = String(source?.url || '');
+    if (!isWebSourceUrl(url)) return match;
+    const label = [sourceHost(url), source.title].filter(Boolean).join(' — ');
+    return hold(`<a class="oscar-cite" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(label)}" data-cite-n="${Number(value)}">${Number(value)}</a>`);
+  });
 
   let html = escapeHtml(text);
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  html = html.replace(/(^|[^\p{L}\p{N}_])__([^_\n]+)__(?![\p{L}\p{N}_])/gu, '$1<strong>$2</strong>');
   html = html.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
-  html = html.replace(/(^|[^_])_([^_\n]+)_/g, '$1<em>$2</em>');
+  html = html.replace(/(^|[^\p{L}\p{N}_])_([^_\n]+)_(?![\p{L}\p{N}_])/gu, '$1<em>$2</em>');
   html = html.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
   html = html.replace(/([\p{L}\p{N})\]])\s*\*\s*([\p{L}\p{N}(\[])/gu, '$1 × $2');
   html = html.replace(/\+\/-/g, '±').replace(/&lt;=/g, '≤').replace(/&gt;=/g, '≥').replace(/-&gt;/g, '→');
@@ -981,7 +1025,7 @@ export function confirmationBanner(text, confirmation, plan = null) {
     <div class="permission-banner">
       <div>
         <strong>Нужна точная action-card</strong>
-        <p>${escapeHtml(reason)} Текст и старый confirmation token не являются разрешением.</p>
+        <p>${escapeHtml(reason)} Для продолжения нужно новое разрешение. Сообщение в чате его не заменяет.</p>
       </div>
     </div>
   `;
@@ -1059,7 +1103,7 @@ export function createOscarMessage(role, content, label, meta = {}) {
     streamEvents: Array.isArray(meta.streamEvents) ? meta.streamEvents : [],
     streamPhase: typeof meta.streamPhase === 'string' ? meta.streamPhase : '',
     researchFlow: meta.researchFlow === true,
-    routeConsent: meta.routeConsent && typeof meta.routeConsent === 'object' ? { ...meta.routeConsent } : null,
+    researchSteps: Array.isArray(meta.researchSteps) ? meta.researchSteps : [],
     usage: meta.usage && typeof meta.usage === 'object' ? meta.usage : null,
     showTrace: meta.showTrace === true,
     sendActive: meta.sendActive === true,
@@ -1070,6 +1114,7 @@ export function createOscarMessage(role, content, label, meta = {}) {
     provenance: meta.provenance && typeof meta.provenance === 'object' ? { ...meta.provenance } : null,
     outcome: typeof meta.outcome === 'string' ? meta.outcome : '',
     integrityWarning: typeof meta.integrityWarning === 'string' ? meta.integrityWarning : '',
+    taskReport: Array.isArray(meta.taskReport) ? meta.taskReport : [],
     createdAt: typeof meta.createdAt === 'string' && meta.createdAt ? meta.createdAt : new Date().toISOString()
   };
 }
@@ -1103,6 +1148,7 @@ export function syncThreadDOM(container, newHtml) {
   template.innerHTML = newHtml;
   if (container.children.length === 0 || container.querySelector('.oscar-empty-focus') || container.querySelector('.empty-state')) {
     container.innerHTML = newHtml;
+    markRenderedDetails(container);
     return;
   }
 
@@ -1111,8 +1157,12 @@ export function syncThreadDOM(container, newHtml) {
   syncDomChildren(container, template);
 }
 
+// Nodes a design layer mounts into rendered markup (the PaperPixel loader in a
+// thinking orb) are not part of the markup, so a re-render must keep them.
+const isDomDecoration = (node) => node.nodeType === Node.ELEMENT_NODE && node.hasAttribute('data-dom-decoration');
+
 function syncDomChildren(currentParent, nextParent) {
-  const currentNodes = Array.from(currentParent.childNodes);
+  const currentNodes = Array.from(currentParent.childNodes).filter((node) => !isDomDecoration(node));
   const nextNodes = Array.from(nextParent.childNodes);
   const sharedLength = Math.min(currentNodes.length, nextNodes.length);
 
@@ -1120,7 +1170,9 @@ function syncDomChildren(currentParent, nextParent) {
     const currentNode = currentNodes[index];
     const nextNode = nextNodes[index];
     if (!canSyncDomNode(currentNode, nextNode)) {
-      currentNode.replaceWith(nextNode.cloneNode(true));
+      const replacement = nextNode.cloneNode(true);
+      currentNode.replaceWith(replacement);
+      markRenderedDetails(replacement);
       continue;
     }
     if (currentNode.nodeType === Node.TEXT_NODE) {
@@ -1136,10 +1188,25 @@ function syncDomChildren(currentParent, nextParent) {
   }
 
   for (let index = sharedLength; index < nextNodes.length; index += 1) {
-    currentParent.append(nextNodes[index].cloneNode(true));
+    const added = nextNodes[index].cloneNode(true);
+    currentParent.append(added);
+    markRenderedDetails(added);
+    if (added.nodeType === Node.ELEMENT_NODE && added.matches('.oscar-message.assistant')
+      && typeof added.animate === 'function'
+      && !reducedUiMotion.matches) {
+      added.animate([{ opacity: 0, transform: 'translateY(5px)' }, { opacity: 1, transform: 'translateY(0)' }],
+        { duration: 240, easing: 'cubic-bezier(.16,1,.3,1)' });
+    }
   }
   for (let index = currentNodes.length - 1; index >= nextNodes.length; index -= 1) {
     currentNodes[index].remove();
+  }
+}
+
+function markRenderedDetails(root) {
+  if (root?.nodeType !== Node.ELEMENT_NODE) return;
+  for (const details of [...(root.matches('details') ? [root] : []), ...root.querySelectorAll('details')]) {
+    details.monarchRenderedOpen = details.hasAttribute('open');
   }
 }
 
@@ -1153,10 +1220,22 @@ function canSyncDomNode(currentNode, nextNode) {
 }
 
 function syncDomAttributes(currentElement, nextElement) {
+  // A <details> open state belongs to the person once they toggle it. Apply the
+  // markup's `open` only when the markup itself changes its intent (a reasoning
+  // block closing when the answer finishes), never on every re-render.
+  const details = currentElement.tagName === 'DETAILS';
+  if (details) {
+    const nextOpen = nextElement.hasAttribute('open');
+    const renderedOpen = currentElement.monarchRenderedOpen ?? nextOpen;
+    if (nextOpen !== renderedOpen) currentElement.open = nextOpen;
+    currentElement.monarchRenderedOpen = nextOpen;
+  }
   for (const attribute of Array.from(currentElement.attributes)) {
+    if (details && attribute.name === 'open') continue;
     if (!nextElement.hasAttribute(attribute.name)) currentElement.removeAttribute(attribute.name);
   }
   for (const attribute of Array.from(nextElement.attributes)) {
+    if (details && attribute.name === 'open') continue;
     if (currentElement.getAttribute(attribute.name) !== attribute.value) {
       currentElement.setAttribute(attribute.name, attribute.value);
     }
@@ -1165,11 +1244,13 @@ function syncDomAttributes(currentElement, nextElement) {
 
 export function renderOscarMessage(message) {
   const isUser = message.role === 'user';
+  const origin = message.provenance?.surface;
+  const originHtml = origin === 'telegram' || origin === 'telegram-cloud'
+    ? `<span class="oscar-provenance-badge">${origin === 'telegram-cloud' ? 'ТГ · облако' : 'ТГ'}</span>` : '';
   const pendingClass = message.pending ? 'pending' : '';
   const errorClass = message.error ? 'error' : '';
   const streamPhase = message.pending ? inferOscarStreamPhase(message) : '';
   const streamPhaseAttr = streamPhase ? ` data-stream-phase="${escapeHtml(streamPhase)}"` : '';
-  const routeConsentClass = message.pending && message.routeConsent ? ' route-consent' : '';
   const researchFlowClass = message.pending && message.researchFlow ? ' research-flow' : '';
 
   if (isUser) {
@@ -1179,9 +1260,6 @@ export function renderOscarMessage(message) {
       ? `<div class="message-skill-invocation">${escapeHtml(skillUserFacingName({ name: skillInvocation.skillName }))}</div>`
       : '';
     const sendActiveAttr = message.sendActive ? ' data-send-active="true"' : '';
-    const sendSyncHtml = message.sendActive
-      ? `<span class="message-send-sync" aria-hidden="true">${Array.from({ length: 8 }).map(() => '<span></span>').join('')}</span>`
-      : '';
     const attachmentsHtml = Array.isArray(message.attachments) && message.attachments.length
       ? `<div class="message-attachments">${message.attachments.map((attachment, index) => {
           const source = attachment.preview_url || (attachment.data_base64
@@ -1197,16 +1275,14 @@ export function renderOscarMessage(message) {
     return `
       <div class="oscar-message user" data-message-id="${escapeHtml(message.id)}"${sendActiveAttr}>
         <div class="oscar-message-card">
-          <div class="message-meta-row">
-            <div class="message-meta">${escapeHtml(message.label || 'ты')}${sendSyncHtml}</div>
-            <div class="oscar-message-actions">
-              <button type="button" data-message-copy="${escapeHtml(message.id)}" aria-label="Копировать сообщение" title="Копировать сообщение">${copyIcon()}</button>
-              <button type="button" data-message-edit="${escapeHtml(message.id)}" aria-label="Редактировать сообщение" title="Редактировать сообщение">${editIcon()}</button>
-            </div>
-          </div>
           ${attachmentsHtml}
           ${skillInvocationHtml}
+          ${originHtml}
           <div class="message-text">${escapeHtml(visibleMessageContent)}</div>
+        </div>
+        <div class="oscar-message-actions user-message-actions" role="group" aria-label="Действия с твоим сообщением">
+          <button type="button" data-message-copy="${escapeHtml(message.id)}" aria-label="Копировать сообщение" title="Копировать сообщение">${copyIcon()}</button>
+          <button type="button" data-message-edit="${escapeHtml(message.id)}" aria-label="Редактировать сообщение" title="Редактировать сообщение">${editIcon()}</button>
         </div>
       </div>
     `;
@@ -1220,8 +1296,9 @@ export function renderOscarMessage(message) {
       && !visibleContent
       && !message.error
       && !message.action
-      && !message.routeConsent
-      && !showDetailedThinking;
+      && !showDetailedThinking
+      // Research steps need the full card: the trace grows under the live stage.
+      && !(Array.isArray(message.researchSteps) && message.researchSteps.length);
     if (isThinkingOnly) {
       const liveStatus = resolveOscarLiveStatus(message, streamPhase);
       return `
@@ -1233,11 +1310,14 @@ export function renderOscarMessage(message) {
       `;
     }
 
-    const sourcesHtml = Array.isArray(message.sources) && message.sources.length > 0
-      ? `<div class="source-list">
-           ${message.sources.map(renderOscarMessageSource).join('')}
-         </div>`
+    const visibleSources = Array.isArray(message.sources) ? message.sources.filter(source =>
+      !(source?.kind === 'memory' || String(source?.url || '').startsWith('memory://'))) : [];
+    const hasMemorySource = Array.isArray(message.sources) && visibleSources.length < message.sources.length;
+    const sourcesHtml = visibleSources.length > 0 || hasMemorySource
+      ? renderOscarSources(visibleSources,
+        hasMemorySource ? '<button type="button" class="source-chip is-memory" data-source-open-memory title="Открыть память Oscar">Учтена память</button>' : '')
       : '';
+    const researchTraceHtml = renderOscarResearchTrace(message, visibleSources.length);
 
     const reasoningHtml = message.showTrace && message.reasoning && (!message.pending || showDetailedThinking)
       ? `<details class="oscar-reasoning-block" ${message.pending ? 'open' : ''}>
@@ -1260,12 +1340,8 @@ export function renderOscarMessage(message) {
          </div>`
       : '';
 
-    const liveStageHtml = message.pending && !message.routeConsent
+    const liveStageHtml = message.pending
       ? renderOscarLiveStage(message, streamPhase)
-      : '';
-
-    const routeConsentHtml = message.pending && message.routeConsent
-      ? renderOscarRouteConsent(message.routeConsent)
       : '';
 
     const grantOptions = Array.isArray(message.action?.grantOptions) ? message.action.grantOptions : ['once'];
@@ -1278,25 +1354,42 @@ export function renderOscarMessage(message) {
       ? ` data-agent-task-id="${escapeHtml(message.action.agentTaskId)}" data-agent-approval-id="${escapeHtml(message.action.agentApprovalId)}" data-agent-proposal-hash="${escapeHtml(message.action.agentApprovalHash || '')}" data-agent-capability-id="${escapeHtml(message.action.agentCapabilityId || '')}"`
       : '';
     const actionArmed = Number(message.action?.armedUntil || 0) > Date.now();
+    const exactAstraApproval = message.action?.astra?.card?.type === 'approval.required'
+      && message.action?.astra?.turn?.id === message.turnId;
+    const exactRuntimeRetry = message.action?.kind === 'runtime-retry'
+      && message.action?.agentTaskId
+      && message.action?.oscarTurnId === message.turnId;
+    const astraExpired = exactAstraApproval && Date.now() >= message.action.astra.card.payload.expiresAt;
     const actionButtons = message.action?.settling
       ? ''
+      : exactRuntimeRetry
+        ? `<button type="button" class="claude-primary-btn" data-oscar-runtime-action="resume" data-message-id="${escapeHtml(message.id)}">${escapeHtml(message.action.label || 'Повторить')}</button>
+           <button type="button" class="claude-secondary-btn" data-oscar-runtime-action="cancel" data-message-id="${escapeHtml(message.id)}">Отменить задачу</button>`
+      : exactAstraApproval
+        ? `<button type="button" class="claude-primary-btn" data-oscar-confirm-action data-message-id="${escapeHtml(message.id)}" data-oscar-astra-decision="approve"${astraExpired ? ' disabled title="Срок подтверждения истёк — для выполнения нужен новый запрос"' : ''}>${escapeHtml(message.action.label || 'Разрешить один раз')}</button>`
       : message.action?.requiresArm && !actionArmed
-      ? `<button type="button" class="claude-primary-btn" data-oscar-arm-action data-message-id="${escapeHtml(message.id)}">Arm</button>`
+      ? `<button type="button" class="claude-primary-btn" data-oscar-arm-action data-message-id="${escapeHtml(message.id)}">Проверить перед разрешением</button>`
       : exactAgentApproval
         ? grantOptions.map((scope) => `<button type="button" class="claude-primary-btn" data-oscar-confirm-action data-message-id="${escapeHtml(message.id)}" data-grant-scope="${scope === 'task' ? 'task' : 'once'}"${agentApprovalAttrs} data-agent-decision="approve">${scope === 'task' ? 'Разрешить для задачи' : escapeHtml(message.action?.label || 'Разрешить один раз')}</button>`).join('')
         : '';
-    const denyAgentButton = agentApprovalAttrs && !message.action?.settling
+    const denyAgentButton = exactAstraApproval && !message.action?.settling
+      ? `<button type="button" class="claude-secondary-btn" data-oscar-confirm-action data-message-id="${escapeHtml(message.id)}" data-oscar-astra-decision="reject">Отклонить</button>`
+      : agentApprovalAttrs && !message.action?.settling
       ? `<button type="button" class="claude-secondary-btn" data-oscar-confirm-action data-message-id="${escapeHtml(message.id)}"${agentApprovalAttrs} data-agent-decision="deny">Отклонить</button>`
       : '';
-    const actionHtml = exactAgentApproval
-      ? `<div class="oscar-action-card">
+    const actionHtml = exactAgentApproval || exactAstraApproval || exactRuntimeRetry
+      ? `<div class="oscar-action-card${message.action?.critical ? ' is-critical' : ''}"${message.action?.critical ? ' role="alert"' : ''}>
            <div>
-             <strong>Monarch Access</strong>
-             <span>${escapeHtml(message.action.text || 'действие')} · ${escapeHtml(message.action.risk || 'действие')}</span>
+             ${message.action?.critical ? '<span class="oscar-action-kicker">MONARCH SECURITY · КРИТИЧЕСКОЕ ДЕЙСТВИЕ</span>' : ''}
+             <strong>${exactRuntimeRetry ? 'Задача безопасно приостановлена' : message.action?.critical ? 'Действие остановлено до твоего решения' : 'Нужно твоё разрешение'}</strong>
+             <span>${exactRuntimeRetry ? 'Запусти модель или восстанови инструмент, затем продолжи с сохранённого шага.' : `${escapeHtml(message.action.text || 'действие')} · ${escapeHtml(message.action.risk || 'действие')}`}</span>
              ${message.action.target ? `<span>Цель: ${escapeHtml(message.action.target)}</span>` : ''}
              ${message.action.expiresAt ? `<span>Срок: ${escapeHtml(message.action.expiresAt)}</span>` : ''}
-             ${message.action.proposalHash ? `<span title="${escapeHtml(message.action.proposalHash)}">Hash: ${escapeHtml(String(message.action.proposalHash).slice(0, 18))}…</span>` : ''}
-             ${message.action.requiresArm ? `<span>${actionArmed ? 'Armed: нажми финальную кнопку в коротком окне.' : 'Чувствительное действие: сначала Arm, затем отдельное разрешение.'}</span>` : ''}
+             ${message.action.reason ? `<span class="oscar-action-reason"><b>Почему:</b> ${escapeHtml(message.action.reason)}</span>` : ''}
+             ${astraExpired ? '<span class="oscar-action-warning">Срок подтверждения истёк. Действие не выполнялось; его всё ещё можно отклонить.</span>' : ''}
+             ${message.action.warning ? `<span class="oscar-action-warning">${escapeHtml(message.action.warning)}</span>` : ''}
+             ${exactAstraApproval ? `<pre class="oscar-action-preview">${escapeHtml(message.action.preview || '')}</pre>` : ''}
+             ${message.action.requiresArm ? `<span>${actionArmed ? 'Теперь можно подтвердить действие. Разрешение доступно недолго.' : 'Важное действие: сначала проверь его, затем подтверди отдельной кнопкой.'}</span>` : ''}
            </div>
            <div class="oscar-action-buttons">${actionButtons}${denyAgentButton}</div>
          </div>`
@@ -1304,7 +1397,7 @@ export function renderOscarMessage(message) {
 
     const provenanceHtml = renderOscarProvenance(message);
 
-    const usageHtml = !message.pending && !message.error ? renderOscarUsage(message.usage) : '';
+    const usageHtml = !message.pending && !message.error ? renderOscarUsage(message.usage, message) : '';
     const modelNoteHtml = renderOscarModelNote(message, streamPhase);
     const speechHtml = !message.pending && !message.error && visibleContent
       ? `<div class="oscar-speech-actions">
@@ -1317,39 +1410,129 @@ export function renderOscarMessage(message) {
 
     const contentHtml = message.pending
       ? `<div class="oscar-text-part oscar-streaming-text">${escapeHtml(sanitizeVisibleAssistantContent(message.content))}</div>`
-      : formatOscarContent(message.content);
+      : formatOscarContent(message.content, { sources: visibleSources });
 
     return `
-      <div class="oscar-message assistant ${pendingClass} ${errorClass}${routeConsentClass}${researchFlowClass}" data-message-id="${escapeHtml(message.id)}"${streamPhaseAttr}>
-        ${workTimerHtml}
+      <div class="oscar-message assistant ${pendingClass} ${errorClass}${researchFlowClass}" data-message-id="${escapeHtml(message.id)}"${streamPhaseAttr}>
         <div class="avatar oscar-avatar">O</div>
         <div class="oscar-message-card">
           <div class="message-meta-row">
-            <div class="message-meta">Oscar${provenanceHtml}</div>
+            <div class="message-meta">Oscar${originHtml}${provenanceHtml}</div>
             <div class="oscar-message-actions">
               <button type="button" data-message-copy="${escapeHtml(message.id)}" aria-label="Копировать ответ Oscar" title="Копировать ответ Oscar">${copyIcon()}</button>
             </div>
           </div>
           ${reasoningHtml}
           ${streamEventsHtml}
-          ${routeConsentHtml}
           ${liveStageHtml}
+          ${researchTraceHtml}
           <div class="message-text">${contentHtml}</div>
           ${speechHtml}
           ${modelNoteHtml}
           ${actionHtml}
+          ${message.pending ? '' : renderOscarTaskReport(message.taskReport, escapeHtml)}
           ${sourcesHtml}
           ${usageHtml}
+          ${usageHtml ? '' : workTimerHtml}
         </div>
       </div>
     `;
   }
 }
 
+/** Agent work as it happens, the way a person narrates it: what the model
+ * found and does now (its own words), the actions under that note and, for
+ * MAX models only, the reasoning behind the step. Steps that share one note
+ * fold into a single segment. */
+export function groupOscarAgentSteps(steps) {
+  const segments = [];
+  for (const raw of Array.isArray(steps) ? steps.slice(-8) : []) {
+    const step = {
+      title: String(raw?.title || '').trim(),
+      state: ['done', 'failed', 'active'].includes(raw?.state) ? raw.state : 'done',
+      note: String(raw?.note || '').trim(),
+      thought: String(raw?.thought || '').trim(),
+    };
+    if (!step.title) continue;
+    const last = segments.at(-1);
+    if (last && (!step.note || step.note === last.note) && !step.thought) last.steps.push(step);
+    else segments.push({ note: step.note, thought: step.thought, steps: [step] });
+  }
+  return segments;
+}
+
+const OSCAR_AGENT_MARKS = { done: '✓', failed: '✕', active: '' };
+
+function renderOscarAgentAction(step, fresh = false) {
+  const current = step.state === 'active' ? ' aria-current="step"' : '';
+  return `<div class="oscar-agent-action is-${step.state}${fresh ? ' is-fresh' : ''}"${current}>
+      <span class="oscar-agent-action__mark" aria-hidden="true">${OSCAR_AGENT_MARKS[step.state]}</span>
+      <span class="oscar-agent-action__title">${escapeHtml(step.title)}</span>
+    </div>`;
+}
+
+/** Three or more finished actions under one note read as one line
+ * ("Прочитал файл «a» и ещё 3") that opens to the full list. */
+function renderOscarAgentActions(steps, latest) {
+  const active = steps.filter(step => step.state === 'active');
+  const settled = steps.filter(step => step.state !== 'active');
+  let html;
+  if (settled.length >= 3) {
+    const failed = settled.filter(step => step.state === 'failed').length;
+    const state = failed === settled.length ? 'failed' : 'done';
+    const more = `и ещё ${settled.length - 1}${failed && state !== 'failed' ? ` · не получилось ${failed}` : ''}`;
+    html = `<details class="oscar-agent-action-group">
+        <summary class="oscar-agent-action is-${state}">
+          <span class="oscar-agent-action__mark" aria-hidden="true">${OSCAR_AGENT_MARKS[state]}</span>
+          <span class="oscar-agent-action__title">${escapeHtml(settled[0].title)} <small>${escapeHtml(more)}</small></span>
+          <span class="oscar-agent-chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="oscar-agent-action-group__list">${settled.map(step => renderOscarAgentAction(step)).join('')}</div>
+      </details>`;
+  } else {
+    html = settled.map((step, index) => renderOscarAgentAction(step,
+      latest && !active.length && index === settled.length - 1)).join('');
+  }
+  return html + active.map(step => renderOscarAgentAction(step, true)).join('');
+}
+
+function renderOscarAgentProgress(message, status, steps, stepNumber) {
+  const segments = groupOscarAgentSteps(steps);
+  const running = segments.at(-1)?.steps.some(step => step.state === 'active') === true;
+  const body = segments.map((segment, index) => {
+    const latest = index === segments.length - 1;
+    const note = segment.note ? `<p class="oscar-agent-note">${escapeHtml(segment.note)}</p>` : '';
+    // The newest reasoning is open while its step runs; older ones stay folded.
+    const thought = segment.thought
+      ? `<details class="oscar-agent-thought"${latest && running ? ' open' : ''}>
+          <summary>Рассуждение<span class="oscar-agent-chevron" aria-hidden="true"></span></summary>
+          <div class="oscar-agent-thought__text">${escapeHtml(segment.thought)}</div>
+        </details>`
+      : '';
+    return `<div class="oscar-agent-segment${latest ? ' is-latest' : ''}">
+        ${note}${thought}
+        <div class="oscar-agent-actions">${renderOscarAgentActions(segment.steps, latest)}</div>
+      </div>`;
+  }).join('');
+  const count = Number(stepNumber) > 0 ? ` · шаг ${escapeHtml(String(stepNumber))}` : '';
+  return `
+    <section class="oscar-agent-log" data-phase="${escapeHtml(status.visualPhase)}" aria-live="polite" aria-label="Ход работы Oscar">
+      ${body}
+      <footer class="oscar-agent-log__foot">
+        <span class="oscar-agent-log__orb" aria-hidden="true">${renderMonarchThinkingOrb(status.visualPhase, status.motion)}</span>
+        <span>Oscar работает${count}</span>
+      </footer>
+    </section>`;
+}
+
 function renderOscarLiveStage(message, phase) {
   const status = resolveOscarLiveStatus(message, phase);
+  const agentEvent = [...(Array.isArray(message.streamEvents) ? message.streamEvents : [])].reverse()
+    .find((event) => Array.isArray(event?.activity?.steps) && event.activity.steps.length);
+  if (agentEvent) return renderOscarAgentProgress(message, status, agentEvent.activity.steps, agentEvent.activity.stepNumber);
   const showDetails = Boolean(message.researchFlow || isOscarResearchOrSearchPhase(phase));
-  const researchTimeline = message.researchFlow ? renderOscarResearchTimeline(phase) : '';
+  // The trace below already names the current step; the stage keeps only its motion and label.
+  const hasResearchSteps = Array.isArray(message.researchSteps) && message.researchSteps.length > 0;
   const liveStage = `
       <div class="oscar-live-stage" data-phase="${escapeHtml(status.visualPhase)}" data-motion="${escapeHtml(status.motion)}" aria-label="${escapeHtml(status.label)}" aria-live="polite">
         <span class="oscar-live-rail" aria-hidden="true">
@@ -1357,17 +1540,12 @@ function renderOscarLiveStage(message, phase) {
         </span>
         <span class="oscar-live-copy">
           <strong>${escapeHtml(status.label)}</strong>
-          ${status.detail ? `<small title="${escapeHtml(status.detail)}">${escapeHtml(status.detail)}</small>` : ''}
+          ${status.detail && !hasResearchSteps ? `<small title="${escapeHtml(status.detail)}">${escapeHtml(status.detail)}</small>` : ''}
         </span>
         ${message.researchFlow ? '<span class="oscar-research-live-badge">в процессе</span>' : ''}
       </div>`;
   if (!showDetails) return liveStage;
-  return `
-    <div class="oscar-research-activity">
-      ${liveStage}
-      ${researchTimeline}
-    </div>
-  `;
+  return `<div class="oscar-research-activity">${liveStage}</div>`;
 }
 
 export function resolveOscarLiveStatus(message, phase) {
@@ -1377,8 +1555,7 @@ export function resolveOscarLiveStatus(message, phase) {
   const operation = String(activity.operation || '').trim().toLowerCase();
   const domain = String(activity.domain || '').trim().toLowerCase();
   const fallbackLabel = formatOscarStreamPhase(phase);
-  const label = String(activity.label || latest?.label || fallbackLabel).replace(/\s+/g, ' ').trim().slice(0, 80)
-    || fallbackLabel;
+  const label = plainActivity(`${phase} ${latest?.kind || ''}`, operation);
   const subject = String(activity.subject || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
   const target = String(activity.target || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
   const activityDetail = String(activity.detail || '').trim();
@@ -1392,7 +1569,12 @@ export function resolveOscarLiveStatus(message, phase) {
     || derivedDetail
     || (eventDetail && eventDetail !== label ? eventDetail : '')
     || formatOscarStreamHint(phase);
-  const detail = detailCandidate.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 180);
+  // Keep concrete action targets, not internal routing chatter. Errors remain
+  // visible in their dedicated message/card, never replaced by a success label.
+  const detail = derivedDetail
+    ? derivedDetail.slice(0, 180)
+    : /error|failed|blocked|approval/.test(String(phase)) && !containsTechnicalCopy(detailCandidate)
+      ? detailCandidate.slice(0, 180) : '';
   const mutation = ['move', 'copy', 'trash', 'delete', 'create', 'write', 'open', 'verify', 'control', 'click', 'type', 'key', 'scroll'].includes(operation);
   const motion = activity.motion === 'heartbeat' || mutation ? 'heartbeat' : 'breathing';
   const visualPhase = operation === 'search' || domain === 'internet'
@@ -1401,29 +1583,135 @@ export function resolveOscarLiveStatus(message, phase) {
   return { label, detail, motion, visualPhase };
 }
 
-const OSCAR_RESEARCH_STEPS = [
-  { label: 'План', phases: ['route', 'research-plan'] },
-  { label: 'Источники', phases: ['research-search'] },
-  { label: 'Чтение', phases: ['research-read'] },
-  { label: 'Синтез', phases: ['research-synthesize'] },
-  { label: 'Проверка', phases: ['research-reflect', 'research-verify', 'research-revise'] },
-  { label: 'Итог', phases: ['research-finalize', 'write'] },
-];
-
 function isOscarResearchOrSearchPhase(phase) {
   const normalizedPhase = String(phase || '').toLowerCase();
   return normalizedPhase === 'search' || normalizedPhase.startsWith('research-');
 }
 
-function renderOscarMessageSource(source) {
+/** Research steps as they happened, from the turn's progress events. */
+const OSCAR_RESEARCH_STEP_KINDS = Object.freeze({
+  search: 'search', 'research-search': 'search', 'search-plan': 'plan', 'research-plan': 'plan', 'research-read': 'read',
+  'research-verify': 'verify', 'research-reflect': 'verify', 'research-write': 'write',
+  'research-synthesize': 'write', 'research-finalize': 'write',
+});
+const OSCAR_RESEARCH_STEP_LABELS = Object.freeze({
+  plan: 'План', search: 'Запросы', read: 'Чтение', verify: 'Не хватало', write: 'Вывод',
+});
+
+/** One research step from a progress phase (`agent-search`, `research-read`…), or null. */
+export function oscarResearchStep(phase, detail) {
+  const kind = OSCAR_RESEARCH_STEP_KINDS[String(phase || '').toLowerCase().replace(/^agent-/, '')];
+  const text = String(detail || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  return kind && text ? { kind, detail: text } : null;
+}
+
+/** The steps stay in one <details>: open while Oscar searches, folded into a
+ * one-line summary when the answer is done, so the trace collapses into the
+ * place it grew from instead of disappearing. */
+function renderOscarResearchTrace(message, sourceCount) {
+  const steps = Array.isArray(message.researchSteps) ? message.researchSteps.filter((step) =>
+    OSCAR_RESEARCH_STEP_LABELS[step?.kind] && step?.detail) : [];
+  if (!steps.length || message.error) return '';
+  const queries = steps.filter((step) => step.kind === 'search')
+    .reduce((count, step) => count + String(step.detail).split(' · ').filter(Boolean).length, 0);
+  const rounds = steps.filter((step) => step.kind === 'verify').length;
+  const live = message.pending === true;
+  const facts = [
+    queries ? `<span class="oscar-research-fact"><span>Запросы</span> <b>${queries}</b></span>` : '',
+    sourceCount ? `<span class="oscar-research-fact"><span>Источники</span> <b>${sourceCount}</b></span>` : '',
+    rounds ? `<span class="oscar-research-fact"><span>Дозапросы</span> <b>${rounds}</b></span>` : '',
+  ].join('');
+  return `
+    <details class="oscar-research-trace" data-live="${live}"${live ? ' open' : ''}>
+      <summary>
+        <span class="oscar-research-trace-title">${live ? 'Исследую' : 'Как искал'}</span>
+        <span class="oscar-research-facts">${live ? '' : facts}</span>
+      </summary>
+      <ol class="oscar-research-steps">
+        ${steps.map((step, index) => `
+          <li data-step-kind="${escapeHtml(step.kind)}"${live && index === steps.length - 1 ? ' aria-current="step"' : ''}>
+            <span class="oscar-research-step-label">${escapeHtml(OSCAR_RESEARCH_STEP_LABELS[step.kind])}</span>
+            <span class="oscar-research-step-detail" data-no-i18n>${escapeHtml(step.detail)}</span>
+          </li>`).join('')}
+      </ol>
+    </details>`;
+}
+
+const OSCAR_SOURCE_CARDS_SHOWN = 6;
+const SOURCE_DATE_LOCALES = Object.freeze({ ru: 'ru-RU', uk: 'uk-UA', en: 'en-GB', bg: 'bg-BG' });
+
+function isWebSourceUrl(url) {
+  return /^https?:\/\//i.test(String(url || ''));
+}
+
+function sourceHost(url) {
+  try { return new URL(url).hostname.replace(/^www\./i, ''); } catch { return ''; }
+}
+
+/** The number a source has in the answer's [n] citations. */
+function oscarSourceNumber(source, index) {
+  const id = Number(source?.id);
+  return Number.isSafeInteger(id) && id > 0 ? id : index + 1;
+}
+
+/** "28 сент." this year, "21 авг. 2024 г." otherwise; '' for anything that is not a date. */
+export function formatOscarSourceDate(value, now = new Date()) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ''));
+  if (!match) return '';
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  if (Number.isNaN(date.valueOf()) || date.getUTCDate() !== Number(match[3])) return '';
+  const options = { day: 'numeric', month: 'short', timeZone: 'UTC',
+    ...(date.getUTCFullYear() === now.getFullYear() ? {} : { year: 'numeric' }) };
+  try {
+    return new Intl.DateTimeFormat(SOURCE_DATE_LOCALES[currentUiLanguage()] || 'ru-RU', options).format(date);
+  } catch {
+    return match[0];
+  }
+}
+
+function renderOscarSourceCard(source, index) {
   if (typeof source === 'string') {
     return `<span class="source-chip" title="${escapeHtml(source)}">${escapeHtml(source)}</span>`;
   }
   const url = String(source?.url || '');
-  const memory = source?.kind === 'memory' || url.startsWith('memory://');
-  const title = memory ? 'Из памяти' : source?.title || url || 'Источник';
-  const detail = source?.detail || source?.title || url || source?.snippet || '';
-  return `<span class="source-chip ${memory ? 'is-memory' : ''}" title="${escapeHtml(detail)}">${escapeHtml(title)}</span>`;
+  const host = sourceHost(url);
+  const title = String(source?.title || host || url || 'Источник').replace(/\s+/g, ' ').trim();
+  const number = oscarSourceNumber(source, index);
+  const published = formatOscarSourceDate(source?.published);
+  const savedAt = formatOscarSourceDate(source?.savedAt || source?.saved_at);
+  const meta = [
+    host ? `<span class="oscar-source-host" data-no-i18n>${escapeHtml(host)}</span>` : '',
+    published ? `<time datetime="${escapeHtml(String(source.published).slice(0, 10))}">${escapeHtml(published)}</time>` : '',
+    source?.origin === 'wikipedia' ? '<span class="oscar-source-origin">Википедия</span>' : '',
+    source?.origin === 'saved' ? '<span class="oscar-source-origin">Прочитано раньше</span>' : '',
+    source?.origin === 'saved' && savedAt ? `<time>${escapeHtml(savedAt)}</time>` : '',
+  ].filter(Boolean).join('');
+  const body = `
+      <span class="oscar-source-n" aria-hidden="true">${number}</span>
+      <span class="oscar-source-body">
+        <span class="oscar-source-title" data-no-i18n>${escapeHtml(title)}</span>
+        ${meta ? `<span class="oscar-source-meta">${meta}</span>` : ''}
+      </span>`;
+  // A link opens in the browser: the window's open handler admits http(s) only.
+  return isWebSourceUrl(url)
+    ? `<a class="oscar-source-card" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" data-source-n="${number}" title="${escapeHtml(url)}">${body}</a>`
+    : `<span class="oscar-source-card" data-source-n="${number}">${body}</span>`;
+}
+
+function renderOscarSources(sources, memoryChip = '') {
+  const cards = sources.map(renderOscarSourceCard);
+  const shown = cards.slice(0, OSCAR_SOURCE_CARDS_SHOWN);
+  const more = cards.slice(OSCAR_SOURCE_CARDS_SHOWN);
+  return `
+    <section class="oscar-sources" aria-label="Источники">
+      ${shown.length ? `<div class="oscar-sources-grid">${shown.join('')}</div>` : ''}
+      ${more.length ? `
+        <details class="oscar-sources-more">
+          <summary><span>Ещё источники</span> <b>${more.length}</b></summary>
+          <div class="oscar-sources-grid">${more.join('')}</div>
+        </details>` : ''}
+      ${memoryChip}
+    </section>`;
 }
 
 function renderOscarProvenance(message) {
@@ -1431,20 +1719,28 @@ function renderOscarProvenance(message) {
   const outcome = String(message.outcome || '');
   let label = '';
   let tone = 'model';
-  if (verification === 'kernel-verified') {
-    label = 'Kernel verified';
+  // A finished Astra task persists its message as system-state with the
+  // Kernel-certified outcome beside it; after a reload that used to read as the
+  // vague "Состояние задачи" although the live view had said "confirmed".
+  if (verification === 'kernel-verified' || (verification === 'system-state' && outcome === 'verified')) {
+    label = 'Выполнение подтверждено';
     tone = 'verified';
   } else if (verification === 'kernel-partial' || outcome === 'partial') {
-    label = 'Частично · Kernel';
+    label = 'Выполнено частично';
     tone = 'partial';
   } else if (verification === 'source-grounded') {
-    label = 'Ответ с источниками';
+    label = Array.isArray(message.sources) && message.sources.some(source =>
+      !(source?.kind === 'memory' || String(source?.url || '').startsWith('memory://')))
+      ? 'С источниками' : '';
     tone = 'sources';
   } else if (outcome === 'blocked') {
     label = 'Не выполнено';
     tone = 'blocked';
+  } else if (verification === 'system-state' && outcome === 'answered') {
+    // An agent reply that cited no action is an answer, not an execution.
+    label = 'Ответ модели';
   } else if (verification === 'system-state') {
-    label = outcome === 'cancelled' ? 'Остановлено' : outcome === 'failed' ? 'Не завершено' : 'Системный статус';
+    label = outcome === 'cancelled' ? 'Остановлено' : outcome === 'failed' ? 'Не завершено' : 'Состояние задачи';
     tone = 'blocked';
   } else if (verification === 'legacy-unknown') {
     label = 'Действие не подтверждено';
@@ -1455,84 +1751,6 @@ function renderOscarProvenance(message) {
   if (!label) return '';
   const warning = message.integrityWarning ? ` title="${escapeHtml(message.integrityWarning)}"` : '';
   return ` <span class="oscar-provenance-badge is-${tone}"${warning}>${escapeHtml(label)}</span>`;
-}
-
-function renderOscarResearchTimeline(phase, options = {}) {
-  const normalizedPhase = String(phase || 'route');
-  const requestedIndex = OSCAR_RESEARCH_STEPS.findIndex((step) => step.phases.includes(normalizedPhase));
-  const currentIndex = Number.isInteger(options.currentIndex)
-    ? Math.max(0, Math.min(options.currentIndex, OSCAR_RESEARCH_STEPS.length - 1))
-    : Math.max(0, requestedIndex);
-  const waiting = options.waiting === true;
-  return `
-    <ol class="oscar-research-timeline" aria-label="Этапы исследования">
-      ${OSCAR_RESEARCH_STEPS.map((step, index) => {
-        const state = waiting ? 'upcoming' : index < currentIndex ? 'complete' : index === currentIndex ? 'current' : 'upcoming';
-        return `
-          <li data-step-state="${state}"${state === 'current' ? ' aria-current="step"' : ''}>
-            <span>${String(index + 1).padStart(2, '0')}</span>
-            <strong>${escapeHtml(step.label)}</strong>
-          </li>
-        `;
-      }).join('')}
-    </ol>
-  `;
-}
-
-function renderOscarRouteConsent(consent) {
-  const state = ['accepted', 'denied'].includes(consent.state) ? consent.state : 'waiting';
-  const webSearch = consent.webSearch === true;
-  const pro = consent.pro === true;
-  const title = state === 'accepted'
-    ? webSearch ? 'Исследование запускается' : 'Pro включён для этого ответа'
-    : state === 'denied'
-      ? webSearch ? 'Отвечаю без исследования' : 'Остаюсь на Medium'
-      : String(consent.title || 'Подтвердить выбранный маршрут?');
-  const description = state === 'waiting'
-    ? String(consent.description || '')
-    : state === 'accepted'
-      ? webSearch ? 'Готовлю план и подключаю публичные источники.' : 'Продолжаю на более глубокой модели.'
-      : webSearch ? 'Интернет-доступ не используется для этого ответа.' : 'Продолжаю без переключения модели.';
-  const chips = [
-    webSearch ? 'Публичные источники' : 'Локальная модель',
-    webSearch ? 'Несколько проходов' : pro ? 'Глубокий анализ' : 'Обычный ответ',
-    'Только один ответ',
-  ];
-  const bindingDetails = state === 'waiting' && webSearch ? `
-    <dl class="oscar-consent-binding">
-      <div><dt>Цель</dt><dd>${escapeHtml(consent.target || 'Публичные интернет-источники')}</dd></div>
-      <div><dt>Данные</dt><dd>${escapeHtml((consent.dataClasses || []).join(', ') || 'текст запроса')}</dd></div>
-      <div><dt>Истекает</dt><dd>${escapeHtml(consent.expiresAt || 'короткое окно')}</dd></div>
-      <div><dt>Binding</dt><dd><code>${escapeHtml(consent.canonicalBindingHash || 'не выдан')}</code></dd></div>
-    </dl>
-  ` : '';
-  return `
-    <section class="oscar-inline-consent" data-consent-state="${state}" aria-label="${escapeHtml(webSearch ? 'Подтверждение исследования' : 'Выбор модели')}">
-      <div class="oscar-inline-consent-heading">
-        ${renderMonarchThinkingOrb(webSearch ? 'search' : 'route')}
-        <span>
-          <small>Oscar · ${webSearch ? 'исследование' : 'маршрут ответа'}</small>
-          <strong>${escapeHtml(title)}</strong>
-        </span>
-      </div>
-      <p>${escapeHtml(description)}</p>
-      <div class="oscar-consent-chips" aria-label="Параметры маршрута">
-        ${chips.map((chip) => `<span>${escapeHtml(chip)}</span>`).join('')}
-      </div>
-      ${bindingDetails}
-      ${webSearch ? renderOscarResearchTimeline('route', { waiting: state === 'waiting' }) : ''}
-      ${state === 'waiting' ? `
-        <div class="oscar-route-consent-actions">
-          <button type="button" data-oscar-route-decision="deny">${escapeHtml(consent.denyLabel || 'Продолжить без этого')}</button>
-          <button type="button" class="primary" data-oscar-route-decision="allow">${escapeHtml(consent.allowLabel || 'Разрешить')}</button>
-        </div>
-      ` : `
-        <div class="oscar-consent-transition" role="status" aria-live="polite">
-          <span></span>${escapeHtml(state === 'accepted' ? 'Перехожу к следующему этапу' : 'Обновляю маршрут ответа')}
-        </div>
-      `}
-    </section>
-  `;
 }
 
 const OSCAR_THINKING_ORB_PHASES = new Set([
@@ -1562,7 +1780,8 @@ function renderOscarModelNote(message, phase) {
   if (message.error) return '';
   if (message.pending) return '';
   const label = String(message.label || '').trim();
-  if (/^Oscar$/iu.test(label)) return '';
+  if (/^Oscar(?:\s*·.*)?$/iu.test(label) || containsTechnicalCopy(label)) return '';
+  if (/^(?:Fast|Medium|Balanced|Pro|Agent|Lite|Micro)$/iu.test(label)) return '';
   const usageModelLabel = !message.pending && message.usage
     ? formatUsageModel(message.usage.model_tier || message.usage.model || '')
     : '';
@@ -1638,24 +1857,51 @@ function formatOscarStreamHint(phase) {
   }
 }
 
-function renderOscarUsage(usage) {
-  if (!usage || typeof usage !== 'object') return '';
-  const tokenCount = Number(usage.total_tokens || usage.token_count || 0);
-  const modelLabel = formatUsageModel(usage.model_tier || usage.model || '');
-  if (!tokenCount && !modelLabel) return '';
-  const parts = [];
-  if (modelLabel) parts.push(modelLabel);
-  if (tokenCount) parts.push(`${usage.estimated ? '≈' : ''}${Math.round(tokenCount).toLocaleString('ru-RU')} токенов`);
-  return `<div class="oscar-message-usage">${escapeHtml(parts.join(' · '))}</div>`;
+/** Why MAX did not answer, in a few words. The note used to say only that it
+ * did not (live: DeepSeek answered 402, an empty balance, and the person saw
+ * no reason at all). Unknown codes keep the plain note. */
+export function maxFallbackReason(code) {
+  const value = String(code || '');
+  if (/rate-limit|quota/u.test(value)) return ': у сервиса закончился лимит или баланс';
+  if (/credential|unauthorized|authentication/u.test(value)) return ': сервис не принял ключ';
+  if (/consent-required/u.test(value)) return ': нужно согласие на отправку данных';
+  if (/model-unavailable|model-not|permission|forbidden/u.test(value)) return ': модель недоступна для ключа';
+  if (/timeout/u.test(value)) return ': сервис не ответил вовремя';
+  if (/safety-blocked/u.test(value)) return ': сработала проверка безопасности';
+  if (/output-budget|input-budget|context-too-large/u.test(value)) return ': запрос или ответ слишком большой';
+  if (/unavailable|connection/u.test(value)) return ': сервис недоступен';
+  return '';
+}
+
+function renderOscarUsage(usage, message = {}) {
+  if (usage?.max_fallback === 'local') {
+    // Owner-enabled safety net: say plainly who answered and why.
+    return `<div class="oscar-max-fallback-note" role="note"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 11.5h6.5a3 3 0 0 0 .3-6 4.2 4.2 0 0 0-8 1A2.6 2.6 0 0 0 4.5 11.5z"/><path d="M2 14 14 2"/></svg><span>MAX не ответил${maxFallbackReason(usage.max_failure_code)} — ответила модель на компьютере</span></div>`;
+  }
+  const model = String(usage?.model_tier || usage?.model || '').toLowerCase();
+  const isMax = model.startsWith('max-cloud:') || model === 'max-qwen-3.8-27b' || model === 'qwen/qwen3.8-27b'
+    || model === 'max-gpt-oss-120b' || model === 'openai/gpt-oss-120b';
+  if (!isMax) return '';
+  const label = formatUsageModel(model);
+  // One completion line: the MAX boundary carries the duration instead of a second "Завершено за" row.
+  const elapsedMs = Number(usage?.turn_elapsed_ms || usage?.elapsed_ms || 0);
+  const duration = !message.error && elapsedMs > 0 ? formatOscarWorkDuration(elapsedMs) : '';
+  return `<div class="oscar-max-completion" role="status" aria-label="Ответ MAX завершён полностью">
+    <span aria-hidden="true"></span><strong>Ответ завершён</strong>${label ? `<small>${escapeHtml(label)}</small>` : ''}${duration ? `<small class="oscar-max-completion-time">за ${escapeHtml(duration)}</small>` : ''}
+  </div>`;
 }
 
 function renderOscarWorkTimer(message) {
   if (message.error) return '';
   const startedAt = String(message.createdAt || '');
   const startedMs = Date.parse(startedAt);
+  // While running, the timer counts the wall clock. On completion it must keep
+  // the same basis: `elapsed_ms` is only the model's generation time, so
+  // falling back to it made the finished label jump down from what the person
+  // had just watched. `turn_elapsed_ms` is the whole Turn, routing included.
   const elapsedMs = message.pending
     ? Number.isFinite(startedMs) ? Math.max(0, Date.now() - startedMs) : 0
-    : Number(message.usage?.elapsed_ms || 0);
+    : Number(message.usage?.turn_elapsed_ms || message.usage?.elapsed_ms || 0);
   if (!message.pending && elapsedMs <= 0) return '';
   const label = message.pending ? 'Работает' : 'Завершено за';
   const pendingAttrs = message.pending
@@ -1684,10 +1930,13 @@ export function formatOscarWorkDuration(elapsedMs) {
 }
 
 function formatUsageModel(value) {
+  if (String(value).startsWith('max-cloud:')) return 'MAX · ' + String(value).split(':').slice(2).join(':');
   switch (String(value || '').toLowerCase()) {
   case 'gemma4-fast': case 'weak': case 'gemma_low': return 'Fast';
   case 'gemma4-balanced': case 'medium': case 'gemma': case 'gemma_high': case 'vision': return 'Medium';
   case 'gemma4-deepthinking': case 'powerful': case 'reasoning': case 'gemma4-31b': case 'qwen3.8-27b-pro': return 'Pro';
+  case 'max-qwen-3.8-27b': case 'qwen/qwen3.8-27b': return 'MAX · Qwen 3.8';
+  case 'max-gpt-oss-120b': case 'openai/gpt-oss-120b': return 'MAX · GPT-OSS 120B';
   case 'system': return 'Monarch';
   default: return '';
   }
@@ -1964,8 +2213,6 @@ function serializeCapabilityPlanCommands(commands) {
   }
   return serialized;
 }
-
-export const extractOscarActionActivator = extractOscarActionProposal;
 
 export function createThinkParser() {
   let buffer = '';

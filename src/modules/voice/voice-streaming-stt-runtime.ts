@@ -76,8 +76,8 @@ export class VoiceStreamingSttRuntime implements VoiceSttRuntimePort {
     return this.fallback.prepare(language);
   }
 
-  transcribe(input: VoiceSttTranscribeInput): Promise<VoiceSttTranscribeResult> {
-    return this.fallback.transcribe(input);
+  transcribe(input: VoiceSttTranscribeInput, signal?: AbortSignal): Promise<VoiceSttTranscribeResult> {
+    return this.fallback.transcribe(input, signal);
   }
 
   async startStream(input: VoiceSttStreamStartInput): Promise<VoiceSttStreamStartResult> {

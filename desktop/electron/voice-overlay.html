@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:">
+    <title>Oscar Voice</title>
+    <link rel="stylesheet" href="voice-overlay.css">
+  </head>
+  <body data-phase="idle" data-card="hidden">
+    <main class="voice-overlay" aria-live="polite">
+      <div class="voice-orb" aria-hidden="true"><i></i><i></i><i></i><span></span></div>
+      <section class="voice-card">
+        <small id="voice-kicker">Оскар</small>
+        <strong id="voice-title">Слушаю</strong>
+        <p id="voice-text"></p>
+        <div class="voice-data-card" id="voice-data-card" hidden>
+          <div><b id="voice-card-primary"></b><span id="voice-card-summary"></span></div>
+          <dl id="voice-card-metrics"></dl>
+          <small id="voice-card-attribution"></small>
+        </div>
+      </section>
+    </main>
+    <script src="voice-overlay.js"></script>
+  </body>
+</html>

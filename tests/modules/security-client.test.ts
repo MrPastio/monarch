@@ -28,6 +28,11 @@ class CapturingSecurityClient extends SecurityClient {
 }
 
 describe('SecurityClient command normalization', () => {
+  it('queues watched-scope inspection recovery without paths, PIN or protection start', async () => {
+    const client = await createCapturingClient();
+    await client.retryInspection();
+    expect(client.calls).toEqual([{ args: ['inspection-retry'], options: { timeoutMs: 8000 } }]);
+  });
   it('keeps direct numeric arguments inside the Python CLI contract', async () => {
     const client = await createCapturingClient();
 
