@@ -26,6 +26,7 @@ out/
 # Local agent, browser, and sandbox workspaces
 /.agents/
 /.codex/
+/.agent-control/
 /.agents/*/
 !/.agents/orchestrator/
 !/.agents/orchestrator/**
@@ -95,6 +96,7 @@ oscar/**/__pycache__/
 # Global model ignores
 *.gguf
 gemma_models/
+custom_models/
 *.safetensors
 *.pt
 *.pth
@@ -130,6 +132,10 @@ security/src/*.egg-info/
 /.tmp/
 /.codex-tmp/
 /.test-tmp/
+
+# Local AI-agent onboarding and machine-specific Grok policy
+/GROK_ONBOARDING.md
+/.grok/
 
 # OS / editor
 .vscode/

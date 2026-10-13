@@ -1,0 +1,402 @@
+/* Composer menus: "+" (attach, tools, autonomy) and the model chip menu
+   (where Oscar works, which model, depth and research). One file owns their
+   layout and material in both designs; earlier sheets only position them.
+   Selection is said by a tick and a filled row, never by glow. */
+
+.omenu {
+  --om-ink: var(--ds-ink, #f4f2ee);
+  --om-muted: var(--ds-ink-3, #a2a3a6);
+  --om-line: var(--ds-line, rgba(255, 255, 255, .09));
+  --om-fill: var(--ds-fill-2, rgba(255, 255, 255, .055));
+  --om-hover: var(--ds-fill-3, rgba(255, 255, 255, .085));
+  --om-chosen: var(--ds-accent-fill, rgba(255, 176, 36, .1));
+  --om-mark: var(--ds-accent-ink, #ffc862);
+  --om-thumb: rgba(var(--theme-wash-rgb, 255, 255, 255), .1);
+  --om-thumb-line: var(--ds-accent-line, rgba(255, 184, 48, .36));
+  --om-switch-on: var(--ds-accent, #ffb52b);
+  --om-switch-knob-on: var(--ds-on-accent, #1a1206);
+  --om-stroke: 1px;
+  --om-r: 12px;
+  --om-r-tile: 14px;
+  --om-r-pill: 10px;
+  --om-ease: cubic-bezier(.2, .8, .2, 1);
+  --om-move: 260ms;
+  --om-touch: 150ms;
+}
+html:root[data-theme="light"]:not([data-design="pp"]) .omenu { --om-thumb: #ffffff; }
+html:root[data-design="pp"] .omenu {
+  --om-ink: var(--pp-ink);
+  --om-muted: var(--pp-ink-muted);
+  --om-line: var(--pp-line-soft);
+  --om-fill: var(--pp-paper-2);
+  --om-hover: var(--pp-paper-2);
+  --om-chosen: var(--pp-paper-2);
+  --om-mark: var(--pp-ink);
+  --om-thumb: var(--pp-paper);
+  --om-thumb-line: var(--pp-ink);
+  --om-switch-on: var(--pp-ink);
+  --om-switch-knob-on: var(--pp-paper);
+  --om-stroke: var(--pp-stroke);
+  --om-r: var(--pp-r-md);
+  --om-r-tile: var(--pp-r-md);
+  --om-r-pill: 999px;
+  --om-ease: var(--pp-ease-out);
+}
+
+/* ------------------------------------------------------------ containers */
+#oscar-model-popover.omenu,
+#oscar-composer #oscar-composer-menu-popover.omenu {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  max-width: calc(100vw - 24px);
+  max-height: min(640px, calc(100dvh - var(--desktop-titlebar-height, 0px) - 120px));
+  padding: 6px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+  color: var(--om-ink);
+  font-family: inherit;
+}
+#oscar-model-popover.omenu { width: 344px; transform-origin: calc(100% - 40px) calc(100% + 10px); animation: omenu-in 220ms var(--om-ease) both; }
+#oscar-model-popover.omenu.hidden { display: none; }
+#oscar-composer #oscar-composer-menu-popover.omenu { width: 316px; }
+@keyframes omenu-in {
+  from { opacity: 0; transform: translateY(8px) scale(.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ------------------------------------------------------------------ rows */
+.omenu .omenu-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  margin: 0;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--om-r);
+  background: transparent;
+  box-shadow: none;
+  color: var(--om-ink);
+  font: inherit;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--om-touch) ease, transform var(--om-touch) var(--om-ease);
+}
+.omenu .omenu-row:hover { background: var(--om-hover); }
+.omenu .omenu-row:focus-visible { outline: 2px solid var(--om-thumb-line); outline-offset: -2px; background: var(--om-hover); }
+.omenu .omenu-row:active:not(:disabled) { transform: scale(.985); }
+.omenu .omenu-row:is([aria-selected="true"], .active) { background: var(--om-chosen); color: var(--om-ink); font-weight: 400; }
+.omenu .omenu-row:is(:disabled, [aria-disabled="true"]) { cursor: default; opacity: .45; }
+.omenu .omenu-row:is(:disabled, [aria-disabled="true"]):hover { background: transparent; }
+.omenu .omenu-row-text { display: grid; flex: 1 1 auto; gap: 1px; min-width: 0; }
+.omenu .omenu-row-text > strong,
+.omenu .omenu-row-text:not(:has(strong)) {
+  overflow: hidden;
+  color: var(--om-ink);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.omenu .omenu-row-text em {
+  margin-left: 5px;
+  color: var(--om-muted);
+  font: 500 11px/1 var(--pp-mono, ui-monospace, "Cascadia Code", Consolas, monospace);
+  font-style: normal;
+  letter-spacing: .02em;
+}
+.omenu .omenu-row-text small {
+  overflow: hidden;
+  color: var(--om-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.omenu .omenu-row-icon,
+.omenu .omenu-row-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: calc(var(--om-r) - 5px);
+  background: var(--om-fill);
+  color: var(--om-ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+.omenu .omenu-row:hover :is(.omenu-row-icon, .omenu-row-mark) { background: var(--om-thumb); }
+.omenu :is(.omenu-row-icon, .omenu-row-mark) svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.omenu :is(.omenu-row-icon, .omenu-row-mark) img { width: 17px; height: 17px; object-fit: contain; }
+html:root[data-design="pp"] .omenu :is(.omenu-row-icon, .omenu-row-mark) img { filter: grayscale(1) brightness(0); }
+html:root[data-design="pp"][data-theme="dark"] .omenu :is(.omenu-row-icon, .omenu-row-mark) img { filter: grayscale(1) brightness(0) invert(1); }
+html:root:not([data-design="pp"]) .omenu .omenu-row-icon img { filter: invert(1) opacity(.86); }
+html:root:not([data-design="pp"])[data-theme="light"] .omenu .omenu-row-icon img { filter: opacity(.8); }
+
+/* the tick draws itself in when a row becomes the choice */
+.omenu .omenu-check {
+  position: relative;
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+.omenu .omenu-check::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 3px;
+  width: 9px;
+  height: 5px;
+  border-bottom: 2px solid var(--om-mark);
+  border-left: 2px solid var(--om-mark);
+  transform: rotate(-45deg) scale(.4);
+  transform-origin: 30% 70%;
+  opacity: 0;
+  transition: opacity 120ms ease, transform var(--om-move) var(--om-ease);
+}
+.omenu .omenu-row:is([aria-selected="true"], .active) .omenu-check::after { opacity: 1; transform: rotate(-45deg) scale(1); }
+.omenu .omenu-row-state {
+  flex: none;
+  padding: 3px 9px;
+  border: var(--om-stroke) solid var(--om-line);
+  border-radius: 999px;
+  color: var(--om-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.omenu .omenu-row[aria-pressed="true"] .omenu-row-state { border-color: var(--om-thumb-line); color: var(--om-ink); }
+.omenu .omenu-row-link { min-height: 38px; color: var(--om-muted); }
+.omenu .omenu-row-link .omenu-row-text { color: var(--om-muted); font-size: 12.5px; font-weight: 500; }
+.omenu .omenu-row-link:hover .omenu-row-text { color: var(--om-ink); }
+.omenu .omenu-chevron { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform var(--om-touch) var(--om-ease); }
+.omenu .omenu-row-link:hover .omenu-chevron { transform: translateX(2px); }
+.omenu .omenu-divider {
+  display: block;
+  margin: 6px 10px 2px;
+  color: var(--om-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.omenu .omenu-group { display: grid; gap: 2px; min-width: 0; margin: 0; padding: 0; border: 0; background: none; }
+.omenu .omenu-group[hidden] { display: none; }
+
+/* ------------------------------------------------- where Oscar works */
+#oscar-model-popover .omenu-source {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 3px;
+  border-radius: calc(var(--om-r-pill) + 3px);
+  background: var(--om-fill);
+}
+html:root[data-design="pp"] #oscar-model-popover .omenu-source { border-radius: 999px; }
+#oscar-model-popover .omenu-source-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  border: var(--om-stroke) solid var(--om-thumb-line);
+  border-radius: var(--om-r-pill);
+  background: var(--om-thumb);
+  box-shadow: var(--pp-shadow-thumb, 0 1px 2px rgba(0, 0, 0, .18));
+  transition: transform var(--om-move) var(--om-ease);
+}
+#oscar-model-popover[data-source="max"] .omenu-source-thumb { transform: translateX(100%); }
+#oscar-model-popover .omenu-source-option {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  margin: 0;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--om-r-pill);
+  background: transparent;
+  box-shadow: none;
+  color: var(--om-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--om-touch) ease;
+}
+#oscar-model-popover .omenu-source-option:hover,
+#oscar-model-popover .omenu-source-option[aria-checked="true"] { color: var(--om-ink); background: transparent; }
+#oscar-model-popover .omenu-source-option:focus-visible { outline: 2px solid var(--om-thumb-line); outline-offset: 1px; }
+#oscar-model-popover .omenu-source-option svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Both lists share one cell and the cell is as tall as the shown list. The
+   stage alone animates its height (astra-max-setup.js), so the menu grows or
+   shrinks toward the chip it hangs from, while the lists cross over the way
+   the thumb went. */
+#oscar-model-popover .omenu-stage { display: grid; min-width: 0; overflow: clip; overflow-clip-margin: 4px; }
+#oscar-model-popover .omenu-panel {
+  display: grid;
+  grid-area: 1 / 1;
+  gap: 2px;
+  align-content: start;
+  min-width: 0;
+  transition: opacity 180ms ease 40ms, transform var(--om-move) var(--om-ease), visibility 0s linear 0s;
+}
+#oscar-model-popover:not([data-source="max"]) [data-panel="max"],
+#oscar-model-popover[data-source="max"] [data-panel="local"] {
+  height: 0;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, transform var(--om-move) var(--om-ease), visibility 0s linear var(--om-move);
+}
+#oscar-model-popover:not([data-source="max"]) [data-panel="max"] { transform: translateX(16px); }
+#oscar-model-popover[data-source="max"] [data-panel="local"] { transform: translateX(-16px); }
+
+/* ------------------------------------------------ depth, research, autonomy */
+.omenu .omenu-tune {
+  display: grid;
+  gap: 10px;
+  margin: 2px 0 0;
+  padding: 10px 4px 4px;
+  border-top: var(--om-stroke) solid var(--om-line);
+}
+.omenu .omenu-tune-group { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; background: none; }
+.omenu .omenu-tune-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 0 4px;
+}
+.omenu .omenu-tune-head strong { flex: none; color: var(--om-ink); font-size: 12.5px; font-weight: 600; }
+.omenu .omenu-tune-head small { overflow: hidden; color: var(--om-muted); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.omenu .omenu-segment {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  gap: 2px;
+  padding: 3px;
+  border: 0;
+  border-radius: calc(var(--om-r-pill) + 3px);
+  background: var(--om-fill);
+}
+.omenu .omenu-segment > button {
+  min-width: 0;
+  min-height: 30px;
+  margin: 0;
+  padding: 0 6px;
+  border: var(--om-stroke) solid transparent;
+  border-radius: var(--om-r-pill);
+  background: transparent;
+  box-shadow: none;
+  color: var(--om-muted);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--om-touch) ease, background-color var(--om-touch) ease, border-color var(--om-touch) ease;
+}
+.omenu .omenu-segment > button strong { font-weight: inherit; }
+.omenu .omenu-segment > button:hover { color: var(--om-ink); background: transparent; }
+.omenu .omenu-segment > button[aria-checked="true"] {
+  border-color: var(--om-thumb-line);
+  background: var(--om-thumb);
+  box-shadow: var(--pp-shadow-thumb, 0 1px 2px rgba(0, 0, 0, .18));
+  color: var(--om-ink);
+  font-weight: 600;
+}
+.omenu .omenu-segment > button:focus-visible { outline: 2px solid var(--om-thumb-line); outline-offset: 1px; }
+.omenu .omenu-segment > button[aria-busy] { cursor: progress; }
+.omenu .omenu-tune-group[data-disabled="true"] .omenu-segment { opacity: .45; }
+.omenu .omenu-tune-group[data-disabled="true"] .omenu-segment > button { cursor: default; }
+
+/* --------------------------------------------------------------- "+" menu */
+#oscar-composer-menu-popover .omenu-tiles {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  gap: 6px;
+}
+#oscar-composer-menu-popover .omenu-tile {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 74px;
+  margin: 0;
+  padding: 10px 6px;
+  border: var(--om-stroke) solid var(--om-line);
+  border-radius: var(--om-r-tile);
+  background: transparent;
+  box-shadow: none;
+  color: var(--om-ink);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--om-touch) ease, background-color var(--om-touch) ease, transform var(--om-touch) var(--om-ease);
+}
+#oscar-composer-menu-popover .omenu-tile:hover { border-color: var(--om-thumb-line); background: var(--om-hover); }
+#oscar-composer-menu-popover .omenu-tile:active:not(:disabled) { transform: scale(.97); }
+#oscar-composer-menu-popover .omenu-tile:focus-visible { outline: 2px solid var(--om-thumb-line); outline-offset: 1px; }
+#oscar-composer-menu-popover .omenu-tile:disabled { cursor: default; opacity: .45; }
+#oscar-composer-menu-popover .omenu-tile svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+#oscar-composer-menu-popover .omenu-list { display: grid; gap: 2px; }
+
+/* Computer Use is an on/off setting: a switch whose knob travels */
+.omenu .omenu-switch {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 20px;
+  border: var(--om-stroke) solid var(--om-line);
+  border-radius: 999px;
+  background: var(--om-fill);
+  transition: background-color var(--om-move) ease, border-color var(--om-move) ease;
+}
+.omenu .omenu-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--om-muted);
+  transition: transform var(--om-move) var(--om-ease), background-color var(--om-move) ease;
+}
+.omenu .omenu-row:is([aria-pressed="true"], .is-active) .omenu-switch { border-color: var(--om-switch-on); background: var(--om-switch-on); }
+.omenu .omenu-row:is([aria-pressed="true"], .is-active) .omenu-switch::after { background: var(--om-switch-knob-on); transform: translateX(14px); }
+.omenu .omenu-row[aria-busy] .omenu-switch { opacity: .6; }
+.omenu small.error-text { color: var(--ds-danger-ink, #ff8f86); }
+
+@media (max-height: 640px) {
+  .omenu .omenu-row { min-height: 40px; padding-block: 4px; }
+  .omenu :is(.omenu-row-icon, .omenu-row-mark) { width: 28px; height: 28px; }
+  .omenu .omenu-tune { gap: 8px; padding-top: 8px; }
+  #oscar-composer-menu-popover .omenu-tile { min-height: 62px; padding-block: 8px; }
+}
+@media (max-width: 420px) {
+  #oscar-model-popover.omenu { width: calc(100vw - 24px); }
+  #oscar-composer #oscar-composer-menu-popover.omenu { width: calc(100vw - 24px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #oscar-model-popover.omenu { animation: none; }
+  .omenu :is(.omenu-row, .omenu-tile, .omenu-panel, .omenu-source-thumb, .omenu-switch, .omenu-chevron),
+  .omenu .omenu-check::after,
+  .omenu .omenu-switch::after { transition: none !important; }
+  #oscar-model-popover .omenu-panel { transform: none !important; }
+  .omenu :is(.omenu-row, .omenu-tile):active:not(:disabled) { transform: none; }
+}

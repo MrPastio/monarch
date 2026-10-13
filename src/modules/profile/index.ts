@@ -2,13 +2,11 @@ import path from 'node:path';
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
-  MonarchRouteDecision,
 } from '../../core';
-import { permissionModeForRisk, resolveMonarchRuntimePaths } from '../../core';
+import { resolveMonarchRuntimePaths } from '../../core';
 import { profileManifest } from './manifest';
 import {
   MonarchProfileStore,
@@ -49,34 +47,6 @@ export class ProfileModule implements MonarchModule {
     };
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.trim();
-    if (!/(?:\b(?:monarch|user|my|assistant) profile\b|\bprofile (?:settings|preferences|rules)\b|\b(?:set|update|save|remember|show|read) (?:my )?(?:profile|preference|style rule|boundary)\b)/i.test(text)) {
-      return null;
-    }
-
-    if (/(update|set|save|remember|add)/i.test(text)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'profile.update',
-        confidence: 0.74,
-        reason: 'User asks to update local profile preferences.',
-        permissionMode: permissionModeForRisk('write'),
-        input: inferProfilePatch(text),
-      };
-    }
-
-    return {
-      intentId: intent.id,
-      targetModuleId: this.manifest.id,
-      capabilityId: 'profile.read',
-      confidence: 0.9,
-      reason: 'User asks to read local profile.',
-      permissionMode: permissionModeForRisk('read'),
-      input: {},
-    };
-  }
 
   async executeCapability(
     request: MonarchExecutionRequest,
@@ -117,21 +87,6 @@ export class ProfileModule implements MonarchModule {
       output: { profile },
     };
   }
-}
-
-function inferProfilePatch(text: string): MonarchProfilePatch {
-  const preference = text.match(/\bpreference\s+([a-z0-9_.-]+)\s*=\s*(.+)$/i);
-  if (preference?.[1] && preference[2]) {
-    return {
-      preferences: {
-        [preference[1].trim()]: preference[2].trim(),
-      },
-    };
-  }
-
-  return {
-    adaptiveSummary: text.replace(/^(update|set|save|remember|add)\s+/i, '').trim(),
-  };
 }
 
 function readPatch(input: unknown): MonarchProfilePatch {

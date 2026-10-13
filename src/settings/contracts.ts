@@ -16,6 +16,7 @@ export type MonarchSettingsCommandV1 =
   | 'personality.profile.select'
   | 'personality.personalization.set'
   | 'personality.scope.copy'
+  | 'personality.style.set'
   | 'voice.update'
   | 'voice.preset.create'
   | 'voice.preset.update'
@@ -139,6 +140,13 @@ export interface VoicePronunciationRuleV1 {
 export interface VoiceInputPreferencesV1 {
   schemaVersion: 1;
   autoSendAfterDictation: boolean;
+  simplifiedModeEnabled: boolean;
+  backgroundWakeEnabled: boolean;
+  informationProvidersEnabled: boolean;
+  informationProviderAgreementVersion: string | null;
+  informationProviderConsentedAt: string | null;
+  weatherLocationMode: 'manual' | 'device';
+  weatherLocation: string;
 }
 
 export interface VoicePreferencesV2 {

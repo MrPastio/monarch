@@ -43,6 +43,14 @@ export class MonarchPermissionGate {
     capability: MonarchCapability | undefined
   ): MonarchPermissionDecision {
     const risk = capability?.risk || 'security-sensitive';
+    if (isBoundedSimplifiedVoiceAction(request, capability)) {
+      return {
+        mode: 'allow',
+        reason: 'Attested Simplified Voice may perform this bounded, locally verified convenience action.',
+        risk,
+        requiresUserConfirmation: false,
+      };
+    }
     if (isInternalSecurityControllerCheck(request, capability)) {
       return {
         mode: 'allow',
@@ -88,6 +96,26 @@ export class MonarchPermissionGate {
   }
 }
 
+const SIMPLIFIED_VOICE_CAPABILITY_ALLOWLIST = new Set([
+  'device.app.open',
+  'device.browser.open',
+  'device.volume.set',
+  'device.brightness.set',
+]);
+
+function isBoundedSimplifiedVoiceAction(
+  request: MonarchExecutionRequest,
+  capability: MonarchCapability | undefined,
+): boolean {
+  return request.source === 'voice'
+    && request.requestedBy === 'ui:voice-simplified'
+    && request.moduleId === 'device'
+    && capability?.moduleId === 'device'
+    && capability.id === request.capabilityId
+    && capability.risk === 'device-control'
+    && SIMPLIFIED_VOICE_CAPABILITY_ALLOWLIST.has(request.capabilityId);
+}
+
 function isInternalSecurityControllerCheck(
   request: MonarchExecutionRequest,
   capability: MonarchCapability | undefined
@@ -98,6 +126,31 @@ function isInternalSecurityControllerCheck(
     && capability.id === 'security.controller.check'
     && request.requestedBy === 'system'
     && request.confirmed === true;
+}
+
+/** Risks shown to the person as "what happens with each action". */
+export const PERMISSION_MATRIX_RISKS: readonly MonarchRisk[] = ['read', 'write', 'execute', 'network', 'delete', 'money'];
+
+export interface MonarchPermissionMatrixRow {
+  autonomyMode: MonarchAutonomyMode;
+  sandboxMode: MonarchSandboxMode;
+  cells: Array<{ risk: MonarchRisk; mode: MonarchPermissionMode }>;
+}
+
+/** The same rules the gate evaluates, laid out per autonomy mode, so the UI
+ * never keeps its own copy of the policy. */
+export function permissionMatrix(approvalPolicy: MonarchApprovalPolicy = 'on-request'): MonarchPermissionMatrixRow[] {
+  const modes: Array<[MonarchAutonomyMode, MonarchSandboxMode]> = [
+    ['guided', 'read-only'], ['workspace-autonomous', 'workspace-write'], ['full-local', 'danger-full-access'],
+  ];
+  return modes.map(([autonomyMode, sandboxMode]) => ({
+    autonomyMode,
+    sandboxMode,
+    cells: PERMISSION_MATRIX_RISKS.map((risk) => {
+      const mode = permissionRuleFor(sandboxMode, risk).mode;
+      return { risk, mode: mode === 'confirm' && approvalPolicy === 'never' ? 'deny' : mode };
+    }),
+  }));
 }
 
 function permissionRuleFor(

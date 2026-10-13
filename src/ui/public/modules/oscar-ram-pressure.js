@@ -113,9 +113,9 @@ function buildProMessage({ available, estimated, projected, reclaim, proLoaded, 
 function reclaimInstruction(reclaim, critical) {
   const target = critical ? OSCAR_RAM_CRITICAL_HEADROOM_GB : OSCAR_RAM_RECOMMENDED_HEADROOM_GB;
   if (critical) {
-    return `Не хватает примерно ${formatRamGb(reclaim)} ГБ для размещения модели; освободи память или выбери Basic.`;
+    return `Не хватает примерно ${formatRamGb(reclaim)} ГБ для размещения модели; освободи память или выбери Fast.`;
   }
-  return `Это только предупреждение: запуск разрешён. Рекомендуемый запас — ${formatRamGb(target)} ГБ; при необходимости выбери Basic.`;
+  return `Это только предупреждение: запуск разрешён. Рекомендуемый запас — ${formatRamGb(target)} ГБ; при необходимости выбери Fast.`;
 }
 
 function hasCompleteRuntimeAssessment(assessment) {

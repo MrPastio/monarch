@@ -5,7 +5,6 @@ import { astraModulePackage } from './astra';
 import { diagnosticsModulePackage } from './diagnostics';
 import { knowledgeModulePackage } from './knowledge';
 import { memoryModulePackage } from './memory';
-import { monarchModulesModulePackage } from './monarch-modules';
 import { modelsModulePackage } from './models';
 import { oscarModulePackage } from './oscar';
 import { profileModulePackage } from './profile';
@@ -13,7 +12,6 @@ import { pluginsModulePackage } from './plugins';
 import { securityModulePackage } from './security';
 import { safeModulePackage } from './safe';
 import { sharingModulePackage } from './sharing';
-import { studioModulePackage } from './studio';
 import { voiceModulePackage } from './voice';
 import { workspaceModulePackage } from './workspace';
 import { customToolsModulePackage } from './custom-tools';
@@ -22,6 +20,9 @@ import { deviceModulePackage } from './device';
 import { coderModulePackage } from './coder';
 import { computerModulePackage } from './computer';
 import { systemShellModulePackage } from './system-shell';
+import { gmailModulePackage } from './gmail';
+import { githubModulePackage } from './github';
+import { calendarModulePackage } from './calendar';
 
 export const builtInModulePackages: readonly MonarchModulePackage[] = [
   assistantModulePackage,
@@ -30,8 +31,6 @@ export const builtInModulePackages: readonly MonarchModulePackage[] = [
   knowledgeModulePackage,
   profileModulePackage,
   memoryModulePackage,
-  monarchModulesModulePackage,
-  studioModulePackage,
   astraModulePackage,
   diagnosticsModulePackage,
   pluginsModulePackage,
@@ -47,4 +46,7 @@ export const builtInModulePackages: readonly MonarchModulePackage[] = [
   systemShellModulePackage,
   customToolsModulePackage,
   coderModulePackage,
+  gmailModulePackage,
+  githubModulePackage,
+  calendarModulePackage,
 ];

@@ -578,6 +578,58 @@ describe('voice input helpers', () => {
     expect(harness.status.dataset.state).toBe('done');
   });
 
+  it('forwards resident streaming partials before the recording ends', async () => {
+    const onPartialTranscript = vi.fn();
+    const createPcmStream = vi.fn(async (options: { onPartial?: (value: unknown) => void }) => {
+      options.onPartial?.({ transcript: 'оскар', sequence: 0 });
+      return { stop: vi.fn(), cancel: vi.fn(async () => undefined) };
+    });
+    const harness = createCompletingHarness(vi.fn(async () => 'fallback'), {
+      createPcmStream,
+      onPartialTranscript,
+    });
+
+    harness.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+
+    expect(onPartialTranscript).toHaveBeenCalledWith({ transcript: 'оскар', sequence: 0 });
+    expect(harness.controller?.isListening()).toBe(true);
+    expect(harness.getUserMedia).toHaveBeenCalledWith({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      },
+    });
+  });
+
+  it('keeps a resident wake capture alive and rotates only its PCM segment', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const reset = vi.fn(async () => true);
+    const harness = createCompletingHarness(vi.fn(async () => 'fallback'), {
+      createPcmStream: vi.fn(async () => ({
+        reset,
+        stop: vi.fn(),
+        cancel: vi.fn(async () => undefined),
+      })),
+      maxRecordingMs: 0,
+      retainFallbackAudio: false,
+    });
+
+    harness.button.dispatchEvent(new Event('click'));
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(VOICE_RECORDING_LIMITS.maxMs + 1_000);
+    expect(harness.controller?.isListening()).toBe(true);
+    expect(CompletingMediaRecorderMock.instances[0]?.stopCalls).toBe(0);
+
+    await harness.controller?.resetSegment();
+    expect(reset).toHaveBeenCalledOnce();
+    expect(harness.getUserMedia).toHaveBeenCalledOnce();
+    expect(harness.controller?.isListening()).toBe(true);
+  });
+
   it('falls back to the parallel MediaRecorder clip when direct PCM fails', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);

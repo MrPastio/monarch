@@ -29,6 +29,13 @@ export const DEFAULT_OSCAR_VOICE_PREFERENCES = Object.freeze({
 export const DEFAULT_VOICE_INPUT_PREFERENCES = Object.freeze({
   schemaVersion: 1,
   autoSendAfterDictation: false,
+  simplifiedModeEnabled: true,
+  backgroundWakeEnabled: true,
+  informationProvidersEnabled: false,
+  informationProviderAgreementVersion: null,
+  informationProviderConsentedAt: null,
+  weatherLocationMode: 'manual',
+  weatherLocation: '',
 });
 
 export const DEFAULT_VOICE_RUNTIME_CAPABILITIES = Object.freeze({
@@ -129,6 +136,11 @@ export function applyVoiceSettingsSnapshot(context) {
   voiceSettingsRevision = Math.max(0, Number(context?.revision) || 0);
   voiceSettingsDocument = normalizeVoicePreferencesDocument(context?.value);
   voiceSettingsReady = true;
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new CustomEvent('monarch:voice-settings-changed', {
+      detail: { input: { ...voiceSettingsDocument.input }, revision: voiceSettingsRevision },
+    }));
+  }
   return readVoiceSettingsSnapshot();
 }
 
@@ -223,7 +235,17 @@ function normalizePronunciationRule(value) {
 
 function normalizeVoiceInputPreferences(value) {
   const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-  return { schemaVersion: 1, autoSendAfterDictation: input.autoSendAfterDictation === true };
+  return {
+    schemaVersion: 1,
+    autoSendAfterDictation: input.autoSendAfterDictation === true,
+    simplifiedModeEnabled: input.simplifiedModeEnabled !== false,
+    backgroundWakeEnabled: input.backgroundWakeEnabled !== false,
+    informationProvidersEnabled: input.informationProvidersEnabled === true,
+    informationProviderAgreementVersion: cleanString(input.informationProviderAgreementVersion, 80) || null,
+    informationProviderConsentedAt: cleanString(input.informationProviderConsentedAt, 80) || null,
+    weatherLocationMode: input.weatherLocationMode === 'device' ? 'device' : 'manual',
+    weatherLocation: cleanString(input.weatherLocation, 100),
+  };
 }
 
 function boundedInteger(value, minimum, maximum, fallback) {

@@ -3,7 +3,7 @@ import type { MonarchModuleManifest } from '../../core';
 export const securityManifest: MonarchModuleManifest = {
   id: 'security',
   name: 'Monarch Security',
-  version: '0.1.0',
+  version: '0.2.0',
   kind: 'runtime',
   description: 'Integrated local-first host security protector: sensors, policy, scan, audit integrity, and safe verification labs.',
   owns: [
@@ -59,6 +59,38 @@ export const securityManifest: MonarchModuleManifest = {
   ],
   capabilities: [
     {
+      id: 'security.inspection.retry', moduleId: 'security', title: 'Recheck current watched directories',
+      description: 'Queue a bounded local read-only recheck of current configured watched directories; no new paths, trust changes or protection restart.', risk: 'read',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+      id: 'security.scan.start', moduleId: 'security', title: 'Start a local read-only scan',
+      description: 'Start one bounded local file or system scan; no cloud, Defender mutation, or automatic response.', risk: 'read',
+      inputSchema: { type: 'object', properties: { kind: { type: 'string', enum: ['file', 'system'] }, path: { type: 'string', maxLength: 32768 } }, required: ['kind'], additionalProperties: false },
+    },
+    {
+      id: 'security.scan.status', moduleId: 'security', title: 'Read current scan progress', description: 'Read the current or most recent manual scan owned by this runtime.', risk: 'read',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+      id: 'security.scan.cancel', moduleId: 'security', title: 'Cancel the exact manual scan', description: 'Stop only the selected read-only scan worker and its child queries; background protection continues.', risk: 'read',
+      inputSchema: { type: 'object', properties: { jobId: { type: 'string', minLength: 36, maxLength: 36 } }, required: ['jobId'], additionalProperties: false },
+    },
+    {
+      id: 'security.background.enable', moduleId: 'security',
+      title: 'Enable protection at Windows sign-in',
+      description: 'Register a limited per-user Windows startup task and keep local protection running after closing Monarch.',
+      risk: 'execute',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+      id: 'security.background.disable', moduleId: 'security',
+      title: 'Disable automatic background protection',
+      description: 'Remove the exact per-user Security startup task and stop protection after Security PIN authorization.',
+      risk: 'execute',
+      inputSchema: { type: 'object', properties: { pin: { type: 'string', minLength: 6, maxLength: 6 } }, required: ['pin'], additionalProperties: false },
+    },
+    {
       id: 'security.status',
       moduleId: 'security',
       title: 'Read security protector status',
@@ -69,12 +101,7 @@ export const securityManifest: MonarchModuleManifest = {
         properties: {},
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['security status', 'status security', 'protection status', 'protector status', 'статус security', 'статус защиты', 'статус безопасности'],
-        keywords: ['security', 'protection', 'protector', 'status', 'безопасность', 'защита', 'статус'],
-        examples: ['show security status', 'покажи статус Security', 'покажи статус защиты'],
-        intentKinds: ['security.status', 'protector.status'],
-      },
+
     },
     {
       id: 'security.diagnose',
@@ -87,12 +114,7 @@ export const securityManifest: MonarchModuleManifest = {
         properties: {},
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['security diagnose', 'diagnose protection', 'диагностика защиты'],
-        keywords: ['security', 'diagnose', 'runtime', 'settings', 'resources', 'безопасность', 'диагностика', 'настройки'],
-        examples: ['diagnose Monarch Security', 'проверь диагностику защиты'],
-        intentKinds: ['security.diagnose'],
-      },
+
     },
     {
       id: 'security.profile.get',
@@ -101,12 +123,7 @@ export const securityManifest: MonarchModuleManifest = {
       description: 'Read the active Security observation and command-control strictness.',
       risk: 'read',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      routing: {
-        aliases: ['security level', 'security strictness', 'уровень строгости security'],
-        keywords: ['security', 'profile', 'level', 'strictness', 'уровень', 'строгость'],
-        examples: ['покажи уровень строгости Security'],
-        intentKinds: ['security.profile'],
-      },
+
     },
     {
       id: 'security.profile.set',
@@ -123,12 +140,7 @@ export const securityManifest: MonarchModuleManifest = {
         required: ['level'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['change security level', 'set security strictness', 'измени уровень security'],
-        keywords: ['security', 'profile', 'level', 'strictness', 'режим', 'строгость'],
-        examples: ['установи средний уровень Security'],
-        intentKinds: ['security.profile.set'],
-      },
+
     },
     {
       id: 'security.model_policy.get',
@@ -137,12 +149,7 @@ export const securityManifest: MonarchModuleManifest = {
       description: 'Read whether Oscar may propose actions and whether Security observes, guards, or confirms every exact effect.',
       risk: 'read',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      routing: {
-        aliases: ['Oscar command security', 'LLM command policy', 'безопасность команд модели'],
-        keywords: ['Oscar', 'LLM', 'model', 'commands', 'policy', 'модель', 'команды', 'безопасность'],
-        examples: ['покажи параметры безопасности команд Oscar'],
-        intentKinds: ['security.model_policy'],
-      },
+
     },
     {
       id: 'security.model_policy.set',
@@ -161,12 +168,7 @@ export const securityManifest: MonarchModuleManifest = {
         required: ['enabled'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['change Oscar command security', 'set LLM command policy', 'измени безопасность команд модели'],
-        keywords: ['Oscar', 'LLM', 'model', 'commands', 'policy', 'модель', 'команды', 'безопасность'],
-        examples: ['всегда спрашивай перед командами Oscar'],
-        intentKinds: ['security.model_policy.set'],
-      },
+
     },
     {
       id: 'security.audit.tail',
@@ -181,12 +183,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['security audit', 'security logs', 'tail security audit', 'логи защиты', 'аудит безопасности'],
-        keywords: ['security', 'audit', 'logs', 'tail', 'безопасность', 'аудит', 'логи'],
-        examples: ['show security logs', 'покажи последние логи защиты'],
-        intentKinds: ['security.audit', 'audit.read'],
-      },
+
     },
     {
       id: 'security.integrity.verify',
@@ -199,12 +196,7 @@ export const securityManifest: MonarchModuleManifest = {
         properties: {},
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['verify security integrity', 'security integrity', 'проверь целостность защиты'],
-        keywords: ['security', 'integrity', 'hmac', 'audit', 'verify', 'безопасность', 'целостность', 'аудит'],
-        examples: ['verify security integrity', 'проверь целостность аудита защиты'],
-        intentKinds: ['security.integrity'],
-      },
+
     },
     {
       id: 'security.incidents.list',
@@ -219,12 +211,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['security incidents', 'incident inbox', 'инциденты безопасности', 'угрозы безопасности'],
-        keywords: ['security', 'incident', 'threat', 'risk', 'decision', 'безопасность', 'инцидент', 'угроза', 'риск'],
-        examples: ['show security incidents', 'покажи последние инциденты безопасности'],
-        intentKinds: ['security.incidents', 'security.threats'],
-      },
+
     },
     {
       id: 'security.incident.status',
@@ -250,12 +237,7 @@ export const securityManifest: MonarchModuleManifest = {
       description: 'Read active local quarantine records and vault integrity status.',
       risk: 'read',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      routing: {
-        aliases: ['security quarantine', 'карантин безопасности'],
-        keywords: ['security', 'quarantine', 'isolation', 'безопасность', 'карантин', 'изоляция'],
-        examples: ['show security quarantine', 'покажи карантин безопасности'],
-        intentKinds: ['security.quarantine'],
-      },
+
     },
     {
       id: 'security.quarantine.isolate',
@@ -457,12 +439,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['security report', 'generate security report', 'отчет безопасности', 'отчёт безопасности'],
-        keywords: ['security', 'report', 'summary', 'findings', 'controls', 'безопасность', 'отчет', 'отчёт', 'сводка'],
-        examples: ['generate security report', 'сделай отчет безопасности'],
-        intentKinds: ['security.report', 'host.report'],
-      },
+
     },
     {
       id: 'security.scan.system',
@@ -481,12 +458,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['security scan', 'scan system security', 'scan-system', 'проверь безопасность', 'скан системы'],
-        keywords: ['security', 'scan', 'system', 'network', 'devices', 'persistence', 'posture', 'безопасность', 'скан', 'система', 'сеть'],
-        examples: ['run security scan', 'проверь безопасность системы'],
-        intentKinds: ['security.scan', 'host.scan'],
-      },
+
     },
     {
       id: 'security.scan.network',
@@ -501,12 +473,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['scan network security', 'security network scan', 'проверь сеть'],
-        keywords: ['security', 'network', 'internet', 'connections', 'listeners', 'безопасность', 'сеть', 'соединения'],
-        examples: ['scan network security', 'проверь сетевую безопасность'],
-        intentKinds: ['security.scan', 'network.scan'],
-      },
+
     },
     {
       id: 'security.network.center',
@@ -519,12 +486,7 @@ export const securityManifest: MonarchModuleManifest = {
         properties: { limit: { type: 'number' } },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['network center', 'network activity', 'центр сети', 'сетевая активность'],
-        keywords: ['network', 'connections', 'listeners', 'profiles', 'history', 'сеть', 'подключения', 'порты'],
-        examples: ['show Network Center', 'покажи сетевую активность'],
-        intentKinds: ['security.network.center'],
-      },
+
     },
     {
       id: 'security.network.profile.trust',
@@ -541,12 +503,7 @@ export const securityManifest: MonarchModuleManifest = {
         required: ['profileId', 'trusted'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['trust network profile', 'доверять сети', 'убрать доверие сети'],
-        keywords: ['network', 'profile', 'trust', 'trusted', 'сеть', 'профиль', 'доверие'],
-        examples: ['trust this network profile', 'доверять этому профилю сети'],
-        intentKinds: ['security.network.profile.trust'],
-      },
+
     },
     {
       id: 'security.scan.devices',
@@ -561,12 +518,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['scan security devices', 'scan usb', 'проверь usb', 'проверь устройства'],
-        keywords: ['security', 'devices', 'usb', 'hid', 'storage', 'безопасность', 'устройства', 'usb'],
-        examples: ['scan connected devices', 'проверь подключенные устройства'],
-        intentKinds: ['security.scan', 'device.scan'],
-      },
+
     },
     {
       id: 'security.scan.persistence',
@@ -581,12 +533,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['scan persistence', 'scan autorun', 'проверь автозапуск'],
-        keywords: ['security', 'persistence', 'autorun', 'startup', 'scheduled tasks', 'безопасность', 'автозапуск'],
-        examples: ['scan persistence entries', 'проверь автозапуск'],
-        intentKinds: ['security.scan', 'persistence.scan'],
-      },
+
     },
     {
       id: 'security.scan.posture',
@@ -601,12 +548,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['scan posture', 'check defender', 'check firewall', 'проверь defender', 'проверь firewall'],
-        keywords: ['security', 'posture', 'defender', 'firewall', 'безопасность', 'защитник', 'фаервол'],
-        examples: ['check Defender posture', 'проверь защитник и firewall'],
-        intentKinds: ['security.scan', 'posture.scan'],
-      },
+
     },
     {
       id: 'security.scan.path',
@@ -625,12 +567,7 @@ export const securityManifest: MonarchModuleManifest = {
         required: ['path'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['scan path', 'scan file', 'scan folder', 'проверь файл', 'проверь папку'],
-        keywords: ['security', 'scan', 'file', 'folder', 'path', 'malware', 'безопасность', 'скан', 'файл', 'папка'],
-        examples: ['scan file E:\\Downloads\\sample.exe', 'проверь файл E:\\tmp\\sample.exe'],
-        intentKinds: ['security.scan', 'file.scan'],
-      },
+
     },
     {
       id: 'security.deep_scan.file',
@@ -648,12 +585,7 @@ export const securityManifest: MonarchModuleManifest = {
         required: ['path'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['deep scan file', 'deep security scan', 'глубокий скан файла'],
-        keywords: ['security', 'deep', 'scan', 'authenticode', 'defender', 'безопасность', 'глубокий', 'скан', 'файл'],
-        examples: ['deep scan file E:\\Downloads\\sample.exe', 'глубоко проверь файл'],
-        intentKinds: ['security.scan', 'file.deep_scan'],
-      },
+
     },
     {
       id: 'security.protection.start',
@@ -668,12 +600,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['start security protection', 'start protector', 'включи защиту'],
-        keywords: ['security', 'start', 'protection', 'protector', 'enable', 'безопасность', 'защита', 'включи', 'запусти'],
-        examples: ['start security protection', 'включи защиту'],
-        intentKinds: ['security.protection.start'],
-      },
+
     },
     {
       id: 'security.protection.stop',
@@ -689,12 +616,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['stop security protection', 'stop protector', 'выключи защиту'],
-        keywords: ['security', 'stop', 'protection', 'protector', 'disable', 'безопасность', 'защита', 'выключи', 'останови'],
-        examples: ['stop security protection', 'выключи защиту'],
-        intentKinds: ['security.protection.stop'],
-      },
+
     },
     {
       id: 'security.baseline.preview',
@@ -721,12 +643,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['save security baseline', 'security baseline', 'запомни норму защиты'],
-        keywords: ['security', 'baseline', 'normal', 'state', 'безопасность', 'норма', 'baseline'],
-        examples: ['save security baseline', 'запомни текущую норму защиты'],
-        intentKinds: ['security.baseline'],
-      },
+
     },
     {
       id: 'security.verify.protection',
@@ -741,12 +658,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['verify protection', 'security self test', 'самопроверка защиты'],
-        keywords: ['security', 'verify', 'protection', 'self-test', 'lab', 'безопасность', 'самопроверка', 'защита'],
-        examples: ['verify protection', 'запусти самопроверку защиты'],
-        intentKinds: ['security.verify'],
-      },
+
     },
     {
       id: 'security.attack.simulation',
@@ -761,12 +673,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['attack simulation', 'security attack simulation', 'симуляция атаки'],
-        keywords: ['security', 'attack', 'simulation', 'evasion', 'detector', 'безопасность', 'атака', 'симуляция'],
-        examples: ['run attack simulation', 'запусти симуляцию атаки'],
-        intentKinds: ['security.attack_simulation'],
-      },
+
     },
     {
       id: 'security.threat.simulation.live',
@@ -775,12 +682,7 @@ export const securityManifest: MonarchModuleManifest = {
       description: 'Create a clearly labelled durable critical incident and real notification from inert RAT-like telemetry without executing a payload or applying containment.',
       risk: 'execute',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      routing: {
-        aliases: ['live threat simulation', 'реалистичная имитация угрозы'],
-        keywords: ['security', 'threat', 'simulation', 'incident', 'безопасность', 'угроза', 'имитация', 'инцидент'],
-        examples: ['simulate a realistic threat safely', 'сымитируй реальную угрозу безопасно'],
-        intentKinds: ['security.attack_simulation'],
-      },
+
     },
     {
       id: 'security.benchmark.start',
@@ -796,12 +698,7 @@ export const securityManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['security benchmark', 'background protection benchmark', 'бенчмарк защиты'],
-        keywords: ['security', 'benchmark', 'cpu', 'rss', 'защита', 'нагрузка', 'ресурсы'],
-        examples: ['run five minute security benchmark', 'запусти бенчмарк фоновой защиты'],
-        intentKinds: ['security.benchmark.start'],
-      },
+
     },
     {
       id: 'security.benchmark.status',
@@ -835,12 +732,7 @@ export const securityManifest: MonarchModuleManifest = {
         properties: {},
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['test security notification', 'test notification', 'тест уведомления защиты'],
-        keywords: ['security', 'notification', 'test', 'alert', 'безопасность', 'уведомление', 'тест'],
-        examples: ['test security notification', 'проверь уведомление защиты'],
-        intentKinds: ['security.notification'],
-      },
+
     },
     {
       id: 'security.controller.check',
@@ -860,6 +752,7 @@ export const securityManifest: MonarchModuleManifest = {
           monarchConfirmed: { type: 'boolean' },
           modelProposed: { type: 'boolean' },
           runtimeOwnedExactAction: { type: 'boolean' },
+          directAccess: { type: 'boolean' },
           actionGuardReaction: { type: 'string', enum: ['observe', 'guard', 'confirm-all'] },
           agentSecurityMode: { type: 'string', enum: ['off', 'observe', 'guard', 'strict'] },
           trustedActionContext: { type: 'object', additionalProperties: true },

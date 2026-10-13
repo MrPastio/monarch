@@ -1,4 +1,6 @@
 import type { MonarchPersonalityContextV2 } from '../../settings';
+import { parseCloudRole, type MaxCloudRole } from '../../agent-v3/max-cloud-catalog';
+import { isAstraLocalAgentModelChoice, type AstraLocalAgentModelChoice } from '../../agent-v3/source-goal-contract';
 
 export type CoderProjectSource = 'created' | 'imported';
 
@@ -19,8 +21,21 @@ export interface CoderProjectRegistryV1 {
 }
 
 export type CoderModelId =
-  | 'qwen3-coder-30b-a3b-instruct'
-  | 'deepseek-coder-v2-lite-instruct';
+  | AstraLocalAgentModelChoice
+  | 'max-gpt-oss-120b'
+  | 'max-qwen-3.8-27b'
+  | MaxCloudRole;
+
+export function isCoderModelId(value: unknown): value is CoderModelId {
+  return isAstraLocalAgentModelChoice(value)
+    || value === 'max-gpt-oss-120b'
+    || value === 'max-qwen-3.8-27b'
+    || parseCloudRole(value) !== null;
+}
+
+export function isCoderMaxModelId(value: CoderModelId): boolean {
+  return value === 'max-gpt-oss-120b' || value === 'max-qwen-3.8-27b' || parseCloudRole(value) !== null;
+}
 
 export type CoderRunStatus =
   | 'queued'
@@ -83,13 +98,20 @@ export interface CoderRun {
   projectId: string;
   projectName?: string;
   projectRoot?: string;
+  clientRequestId?: string;
+  /** Conversation the run continues. Legacy runs without it are their own session. */
+  sessionId?: string;
+  runtimeStatus?: string;
+  completionEvidence?: 'succeeded' | 'none' | 'mixed' | 'failed';
   /** Common Oscar Turn and AgentTask identities for Agent-First runs. */
   oscarTurnId?: string;
   agentTaskId?: string;
+  agentRuntimeVersion?: 'v2' | 'v3';
   agentEventSequence?: number;
+  astraActivityRound?: number;
+  astraActivityStates?: Record<string, 'proposed' | 'observed' | 'failed'>;
   prompt: string;
   model: CoderModelId;
-  fallbackModel: CoderModelId;
   status: CoderRunStatus;
   createdAt: string;
   updatedAt: string;
@@ -115,6 +137,29 @@ export interface CoderRun {
     purpose?: 'policy' | 'owner-security-override';
     proposal: Record<string, unknown>;
   };
+  /** Exact durable ask-user binding projected from the linked Astra V3 task. */
+  agentQuestion?: {
+    id: string;
+    digest: string;
+    text: string;
+    predecessorMessageId: string;
+    expiresAt: string;
+  };
+}
+
+export interface CoderAstraTaskProjection {
+  taskId: string;
+  status: CoderRunStatus;
+  modelTurns: number;
+  capabilityCalls: number;
+  runtimeStatus?: string;
+  completionEvidence?: CoderRun['completionEvidence'];
+  answer?: string;
+  error?: string;
+  approval?: CoderRun['agentApproval'];
+  question?: CoderRun['agentQuestion'];
+  activities: Array<{ round: number; capabilityId: string; reason: string; thought?: string;
+    state: 'proposed' | 'observed' | 'failed'; summary?: string; ok?: boolean; output?: unknown }>;
 }
 
 export interface CoderProjectSnapshot {

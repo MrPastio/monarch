@@ -307,9 +307,10 @@ describe('Oscar Turn HTTP API', () => {
     }
   });
 
-  it('blocks operational requests without Agent Runtime and never invokes chat', async () => {
+  it('blocks operational requests when Astra V3 is unavailable and never invokes chat', async () => {
     const answerExecutor = vi.fn(async () => emptyStream());
-    const setup = await startFixture({ answerExecutor });
+    const setup = await startFixture({ answerExecutor,
+      dispositionProvider: { classify: async () => ({ lane: 'agent', kind: 'operation', confidence: 1, reason: 'fixture' }) } });
     try {
       const response = await postJson(`${setup.baseUrl}/api/oscar/turns`, {
         version: 1,
@@ -734,6 +735,9 @@ async function startFixture(options: {
     qualityRegenerationEnabled: boolean;
   }>;
   modelComponentManager?: MonarchModelComponentManager;
+  dispositionProvider?: { classify(input: { text: string }): Promise<{
+    lane: 'answer' | 'agent' | 'clarify'; kind: string; confidence: number; reason: string;
+  }> };
 } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-oscar-turn-http-'));
   roots.push(root);
@@ -745,8 +749,8 @@ async function startFixture(options: {
   const coordinator = new OscarTurnCoordinator({
     persistentStore,
     volatileStore,
-    agentRuntime: null,
     answerExecutor: options.answerExecutor || (async () => answerStream()),
+    ...(options.dispositionProvider ? { dispositionProvider: options.dispositionProvider } : {}),
     persistMessage: async (message) => { persisted.push(message); },
     resolveAttachments: (ids, privacy, source, conversationId) => attachments.resolve(ids, privacy, source, conversationId),
     consumeDataEgressConsent: (consentId, turn) => dataEgressConsents.consume(consentId, turn.id, {
@@ -763,7 +767,6 @@ async function startFixture(options: {
     workspaceRoot: root,
     enabledModules: ['workspace'],
     enableLocalSystemRouter: false,
-    enableAgentRuntimeV2: false,
     oscarTurnCoordinator: coordinator,
     oscarAttachmentStore: attachments,
     oscarDataEgressConsentStore: dataEgressConsents,

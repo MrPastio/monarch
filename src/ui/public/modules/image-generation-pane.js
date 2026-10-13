@@ -1,3 +1,4 @@
+import { confirmAction, promptValue } from './ui-dialogs.js';
 import {
   cancelImageGenerationJob,
   deleteImageLibraryRecord,
@@ -39,6 +40,7 @@ const galleryObjectUrls = new Map();
 export function initImageGenerationPane() {
   const root = document.querySelector('#images-section');
   if (!root) return;
+  document.querySelector('#image-context-retry')?.addEventListener('click', () => refreshImageContext(true));
   genesisField = new MonarchGenesisField(document.querySelector('#monarch-genesis-field'));
   root.querySelectorAll('[data-images-tab]').forEach((button) => {
     button.addEventListener('click', () => selectImagesTab(button.dataset.imagesTab));
@@ -54,10 +56,10 @@ export function initImageGenerationPane() {
   document.querySelector('#image-aspect-ratio')?.addEventListener('change', syncImageAspectRatio);
   document.querySelector('#image-provider-open-again')?.addEventListener('click', () => void openProvider(latestProvider));
   document.querySelector('#image-manual-fallback')?.addEventListener('click', () => void openManualFallback());
-  document.querySelector('#image-perchance-connect')?.addEventListener('click', () => void openEmbeddedPerchance({ requestAccess: true }));
+  document.querySelector('#image-perchance-connect')?.addEventListener('click', () => void requestEmbeddedPerchance({ requestAccess: true }));
   document.querySelector('#image-perchance-back')?.addEventListener('click', () => void navigateEmbeddedPerchance('back'));
   document.querySelector('#image-perchance-reload')?.addEventListener('click', () => void navigateEmbeddedPerchance('reload'));
-  document.querySelector('#image-perchance-zoom')?.addEventListener('change', () => void openEmbeddedPerchance({ requestAccess: false }));
+  document.querySelector('#image-perchance-zoom')?.addEventListener('change', () => void requestEmbeddedPerchance({ requestAccess: false }));
   document.querySelector('#image-perchance-translate')?.addEventListener('click', () => void translatePerchancePrompt());
   document.querySelector('#image-perchance-copy')?.addEventListener('click', () => void copyPerchancePrompt());
   document.querySelector('#image-perchance-external')?.addEventListener('click', () => void openPerchanceExternally());
@@ -80,8 +82,8 @@ export function initImageGenerationPane() {
   });
   window.addEventListener('monarch:view-change', (event) => {
     if (event.detail?.view === 'images-section') {
-      void ensureContextLoaded(true).then(() => {
-        if (activeTab === 'perchance') void openEmbeddedPerchance({ requestAccess: false });
+      refreshImageContext(true, () => {
+        if (activeTab === 'perchance') void requestEmbeddedPerchance({ requestAccess: false });
       });
       return;
     }
@@ -125,9 +127,9 @@ export function initImageGenerationPane() {
 }
 
 export function renderImageGenerationPane() {
-  void ensureContextLoaded().then((value) => {
+  refreshImageContext(false, (value) => {
     restoreActiveJob(value?.jobs);
-    if (activeTab === 'perchance') void openEmbeddedPerchance({ requestAccess: false });
+    if (activeTab === 'perchance') void requestEmbeddedPerchance({ requestAccess: false });
   });
   renderPolicyState();
 }
@@ -205,21 +207,37 @@ export async function handoffOscarImageGeneration(intent, options = {}) {
   return { status: 'blocked', reason: 'image-confirmation-loop' };
 }
 
+// Fire-and-forget render refreshes own their rejection; action callers still
+// await the throwing loader so a failed policy read can never authorize work.
+function refreshImageContext(force, afterLoad = () => {}) {
+  void ensureContextLoaded(force).then(afterLoad).catch(() => {});
+}
+
 async function ensureContextLoaded(force = false) {
   if (context && !force) return context;
   if (!loadPromise) {
+    const retry = document.querySelector('#image-context-retry');
+    if (retry) retry.disabled = true;
     loadPromise = fetchImageGenerationContext()
       .then((value) => {
         context = value;
+        const feedback = document.querySelector('#image-context-feedback');
+        if (feedback) feedback.hidden = true;
         renderPolicyState();
         renderGallery();
         return value;
       })
       .catch((error) => {
         setGenerationStatus(readErrorMessage(error), true);
+        const feedback = document.querySelector('#image-context-feedback');
+        const message = document.querySelector('#image-context-error');
+        if (feedback) feedback.hidden = false;
+        if (message) message.textContent = context
+          ? 'Не удалось обновить изображения. Показаны ранее загруженные данные. Попробуй ещё раз.'
+          : 'Не удалось загрузить изображения и галерею. Проверь подключение к Monarch и попробуй ещё раз.';
         throw error;
       })
-      .finally(() => { loadPromise = null; });
+      .finally(() => { loadPromise = null; if (retry) retry.disabled = false; });
   }
   return loadPromise;
 }
@@ -235,8 +253,8 @@ function selectImagesTab(value) {
   document.querySelectorAll('[data-images-panel]').forEach((panel) => {
     panel.hidden = panel.dataset.imagesPanel !== activeTab;
   });
-  if (activeTab === 'gallery') void ensureContextLoaded(true);
-  if (activeTab === 'perchance') void openEmbeddedPerchance({ requestAccess: false });
+  if (activeTab === 'gallery') refreshImageContext(true);
+  if (activeTab === 'perchance') void requestEmbeddedPerchance({ requestAccess: false });
   else void hideEmbeddedPerchance();
   renderPolicyState();
 }
@@ -334,7 +352,7 @@ function renderGenerationJob(job) {
     setStageState('complete');
     setGenerationStatus(`${job.results.length} готово · ${job.savePolicy === 'save' ? 'сохранено локально' : 'временно в памяти'} · anonymous sharing с LAION`);
     void showGenerationResult(0);
-    void ensureContextLoaded(true);
+    refreshImageContext(true);
     return;
   }
   genesisField?.setState(job.status === 'cancelled' ? 'idle' : 'error', job.status === 'cancelled' ? '' : 'Генерация остановлена');
@@ -444,6 +462,16 @@ async function openManualFallback() {
     await openEmbeddedPerchance({ requestAccess: true });
   } catch (error) {
     setGenerationStatus(readErrorMessage(error), true);
+  }
+}
+
+async function requestEmbeddedPerchance(options) {
+  try {
+    return await openEmbeddedPerchance(options);
+  } catch (error) {
+    setPerchanceState('error');
+    setPerchanceStatus(readErrorMessage(error));
+    return { ok: false };
   }
 }
 
@@ -632,7 +660,7 @@ async function handleImageProviderDownload(value = {}) {
     return;
   }
   if (privacyMode === 'incognito' && policy?.incognitoPersistence === 'ask'
-    && !window.confirm('Сохранить это изображение из инкогнито-чата в локальную Галерею?')) {
+    && !await confirmAction('Сохранить это изображение из инкогнито-чата в локальную Галерею?')) {
     setPerchanceStatus('Файл не сохранён по правилу инкогнито.');
     return;
   }
@@ -745,7 +773,7 @@ function setPerchanceState(value) {
   const placeholder = document.querySelector('#image-perchance-placeholder');
   if (panel) panel.dataset.providerState = value;
   if (placeholder) placeholder.hidden = value === 'ready' || value === 'loading';
-  if (value === 'loading') setPerchanceStatus('Подключаю тестовую BETA-интеграцию Perchance…');
+  if (value === 'loading') setPerchanceStatus('Открываю Perchance…');
   else if (value === 'ready') setPerchanceStatus('Тестовая BETA-интеграция Perchance открыта. Вставь prompt и нажми Generate вручную.');
   else if (value === 'consent') setPerchanceStatus('Для доступа к внешнему сервису нужно один раз принять соглашение.');
   else if (value === 'age') setPerchanceStatus('Perchance требует отдельного подтверждения возраста 18+.');
@@ -847,7 +875,7 @@ async function importSelectedImage(input) {
 
 async function deleteLibraryImage(id) {
   const record = context?.library?.find((candidate) => candidate.id === id);
-  if (!record || !window.confirm(`Удалить «${record.name}» из локальной галереи?`)) return;
+  if (!record || !await confirmAction(`Удалить «${record.name}» из локальной галереи?`)) return;
   try {
     await deleteImageLibraryRecord(id);
     const objectUrl = galleryObjectUrls.get(id);

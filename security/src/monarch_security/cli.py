@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
 from html import escape as html_escape
@@ -13,6 +14,7 @@ from pathlib import Path
 import re
 import shlex
 import sys
+import subprocess
 import time
 import threading
 import getpass
@@ -39,7 +41,7 @@ from .actions import (
     serve_response_pipe,
 )
 from .config import load_config
-from .control import protector_status, start_protector, stop_protector
+from .control import protector_status, request_emergency_test, start_protector, stop_protector
 from .deep_scan import deep_scan_file
 from .events import SecurityEvent, json_line
 from .emergency import EmergencyError, EmergencyManager, EmergencyStore
@@ -223,6 +225,10 @@ def _add_pin_request_arguments(parser: argparse.ArgumentParser, *, allow_file: b
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="monarch_sec")
+    parser.add_argument("--data-root", type=Path, default=None, help="Exact Security state root")
+    parser.add_argument("--logs-root", type=Path, default=None)
+    parser.add_argument("--runtime-context", default=None)
+    parser.add_argument("--site-packages", default=None)
     parser.add_argument(
         "--config",
         type=Path,
@@ -249,6 +255,14 @@ def main(argv: list[str] | None = None) -> int:
     _add_pin_request_arguments(stop, allow_file=False)
 
     subparsers.add_parser("status", help="Show background protection status")
+    subparsers.add_parser('inspection-retry', help='Queue read-only recovery of current watched directories')
+    subparsers.add_parser("background-host", help="Run the per-user background watchdog")
+    subparsers.add_parser("background-reconcile", help="Refresh existing startup action for the current installation")
+    background_enable = subparsers.add_parser("background-enable", help="Enable protection at Windows sign-in")
+    background_enable.add_argument("--confirm", action="store_true")
+    background_disable = subparsers.add_parser("background-disable", help="Disable protection at Windows sign-in")
+    background_disable.add_argument("--confirm", action="store_true")
+    _add_pin_request_arguments(background_disable, allow_file=False)
     subparsers.add_parser("profile", help="Read Security strictness profile")
     profile_set = subparsers.add_parser("profile-set", help="Change Security strictness profile")
     profile_set.add_argument("--level", choices=SECURITY_LEVELS, required=True)
@@ -309,6 +323,8 @@ def main(argv: list[str] | None = None) -> int:
     uninstall_response = subparsers.add_parser("response-service-uninstall", help="Roll back actions and remove the response executor task")
     uninstall_response.add_argument("--confirm-service-install", action="store_true")
     subparsers.add_parser("emergency-status", help="Read the signed emergency response state")
+    test_screen_lock = subparsers.add_parser("emergency-test", help="Temporarily test Windows lock and Security PIN recovery")
+    test_screen_lock.add_argument("--confirm-emergency-test", action="store_true")
     activate_emergency = subparsers.add_parser("emergency-activate", help="Activate native-lock emergency response for a corroborated 700-800 incident")
     activate_emergency.add_argument("--incident-id", required=True)
     activate_emergency.add_argument("--confirm-emergency", action="store_true")
@@ -560,6 +576,42 @@ def main(argv: list[str] | None = None) -> int:
     block_action.add_argument("--capability", type=str, required=True)
 
     args = parser.parse_args(argv)
+    if args.runtime_context is not None:
+        from .background import apply_runtime_context
+        apply_runtime_context(args.runtime_context)
+    if args.data_root is not None:
+        os.environ["MONARCH_SECURITY_DATA_ROOT"] = str(args.data_root.resolve())
+    if args.logs_root is not None:
+        os.environ["MONARCH_SECURITY_LOGS_ROOT"] = str(args.logs_root.resolve())
+    if args.site_packages:
+        os.environ["MONARCH_SECURITY_SITE_PACKAGES"] = args.site_packages
+    if args.command in {"background-host", "background-enable", "background-disable", "background-reconcile"}:
+        from .background import run_background, enable_background, disable_background, reconcile_background
+        config = load_config(args.config)
+        config_path = args.config or config.root / "config" / "monarch_security.toml"
+        if args.command == "background-host":
+            return run_background(config, config_path)
+        if args.command == "background-reconcile":
+            try:
+                payload = reconcile_background(config, config_path)
+            except (OSError, RuntimeError, TimeoutError, ValueError, subprocess.TimeoutExpired):
+                payload = {"ok": False, "state": "startup-reconciliation-unavailable"}
+            print(json_line(payload))
+            return 0 if payload.get("ok") else 2
+        if not args.confirm:
+            print(json_line({"ok": False, "error": "explicit --confirm is required"}))
+            return 2
+        try:
+            if args.command == "background-disable":
+                _authorize_lifecycle(config, request_stdin=args.request_stdin, purpose="security.protection.stop")
+                payload = disable_background(config, config_path)
+                payload["protection"] = stop_protector(config_path, wait_seconds=10)
+            else:
+                payload = enable_background(config, config_path)
+        except (OSError, RuntimeError, TimeoutError, SecurityPinError, subprocess.TimeoutExpired) as exc:
+            payload = {"ok": False, "error": str(exc)}
+        print(json_line(payload))
+        return 0 if payload.get("ok") else 2
     if args.command is None:
         return _tui(args.config, once=False)
     if args.command == "tui":
@@ -607,12 +659,24 @@ def main(argv: list[str] | None = None) -> int:
     router = LLMRouter(config, resources, policy)
 
     if args.command == "status":
+        from .background import background_status
+        background = background_status(config)
         print(json_line({
             **protector_status(config),
             "profile": read_security_profile(config).to_dict(),
             "model_policy": read_model_command_policy(config).to_dict(),
+            "background": background,
+            **({"protection_state": "recovery_required"} if background["recovery_required"] else {}),
         }))
         return 0
+    if args.command == 'inspection-retry':
+        from .inspection_recovery import request_retry
+        try:
+            result = request_retry(config)
+        except (RuntimeError, OSError) as exc:
+            result = {'ok': False, 'error': str(exc) if isinstance(exc, RuntimeError) else 'inspection-state-unavailable'}
+        print(json_line(result))
+        return 0 if result['ok'] else 2
     if args.command == "profile":
         print(json_line({"ok": True, "profile": read_security_profile(config).to_dict()}))
         return 0
@@ -745,6 +809,13 @@ def main(argv: list[str] | None = None) -> int:
         return _uninstall_response_service(args, config)
     if args.command == "emergency-status":
         return _emergency_status(config)
+    if args.command == "emergency-test":
+        if not args.confirm_emergency_test:
+            print(json_line({"ok": False, "error": "emergency test requires explicit confirmation"}))
+            return 2
+        result = request_emergency_test(config)
+        print(json_line(result))
+        return 0 if result.get("ok") else 1
     if args.command == "emergency-activate":
         return _activate_emergency(args, config)
     if args.command == "emergency-resolve":
@@ -949,6 +1020,16 @@ def _check_action(args, config, rules, router, policy) -> int:
         return 0
     args.action_risk = action_risk
     state = StateStore(config.runtime.state_path, config.runtime.integrity_key_path)
+    if state.data.get("load_error") or state.data.get("integrity_error"):
+        payload = _action_decision_payload(
+            ok=False,
+            status="invalid_passkey" if args.passkey else "state_recovery_required",
+            report="Состояние Security повреждено. Действие заблокировано до восстановления правил защиты.",
+            risk="blocked", reasons=["security-state-recovery-required"], action="block", args=args,
+        )
+        _audit_action_decision(config, payload, args)
+        print(json_line(payload))
+        return 0
     
     # 1. Permanent blocklist check
     permanent_blocklist = state.get_list("permanent_blocklist")
@@ -2067,8 +2148,18 @@ def _build_scan_system_payload(
     scan_payloads = []
     top_findings = []
 
+    # Query independent Windows providers concurrently; keep assessment and
+    # model ownership on this thread. One slow provider cannot serialize all.
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="security-snapshot") as pool:
+        futures = {name: pool.submit(lambda current=sensor: list(current.poll())) for name, sensor in scans}
+        snapshots = {}
+        for name, sensor in scans:
+            try:
+                snapshots[name] = (futures[name].result(), getattr(sensor, "last_error", None))
+            except Exception as exc:
+                snapshots[name] = ([], type(exc).__name__)
     for name, sensor in scans:
-        events = list(sensor.poll())
+        events, sensor_error = snapshots[name]
         results = [
             _decision_result(event, no_llm, rules, router, policy)
             for event in events
@@ -2079,7 +2170,7 @@ def _build_scan_system_payload(
             "name": name,
             "sensor": sensor.__class__.__name__,
             "events": len(events),
-            "error": getattr(sensor, "last_error", None),
+            "error": sensor_error,
         }
         if not summary_only:
             payload["results"] = results
@@ -2109,6 +2200,8 @@ def _build_scan_system_payload(
         "summary": summary,
         "top_findings": top_findings,
         "scans": scan_payloads,
+        "complete": all(not item.get("error") for item in scan_payloads),
+        "coverage": {"checked": sum(not item.get("error") for item in scan_payloads), "total": len(scan_payloads), "failed": [item["name"] for item in scan_payloads if item.get("error")]},
     }
 
 
@@ -2213,9 +2306,21 @@ def _finding_summary(scan_name: str, result: dict) -> dict:
 
 
 def _persistence_baseline_preview(config) -> int:
+    from .observation import ObservationUnavailable
+    try:
+        return _persistence_baseline_preview_complete(config)
+    except ObservationUnavailable:
+        print(json_line({'ok': False, 'code': 'baseline-observation-incomplete',
+                         'error': 'Не удалось полностью проверить автозапуск. Повтори проверку.'}))
+        return 1
+
+
+def _persistence_baseline_preview_complete(config) -> int:
+    from .observation import require_complete
     state = StateStore(config.runtime.state_path, config.runtime.integrity_key_path)
     sensor = PersistenceSensor(config.persistence, include_existing=True)
     current = sensor.snapshot_signatures()
+    require_complete(sensor)
     payload = build_persistence_baseline_preview(
         current,
         state.get_dict("approved_persistence_signatures"),
@@ -2227,6 +2332,17 @@ def _persistence_baseline_preview(config) -> int:
 
 
 def _baseline(args, config) -> int:
+    from .observation import ObservationUnavailable
+    try:
+        return _baseline_complete(args, config)
+    except ObservationUnavailable:
+        print(json_line({'ok': False, 'code': 'baseline-observation-incomplete',
+                         'error': 'Проверка не завершилась. Прежние базовые данные сохранены.'}))
+        return 1
+
+
+def _baseline_complete(args, config) -> int:
+    from .observation import require_complete
     only_flags = [
         args.devices_only,
         args.installs_only,
@@ -2269,6 +2385,7 @@ def _baseline(args, config) -> int:
     if not any([args.installs_only, args.files_only, args.network_only, args.persistence_only, args.posture_only, args.self_protection_only]):
         device_sensor = DeviceSensor(include_existing=True)
         devices = device_sensor.snapshot()
+        require_complete(device_sensor)
         device_ids = {str(item["instance_id"]) for item in devices if item.get("instance_id")}
         pending_lists["known_devices"] = device_ids
         payload["known_devices"] = len(device_ids)
@@ -2278,6 +2395,7 @@ def _baseline(args, config) -> int:
     if not any([args.devices_only, args.files_only, args.network_only, args.persistence_only, args.posture_only, args.self_protection_only]):
         install_sensor = InstallSensor(include_existing=True)
         installs = install_sensor.snapshot()
+        require_complete(install_sensor)
         install_ids = {str(item["id"]) for item in installs if item.get("id")}
         pending_lists["known_installs"] = install_ids
         payload["known_installs"] = len(install_ids)
@@ -2290,12 +2408,14 @@ def _baseline(args, config) -> int:
             include_existing=True,
         )
         signatures = file_sensor.snapshot_signatures()
+        require_complete(file_sensor)
         pending_dicts["known_file_signatures"] = signatures
         payload["known_file_signatures"] = len(signatures)
 
     if not any([args.devices_only, args.installs_only, args.files_only, args.persistence_only, args.posture_only, args.self_protection_only]):
         network_sensor = NetworkSensor(config.network, include_existing=True)
         signatures = network_sensor.snapshot_signatures()
+        require_complete(network_sensor)
         pending_dicts["known_network_signatures"] = signatures
         payload["known_network_signatures"] = len(signatures)
         if network_sensor.last_error:
@@ -2304,6 +2424,7 @@ def _baseline(args, config) -> int:
     if not any([args.devices_only, args.installs_only, args.files_only, args.network_only, args.posture_only, args.self_protection_only]):
         persistence_sensor = PersistenceSensor(config.persistence, include_existing=True)
         signatures = persistence_sensor.snapshot_signatures()
+        require_complete(persistence_sensor)
         current_digest = persistence_baseline_digest(signatures)
         if expected_digest and current_digest != expected_digest:
             preview = build_persistence_baseline_preview(
@@ -2330,6 +2451,7 @@ def _baseline(args, config) -> int:
     if not any([args.devices_only, args.installs_only, args.files_only, args.network_only, args.persistence_only, args.self_protection_only]):
         posture_sensor = PostureSensor(config.posture, include_existing=True)
         signatures = posture_sensor.snapshot_signatures()
+        require_complete(posture_sensor)
         pending_dicts["known_posture_signatures"] = signatures
         payload["known_posture_signatures"] = len(signatures)
         if posture_sensor.last_error:
@@ -2338,6 +2460,7 @@ def _baseline(args, config) -> int:
     if not any([args.devices_only, args.installs_only, args.files_only, args.network_only, args.persistence_only, args.posture_only]):
         tamper_sensor = TamperSensor(self_protection_paths(config), include_existing=True)
         signatures = tamper_sensor.snapshot_signatures()
+        require_complete(tamper_sensor)
         pending_dicts["known_self_protection_signatures"] = signatures
         payload["known_self_protection_signatures"] = len(signatures)
 
@@ -2666,8 +2789,9 @@ def _reconcile_response_actions(args, config) -> int:
         return 2
     try:
         records = _response_service(config).reconcile()
-        print(json_line({"ok": True, "rolled_back": [item.to_dict() for item in records]}))
-        return 0
+        complete = all(item.status == "rolled_back" for item in records)
+        print(json_line({"ok": complete, "cleanup_complete": complete, "rolled_back": [item.to_dict() for item in records]}))
+        return 0 if complete else 1
     except (OSError, ResponseActionError) as exc:
         print(json_line({"ok": False, "error": str(exc)}))
         return 1
@@ -2681,12 +2805,14 @@ def _run_response_service(args, config) -> int:
         service = _response_service(config)
         service.reconcile()
         if args.once:
+            pending = sum(item.status in {"pending", "failed"} for item in service.actions.list_latest())
             write_service_heartbeat(
                 config.runtime.response_service_heartbeat_path,
                 config.runtime.integrity_key_path,
-                {"status": "running", "active_actions": sum(item.status == "active" for item in service.actions.list_latest())},
+                {"status": "degraded" if pending else "running", "pending_actions": pending,
+                 "active_actions": sum(item.status == "active" for item in service.actions.list_latest())},
             )
-            return 0
+            return 1 if pending else 0
         broker = PrivilegedResponseBroker(
             ResponseApprovalBroker(
                 ResponseProposalStore(config.runtime.response_log_path, config.runtime.integrity_key_path),
@@ -2700,14 +2826,21 @@ def _run_response_service(args, config) -> int:
         def heartbeat_loop() -> None:
             while not stop_heartbeat.is_set():
                 try:
+                    # Retry unresolved cleanup during normal service life, not only at startup.
+                    service.reconcile()
                     active = sum(item.status == "active" for item in service.actions.list_latest())
+                    pending = sum(item.status in {"pending", "failed"} for item in service.actions.list_latest())
                     write_service_heartbeat(
                         config.runtime.response_service_heartbeat_path,
                         config.runtime.integrity_key_path,
-                        {"status": "running", "active_actions": active},
+                        {"status": "degraded" if pending else "running", "active_actions": active, "pending_actions": pending},
                     )
-                except OSError:
-                    pass
+                except (OSError, ResponseActionError):
+                    try:
+                        write_service_heartbeat(config.runtime.response_service_heartbeat_path,
+                                                config.runtime.integrity_key_path, {"status": "degraded"})
+                    except OSError:
+                        pass
                 stop_heartbeat.wait(args.poll_seconds)
 
         heartbeat_thread = threading.Thread(target=heartbeat_loop, name="security-response-heartbeat", daemon=True)
@@ -2756,8 +2889,10 @@ def _uninstall_response_service(args, config) -> int:
         print(json_line({"ok": False, "error": "service removal requires explicit confirmation"}))
         return 2
     try:
-        uninstall_response_executor_task()
         rolled_back = _response_service(config).rollback_all()
+        if any(item.status != "rolled_back" for item in rolled_back):
+            raise ResponseActionError("Response executor cleanup remains pending; service retained")
+        uninstall_response_executor_task()
         try:
             config.runtime.response_service_heartbeat_path.unlink(missing_ok=True)
         except OSError:
@@ -3162,7 +3297,9 @@ def _verify_integrity(config) -> int:
             try:
                 import json
 
-                parsed = json.loads(config.runtime.state_path.read_text(encoding="utf-8"))
+                from .state import read_shared_text
+
+                parsed = json.loads(read_shared_text(config.runtime.state_path))
                 if isinstance(parsed, dict):
                     ok, reason = verify_payload(parsed, key, "state-store")
                     state_result = {"ok": ok, "error": None if ok else reason}

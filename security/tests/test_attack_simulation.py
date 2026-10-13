@@ -50,7 +50,7 @@ class AttackSimulationTests(unittest.TestCase):
             use_llm=False,
         )
 
-        self.assertTrue(payload["passed"], payload["survived_evasions"])
+        self.assertTrue(payload["passed"], [case for case in payload["cases"] if not case["passed"]])
         self.assertEqual(payload["case_count"], 8)
         self.assertEqual(payload["benign_case_count"], 7)
         self.assertFalse(payload["survived_evasions"])

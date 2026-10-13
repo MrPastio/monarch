@@ -180,14 +180,40 @@ internal static class Program
         File.WriteAllText(requestPath, Json.Serialize(request), new UTF8Encoding(false));
         if (!TryLaunchExperimental(request, self, commandLine, readOnlyPaths, out process, out experimentalError))
         {
-            if (experimentalError != 120 && experimentalError != 50 && experimentalError != 126)
+            if (experimentalError != 120 && experimentalError != 50 && experimentalError != 126 && experimentalError != 183)
                 throw new InvalidOperationException("AppContainer BFS launch failed with Win32 error " + experimentalError + ".");
             request.isolationKind = "windows-appcontainer-acl";
             File.WriteAllText(requestPath, Json.Serialize(request), new UTF8Encoding(false));
             commandLine = new StringBuilder(QuoteArgument(self) + " " + workerArguments);
             process = LaunchStableAppContainer(request, self, commandLine, readOnlyPaths);
+            return StartAndWaitForWorker(request, resultPath, process);
         }
+
+        int experimentalExitCode = StartAndWaitForWorker(request, resultPath, process);
+        if (!ShouldFallbackToStableAppContainer(resultPath)) return experimentalExitCode;
+
+        File.Delete(resultPath);
+        request.isolationKind = "windows-appcontainer-acl";
+        File.WriteAllText(requestPath, Json.Serialize(request), new UTF8Encoding(false));
+        commandLine = new StringBuilder(QuoteArgument(self) + " " + workerArguments);
+        process = LaunchStableAppContainer(request, self, commandLine, readOnlyPaths);
         return StartAndWaitForWorker(request, resultPath, process);
+    }
+
+    private static bool ShouldFallbackToStableAppContainer(string resultPath)
+    {
+        try
+        {
+            if (!File.Exists(resultPath)) return false;
+            BrokerResult result = Json.Deserialize<BrokerResult>(File.ReadAllText(resultPath, Encoding.UTF8));
+            return result != null
+                && !String.IsNullOrWhiteSpace(result.error)
+                && result.error.StartsWith("sandbox-worker-produced-no-result", StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static bool TryLaunchExperimental(
@@ -251,6 +277,7 @@ internal static class Program
     {
         IntPtr appContainerSid = IntPtr.Zero;
         IntPtr capabilitySid = IntPtr.Zero;
+        IntPtr traverseCapabilitySid = IntPtr.Zero;
         IntPtr capabilitiesArray = IntPtr.Zero;
         IntPtr securityCapabilitiesPointer = IntPtr.Zero;
         IntPtr attributeList = IntPtr.Zero;
@@ -273,21 +300,36 @@ internal static class Program
             SecurityIdentifier sid = new SecurityIdentifier(appContainerSid);
             GrantDirectoryAccess(request.hostProjectRoot, sid, true, true);
             GrantDirectoryAccess(request.jobDirectory, sid, true, true);
+            // Tools such as git stat every component of an absolute path while
+            // creating directories. Ancestors get traverse + read-attributes (no
+            // listing, no reading, not inherited) for one shared Coder capability,
+            // so the grant happens once instead of once per project SID: a DACL
+            // write re-walks the whole subtree below that ancestor.
+            traverseCapabilitySid = DeriveCoderTraverseCapability();
+            SecurityIdentifier traverseSid = new SecurityIdentifier(traverseCapabilitySid);
+            GrantAncestorTraverse(request.hostProjectRoot, traverseSid);
+            GrantAncestorTraverse(request.jobDirectory, traverseSid);
             AssertSharedReadAccess(Path.GetDirectoryName(self));
             foreach (string readOnlyPath in readOnlyPaths) AssertSharedReadAccess(readOnlyPath);
 
             SECURITY_CAPABILITIES securityCapabilities = new SECURITY_CAPABILITIES();
             securityCapabilities.AppContainerSid = appContainerSid;
+            List<SID_AND_ATTRIBUTES> capabilities = new List<SID_AND_ATTRIBUTES>
+            {
+                new SID_AND_ATTRIBUTES { Sid = traverseCapabilitySid, Attributes = 0x00000004 },
+            };
             if (request.allowNetwork)
             {
                 if (!ConvertStringSidToSid("S-1-15-3-1", out capabilitySid))
                     throw new InvalidOperationException("internetClient capability SID could not be created.");
-                SID_AND_ATTRIBUTES capability = new SID_AND_ATTRIBUTES { Sid = capabilitySid, Attributes = 0x00000004 };
-                capabilitiesArray = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES)));
-                Marshal.StructureToPtr(capability, capabilitiesArray, false);
-                securityCapabilities.Capabilities = capabilitiesArray;
-                securityCapabilities.CapabilityCount = 1;
+                capabilities.Add(new SID_AND_ATTRIBUTES { Sid = capabilitySid, Attributes = 0x00000004 });
             }
+            int capabilitySize = Marshal.SizeOf(typeof(SID_AND_ATTRIBUTES));
+            capabilitiesArray = Marshal.AllocHGlobal(capabilitySize * capabilities.Count);
+            for (int index = 0; index < capabilities.Count; index++)
+                Marshal.StructureToPtr(capabilities[index], new IntPtr(capabilitiesArray.ToInt64() + capabilitySize * index), false);
+            securityCapabilities.Capabilities = capabilitiesArray;
+            securityCapabilities.CapabilityCount = (uint)capabilities.Count;
             securityCapabilitiesPointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(SECURITY_CAPABILITIES)));
             Marshal.StructureToPtr(securityCapabilities, securityCapabilitiesPointer, false);
 
@@ -330,6 +372,7 @@ internal static class Program
             if (securityCapabilitiesPointer != IntPtr.Zero) Marshal.FreeHGlobal(securityCapabilitiesPointer);
             if (capabilitiesArray != IntPtr.Zero) Marshal.FreeHGlobal(capabilitiesArray);
             if (capabilitySid != IntPtr.Zero) LocalFree(capabilitySid);
+            if (traverseCapabilitySid != IntPtr.Zero) LocalFree(traverseCapabilitySid);
             if (appContainerSid != IntPtr.Zero) FreeSid(appContainerSid);
         }
     }
@@ -384,7 +427,7 @@ internal static class Program
             if (!GetExitCodeProcess(process.hProcess, out exitCode)) exitCode = 70;
             if (!File.Exists(resultPath))
             {
-                TryWriteFailure(resultPath, "sandbox-worker-produced-no-result");
+                TryWriteFailure(resultPath, "sandbox-worker-produced-no-result:exit-" + exitCode);
                 return 70;
             }
             return unchecked((int)exitCode);
@@ -401,6 +444,7 @@ internal static class Program
         if (String.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory)) return;
         try
         {
+            RepairNonCanonicalDacl(directory);
             DirectorySecurity security = Directory.GetAccessControl(directory, AccessControlSections.Access);
             FileSystemRights rights = writable
                 ? FileSystemRights.Modify | FileSystemRights.Synchronize
@@ -431,6 +475,75 @@ internal static class Program
         }
     }
 
+    /// <summary>A Coder project or job folder created under a parent that an
+    /// earlier broker left without the auto-inherited mark has its inherited
+    /// entries as explicit ones, out of order. Windows then refuses any change.
+    /// The entries are put back in canonical order (explicit deny, explicit
+    /// allow, inherited); with allow-only entries access stays exactly the same.
+    /// Only the project and job folders Coder owns are repaired.</summary>
+    private static void RepairNonCanonicalDacl(string directory)
+    {
+        DirectorySecurity security = Directory.GetAccessControl(directory, AccessControlSections.Access);
+        if (security.AreAccessRulesCanonical) return;
+        RawSecurityDescriptor raw = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
+        RawAcl source = raw.DiscretionaryAcl;
+        List<GenericAce> explicitDeny = new List<GenericAce>(), explicitAllow = new List<GenericAce>(), inherited = new List<GenericAce>();
+        foreach (GenericAce ace in source)
+        {
+            if ((ace.AceFlags & AceFlags.Inherited) != 0) inherited.Add(ace);
+            else if (ace.AceType == AceType.AccessDenied || ace.AceType == AceType.AccessDeniedObject || ace.AceType == AceType.AccessDeniedCallback) explicitDeny.Add(ace);
+            else explicitAllow.Add(ace);
+        }
+        RawAcl ordered = new RawAcl(source.Revision, source.Count);
+        foreach (GenericAce ace in explicitDeny) ordered.InsertAce(ordered.Count, ace);
+        foreach (GenericAce ace in explicitAllow) ordered.InsertAce(ordered.Count, ace);
+        foreach (GenericAce ace in inherited) ordered.InsertAce(ordered.Count, ace);
+        raw.DiscretionaryAcl = ordered;
+        DirectorySecurity repaired = new DirectorySecurity();
+        byte[] descriptor = new byte[raw.BinaryLength];
+        raw.GetBinaryForm(descriptor, 0);
+        repaired.SetSecurityDescriptorBinaryForm(descriptor, AccessControlSections.Access);
+        SetDirectoryDaclWithoutPropagation(directory, repaired);
+    }
+
+    /// <summary>Writes only this directory's DACL. The .NET/SetNamedSecurityInfo
+    /// path re-propagates inheritance through the whole subtree (minutes under a
+    /// user profile); the added ACE is not inheritable, so children need nothing.
+    /// The DACL stays marked auto-inherited (SE_DACL_AUTO_INHERITED, which the
+    /// kernel only accepts with SE_DACL_AUTO_INHERIT_REQ): without the mark,
+    /// every folder created here later got its inherited entries as explicit
+    /// ones, a non-canonical DACL that Windows then refuses to change.</summary>
+    private static void SetDirectoryDaclWithoutPropagation(string directory, DirectorySecurity security)
+    {
+        const uint ReadControl = 0x00020000, WriteDac = 0x00040000, ShareAll = 0x7, OpenExisting = 3, BackupSemantics = 0x02000000;
+        const uint DaclSecurityInformation = 0x4;
+        using (Microsoft.Win32.SafeHandles.SafeFileHandle handle = CreateFile(directory, ReadControl | WriteDac, ShareAll, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero))
+        {
+            if (handle.IsInvalid) throw new InvalidOperationException("Directory could not be opened for DACL update: " + Marshal.GetLastWin32Error() + ".");
+            RawSecurityDescriptor raw = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
+            raw.SetFlags(raw.ControlFlags | ControlFlags.DiscretionaryAclAutoInheritRequired | ControlFlags.DiscretionaryAclAutoInherited);
+            byte[] descriptor = new byte[raw.BinaryLength];
+            raw.GetBinaryForm(descriptor, 0);
+            if (!SetKernelObjectSecurity(handle, DaclSecurityInformation, descriptor))
+                throw new InvalidOperationException("Directory DACL update failed: " + Marshal.GetLastWin32Error() + ".");
+        }
+    }
+
+    /// <summary>The app-capability SID "monarchCoderTraverse" shared by every
+    /// Coder container. Caller frees it with LocalFree.</summary>
+    private static IntPtr DeriveCoderTraverseCapability()
+    {
+        IntPtr groupSids, capabilitySids; int groupCount, capabilityCount;
+        if (!DeriveCapabilitySidsFromName("monarchCoderTraverse", out groupSids, out groupCount, out capabilitySids, out capabilityCount)
+            || capabilityCount < 1)
+            throw new InvalidOperationException("Coder traverse capability SID could not be derived: " + Marshal.GetLastWin32Error() + ".");
+        IntPtr result = Marshal.ReadIntPtr(capabilitySids);
+        for (int index = 1; index < capabilityCount; index++) LocalFree(Marshal.ReadIntPtr(capabilitySids, index * IntPtr.Size));
+        for (int index = 0; index < groupCount; index++) LocalFree(Marshal.ReadIntPtr(groupSids, index * IntPtr.Size));
+        LocalFree(capabilitySids); LocalFree(groupSids);
+        return result;
+    }
+
     private static void GrantAncestorTraverse(string directory, SecurityIdentifier sid)
     {
         DirectoryInfo current = Directory.GetParent(Path.GetFullPath(directory));
@@ -455,7 +568,16 @@ internal static class Program
                         break;
                     }
                 }
-                if (alreadyGranted) { current = current.Parent; continue; }
+                if (alreadyGranted)
+                {
+                    // An earlier broker wrote this DACL without the auto-inherited
+                    // mark; restoring it lets new folders here inherit normally.
+                    RawSecurityDescriptor written = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
+                    if ((written.ControlFlags & ControlFlags.DiscretionaryAclAutoInherited) == 0 && !security.AreAccessRulesProtected)
+                        SetDirectoryDaclWithoutPropagation(current.FullName, security);
+                    current = current.Parent;
+                    continue;
+                }
                 FileSystemAccessRule rule = new FileSystemAccessRule(
                     sid,
                     FileSystemRights.Traverse | FileSystemRights.ReadAttributes | FileSystemRights.ReadPermissions | FileSystemRights.Synchronize,
@@ -463,7 +585,7 @@ internal static class Program
                     PropagationFlags.None,
                     AccessControlType.Allow);
                 security.AddAccessRule(rule);
-                current.SetAccessControl(security);
+                SetDirectoryDaclWithoutPropagation(current.FullName, security);
             }
             catch
             {
@@ -680,6 +802,16 @@ internal static class Program
             start.EnvironmentVariables["HOME"] = request.jobDirectory;
             start.EnvironmentVariables["GIT_CONFIG_NOSYSTEM"] = "1";
             start.EnvironmentVariables["GIT_TERMINAL_PROMPT"] = "0";
+            // Repository discovery must stop at the project: the AppContainer has
+            // no access above it, and stat on a parent aborts git before `init`.
+            // The leading empty entry tells git not to resolve these paths.
+            List<string> ceilings = new List<string> { "" };
+            foreach (string root in new[] { request.hostProjectRoot, request.projectRoot })
+            {
+                string parent = Path.GetDirectoryName(root);
+                if (!String.IsNullOrEmpty(parent)) ceilings.Add(parent.Replace(Path.DirectorySeparatorChar, '/'));
+            }
+            start.EnvironmentVariables["GIT_CEILING_DIRECTORIES"] = String.Join(";", ceilings.ToArray());
         }
         start.EnvironmentVariables["MONARCH_CODER_SANDBOX"] = String.IsNullOrWhiteSpace(request.isolationKind) ? "windows-appcontainer-acl" : request.isolationKind;
         start.EnvironmentVariables["MONARCH_CODER_PROJECT_ROOT"] = request.projectRoot;
@@ -1026,6 +1158,12 @@ internal static class Program
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool ConvertStringSidToSid(string stringSid, out IntPtr sid);
     [DllImport("advapi32.dll")] private static extern IntPtr FreeSid(IntPtr sid);
     [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr memory);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(
+        string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool SetKernelObjectSecurity(
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle, uint securityInformation, byte[] securityDescriptor);
+    [DllImport("kernelbase.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool DeriveCapabilitySidsFromName(
+        string capabilityName, out IntPtr capabilityGroupSids, out int capabilityGroupSidCount, out IntPtr capabilitySids, out int capabilitySidCount);
 }
 
 internal static class SandboxSpecBuilder

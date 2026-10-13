@@ -1,5 +1,5 @@
 import { gzipSync } from 'node:zlib';
-import { link, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -214,6 +214,22 @@ describe('Monarch Safe adversarial security gates', () => {
     expect(vault.list().files).toHaveLength(1);
   });
 
+  it('extracts a multi-file archive through one visible result', async () => {
+    const { vault } = await createVault();
+    const sectionId = vault.list().sections[0].id;
+    const first = await vault.createFile({ name: 'first.txt', text: 'one', sectionId });
+    const second = await vault.createFile({ name: 'second.txt', text: 'two', sectionId });
+    const archive = await vault.createArchive({ fileIds: [first.id, second.id], name: 'bundle.msa', sectionId });
+    const result = await vault.extractArchive({ id: archive.id, sectionId });
+    expect(result.created.map((file: { name: string }) => file.name)).toEqual(['first.txt', 'second.txt']);
+    expect(vault.list().files).toHaveLength(5);
+    const contents = await Promise.all(result.created.map(async (file: { id: string }) => {
+      const read = await vault.readFile({ id: file.id });
+      return new TextDecoder().decode(read.bytes);
+    }));
+    expect(contents).toEqual(['one', 'two']);
+  });
+
   it('rejects negative archive bounds and unreferenced trailing payload bytes', async () => {
     const { vault } = await createVault();
     const sectionId = vault.list().sections[0].id;
@@ -267,7 +283,7 @@ describe('Monarch Safe adversarial security gates', () => {
 
     const recovered = new SafeVault(root, { testKdf: true });
     await recovered.initialize();
-    await expect(recovered.unlockWithPin('1234')).rejects.toMatchObject({ code: 'device-binding-unavailable' });
+    await expect(recovered.unlockWithPin('1234')).rejects.toMatchObject({ code: 'vault-config-integrity-failed' });
     await expect(recovered.unlockWithRecoveryKey(setup.recoveryKeys[0])).resolves.toMatchObject({ unlocked: true });
   });
 
@@ -334,8 +350,8 @@ describe('Monarch Safe adversarial security gates', () => {
     await expect(reopened.unlockWithRecoveryKey(setup.recoveryKeys[0])).resolves.toMatchObject({ unlocked: true, recoveryKeysRemaining: 2 });
   });
 
-  it('upgrades an unsealed pre-release config only after a successful PIN unlock', async () => {
-    const { root, vault } = await createVault();
+  it('requires recovery to reseal an unsealed pre-release config', async () => {
+    const { root, vault, setup } = await createVault();
     vault.lock();
     const configPath = path.join(root, 'config.safe.json');
     const config = JSON.parse(await readFile(configPath, 'utf8'));
@@ -343,9 +359,45 @@ describe('Monarch Safe adversarial security gates', () => {
     await writeFile(configPath, JSON.stringify(config), 'utf8');
 
     const reopened = new SafeVault(root, { testKdf: true, deviceKey: Buffer.alloc(32, 0x41) });
-    await expect(reopened.initialize()).resolves.toMatchObject({ pinIntegrity: 'legacy', attemptsRemaining: 3 });
-    await expect(reopened.unlockWithPin('1234')).resolves.toMatchObject({ unlocked: true, pinIntegrity: 'valid' });
+    await expect(reopened.initialize()).resolves.toMatchObject({ pinIntegrity: 'legacy', attemptsRemaining: 3, pinUnlockAvailable: false });
+    await expect(reopened.unlockWithPin('0000')).rejects.toMatchObject({ code: 'vault-config-integrity-failed' });
+    await expect(reopened.unlockWithRecoveryKey(setup.recoveryKeys[0])).resolves.toMatchObject({ unlocked: true, pinIntegrity: 'valid' });
     expect(JSON.parse(await readFile(configPath, 'utf8')).deviceSeal).toMatch(/^[A-Za-z0-9+/]+=*$/);
+  });
+
+  it('does not permit unlimited PIN guesses through a higher-sequence unsealed candidate', async () => {
+    const { root, vault, setup } = await createVault();
+    vault.lock();
+    const configPath = path.join(root, 'config.safe.json');
+    const forged = JSON.parse(await readFile(configPath, 'utf8'));
+    forged.sequence += 100;
+    forged.attempts.pinFailures = 0;
+    delete forged.deviceSeal;
+    await writeFile(`${configPath}.next`, JSON.stringify(forged));
+    const reopened = await reopenVault(root, 'forged-config-session');
+    expect(reopened.status()).toMatchObject({ pinIntegrity: 'legacy', pinUnlockAvailable: false });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await expect(reopened.unlockWithPin('0000')).rejects.toMatchObject({ code: 'vault-config-integrity-failed' });
+    }
+    await expect(reopened.unlockWithRecoveryKey(setup.recoveryKeys[0])).resolves.toMatchObject({ pinIntegrity: 'valid', unlocked: true });
+  });
+
+  it('refuses a redirected blob directory before it can remove external files', async () => {
+    const { root, vault } = await createVault();
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'monarch-safe-outside-'));
+    roots.push(outside);
+    const marker = path.join(outside, 'outside.txt');
+    await writeFile(marker, 'preserve');
+    vault.lock();
+    const blobRoot = path.join(root, 'blobs');
+    await rm(blobRoot, { recursive: true });
+    await symlink(outside, blobRoot, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      await expect(vault.destroy('test-redirection')).rejects.toMatchObject({ code: 'vault-storage-redirection' });
+      expect(await readFile(marker, 'utf8')).toBe('preserve');
+    } finally {
+      await rm(blobRoot, { force: true });
+    }
   });
 
   it('lets recovery without the device binding invalidate the stale seal and reseal on the original device', async () => {
@@ -358,7 +410,8 @@ describe('Monarch Safe adversarial security gates', () => {
 
     const originalDevice = new SafeVault(root, { testKdf: true, deviceKey: Buffer.alloc(32, 0x41) });
     await expect(originalDevice.initialize()).resolves.toMatchObject({ pinIntegrity: 'legacy', attemptsRemaining: 3 });
-    await expect(originalDevice.unlockWithPin('1234')).resolves.toMatchObject({ unlocked: true, pinIntegrity: 'valid', recoveryKeysRemaining: 2 });
+    await expect(originalDevice.unlockWithPin('1234')).rejects.toMatchObject({ code: 'vault-config-integrity-failed' });
+    await expect(originalDevice.unlockWithRecoveryKey(setup.recoveryKeys[1])).resolves.toMatchObject({ unlocked: true, pinIntegrity: 'valid', recoveryKeysRemaining: 1 });
   });
 
   it('prefers a newer recovery-consumption config over an older valid-sealed atomic sibling', async () => {
@@ -387,7 +440,8 @@ describe('Monarch Safe adversarial security gates', () => {
     await writeFile(`${configPath}.previous`, oldActive);
 
     const reopened = new SafeVault(root, { testKdf: true, deviceKey: Buffer.alloc(32, 0x41) });
-    await expect(reopened.initialize()).resolves.toMatchObject({ wiped: true, configured: false, setupAvailable: true });
+    await expect(reopened.initialize()).resolves.toMatchObject({ wiped: true, configured: false, setupAvailable: false });
+    await expect(reopened.setup({ pin: '5678', pinLength: 4, destructionConfirmed: true })).rejects.toMatchObject({ code: 'vault-config-integrity-failed' });
   });
 
   it('keeps setup pending until recovery acknowledgement and safely resets an interrupted empty provisioning', async () => {
@@ -532,7 +586,7 @@ describe('Monarch Safe adversarial security gates', () => {
 
     await expect(vault.updateSecurityPolicy({ pin: '9999', policy: lowPolicy, lowSecurityAcknowledged: true }))
       .rejects.toMatchObject({ code: 'invalid-pin' });
-    expect(vault.status().attemptsRemaining).toBe(3);
+    expect(vault.status().attemptsRemaining).toBe(2);
     await expect(vault.updateSecurityPolicy({ pin: '1234', policy: lowPolicy }))
       .rejects.toMatchObject({ code: 'low-security-acknowledgement-required' });
     await expect(vault.updateSecurityPolicy({ pin: '1234', policy: lowPolicy, lowSecurityAcknowledged: true }))

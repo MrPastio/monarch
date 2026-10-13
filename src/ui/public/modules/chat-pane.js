@@ -303,7 +303,7 @@ function renderTopStatus() {
   elements.topStatus.innerHTML = [
     statusPill(healthOk ? 'Ядро активно' : 'Ядро требует внимания', healthOk ? 'green' : 'red'),
     statusPill(
-      `${selected.label} · ${selectedRuntime?.canInfer ? 'готова' : routerRuntime?.canInfer ? 'маршрутизация готова' : 'ожидает'}`,
+      `${selected.label} · ${selectedRuntime?.canInfer ? 'готова' : routerRuntime?.canInfer ? 'подбор модели работает' : 'ожидает'}`,
       selectedRuntime?.canInfer ? 'green' : selected.available ? 'amber' : 'red',
     ),
   ].join('');
@@ -357,7 +357,7 @@ function renderRouteSummary() {
         <span>${escapeHtml(summary.label)}</span>
       </div>
       <strong>${escapeHtml(route?.capabilityId || 'Навык пока не выбран')}</strong>
-      <p>${escapeHtml(lastIntent?.summary || 'Готов принять команду через kernel.')}</p>
+      <p>${escapeHtml(lastIntent?.summary || 'Готов помочь.')}</p>
       <div class="decision-meta">
         ${miniMeta('модуль', route?.targetModuleId || 'router')}
         ${miniMeta('план', plan?.status || 'pending')}
@@ -513,7 +513,7 @@ export function renderThread() {
       <div class="thread-message message-assistant">
         <div class="message-meta">Monarch Job</div>
         <div class="message-text">
-          <div class="result-summary">${escapeHtml(job.status === 'queued' ? 'Задача в очереди' : 'Выполняю через kernel')}</div>
+          <div class="result-summary">${escapeHtml(job.status === 'queued' ? 'Задача в очереди' : 'Выполняю задачу')}</div>
           ${streamingReply ? `
             <div class="assistant-reply-container">
               <div class="reply-text">${formatOscarContent(streamingReply)}</div>
@@ -585,7 +585,7 @@ export function renderThread() {
 
     <!-- Assistant block -->
     <div class="thread-message message-assistant">
-      <div class="message-meta">Monarch Kernel</div>
+      <div class="message-meta">Monarch</div>
       <div class="message-text">
         <div class="result-summary">${escapeHtml(lastIntent?.summary || 'Сеанс выполнения инициализирован.')}</div>
 
@@ -595,7 +595,7 @@ export function renderThread() {
             ${replyText ? `<div class="reply-text">${formatOscarContent(replyText)}</div>` : ''}
             ${replyError ? `
               <div class="reply-error-banner">
-                <strong>Внимание: Ошибка LLM</strong>
+                <strong>Не удалось получить ответ</strong>
                 <p>${escapeHtml(replyError)}</p>
               </div>
             ` : ''}

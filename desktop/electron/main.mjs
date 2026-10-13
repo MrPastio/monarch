@@ -1,8 +1,11 @@
+import { installMainDiagnosticsMirror } from './main-diagnostics-log.mjs';
+import { renameWithRetry } from './windows-rename.mjs';
 import {
   app,
   BrowserWindow,
   Menu,
   MessageChannelMain,
+  Notification,
   Tray,
   WebContentsView,
   clipboard,
@@ -10,13 +13,25 @@ import {
   globalShortcut,
   ipcMain,
   nativeImage,
+  nativeTheme,
   powerMonitor,
   safeStorage,
+  screen,
   shell,
   utilityProcess,
 } from 'electron';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { createTelegramSecretBroker, startTelegramSecretServer } from './telegram-secret-broker.mjs';
+import { createReminderDelivery } from './reminder-delivery.mjs';
+import { createTelegramCloudflareSetup } from './telegram-cloudflare-setup.mjs';
+import { createGmailSecretBroker, startGmailSecretServer } from './gmail-secret-broker.mjs';
+import { createGmailOAuthController } from './gmail-oauth-controller.mjs';
+import { createGitHubSecretBroker, startGitHubSecretServer } from './github-secret-broker.mjs';
+import { createCalendarSecretBroker, startCalendarSecretServer } from './calendar-secret-broker.mjs';
+import { createCalendarOAuthController } from './calendar-oauth-controller.mjs';
+import { createServiceIntegrationRegistry, registerServiceIntegrationIpc } from './service-integration-registry.mjs';
+import { restrictProtectedIntegrationAcl } from './protected-integration-acl.mjs';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
@@ -27,6 +42,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   isTrustedRuntimeUrl,
   readExternalHttpUrl,
+  shouldOpenContentLink,
   shouldAllowDesktopPermission,
 } from './security-policy.mjs';
 import { shouldHideToTrayOnClose, trayWindowLabel } from './tray-policy.mjs';
@@ -38,14 +54,27 @@ import {
 } from './image-provider-policy.mjs';
 import { createImageProviderDownloadHandler } from './image-provider-download.mjs';
 import { loadOrCreateSafeDeviceKey } from '../safe/device-binding.mjs';
-import { createSafeCapabilityToken } from '../safe/capability-token.mjs';
+import { authorizeSafeFiles } from './safe-file-authorization.mjs';
 import { normalizeSafeSecurityPolicy } from '../safe/security-policy.mjs';
 import { buildSafeShortcutDetails, safeShortcutPath } from './safe-shortcut.mjs';
 import { isAllowedSafeResourceUrl } from './safe-window-policy.mjs';
 import { ownsSafeSessionResource, shouldLockSafeOnBlur } from './safe-session-policy.mjs';
-import { resolveSafeStorageRoot } from './safe-storage-path.mjs';
-import { resolveRuntimeLaunch } from './runtime-entry.mjs';
+import { resolveSafeMainStorageRoot } from './safe-storage-path.mjs';
+import { writeSafeExport } from './safe-export.mjs';
+import { enforceSafeHostLock } from './safe-host-lock.mjs';
+import { prepareDevelopmentMaxBundle, prepareDevelopmentRuntime } from './development-runtime.mjs';
+import { prepareDevelopmentProfile } from './development-profile.mjs';
 import { waitForRuntimeReady } from './runtime-startup.mjs';
+import { createRuntimeRecoveryPolicy } from './runtime-recovery-policy.mjs';
+import { prepareAstraRuntimePilotEnvironment, resolveAstraRuntimePilotMode,
+  resolveAstraTelegramPilotMode } from './astra-pilot-policy.mjs';
+import { loadOrCreateAstraJournalKey } from './astra-journal-key.mjs';
+import { acquireAstraProductRendererGuard, controlAstraProductComputerActions, controlAstraProductWindows, issueAstraProductComputerAction,
+  pickAstraProductTarget, pickAstraProductWindow, pickAstraTelegramTarget } from './astra-product-host.mjs';
+import { createAstraMaxDesktopBridge, resolveAstraMaxSourceModelSelection,
+  resolveAstraMaxSourcePreviewMode } from './astra-max-desktop-bridge.mjs';
+import { startAstraMaxModelServer } from './astra-max-model-server.mjs';
+import { startAstraMaxNativeServer } from './astra-max-native-server.mjs';
 import { isOwnerModeSuspended, prepareOwnerAuthoritySession, setOwnerModeSuspended } from './owner-authority.mjs';
 import {
   createOwnerDeviceRequest,
@@ -60,7 +89,7 @@ import {
 } from './speech-output.mjs';
 import { MONARCH_RELEASE_PUBLIC_KEYS, createMonarchUpdateEndpoints } from './update-config.mjs';
 import { createUpdateDemoRuntime } from './update-demo.mjs';
-import { MonarchUpdateService } from './update-service.mjs';
+import { MonarchUpdateService, startBackgroundUpdateChecks } from './update-service.mjs';
 import { resolveDesktopUpdatePolicy } from './update-policy.mjs';
 import { createTransactionalInstallerCoordinator } from './installer-coordinator.mjs';
 import {
@@ -69,6 +98,9 @@ import {
   writeHealthAcknowledgement,
 } from './update-transaction.mjs';
 import { migrateLegacySecretsForCurrentUser } from './protected-storage-migration.mjs';
+import { createOscarApiKeyStore } from './oscar-api-key.mjs';
+import { createProfileDataKeyStore, deriveProfileStoreKey } from './profile-data-key.mjs';
+import { createProfileKeyRecovery, generateRecoveryCode, wantsCopy } from './profile-key-recovery.mjs';
 import { cleanupRetainedUpdateComponents } from './retention-cleanup.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -83,6 +115,15 @@ const safeEntryQaMode = process.argv.includes('--safe-entry-qa');
 const updateDemoMode = process.argv.includes('--update-demo') && !app.isPackaged;
 const desktopAcceptanceMode = process.argv.includes('--desktop-acceptance') && !app.isPackaged;
 const smokeMode = process.argv.includes('--smoke');
+const astraRuntimePilotMode = resolveAstraRuntimePilotMode({ argv: process.argv, isPackaged: app.isPackaged,
+  isolatedMode: safeEntryQaMode || updateDemoMode || desktopAcceptanceMode || smokeMode });
+const astraTelegramPilotMode = resolveAstraTelegramPilotMode({ argv: process.argv, isPackaged: app.isPackaged,
+  isolatedMode: safeEntryQaMode || updateDemoMode || desktopAcceptanceMode || smokeMode,
+  runtimeMode: astraRuntimePilotMode });
+const astraMaxSourcePreviewMode = resolveAstraMaxSourcePreviewMode({ argv: process.argv, isPackaged: app.isPackaged,
+  isolatedMode: safeEntryQaMode || updateDemoMode || desktopAcceptanceMode || smokeMode });
+const astraMaxSourceModelSelection = resolveAstraMaxSourceModelSelection({ argv: process.argv,
+  previewMode: astraMaxSourcePreviewMode });
 const configuredInstallRoot = process.env.MONARCH_INSTALL_ROOT && path.isAbsolute(process.env.MONARCH_INSTALL_ROOT)
   ? path.resolve(process.env.MONARCH_INSTALL_ROOT)
   : null;
@@ -121,6 +162,10 @@ const imageProviderDownloadRoot = path.join(imageProviderDownloadParent, randomB
 const desktopLogsRoot = configuredLogsRoot
   ? path.join(configuredLogsRoot, 'desktop')
   : desktopRuntimeRoot;
+const desktopStartupTracePath = path.join(desktopLogsRoot, 'startup-phases.jsonl');
+installMainDiagnosticsMirror({ filePath: path.join(desktopLogsRoot, 'main-diagnostics.jsonl') });
+const desktopStartupSession = randomBytes(12).toString('hex');
+let desktopStartupLogQueue = Promise.resolve();
 const updatePolicy = resolveDesktopUpdatePolicy({
   isPackaged: app.isPackaged,
   demoMode: updateDemoMode,
@@ -138,7 +183,9 @@ const currentLauncherVersion = /^\d+\.\d+\.\d+$/.test(String(installedLauncher?.
 const updateRoot = configuredPayloadRoot
   ? path.join(configuredPayloadRoot, 'updates')
   : path.join(workspaceRoot, 'runtime', 'updates');
-const preloadPath = path.join(__dirname, 'preload.mjs');
+const preloadPath = path.join(__dirname, 'preload.cjs');
+const voiceOverlayPreloadPath = path.join(__dirname, 'voice-overlay-preload.cjs');
+const voiceOverlayIndexPath = path.join(__dirname, 'voice-overlay.html');
 const safeEntryQaProfile = safeEntryQaMode
   ? mkdtempSync(path.join(os.tmpdir(), 'monarch-safe-entry-qa-'))
   : null;
@@ -156,18 +203,149 @@ const desktopAcceptanceProfile = desktopAcceptanceMode
 const desktopSmokeProfile = sourceSmokeMode
   ? mkdtempSync(path.join(desktopIsolationParent, 'desktop-smoke-'))
   : null;
-const desktopRuntimeIsolationProfile = desktopAcceptanceProfile || desktopSmokeProfile;
-const isolatedUserDataRoot = safeEntryQaProfile || updateDemoProfile || desktopAcceptanceProfile;
+// Every diagnostic mode that starts the runtime gets its own data/state roots;
+// Safe entry QA must never reconcile the owner's turns, outbox or authority.
+const desktopRuntimeIsolationProfile = desktopAcceptanceProfile || desktopSmokeProfile || safeEntryQaProfile;
+const isolatedUserDataRoot = safeEntryQaProfile || updateDemoProfile || desktopAcceptanceProfile || desktopSmokeProfile;
 if (isolatedUserDataRoot) app.setPath('userData', isolatedUserDataRoot);
+else if (!app.isPackaged && !installedLayout) {
+  app.setPath('userData', prepareDevelopmentProfile({ defaultProfile: app.getPath('userData'),
+    developmentProfile: path.join(desktopRuntimeRoot, 'electron-development-profile') }));
+}
+const astraMaxPreviewVersionRoot = path.join(workspaceRoot, 'runtime', 'astra-max-preview', 'version');
+const astraMaxNativeEnabled = !safeEntryQaMode && !updateDemoMode && !desktopAcceptanceMode && !smokeMode && !astraMaxSourcePreviewMode;
+const astraMaxPreviewDataRoot = configuredDataRoot
+  ? path.join(configuredDataRoot, 'runtime', 'astra-max-preview')
+  : path.join(workspaceRoot, 'runtime', 'astra-max-preview-data');
+const astraMaxNativeDataRoot = path.join(configuredDataRoot || desktopRuntimeRoot, 'max');
+const astraJournalProtectionRoot = path.join(configuredDataRoot || desktopRuntimeRoot, 'astra-v3-protection');
+const gmailSecretRoot = path.join(configuredDataRoot || desktopRuntimeRoot, 'integrations', 'gmail');
+const gmailSecretBroker = createGmailSecretBroker({ dataRoot: gmailSecretRoot, safeStorage,
+  restrictAccess: target => restrictProtectedIntegrationAcl(target, { recordNames: ['gmail-oauth.encrypted'] }) });
+const gmailOAuthController = createGmailOAuthController({ broker: gmailSecretBroker,
+  openExternal: value => shell.openExternal(value) });
+const githubSecretRoot = path.join(configuredDataRoot || desktopRuntimeRoot, 'integrations', 'github');
+const githubSecretBroker = createGitHubSecretBroker({ dataRoot: githubSecretRoot, safeStorage,
+  restrictAccess: target => restrictProtectedIntegrationAcl(target, { recordNames: ['github-token.encrypted'] }) });
+// A diagnostic profile has its own OS encryption key: its record stays inside
+// that profile and it never removes the owner's legacy file.
+const oscarApiKeyRoot = isolatedUserDataRoot ? path.join(isolatedUserDataRoot, 'oscar-api-key')
+  : path.join(configuredDataRoot || desktopRuntimeRoot, 'integrations', 'oscar');
+const oscarApiKeyStore = createOscarApiKeyStore({ dataRoot: oscarApiKeyRoot, safeStorage,
+  legacyPath: path.join(configuredSecretsRoot, 'oscar_token.txt'),
+  removeLegacyFile: !isolatedUserDataRoot,
+  restrictAccess: target => restrictProtectedIntegrationAcl(target, { recordNames: [oscarApiKeyStore.recordName] }) });
+/** Set once the runtime was started with it; shutdown never creates a key. */
+let oscarApiKey = null;
+// Profile data key (Monarch Security stage 3): personal stores of the runtime
+// are sealed with a key derived from it. Diagnostic profiles keep their own.
+const profileProtectionRoot = isolatedUserDataRoot ? path.join(isolatedUserDataRoot, 'protection')
+  : path.join(configuredDataRoot || desktopRuntimeRoot, 'protection');
+// Stage 3f: copies of that key (Monarch Safe / recovery code) live beside it.
+const profileKeyRecovery = createProfileKeyRecovery({ dataRoot: profileProtectionRoot });
+const profileDataKeyStore = createProfileDataKeyStore({
+  dataRoot: profileProtectionRoot,
+  safeStorage,
+  restrictAccess: target => restrictProtectedIntegrationAcl(target, { recordNames: [profileDataKeyStore.recordName] }),
+  recoveryAvailable: () => profileKeyRecovery.hasAnyCopy(),
+});
+/** Why the runtime has no persistent key, if it has none. */
+let profileKeyProblem = null;
+let runtimeStoreKey;
+let oscarDatabaseKey;
+const calendarSecretRoot = path.join(configuredDataRoot || desktopRuntimeRoot, 'integrations', 'calendar');
+const calendarSecretBroker = createCalendarSecretBroker({ dataRoot: calendarSecretRoot, safeStorage,
+  restrictAccess: target => restrictProtectedIntegrationAcl(target, { recordNames: ['calendar-oauth.encrypted'] }) });
+const calendarOAuthController = createCalendarOAuthController({ broker: calendarSecretBroker,
+  openExternal: value => shell.openExternal(value) });
+const serviceIntegrationRegistry = createServiceIntegrationRegistry([
+  {
+    id: 'gmail', envPrefix: 'MONARCH_GMAIL_HOST', status: () => gmailSecretBroker.status(),
+    connect: input => gmailOAuthController.connect(input), disconnect: () => gmailSecretBroker.disconnect(),
+    startServer: () => startGmailSecretServer(gmailSecretBroker), close: () => gmailOAuthController.close(),
+    messages: {
+      status: 'Не удалось прочитать защищённое подключение Gmail.',
+      connect: 'Не удалось подключить Gmail. Проверь настройки OAuth и повтори.',
+      disconnect: 'Не удалось удалить локальное подключение Gmail.',
+      'gmail:oauth-client': 'Проверь OAuth Client ID для приложения типа Desktop.',
+      'gmail:oauth-scope': 'Выбери хотя бы одну возможность Gmail.',
+      'gmail:oauth-denied': 'Google не разрешил подключение Gmail.',
+      'gmail:oauth-timeout': 'Подключение Gmail не завершено вовремя.',
+      'gmail:oauth-in-progress': 'Подключение Gmail уже открыто в браузере.',
+      'gmail:encryption-unavailable': 'Защищённое хранилище Windows сейчас недоступно.',
+      'gmail:protected-record': 'Не удалось защитить подключение Gmail на диске.',
+    },
+  },
+  {
+    id: 'github', envPrefix: 'MONARCH_GITHUB_HOST', status: () => githubSecretBroker.status(),
+    connect: input => githubSecretBroker.configure(input), disconnect: () => githubSecretBroker.disconnect(),
+    startServer: () => startGitHubSecretServer(githubSecretBroker),
+    messages: {
+      status: 'Не удалось прочитать защищённое подключение GitHub.',
+      connect: 'Не удалось подключить GitHub. Проверь token и список репозиториев.',
+      disconnect: 'Не удалось удалить локальное подключение GitHub.',
+      'github:token': 'Проверь fine-grained personal access token GitHub.',
+      'github:repositories': 'Укажи от одного до двадцати репозиториев в формате owner/name.',
+      'github:permissions': 'Выбери хотя бы одну возможность GitHub.',
+      'github:authentication': 'GitHub отклонил token. Создай новый fine-grained token.',
+      'github:permission-required': 'Token не имеет нужного разрешения GitHub.',
+      'github:provider-not-found': 'GitHub не дал доступ к одному из указанных репозиториев.',
+      'github:repository-denied': 'Проверь точные имена и доступ token к каждому репозиторию.',
+      'github:encryption-unavailable': 'Защищённое хранилище Windows сейчас недоступно.',
+      'github:protected-record': 'Не удалось защитить подключение GitHub на диске.',
+    },
+  },
+  {
+    id: 'calendar', envPrefix: 'MONARCH_CALENDAR_HOST', status: () => calendarSecretBroker.status(),
+    connect: input => calendarOAuthController.connect(input), disconnect: () => calendarSecretBroker.disconnect(),
+    startServer: () => startCalendarSecretServer(calendarSecretBroker), close: () => calendarOAuthController.close(),
+    messages: {
+      status: 'Не удалось прочитать защищённое подключение Google Calendar.',
+      connect: 'Не удалось подключить Google Calendar. Проверь настройки OAuth и повтори.',
+      disconnect: 'Не удалось удалить локальное подключение Google Calendar.',
+      'calendar:oauth-client': 'Проверь OAuth Client ID для приложения типа Desktop.',
+      'calendar:oauth-scope': 'Выбери хотя бы одну возможность Google Calendar.',
+      'calendar:oauth-denied': 'Google не разрешил подключение Calendar.',
+      'calendar:oauth-timeout': 'Подключение Calendar не завершено вовремя.',
+      'calendar:oauth-in-progress': 'Подключение Calendar уже открыто в браузере.',
+      'calendar:encryption-unavailable': 'Защищённое хранилище Windows сейчас недоступно.',
+      'calendar:protected-record': 'Не удалось защитить подключение Calendar на диске.',
+    },
+  },
+]);
+const telegramSecretBroker = createTelegramSecretBroker({ dataRoot: path.join(configuredDataRoot || desktopRuntimeRoot, 'telegram-credentials'), safeStorage,
+  cloudKeyPolicy: async () => (await readSecurityPolicyLevel('telegram.cloudSeparateKey')) ?? 'required',
+  cloudSetup: createTelegramCloudflareSetup({ workerPath: path.join(workspaceRoot, 'cloud', 'oscar-bot', 'dist', 'worker.mjs') }),
+  withSelectedMaxConnection: consume => astraMaxDesktopBridge.withSelectedConnection(consume), selectedMax: async () => {
+  const view = await astraMaxDesktopBridge.providers();
+  const selected = view.providers.find(p => p.id === view.selectedProviderId && p.state === 'ready');
+  return selected ? { available: true, providerId: selected.id, modelId: selected.model, role: selected.role } : { available: false };
+} });
+let telegramSecretServer = null;
+if (astraMaxSourcePreviewMode) mkdirSync(astraMaxPreviewDataRoot, { recursive: true });
+if (astraMaxNativeEnabled) mkdirSync(astraMaxNativeDataRoot, { recursive: true });
+const astraMaxDesktopBridge = createAstraMaxDesktopBridge({
+  beforeSelectionChange: () => telegramSecretBroker.beforeMaxChange(),
+  afterSelectionChange: () => telegramSecretBroker.afterMaxChange(),
+  mode: astraMaxNativeEnabled ? 'native-desktop' : astraMaxSourcePreviewMode,
+  versionRoot: astraMaxNativeEnabled ? workspaceRoot : astraMaxPreviewVersionRoot,
+  dataRoot: astraMaxNativeEnabled ? astraMaxNativeDataRoot : astraMaxPreviewDataRoot,
+  runtimeWorkspaceRoot: workspaceRoot,
+  runtimeEnvironment: { ...process.env, ...(desktopRuntimeIsolationProfile ? {
+    MONARCH_STATE_ROOT: path.join(desktopRuntimeIsolationProfile, 'state'),
+  } : {}) },
+  safeStorage,
+  modelSelection: astraMaxSourceModelSelection,
+});
 const ownerAuthorityRoot = desktopRuntimeIsolationProfile
   ? path.join(desktopRuntimeIsolationProfile, 'owner-authority')
   : path.join(app.getPath('appData'), 'Monarch', 'authority');
-const safeRoot = !updateDemoMode && installedLayout?.configRoot && path.isAbsolute(installedLayout.configRoot)
-  ? path.join(path.resolve(installedLayout.configRoot), 'Safe', 'safe-v1')
-  : resolveSafeStorageRoot({
-    workspaceRoot,
-    qaUserDataRoot: isolatedUserDataRoot ? app.getPath('userData') : null,
-  });
+const safeRoot = resolveSafeMainStorageRoot({
+  workspaceRoot,
+  qaUserDataRoot: isolatedUserDataRoot ? app.getPath('userData') : null,
+  installedConfigRoot: installedLayout?.configRoot,
+  updateDemoMode,
+});
 const safeUiRoot = path.join(workspaceRoot, 'desktop', 'safe');
 const safePreloadPath = path.join(safeUiRoot, 'preload.cjs');
 const safeRuntimePath = path.join(safeUiRoot, 'runtime.mjs');
@@ -180,7 +358,20 @@ const appName = updateDemoMode
   ? 'Monarch · безопасная демонстрация обновления'
   : desktopAcceptanceMode ? 'Monarch · Acceptance' : 'Monarch';
 const desktopAttestationToken = randomBytes(32).toString('base64url');
+// One UI session token for the life of this desktop process, handed to every
+// runtime start. A recovered runtime used to mint its own, so the open window
+// got 401 "Sensitive Monarch API reads require a valid UI session token" for
+// everything it sent while the restart was under way.
+const runtimeApiToken = randomBytes(32).toString('base64url');
+// This capability is intentionally distinct from renderer mutation attestation.
+// It is never returned through preload and exists only for main -> runtime host calls.
+const astraV3HostToken = randomBytes(32).toString('base64url');
 let mainWindow = null;
+let voiceOverlayWindow = null;
+// Last state from the main renderer; the overlay only shows it while the main window is not in front,
+// otherwise the in-window voice surface already shows the same state and the two would overlap.
+let voiceOverlayPayload = null;
+let voiceWakeState = { state: 'disabled', enabled: false };
 let imageProviderWindow = null;
 let embeddedImageProviderView = null;
 let installerCoordinator = null;
@@ -228,25 +419,34 @@ const speechWarmup = createSpeechWarmupCoordinator({
 });
 
 let safeWindow = null;
+let safeExportDialogWindow = null;
 let safeAuthorizationWindow = null;
 let safeProcess = null;
 let safeCapabilityKey = null;
 let safeServiceSequence = 0;
 const safeServicePending = new Map();
 let serverProcess = null;
+let astraMaxModelServer = null;
+let astraMaxNativeServer = null;
+let astraMaxNativePreparedServer = null;
 let runtimeReady = false;
 let runtimeUrl = '';
+let runtimeRecoveryPromise = null;
+const runtimeRecovery = createRuntimeRecoveryPolicy();
 let tray = null;
 let quitRequested = false;
 let trayHintShown = false;
 let shuttingDown = false;
 let shutdownComplete = false;
 let shutdownPromise = null;
+let retainedUpdateCleanupPromise = null;
 let computerUseEmergencyStopRunning = false;
 const configuredSafeSessions = new WeakSet();
 const configuredImageProviderSessions = new WeakSet();
 const safeEntryQaEvents = [];
 let safeSecurityPolicy = normalizeSafeSecurityPolicy(null);
+
+markDesktopStartup('module-ready');
 
 if (!updateDemoMode && configuredInstallRoot && configuredPayloadRoot) {
   installerCoordinator = createTransactionalInstallerCoordinator({
@@ -263,8 +463,10 @@ if (!updateDemoMode && configuredInstallRoot && configuredPayloadRoot) {
 }
 
 if (!safeEntryQaMode && !updateDemoMode && !smokeMode && !desktopAcceptanceMode && !app.requestSingleInstanceLock()) {
+  markDesktopStartup('single-instance-denied');
   app.quit();
 } else {
+  markDesktopStartup('single-instance-ready');
   if (!safeEntryQaMode && !updateDemoMode && !smokeMode && !desktopAcceptanceMode) {
     app.on('second-instance', (_event, commandLine) => {
       if (commandLine.includes('--safe')) void showSafeWindow();
@@ -303,6 +505,8 @@ app.on('before-quit', (event) => {
     return;
   }
   shuttingDown = true;
+  if (voiceOverlayWindow && !voiceOverlayWindow.isDestroyed()) voiceOverlayWindow.destroy();
+  voiceOverlayWindow = null;
   tray?.destroy();
   tray = null;
   stopRuntime();
@@ -314,16 +518,180 @@ app.on('activate', () => {
 });
 
 ipcMain.handle('monarch:get-runtime-url', () => runtimeUrl);
+/** Window chrome follows the painted theme; "system" is resolved by Windows. */
+function paintWindowChrome() {
+  const light = !nativeTheme.shouldUseDarkColors;
+  mainWindow?.setBackgroundColor(light ? '#faf8f4' : '#08090a');
+  if (process.platform === 'win32') mainWindow?.setTitleBarOverlay({
+    color: light ? '#faf8f4' : '#08090a',
+    symbolColor: light ? '#26221d' : '#f7f7f5', height: 32,
+  });
+}
+nativeTheme.on('updated', () => { if (nativeTheme.themeSource === 'system') paintWindowChrome(); });
+ipcMain.handle('monarch:set-theme', (event, theme) => {
+  assertTrustedMainRenderer(event);
+  if (theme !== 'dark' && theme !== 'light' && theme !== 'system') throw Error('Invalid theme');
+  nativeTheme.themeSource = theme;
+  paintWindowChrome();
+  return theme;
+});
+ipcMain.handle('monarch:telegram-configure', (event, input) => {
+  assertTrustedMainRenderer(event);
+  return telegramSecretBroker.configure(input).catch(() => { throw Error('Не удалось проверить и сохранить ключ Telegram.'); });
+});
+ipcMain.handle('monarch:telegram-cloud-configure', (event, input) => {
+  assertTrustedMainRenderer(event);
+  return telegramSecretBroker.configureCloud(input).catch(() => { throw Error('Проверь адрес личного Worker, ключ устройства и облачное согласие.'); });
+});
+let maxConfigurationTail = Promise.resolve();
+const serializeMaxConfiguration = action => {
+  const result = maxConfigurationTail.then(action); maxConfigurationTail = result.catch(() => undefined); return result;
+};
+ipcMain.handle('monarch:telegram-cloud-inspect', event => {
+  assertTrustedMainRenderer(event);
+  return telegramSecretBroker.inspectPersonalCloud().catch(() => { throw Error('Не удалось найти облако. Проверь вход в Cloudflare и наличие компонента Oscar.'); });
+});
+ipcMain.handle('monarch:telegram-cloud-provision', (event, input) => {
+  assertTrustedMainRenderer(event);
+  return serializeMaxConfiguration(() => telegramSecretBroker.provisionPersonalCloud(input)).catch((error) => {
+    const code = String(error?.message || '');
+    if (code === 'telegram:cloud-key-required') throw Error('Укажи отдельный ключ MAX для облака. Основной ключ с компьютера в облако не передаётся.');
+    if (code === 'telegram:cloud-key-same') throw Error('Это основной ключ MAX. Создай у сервиса новый ключ для облака — лучше с лимитом расходов.');
+    if (code === 'telegram:cloud-key-format') throw Error('Ключ выглядит неполным. Скопируй его у сервиса целиком.');
+    throw Error('Облако не подтвердило подключение. Проверь вход в Cloudflare и выбранный MAX, затем повтори. Сохранённые ключи устройства будут использованы снова.');
+  });
+});
+ipcMain.handle('monarch:telegram-credentials-status', (event, role) => {
+  assertTrustedMainRenderer(event);
+  return telegramSecretBroker.status(role);
+});
+registerServiceIntegrationIpc({ ipcMain, registry: serviceIntegrationRegistry,
+  assertTrustedRenderer: assertTrustedMainRenderer });
 ipcMain.handle('monarch:get-desktop-attestation', (event) => {
   assertTrustedMainRenderer(event);
   return desktopAttestationToken;
+});
+ipcMain.handle('monarch:astra-max-select-provider', (event, id) => {
+  assertTrustedMainRenderer(event);
+  return serializeMaxConfiguration(() => astraMaxDesktopBridge.selectProvider(id));
+});
+ipcMain.handle('monarch:astra-max-providers', (event, input) => {
+  assertTrustedMainRenderer(event);
+  return astraMaxDesktopBridge.providers(input);
+});
+ipcMain.handle('monarch:astra-max-models', (event, input) => {
+  assertTrustedMainRenderer(event);
+  return astraMaxDesktopBridge.listProviderModels(input);
+});
+ipcMain.handle('monarch:astra-max-stored-models', (event, input) => {
+  assertTrustedMainRenderer(event);
+  return astraMaxDesktopBridge.listStoredProviderModels(input);
+});
+ipcMain.handle('monarch:astra-max-configure-provider', (event, input) => {
+  assertTrustedMainRenderer(event);
+  return serializeMaxConfiguration(() => astraMaxDesktopBridge.configureProvider(input));
+});
+ipcMain.handle('monarch:astra-max-update-model', (event, input) => {
+  assertTrustedMainRenderer(event);
+  return serializeMaxConfiguration(() => astraMaxDesktopBridge.updateProviderModel(input));
+});
+ipcMain.handle('monarch:astra-max-reasoning-effort', (event, value) => {
+  assertTrustedMainRenderer(event);
+  return astraMaxDesktopBridge.setReasoningEffort(value);
+});
+ipcMain.handle('monarch:astra-max-verify-provider', (event, input) => {
+  assertTrustedMainRenderer(event);
+  return astraMaxDesktopBridge.verifyProvider(input);
+});
+ipcMain.handle('monarch:astra-max-status', (event) => {
+  assertTrustedMainRenderer(event);
+  return astraMaxDesktopBridge.status();
+});
+ipcMain.handle('monarch:astra-max-configure', (event, request) => {
+  assertTrustedMainRenderer(event);
+  return serializeMaxConfiguration(() => astraMaxDesktopBridge.configure(request));
+});
+ipcMain.handle('monarch:astra-max-verify', (event) => {
+  assertTrustedMainRenderer(event);
+  return astraMaxDesktopBridge.verify();
+});
+ipcMain.handle('monarch:astra-product-pick-target', async (event, request) => {
+  if (!astraRuntimePilotMode || !mainWindow || !runtimeUrl) throw Error('astra-product-host:unavailable');
+  const guard = acquireAstraProductRendererGuard({ window: mainWindow, runtimeUrl, event, assertTrustedRenderer: assertTrustedMainRenderer });
+  try {
+    const defaultDirectory = process.env.MONARCH_WORKSPACE_ROOT && path.isAbsolute(process.env.MONARCH_WORKSPACE_ROOT)
+      ? path.resolve(process.env.MONARCH_WORKSPACE_ROOT) : workspaceRoot;
+    return await pickAstraProductTarget({ mode: astraRuntimePilotMode, request, dialog, window: mainWindow, runtimeUrl,
+      defaultDirectory, desktopAttestationToken, hostToken: astraV3HostToken, fetchImpl: fetch, assertRenderer: guard.assert });
+  } finally { guard.dispose(); }
+});
+ipcMain.handle('monarch:astra-product-pick-telegram-target', async (event, request) => {
+  if (!astraRuntimePilotMode || !astraTelegramPilotMode || !mainWindow || !runtimeUrl) {
+    throw Error('astra-product-host:telegram-unavailable');
+  }
+  const guard = acquireAstraProductRendererGuard({ window: mainWindow, runtimeUrl, event, assertTrustedRenderer: assertTrustedMainRenderer });
+  try {
+    const defaultDirectory = process.env.MONARCH_WORKSPACE_ROOT && path.isAbsolute(process.env.MONARCH_WORKSPACE_ROOT)
+      ? path.resolve(process.env.MONARCH_WORKSPACE_ROOT) : workspaceRoot;
+    return await pickAstraTelegramTarget({ mode: astraRuntimePilotMode, telegramMode: astraTelegramPilotMode,
+      request, dialog, window: mainWindow, runtimeUrl, defaultDirectory, desktopAttestationToken,
+      hostToken: astraV3HostToken, fetchImpl: fetch, assertRenderer: guard.assert });
+  } finally { guard.dispose(); }
+});
+ipcMain.handle('monarch:astra-product-pick-window', async (event, request) => {
+  if (!astraRuntimePilotMode || !mainWindow || !runtimeUrl) throw Error('astra-product-host:unavailable');
+  const guard = acquireAstraProductRendererGuard({ window: mainWindow, runtimeUrl, event, assertTrustedRenderer: assertTrustedMainRenderer });
+  try {
+    return await pickAstraProductWindow({ mode: astraRuntimePilotMode, request, dialog, window: mainWindow, runtimeUrl,
+      desktopAttestationToken, hostToken: astraV3HostToken, fetchImpl: fetch, assertRenderer: guard.assert });
+  } finally { guard.dispose(); }
+});
+ipcMain.handle('monarch:astra-product-issue-computer-action', async (event, request) => {
+  if (!astraRuntimePilotMode || !mainWindow || !runtimeUrl) throw Error('astra-product-host:unavailable');
+  const guard = acquireAstraProductRendererGuard({ window: mainWindow, runtimeUrl, event, assertTrustedRenderer: assertTrustedMainRenderer });
+  try {
+    return await issueAstraProductComputerAction({ mode: astraRuntimePilotMode, request, runtimeUrl,
+      desktopAttestationToken, hostToken: astraV3HostToken, fetchImpl: fetch, assertRenderer: guard.assert });
+  } finally { guard.dispose(); }
+});
+ipcMain.handle('monarch:astra-product-window-selections', async (event, request) => {
+  if (!astraRuntimePilotMode || !mainWindow || !runtimeUrl) throw Error('astra-product-host:unavailable');
+  const guard = acquireAstraProductRendererGuard({ window: mainWindow, runtimeUrl, event, assertTrustedRenderer: assertTrustedMainRenderer });
+  try {
+    return await controlAstraProductWindows({ mode: astraRuntimePilotMode, request, runtimeUrl,
+      desktopAttestationToken, hostToken: astraV3HostToken, fetchImpl: fetch, assertRenderer: guard.assert });
+  } finally { guard.dispose(); }
+});
+ipcMain.handle('monarch:astra-product-computer-action-plans', async (event, request) => {
+  if (!astraRuntimePilotMode || !mainWindow || !runtimeUrl) throw Error('astra-product-host:unavailable');
+  const guard = acquireAstraProductRendererGuard({ window: mainWindow, runtimeUrl, event, assertTrustedRenderer: assertTrustedMainRenderer });
+  try {
+    return await controlAstraProductComputerActions({ mode: astraRuntimePilotMode, request, runtimeUrl,
+      desktopAttestationToken, hostToken: astraV3HostToken, fetchImpl: fetch, assertRenderer: guard.assert });
+  } finally { guard.dispose(); }
 });
 ipcMain.handle('monarch:get-app-info', () => ({
   name: appName,
   version: currentAppVersion,
   workspaceRoot,
   runtimeUrl,
+  astra: { pilot: Boolean(astraRuntimePilotMode), telegramRead: Boolean(astraTelegramPilotMode),
+    surface: process.argv.includes('--astra-v3-same-owner-pilot') ? 'composer' : 'native-chat',
+    maxPreview: Boolean(astraMaxSourcePreviewMode) },
 }));
+ipcMain.handle('monarch:voice-overlay-update', async (event, value = {}) => {
+  assertTrustedMainRenderer(event);
+  voiceOverlayPayload = normalizeVoiceOverlayPayload(value);
+  const visible = await syncVoiceOverlayVisibility();
+  return { ok: true, visible };
+});
+ipcMain.handle('monarch:voice-wake-state', (event, value = {}) => {
+  assertTrustedMainRenderer(event);
+  voiceWakeState = normalizeVoiceWakeState(value);
+  rebuildTrayMenu();
+  syncTrayTooltip();
+  return { ok: true, ...voiceWakeState };
+});
 ipcMain.handle('monarch:update-state', (event) => {
   assertTrustedMainRenderer(event);
   return updateService.snapshot();
@@ -398,6 +766,15 @@ ipcMain.handle('monarch:speech-warmup', (event, value = {}) => {
   }
   return value?.retry === true ? speechWarmup.retry() : speechWarmup.start();
 });
+// Help -> "Если что-то не работает": reveal Monarch's own log folder. The
+// path is fixed here; the renderer cannot choose what gets opened.
+ipcMain.handle('monarch:open-logs', async (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return { ok: false, error: 'untrusted-renderer' };
+  await mkdir(desktopLogsRoot, { recursive: true });
+  const failure = await shell.openPath(desktopLogsRoot);
+  return failure ? { ok: false, error: 'open-failed' } : { ok: true };
+});
+
 ipcMain.handle('monarch:speech-diagnostics', (event) => {
   if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
     return { status: 'failed', ok: false, error: 'untrusted-renderer', summary: 'Диагностика TTS недоступна.' };
@@ -494,16 +871,13 @@ ipcMain.handle('monarch:copy-sharing-token', async (event) => {
   if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
     return { ok: false, error: 'untrusted-renderer' };
   }
-  const tokenPath = path.join(configuredSecretsRoot, 'oscar_token.txt');
-  if (!existsSync(tokenPath)) {
+  // The key the running Oscar actually accepts, persistent or session-only.
+  const loaded = oscarApiKey;
+  if (!loaded) {
     return { ok: false, error: 'token-missing' };
   }
-  const token = (await readFile(tokenPath, 'utf8')).trim().replace(/^\uFEFF/, '');
-  if (!token) {
-    return { ok: false, error: 'token-empty' };
-  }
-  clipboard.writeText(token);
-  return { ok: true };
+  clipboard.writeText(loaded.key);
+  return { ok: true, persistent: loaded.persistent };
 });
 ipcMain.handle('monarch:pick-security-file', async (event) => {
   if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
@@ -519,12 +893,33 @@ ipcMain.handle('monarch:pick-security-file', async (event) => {
   }
   return selection.filePaths[0];
 });
-ipcMain.handle('monarch:pick-coder-folder', async (event) => {
+ipcMain.handle('monarch:pick-model-file', async (event) => {
   if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return null;
   const selection = await dialog.showOpenDialog(mainWindow, {
-    title: 'Выбери папку проекта для Coder Mode',
+    title: 'Выбери свою модель (.gguf)',
+    properties: ['openFile'],
+    buttonLabel: 'Добавить модель',
+    filters: [{ name: 'Модель GGUF', extensions: ['gguf'] }],
+  });
+  if (selection.canceled || selection.filePaths.length !== 1) return null;
+  return selection.filePaths[0];
+});
+ipcMain.handle('monarch:pick-red-zone-folder', async (event) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return null;
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: 'Красная зона: выбери папку, куда Oscar не заходит',
+    properties: ['openDirectory'],
+    buttonLabel: 'Закрыть эту папку',
+  });
+  if (selection.canceled || selection.filePaths.length !== 1) return null;
+  return selection.filePaths[0];
+});
+ipcMain.handle('monarch:pick-coder-folder', async (event, purpose) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return null;
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: purpose === 'telegram' ? 'Выбери папку для поручений из Telegram' : 'Выбери папку проекта для Coder Mode',
     properties: ['openDirectory', 'createDirectory'],
-    buttonLabel: 'Открыть как проект',
+    buttonLabel: purpose === 'telegram' ? 'Выбрать папку' : 'Открыть как проект',
   });
   if (selection.canceled || selection.filePaths.length !== 1) return null;
   return selection.filePaths[0];
@@ -644,99 +1039,111 @@ ipcMain.handle('monarch:safe-chat-lock', async (event) => {
   assertTrustedMainRenderer(event);
   return requestSafeService('chatLock');
 });
-ipcMain.handle('monarch-safe:authorize-delete', async (event, value = {}) => {
+ipcMain.handle('monarch-safe:export-file', async (event, value = {}) => {
   const targetWindow = safeWindow;
-  const targetCapabilityKey = safeCapabilityKey;
-  if (!targetWindow || targetWindow.isDestroyed() || event.sender.id !== targetWindow.webContents.id || !targetCapabilityKey) return null;
-  const batch = Array.isArray(value?.files)
-    ? value.files.slice(0, 100).map((file) => ({
-      id: String(file?.id || ''),
-      name: String(file?.name || 'файл').replace(/[\r\n\t]/g, ' ').slice(0, 160),
-    })).filter((file) => /^[0-9a-f-]{36}$/i.test(file.id))
-    : [];
-  if (batch.length) {
-    const confirmed = await showSafeAuthorizationPrompt({
-      parentWindow: targetWindow,
-      title: 'Удалить выбранные файлы?',
-      message: `Файлов к удалению: ${batch.length}`,
-      detail: `${batch.slice(0, 4).map((file) => `• ${file.name}`).join('\n')}${batch.length > 4 ? `\n• и ещё ${batch.length - 4}` : ''}\n\nАктивные ключи версий будут уничтожены. Операция необратима внутри хранилища.`,
-      confirmLabel: `Удалить · ${batch.length}`,
-      tone: 'danger',
-    });
-    if (!confirmed || !ownsSafeSessionResource(safeWindow, targetWindow) || !ownsSafeSessionResource(safeCapabilityKey, targetCapabilityKey)) return null;
-    return {
-      tokens: batch.map((file) => ({
-        id: file.id,
-        capabilityToken: createSafeCapabilityToken({ key: targetCapabilityKey, action: 'deleteFile', resourceId: file.id }),
-      })),
-    };
+  const targetProcess = safeProcess;
+  if (!trustedSafeSender(event, targetWindow) || !targetProcess) {
+    throw new Error('safe-export-untrusted-window');
   }
-  const fileId = String(value?.id || '');
-  if (!/^[0-9a-f-]{36}$/i.test(fileId)) return null;
-  const name = String(value?.name || 'выбранный файл').replace(/[\r\n\t]/g, ' ').slice(0, 160);
-  const shortId = fileId.slice(0, 8);
-  const confirmed = await showSafeAuthorizationPrompt({
-    parentWindow: targetWindow,
-    title: 'Удалить файл?',
-    message: `«${name}» · ${shortId}`,
-    detail: 'Активный ключ этой версии будет уничтожен. Операция необратима внутри Safe; снимки и внешние резервные копии остаются вне его контроля.',
-    confirmLabel: 'Удалить файл',
-    tone: 'danger',
-  });
-  if (!confirmed || !ownsSafeSessionResource(safeWindow, targetWindow) || !ownsSafeSessionResource(safeCapabilityKey, targetCapabilityKey)) return null;
-  return createSafeCapabilityToken({ key: targetCapabilityKey, action: 'deleteFile', resourceId: fileId });
+  const id = String(value?.id || '');
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error('safe-export-invalid-id');
+  const context = await requestSafeService('fileActionContext', { id, action: 'exportRead' }, targetProcess);
+  if (!ownsSafeSessionResource(safeWindow, targetWindow) || !ownsSafeSessionResource(safeProcess, targetProcess)) throw new Error('safe-export-session-changed');
+  if (safeExportDialogWindow) throw new Error('safe-export-dialog-busy');
+  const name = String(context.name || 'file').replace(/[\\/:*?"<>|\r\n\t\u202a-\u202e\u2066-\u2069]/g, '_').slice(0, 160) || 'file';
+  safeExportDialogWindow = targetWindow;
+  try {
+    const selection = await dialog.showSaveDialog(targetWindow, {
+      title: 'Экспортировать расшифрованный файл',
+      defaultPath: path.join(path.parse(safeRoot).root, name),
+      buttonLabel: 'Экспортировать',
+      showOverwriteConfirmation: true,
+    });
+    if (selection.canceled || !selection.filePath) return { ok: false, canceled: true };
+    if (!ownsSafeSessionResource(safeWindow, targetWindow) || !ownsSafeSessionResource(safeProcess, targetProcess)) {
+      throw new Error('safe-export-session-changed');
+    }
+    const result = await requestSafeService('exportRead', { id, context }, targetProcess);
+    try {
+      if (result?.file?.id !== id || !(result?.bytes instanceof Uint8Array)) throw new Error('safe-export-invalid-response');
+      if (!ownsSafeSessionResource(safeWindow, targetWindow) || !ownsSafeSessionResource(safeProcess, targetProcess)) {
+        throw new Error('safe-export-session-changed');
+      }
+      return await writeSafeExport({
+        destinationPath: selection.filePath,
+        safeRoot,
+        bytes: result.bytes,
+        shouldCommit: async () => ownsSafeSessionResource(safeWindow, targetWindow)
+          && ownsSafeSessionResource(safeProcess, targetProcess)
+          && await requestSafeService('validateFileActionContext', { context }, targetProcess)
+          && ownsSafeSessionResource(safeWindow, targetWindow)
+          && ownsSafeSessionResource(safeProcess, targetProcess),
+      });
+    } finally {
+      result?.bytes?.fill(0);
+    }
+  } finally {
+    if (safeExportDialogWindow === targetWindow) safeExportDialogWindow = null;
+  }
 });
-ipcMain.handle('monarch-safe:authorize-write', async (event, value = {}) => {
+ipcMain.handle('monarch-safe:authorize-delete', (event, value = {}) => authorizeSafeMutation(event, 'deleteFile', value));
+ipcMain.handle('monarch-safe:authorize-write', (event, value = {}) => authorizeSafeMutation(event, 'writeFile', value));
+
+function trustedSafeSender(event, targetWindow) {
+  return Boolean(targetWindow && !targetWindow.isDestroyed()
+    && event.sender === targetWindow.webContents
+    && event.senderFrame === targetWindow.webContents.mainFrame
+    && event.senderFrame.url === pathToFileURL(safeIndexPath).toString());
+}
+
+async function authorizeSafeMutation(event, action, value) {
   const targetWindow = safeWindow;
+  const targetProcess = safeProcess;
   const targetCapabilityKey = safeCapabilityKey;
-  if (!targetWindow || targetWindow.isDestroyed() || event.sender.id !== targetWindow.webContents.id || !targetCapabilityKey) return null;
-  const fileId = String(value?.id || '');
-  if (!/^[0-9a-f-]{36}$/i.test(fileId)) return null;
-  const name = String(value?.name || 'выбранный файл').replace(/[\r\n\t]/g, ' ').slice(0, 160);
-  const shortId = fileId.slice(0, 8);
-  const confirmed = await showSafeAuthorizationPrompt({
-    parentWindow: targetWindow,
-    title: 'Сохранить новую версию?',
-    message: `«${name}» · ${shortId}`,
-    detail: 'Safe запишет новую зашифрованную генерацию, атомарно переключит манифест и уничтожит активный ключ предыдущей версии.',
-    confirmLabel: 'Сохранить версию',
-    tone: 'primary',
-  });
-  if (!confirmed || !ownsSafeSessionResource(safeWindow, targetWindow) || !ownsSafeSessionResource(safeCapabilityKey, targetCapabilityKey)) return null;
-  return createSafeCapabilityToken({ key: targetCapabilityKey, action: 'writeFile', resourceId: fileId });
-});
+  if (!trustedSafeSender(event, targetWindow) || !targetProcess || !targetCapabilityKey) return null;
+  const isCurrent = () => ownsSafeSessionResource(safeWindow, targetWindow)
+    && !targetWindow.isDestroyed() && ownsSafeSessionResource(safeProcess, targetProcess)
+    && ownsSafeSessionResource(safeCapabilityKey, targetCapabilityKey);
+  try {
+    return await authorizeSafeFiles({
+      action, value, key: targetCapabilityKey, isCurrent,
+      prepare: (payload) => requestSafeService('fileActionContext', payload, targetProcess),
+      prompt: (options) => showSafeAuthorizationPrompt({ parentWindow: targetWindow, ...options }),
+    });
+  } finally { if (value?.bytes instanceof Uint8Array) value.bytes.fill(0); }
+}
 ipcMain.on('monarch-safe:sealed', (event) => {
   if (!safeWindow || safeWindow.isDestroyed() || event.sender.id !== safeWindow.webContents.id) return;
   if (safeSecurityPolicy.clearClipboardOnLock) clipboard.clear();
 });
 
 async function startDesktopApp() {
+  await rotateRuntimeLog(speechDiagnosticsPath);
+  markDesktopStartup('app-ready');
+  markDesktopStartup('maintenance-start');
   if (!updateDemoMode && !desktopAcceptanceMode) {
+    markDesktopStartup('post-update-trial-start');
     postUpdateTrial = await preparePostUpdateTrial().catch((error) => {
       if (process.argv.some((value) => value.startsWith('--post-update='))) throw error;
       return null;
     });
+    markDesktopStartup('post-update-trial-ready');
+    markDesktopStartup('rollback-prepare-start');
     await prepareRollback().catch((error) => {
       if (process.argv.some((value) => value.startsWith('--rollback-update='))) throw error;
     });
-    if (
-      configuredInstallRoot
-      && configuredPayloadRoot
-      && !process.argv.some((value) => value.startsWith('--post-update=') || value.startsWith('--rollback-update='))
-    ) {
-      await cleanupRetainedUpdateComponents({
-        installRoot: configuredInstallRoot,
-        payloadRoot: configuredPayloadRoot,
-      });
-    }
+    markDesktopStartup('rollback-prepare-ready');
     if (installedLayout?.configRoot) {
+      markDesktopStartup('secret-migration-start');
       await migrateLegacySecretsForCurrentUser({
         migrationRoot: path.join(installedLayout.configRoot, 'migration', 'secrets'),
         safeRoot,
         safeStorage,
       });
+      markDesktopStartup('secret-migration-ready');
     }
   }
+  markDesktopStartup('maintenance-ready');
   await Promise.all([
     mkdir(desktopRuntimeRoot, { recursive: true }),
     mkdir(desktopLogsRoot, { recursive: true }),
@@ -745,6 +1152,11 @@ async function startDesktopApp() {
   // runtime and must not compete with an unused multi-gigabyte voice worker.
   // Voice Mode starts the shared warmup through trusted IPC when it opens.
   runtimeUrl = await startRuntime();
+  markDesktopStartup('runtime-ready');
+  void syncProfileKeyCopies();
+  if (!(smokeMode || safeEntryQaMode || updateDemoMode || desktopAcceptanceMode || safeLaunchMode)) {
+    reminderDelivery.start();
+  }
 
   if (smokeMode) {
     const [health, capabilityPayload, permissionPayload] = await Promise.all([
@@ -794,11 +1206,57 @@ async function startDesktopApp() {
         windowReady: Boolean(mainWindow && !mainWindow.isDestroyed()),
       });
     }
+    scheduleRetainedUpdateCleanup();
+    if (updatePolicy.mode === 'installed' && !safeEntryQaMode) startBackgroundUpdateChecks(updateService);
   }
   if (safeEntryQaMode) await runSafeEntryQa();
 }
 
+function scheduleRetainedUpdateCleanup() {
+  if (
+    retainedUpdateCleanupPromise
+    || !configuredInstallRoot
+    || !configuredPayloadRoot
+    || safeEntryQaMode
+    || safeLaunchMode
+    || updateDemoMode
+    || desktopAcceptanceMode
+    || smokeMode
+    || process.argv.some((value) => value.startsWith('--post-update=') || value.startsWith('--rollback-update='))
+  ) {
+    return retainedUpdateCleanupPromise;
+  }
+  markDesktopStartup('retention-cleanup-scheduled');
+  retainedUpdateCleanupPromise = new Promise((resolve) => setImmediate(resolve))
+    .then(async () => {
+      if (shuttingDown || quitRequested) {
+        markDesktopStartup('retention-cleanup-cancelled');
+        return Object.freeze({ status: 'skipped', reason: 'desktop-shutting-down', removed: Object.freeze([]) });
+      }
+      markDesktopStartup('retention-cleanup-start');
+      const result = await cleanupRetainedUpdateComponents({
+        installRoot: configuredInstallRoot,
+        payloadRoot: configuredPayloadRoot,
+      });
+      if (result.status === 'completed') markDesktopStartup('retention-cleanup-ready');
+      else markDesktopStartup('retention-cleanup-skipped');
+      return result;
+    })
+    .catch(() => {
+      // Retention is opportunistic. An inventory or filesystem failure must not
+      // make the interactive product unavailable or authorize a retry/delete.
+      markDesktopStartup('retention-cleanup-failed');
+      console.warn('Retained update cleanup failed safely.');
+      return Object.freeze({ status: 'skipped', reason: 'retention-cleanup-failed', removed: Object.freeze([]) });
+    });
+  return retainedUpdateCleanupPromise;
+}
+
 async function createMainWindow() {
+  markDesktopStartup('window-create');
+  // Windows' own theme until the renderer applies the saved choice, so an
+  // "auto" preference reads the truth from prefers-color-scheme before paint.
+  nativeTheme.themeSource = 'system';
   mainWindow = new BrowserWindow({
     title: appName,
     icon: desktopIconPath,
@@ -807,6 +1265,8 @@ async function createMainWindow() {
     minWidth: 980,
     minHeight: 680,
     backgroundColor: '#08090a',
+    ...(process.platform === 'win32' ? { titleBarStyle: 'hidden',
+      titleBarOverlay: { color: '#08090a', symbolColor: '#f7f7f5', height: 32 } } : {}),
     autoHideMenuBar: true,
     show: false,
     ...(safeEntryQaMode ? { x: -32000, y: -32000, opacity: 0, focusable: false, skipTaskbar: true } : {}),
@@ -814,12 +1274,15 @@ async function createMainWindow() {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // The page renders model output; its preload needs only IPC.
+      sandbox: true,
+      backgroundThrottling: false,
     },
   });
   mainWindow.setMenu(null);
 
   const readyToShow = new Promise((resolve) => mainWindow.once('ready-to-show', () => {
+    markDesktopStartup('window-ready-to-show');
     mainWindow?.show();
     rebuildTrayMenu();
     resolve();
@@ -850,8 +1313,13 @@ async function createMainWindow() {
 
   mainWindow.on('show', rebuildTrayMenu);
   mainWindow.on('hide', rebuildTrayMenu);
+  for (const windowEvent of ['focus', 'blur', 'show', 'hide', 'minimize', 'restore']) {
+    mainWindow.on(windowEvent, () => { void syncVoiceOverlayVisibility().catch(() => undefined); });
+  }
 
   mainWindow.on('closed', () => {
+    if (voiceOverlayWindow && !voiceOverlayWindow.isDestroyed()) voiceOverlayWindow.destroy();
+    voiceOverlayWindow = null;
     if (imageProviderWindow && !imageProviderWindow.isDestroyed()) imageProviderWindow.close();
     imageProviderWindow = null;
     destroyEmbeddedImageProvider();
@@ -862,9 +1330,53 @@ async function createMainWindow() {
   configureMainWindowSecurity(mainWindow, runtimeUrl);
 
   await mainWindow.loadURL(runtimeUrl);
+  markDesktopStartup('page-loaded');
   if (updateDemoMode || desktopAcceptanceMode) mainWindow.setTitle(appName);
   await readyToShow;
 }
+
+const reminderDelivery = createReminderDelivery({
+  getRuntimeUrl: () => runtimeUrl,
+  attestationToken: desktopAttestationToken,
+  notify: showReminderNotification,
+  onDelivered: (reminder) => sendToMainWindow('monarch:reminder-delivered', reminderView(reminder)),
+});
+
+function reminderView(reminder) {
+  return {
+    id: String(reminder?.id || ''),
+    text: String(reminder?.text || '').slice(0, 500),
+    dueAt: String(reminder?.dueAt || ''),
+    conversationId: typeof reminder?.conversationId === 'string' ? reminder.conversationId : null,
+  };
+}
+
+function sendToMainWindow(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload);
+  }
+}
+
+/** A Windows notification; a click brings Monarch forward on the chat it was asked in. */
+function showReminderNotification(reminder) {
+  if (!Notification.isSupported()) return;
+  const view = reminderView(reminder);
+  const notification = new Notification({
+    title: 'Напоминание от Оскара',
+    body: view.text,
+    silent: false,
+  });
+  notification.on('click', () => {
+    void showMainWindow().then(() => sendToMainWindow('monarch:reminder-open', view)).catch(() => undefined);
+  });
+  notification.show();
+}
+
+ipcMain.handle('monarch:reminders-changed', (event) => {
+  assertTrustedMainRenderer(event);
+  reminderDelivery.poke();
+  return { ok: true };
+});
 
 async function showMainWindow() {
   if (!runtimeUrl || shuttingDown || quitRequested) return;
@@ -941,13 +1453,13 @@ async function showSafeWindow() {
     if (safeSecurityPolicy.minimizeAction === 'close') {
       closeSafeForSystemBoundary(launchedSafeWindow, launchedSafeProcess, launchedCapabilityKey);
     } else if (safeSecurityPolicy.minimizeAction === 'lock') {
-      launchedSafeWindow.webContents.send('monarch-safe:force-lock');
+      void lockSafeFromMain(launchedSafeWindow, launchedSafeProcess, launchedCapabilityKey);
     }
   });
   launchedSafeWindow.on('hide', () => {
     if (!ownsSafeSessionResource(safeWindow, launchedSafeWindow)) return;
     if (safeSecurityPolicy.minimizeAction === 'close') closeSafeForSystemBoundary(launchedSafeWindow, launchedSafeProcess, launchedCapabilityKey);
-    else if (safeSecurityPolicy.minimizeAction === 'lock') launchedSafeWindow.webContents.send('monarch-safe:force-lock');
+    else if (safeSecurityPolicy.minimizeAction === 'lock') void lockSafeFromMain(launchedSafeWindow, launchedSafeProcess, launchedCapabilityKey);
   });
   launchedSafeWindow.on('blur', () => {
     const ownsSession = ownsSafeSessionResource(safeWindow, launchedSafeWindow);
@@ -956,8 +1468,9 @@ async function showSafeWindow() {
       && !safeAuthorizationWindow.isDestroyed()
       && safeAuthorizationWindow.getParentWindow() === launchedSafeWindow,
     );
-    if (shouldLockSafeOnBlur({ ownsSession, lockOnBlur: safeSecurityPolicy.lockOnBlur, trustedAuthorizationOpen })) {
-      launchedSafeWindow.webContents.send('monarch-safe:force-lock');
+    const trustedExportDialogOpen = safeExportDialogWindow === launchedSafeWindow;
+    if (shouldLockSafeOnBlur({ ownsSession, lockOnBlur: safeSecurityPolicy.lockOnBlur, trustedAuthorizationOpen: trustedAuthorizationOpen || trustedExportDialogOpen })) {
+      void lockSafeFromMain(launchedSafeWindow, launchedSafeProcess, launchedCapabilityKey);
     }
   });
   launchedSafeWindow.on('closed', () => {
@@ -1072,7 +1585,7 @@ async function showSafeAuthorizationPrompt({ parentWindow, title, message, detai
       if (settled || safeEntryQaMode) return;
       settle(false);
       if (ownsSafeSessionResource(safeWindow, parentWindow) && safeSecurityPolicy.lockOnBlur) {
-        parentWindow.webContents.send('monarch-safe:force-lock');
+        void lockSafeFromMain(parentWindow);
       }
     });
     promptWindow.loadFile(safeAuthorizationPath).then(() => {
@@ -1091,7 +1604,9 @@ async function showSafeAuthorizationPrompt({ parentWindow, title, message, detai
 }
 
 async function runSafeEntryQa() {
-  const outputRoot = path.join(workspaceRoot, 'output', 'safe-entry-qa');
+  const outputRoot = process.env.MONARCH_SAFE_QA_OUTPUT_ROOT && path.isAbsolute(process.env.MONARCH_SAFE_QA_OUTPUT_ROOT)
+    ? path.resolve(process.env.MONARCH_SAFE_QA_OUTPUT_ROOT, 'safe-entry-qa')
+    : path.join(workspaceRoot, 'output', 'safe-entry-qa');
   const reportPath = path.join(outputRoot, 'qa-report.json');
   await mkdir(outputRoot, { recursive: true });
   let report;
@@ -1343,9 +1858,11 @@ async function runSafeEntryQa() {
       dirty: document.querySelector('#save-file').dataset.dirty,
     }))`, true);
 
-    if (!confirmationState.title.includes('Удалить файл')
+    if (confirmationState.title !== 'Удалить выбранные файлы?'
       || confirmationState.tone !== 'danger'
-      || confirmationState.confirmLabel !== 'Удалить файл'
+      || confirmationState.confirmLabel !== 'Удалить · 1'
+      || !confirmationState.message.includes('«delete-regression.md» · Личное · ')
+      || !/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(confirmationState.message)
       || JSON.stringify(confirmationState.bridgeKeys) !== JSON.stringify(['onPrompt', 'respond'])) {
       throw new Error(`Styled Safe confirmation contract is invalid: ${JSON.stringify(confirmationState)}`);
     }
@@ -1447,6 +1964,7 @@ function queueSafeEntryQaProfileCleanup() {
       stdio: 'ignore',
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     });
+    cleaner.on('error', () => undefined); // Spawn failure is async; never an uncaught error in main.
     cleaner.unref();
   } catch {
     // The next QA run can safely remove an old test-only profile.
@@ -1476,13 +1994,13 @@ function assertTrustedMainRenderer(event) {
   }
 }
 
-function requestSafeService(action, payload = {}) {
-  const targetProcess = safeProcess;
-  if (!targetProcess) {
+function requestSafeService(action, payload = {}, targetProcess = safeProcess) {
+  if (!targetProcess || !ownsSafeSessionResource(safeProcess, targetProcess)) {
     const error = new Error('Monarch Safe is closed. Open and unlock Safe first.');
     error.code = 'safe-runtime-closed';
     return Promise.reject(error);
   }
+  if (safeServicePending.size >= 32 && action !== 'chatLock') return Promise.reject(new Error('safe-service-busy'));
   safeServiceSequence += 1;
   const id = `safe-chat-${Date.now().toString(36)}-${safeServiceSequence.toString(36)}`;
   return new Promise((resolve, reject) => {
@@ -1491,7 +2009,7 @@ function requestSafeService(action, payload = {}) {
       const error = new Error('Monarch Safe chat operation timed out.');
       error.code = 'safe-service-timeout';
       reject(error);
-    }, 60_000);
+    }, action === 'chatLock' ? 5_000 : 60_000);
     safeServicePending.set(id, { process: targetProcess, resolve, reject, timer });
     try {
       targetProcess.postMessage({ type: 'service-request', id, action, payload });
@@ -1510,6 +2028,7 @@ function handleSafeServiceMessage(targetProcess, message) {
     if (!ownsSafeSessionResource(safeProcess, targetProcess)) return;
     if (payload.data?.securityPolicy) safeSecurityPolicy = normalizeSafeSecurityPolicy(payload.data.securityPolicy);
     emitSafeChatStatus({ runtime: true, ...(payload.data || {}) });
+    if (payload.data?.unlocked === true) void syncProfileKeyCopies();
     return;
   }
   if (payload.type !== 'service-response' || typeof payload.id !== 'string') return;
@@ -1553,6 +2072,21 @@ function closeSafeForSystemBoundary(targetWindow = safeWindow, targetProcess = s
   else stopSafeRuntime(targetProcess, targetCapabilityKey);
 }
 
+const safeHostLocks = new WeakMap();
+function lockSafeFromMain(targetWindow = safeWindow, targetProcess = safeProcess, targetCapabilityKey = safeCapabilityKey) {
+  if (!targetProcess) return Promise.resolve(false);
+  if (safeHostLocks.has(targetProcess)) return safeHostLocks.get(targetProcess);
+  const pending = enforceSafeHostLock({
+    isCurrent: () => ownsSafeSessionResource(safeWindow, targetWindow) && !targetWindow.isDestroyed()
+      && ownsSafeSessionResource(safeProcess, targetProcess) && ownsSafeSessionResource(safeCapabilityKey, targetCapabilityKey),
+    requestLock: () => requestSafeService('chatLock', {}, targetProcess),
+    notify: () => targetWindow.webContents.send('monarch-safe:force-lock'),
+    close: () => closeSafeForSystemBoundary(targetWindow, targetProcess, targetCapabilityKey),
+  }).finally(() => safeHostLocks.delete(targetProcess));
+  safeHostLocks.set(targetProcess, pending);
+  return pending;
+}
+
 function configureSafeWindowSecurity(window, allowedDocumentPath = safeIndexPath) {
   const allowedDocumentUrl = pathToFileURL(allowedDocumentPath).toString();
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -1588,7 +2122,7 @@ function createTray() {
   const source = nativeImage.createFromPath(desktopIconPath);
   const icon = process.platform === 'win32' ? source.resize({ width: 16, height: 16 }) : source;
   tray = new Tray(icon);
-  tray.setToolTip('Monarch · защита работает в фоне');
+  syncTrayTooltip();
   tray.on('click', () => {
     if (mainWindow?.isVisible()) {
       mainWindow.hide();
@@ -1616,6 +2150,14 @@ function rebuildTrayMenu() {
         }
       },
     },
+    {
+      label: voiceWakeState.enabled
+        ? voiceWakeState.state === 'listening'
+          ? 'Оскар: микрофон активен · ждёт wake-фразу'
+          : `Оскар: ${voiceWakeTrayLabel(voiceWakeState.state)}`
+        : 'Оскар в фоне выключен',
+      enabled: false,
+    },
     { label: 'Защита работает в фоне', enabled: false },
     { type: 'separator' },
     {
@@ -1626,6 +2168,48 @@ function rebuildTrayMenu() {
       },
     },
   ]));
+}
+
+function markDesktopStartup(phase) {
+  // Numeric process-relative timings only: no paths, keys or user content.
+  // Keep just the first launch; reopening a tray window is not a cold startup.
+  const name = 'monarch:startup:' + phase;
+  if (!performance.getEntriesByName(name).length) {
+    const processElapsedMs = Math.round(process.uptime() * 1000);
+    performance.mark(name, { detail: { processElapsedMs } });
+    const record = JSON.stringify({
+      schemaVersion: 'monarch.desktop-startup-phase.v1',
+      session: desktopStartupSession,
+      phase,
+      processElapsedMs,
+    }) + '\n';
+    desktopStartupLogQueue = desktopStartupLogQueue
+      .then(async () => {
+        await mkdir(desktopLogsRoot, { recursive: true });
+        await appendFile(desktopStartupTracePath, record, { encoding: 'utf8' });
+      })
+      .catch(() => undefined);
+  }
+}
+
+function syncTrayTooltip() {
+  if (!tray || tray.isDestroyed()) return;
+  tray.setToolTip(voiceWakeState.enabled
+    ? `Monarch · Оскар: ${voiceWakeTrayLabel(voiceWakeState.state)}`
+    : 'Monarch · защита работает в фоне');
+}
+
+function voiceWakeTrayLabel(state) {
+  if (state === 'listening') return 'слушает wake-фразу';
+  if (state === 'hearing') return 'слышит речь';
+  if (state === 'recognizing') return 'распознаёт локально';
+  if (state === 'activated' || state === 'voice-active') return 'активен';
+  if (state === 'permission-denied') return 'нет доступа к микрофону';
+  if (state === 'dictation-active') return 'микрофон у диктовки';
+  if (state === 'starting') return 'подключает микрофон';
+  if (state === 'settings-loading') return 'загружает настройки';
+  if (state === 'error') return 'перезапускается';
+  return 'выключен';
 }
 
 function showTrayHintOnce() {
@@ -1640,7 +2224,7 @@ function showTrayHintOnce() {
 
 function configureMainWindowSecurity(window, trustedRuntimeUrl) {
   window.webContents.setWindowOpenHandler(({ url }) => {
-    void openExternalSafely(url);
+    void openContentLink(window, url);
     return { action: 'deny' };
   });
 
@@ -1649,7 +2233,7 @@ function configureMainWindowSecurity(window, trustedRuntimeUrl) {
       return;
     }
     event.preventDefault();
-    void openExternalSafely(navigationUrl);
+    void openContentLink(window, navigationUrl);
   });
 
   const electronSession = window.webContents.session;
@@ -1681,11 +2265,298 @@ function configureMainWindowSecurity(window, trustedRuntimeUrl) {
   });
 }
 
+/** Stage 3f: keeps the copies of the profile data key the person chose in
+ * Monarch Security. The Safe copy is refreshed only while Safe is open; this
+ * never asks for its PIN. While the key itself is lost nothing is removed:
+ * the copies are then the only way back. */
+let profileKeySync = null;
+function syncProfileKeyCopies() {
+  profileKeySync ||= (async () => {
+    try {
+      if (profileKeyProblem || !runtimeStoreKey) return;
+      const level = await readSecurityPolicyLevel('storage.keyRecovery');
+      if (!level) return;
+      await profileKeyRecovery.removeUnwanted(level);
+      if (!wantsCopy(level, 'safe') || !safeProcess) return;
+      if ((await requestSafeService('chatStatus'))?.unlocked !== true) return;
+      const { key } = await profileDataKeyStore.load();
+      if (!key) return;
+      const wrapping = await requestSafeService('profileKeyBackupKey');
+      const copies = await profileKeyRecovery.status(key);
+      if (copies.safe.current && copies.safe.vaultId === wrapping?.vaultId) return;
+      await profileKeyRecovery.writeSafeCopy(key, wrapping);
+    } catch (error) {
+      console.warn(`Profile key copy not updated (${error?.message || 'error'}).`);
+    } finally {
+      profileKeySync = null;
+    }
+  })();
+  return profileKeySync;
+}
+
+async function profileKeyRecoveryView() {
+  const level = await readSecurityPolicyLevel('storage.keyRecovery');
+  const key = profileKeyProblem || !runtimeStoreKey ? null : (await profileDataKeyStore.load().catch(() => null))?.key ?? null;
+  const copies = await profileKeyRecovery.status(key);
+  const safeOpen = safeProcess ? (await requestSafeService('chatStatus').catch(() => null))?.unlocked === true : false;
+  const describe = copy => ({ present: copy.present, current: copy.current, damaged: copy.damaged === true });
+  return {
+    state: profileKeyProblem ?? (key ? 'ok' : 'session'),
+    level,
+    safeOpen,
+    copies: { safe: describe(copies.safe), code: describe(copies.code) },
+  };
+}
+
+function profileKeyRecoveryMessage(error) {
+  switch (String(error?.message || '')) {
+  case 'profile-key-recovery:code-format': return 'Код выглядит неполным: в нём 25 букв и цифр.';
+  case 'profile-key-recovery:wrong-secret': return 'Не подошло. Проверь код или открой тот Safe, где лежит копия.';
+  case 'profile-key-recovery:other-safe': return 'Копия ключа сделана в другом Monarch Safe.';
+  case 'profile-key-recovery:safe-locked': return 'Открой Monarch Safe и повтори.';
+  case 'profile-key-recovery:no-safe-copy': return 'Копии ключа в Monarch Safe нет.';
+  case 'profile-key-recovery:no-code-copy': return 'Копии ключа под кодом восстановления нет.';
+  case 'profile-data-key:different-key': return 'На этом компьютере уже работает другой ключ истории. Восстановление его не заменит.';
+  case 'profile-data-key:os-encryption': return 'Шифрование Windows недоступно, ключ некуда сохранить.';
+  default: return 'Не удалось восстановить ключ. Данные на диске не изменены.';
+  }
+}
+
+ipcMain.handle('monarch:profile-key-status', async (event) => {
+  assertTrustedMainRenderer(event);
+  await syncProfileKeyCopies();
+  return profileKeyRecoveryView();
+});
+ipcMain.handle('monarch:profile-key-create-code', async (event) => {
+  assertTrustedMainRenderer(event);
+  if (profileKeyProblem) throw Error('Сначала восстанови доступ к истории.');
+  if (!wantsCopy(await readSecurityPolicyLevel('storage.keyRecovery'), 'code')) {
+    throw Error('Код восстановления выключен в настройках восстановления ключа.');
+  }
+  const { key } = await profileDataKeyStore.load();
+  if (!key || !runtimeStoreKey) throw Error('Шифрование Windows недоступно: история хранится только до закрытия Monarch, копировать нечего.');
+  const code = generateRecoveryCode();
+  await profileKeyRecovery.writeCodeCopy(key, code);
+  return { code };
+});
+ipcMain.handle('monarch:profile-key-recover', async (event, value = {}) => {
+  assertTrustedMainRenderer(event);
+  if (!['needs-recovery', 'damaged-record'].includes(profileKeyProblem)) throw Error('Ключ истории на месте, восстанавливать нечего.');
+  let key = null;
+  try {
+    if (value?.method === 'code') {
+      key = await profileKeyRecovery.openCodeCopy(String(value.code || ''));
+    } else if (value?.method === 'safe') {
+      if (!safeProcess || (await requestSafeService('chatStatus'))?.unlocked !== true) throw Error('profile-key-recovery:safe-locked');
+      key = await profileKeyRecovery.openSafeCopy(await requestSafeService('profileKeyBackupKey'));
+    } else {
+      throw Error('profile-key-recovery:method');
+    }
+    await profileDataKeyStore.restore(key);
+  } catch (error) {
+    throw Error(profileKeyRecoveryMessage(error));
+  } finally {
+    key?.fill(0);
+  }
+  // The runtime and Oscar start again with the recovered key.
+  setImmediate(() => {
+    quitRequested = true;
+    app.relaunch();
+    app.quit();
+  });
+  return { ok: true, relaunching: true };
+});
+
+/** A level from the Monarch Security policy center, or null when the runtime
+ * cannot answer; callers then keep their safe default. */
+async function readSecurityPolicyLevel(controlId) {
+  try {
+    if (!runtimeUrl) return null;
+    const response = await fetch(new URL('/api/security/policy', runtimeUrl), {
+      headers: { 'X-Monarch-Desktop-Attestation': desktopAttestationToken },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) return null;
+    const view = await response.json();
+    const level = view?.controls?.find?.(item => item?.id === controlId)?.level;
+    return typeof level === 'string' ? level : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Links in the main window come from model answers and pages: the person
+ * confirms each one unless they turned that off in Monarch Security (F-10). */
+async function openContentLink(window, value) {
+  const open = await shouldOpenContentLink({
+    url: value,
+    readLevel: async () => {
+      const level = await readSecurityPolicyLevel('links.confirmOpen');
+      if (!level) throw new Error('policy-unavailable');
+      return level;
+    },
+    confirm: async (target) => {
+      const url = new URL(target);
+      const shown = target.length > 300 ? target.slice(0, 300) + '…' : target;
+      const { response } = await dialog.showMessageBox(window && !window.isDestroyed() ? window : undefined, {
+        type: 'question',
+        buttons: ['Открыть', 'Отмена'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+        title: 'Открыть ссылку',
+        message: `Открыть сайт ${url.hostname} в браузере?`,
+        detail: `${shown}\n\nСайт узнает о переходе и обо всём, что записано в ссылке.`,
+      });
+      return response === 0;
+    },
+  });
+  if (open) await openExternalSafely(value);
+}
+
 async function openExternalSafely(value) {
   const url = readExternalHttpUrl(value);
   if (!url) return false;
   await shell.openExternal(url).catch(() => undefined);
   return true;
+}
+
+async function ensureVoiceOverlayWindow() {
+  if (voiceOverlayWindow && !voiceOverlayWindow.isDestroyed()) return voiceOverlayWindow;
+  if (![voiceOverlayPreloadPath, voiceOverlayIndexPath].every(existsSync)) {
+    throw new Error('Voice overlay runtime files are missing.');
+  }
+  const overlay = new BrowserWindow({
+    width: 620,
+    height: 260,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    closable: false,
+    focusable: false,
+    show: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+      webPreferences: {
+        partition: 'monarch-voice-overlay',
+        preload: voiceOverlayPreloadPath,
+        contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      backgroundThrottling: false,
+    },
+  });
+  voiceOverlayWindow = overlay;
+  overlay.setAlwaysOnTop(true, 'screen-saver');
+  overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  overlay.setIgnoreMouseEvents(true, { forward: true });
+  overlay.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  overlay.webContents.on('will-navigate', (event, navigationUrl) => {
+    if (navigationUrl !== pathToFileURL(voiceOverlayIndexPath).toString()) event.preventDefault();
+  });
+  const isolatedSession = overlay.webContents.session;
+  isolatedSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  isolatedSession.setPermissionCheckHandler(() => false);
+  overlay.on('closed', () => {
+    if (voiceOverlayWindow === overlay) voiceOverlayWindow = null;
+  });
+  await overlay.loadFile(voiceOverlayIndexPath);
+  positionVoiceOverlay(overlay);
+  return overlay;
+}
+
+function mainWindowInFront() {
+  return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()
+    && !mainWindow.isMinimized() && mainWindow.isFocused());
+}
+
+async function syncVoiceOverlayVisibility() {
+  const payload = voiceOverlayPayload;
+  if (!payload?.visible || mainWindowInFront()) {
+    if (voiceOverlayWindow && !voiceOverlayWindow.isDestroyed()) voiceOverlayWindow.hide();
+    return false;
+  }
+  const overlay = await ensureVoiceOverlayWindow();
+  if (voiceOverlayPayload !== payload) return Boolean(voiceOverlayPayload?.visible) && overlay.isVisible();
+  positionVoiceOverlay(overlay);
+  overlay.webContents.send('monarch:voice-overlay-state', payload);
+  if (!overlay.isVisible()) overlay.showInactive();
+  return true;
+}
+
+function positionVoiceOverlay(overlay = voiceOverlayWindow) {
+  if (!overlay || overlay.isDestroyed()) return;
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const bounds = overlay.getBounds();
+  const x = Math.round(display.workArea.x + (display.workArea.width - bounds.width) / 2);
+  const y = Math.round(display.workArea.y + display.workArea.height - bounds.height - 12);
+  overlay.setPosition(x, y, false);
+}
+
+function normalizeVoiceOverlayPayload(value) {
+  const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const clean = (field, maximum) => String(input[field] || '')
+    .replace(/[\u0000-\u001F\u007F]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, maximum);
+  const rawCard = input.card && typeof input.card === 'object' && !Array.isArray(input.card) ? input.card : null;
+  const cardKind = rawCard && ['weather', 'exchange-rate'].includes(String(rawCard.kind || ''))
+    ? String(rawCard.kind)
+    : '';
+  const metrics = cardKind && Array.isArray(rawCard.metrics)
+    ? rawCard.metrics.slice(0, 3).flatMap((metric) => {
+        if (!metric || typeof metric !== 'object' || Array.isArray(metric)) return [];
+        const label = String(metric.label || '').replace(/[\u0000-\u001F\u007F]/gu, ' ').trim().slice(0, 40);
+        const metricValue = String(metric.value || '').replace(/[\u0000-\u001F\u007F]/gu, ' ').trim().slice(0, 60);
+        return label && metricValue ? [{ label, value: metricValue }] : [];
+      })
+    : [];
+  const card = cardKind ? {
+    kind: cardKind,
+    title: String(rawCard.title || '').replace(/[\u0000-\u001F\u007F]/gu, ' ').trim().slice(0, 120),
+    primary: String(rawCard.primary || '').replace(/[\u0000-\u001F\u007F]/gu, ' ').trim().slice(0, 80),
+    summary: String(rawCard.summary || '').replace(/[\u0000-\u001F\u007F]/gu, ' ').trim().slice(0, 160),
+    metrics,
+    attribution: String(rawCard.provider?.attribution || '').replace(/[\u0000-\u001F\u007F]/gu, ' ').trim().slice(0, 120),
+  } : null;
+  return {
+    visible: input.visible === true,
+    phase: clean('phase', 32) || 'idle',
+    lane: clean('lane', 32) || 'simplified',
+    kicker: clean('kicker', 80),
+    title: clean('title', 120),
+    detail: clean('detail', 300),
+    text: clean('text', 360),
+    design: input.design === 'classic' ? 'classic' : 'pp',
+    theme: input.theme === 'dark' ? 'dark' : 'light',
+    ...(card ? { card } : {}),
+  };
+}
+
+function normalizeVoiceWakeState(value) {
+  const allowed = new Set([
+    'disabled', 'settings-loading', 'starting', 'listening', 'hearing', 'recognizing', 'activated',
+    'voice-active', 'dictation-active', 'permission-denied', 'manual-only', 'error',
+  ]);
+  const state = String(value?.state || 'disabled').trim();
+  const diagnostic = value?.diagnostic && typeof value.diagnostic === 'object'
+    ? {
+        stage: String(value.diagnostic.stage || '').trim().slice(0, 80),
+        code: String(value.diagnostic.code || '').trim().slice(0, 80),
+        message: String(value.diagnostic.message || '').trim().replace(/\s+/g, ' ').slice(0, 240),
+      }
+    : null;
+  return {
+    state: allowed.has(state) ? state : 'error',
+    enabled: value?.enabled === true,
+    ...(diagnostic ? { diagnostic } : {}),
+  };
 }
 
 async function showImageProviderWindow(url) {
@@ -1839,14 +2710,28 @@ function normalizeImageProviderPrompt(value) {
   return String(value || '').replace(/[\u0000-\u001F\u007F]/gu, '').trim().slice(0, 8_000);
 }
 
-async function startRuntime() {
+let developmentMaxBundlePrepared = false;
+async function startRuntime({ requestedPort = null, preserveModelHostOnFailure = false } = {}) {
+  markDesktopStartup('runtime-start');
   const nodePath = resolveNodeExecutable();
-  const runtimeLaunch = resolveRuntimeLaunch({
+  const runtimeLaunch = await prepareDevelopmentRuntime({
     workspaceRoot,
-    preferSource: !app.isPackaged,
+    outputRoot: desktopRuntimeRoot,
+    preferSource: !app.isPackaged && !installedLayout,
   });
+  if (!developmentMaxBundlePrepared) {
+    developmentMaxBundlePrepared = true;
+    // Before the MAX host is first loaded; a failed build keeps the last bundle.
+    await prepareDevelopmentMaxBundle({ workspaceRoot,
+      preferSource: !app.isPackaged && !installedLayout && astraMaxNativeEnabled }).catch((error) => {
+      console.error(JSON.stringify({ diagnostic: 'development-max-build-failed', code: error?.code || error?.name || 'error' }));
+    });
+  }
+  markDesktopStartup('runtime-entry-ready');
 
-  const port = await findFreePort(4317, 40);
+  const port = requestedPort === null ? await findFreePort(4317, 40) : requestedPort;
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw Error('runtime-port-invalid');
+  markDesktopStartup('runtime-port-ready');
   const ownerAuthority = !safeEntryQaMode && !safeLaunchMode && !updateDemoMode
     ? await prepareOwnerAuthoritySession({
       authorityRoot: ownerAuthorityRoot,
@@ -1855,14 +2740,91 @@ async function startRuntime() {
       runtimePort: port,
     }).catch(() => ({ environmentValue: '', summary: { tier: 'public', diagnostic: 'owner-bootstrap-failed' } }))
     : { environmentValue: '', summary: { tier: 'public', diagnostic: 'owner-disabled-in-isolated-mode' } };
-  const env = {
-    ...process.env,
-    MONARCH_UI_PORT: String(port),
-    MONARCH_STRICT_PORT: '1',
-    MONARCH_STARTUP_TRACE: '1',
-    MONARCH_AGENT_RUNTIME_V2: '1',
-    MONARCH_DESKTOP_ATTESTATION_TOKEN: desktopAttestationToken,
-  };
+  markDesktopStartup('runtime-owner-authority-ready');
+  const astraJournalKey = astraRuntimePilotMode
+    ? await loadOrCreateAstraJournalKey({ rootPath: astraJournalProtectionRoot, safeStorage })
+    : null;
+  if (astraRuntimePilotMode && !astraJournalKey) {
+    throw new Error('Astra V3 journal encryption is unavailable. Use --disable-astra-v3 only for isolated diagnostics without Agent execution.');
+  }
+  markDesktopStartup('runtime-journal-key-ready');
+  // Never trust inherited shell authority. Only the source CLI policy authors
+  // a fresh paired mode and main-process-only host capability for this child.
+  if (astraRuntimePilotMode && astraMaxSourcePreviewMode && !astraMaxModelServer) {
+    astraMaxModelServer = await startAstraMaxModelServer({ mode: astraMaxSourcePreviewMode,
+      host: await astraMaxDesktopBridge.preparedModelHost() });
+  }
+  markDesktopStartup('runtime-source-model-host-ready');
+  if (astraMaxNativeEnabled && !astraMaxNativeServer) {
+    astraMaxNativeServer = await startAstraMaxNativeServer({ complete: (input, signal) => astraMaxDesktopBridge.completeNative(input, signal),
+      stream: (input, signal) => astraMaxDesktopBridge.streamNative(input, signal),
+      status: async () => {
+        const view = await astraMaxDesktopBridge.providers();
+        return view.available === true && Array.isArray(view.providers)
+          && view.providers.some(provider => provider?.id === view.selectedProviderId && provider?.state === 'ready');
+      } });
+  }
+  markDesktopStartup('runtime-native-max-ready');
+  if (!telegramSecretServer && !safeLaunchMode && !desktopAcceptanceMode && !smokeMode) telegramSecretServer = await startTelegramSecretServer(telegramSecretBroker);
+  markDesktopStartup('runtime-telegram-broker-ready');
+  if (!safeLaunchMode && !desktopAcceptanceMode && !smokeMode) await serviceIntegrationRegistry.startAll();
+  markDesktopStartup('runtime-service-integrations-ready');
+  if (astraMaxNativeEnabled && astraRuntimePilotMode && !astraMaxNativePreparedServer) {
+    try { astraMaxNativePreparedServer = await startAstraMaxModelServer({ mode: 'native-desktop',
+      host: await astraMaxDesktopBridge.preparedModelHost() }); }
+    catch { console.warn('MAX file analysis unavailable: build the MAX host bundle. Local mode is unchanged.'); }
+  }
+  markDesktopStartup('runtime-prepared-max-ready');
+  if (runtimeStoreKey === undefined) {
+    // A damaged record never becomes a new key: the runtime then keeps personal
+    // data for this session only and leaves what is on disk untouched.
+    const profileKey = await profileDataKeyStore.load().catch((error) => {
+      console.warn(`Profile data key unavailable (${error?.message || 'error'}); personal data stays in this session.`);
+      profileKeyProblem = error?.message === 'profile-data-key:needs-recovery' ? 'needs-recovery'
+        : error?.message === 'profile-data-key:record' ? 'damaged-record' : 'unavailable';
+      return { key: null, persistent: false };
+    });
+    runtimeStoreKey = profileKey.key ? deriveProfileStoreKey(profileKey.key, 'runtime-sealed').toString('base64url') : null;
+    oscarDatabaseKey = profileKey.key ? deriveProfileStoreKey(profileKey.key, 'oscar-memory').toString('hex') : null;
+  }
+  if (!oscarApiKey) {
+    // A damaged record or a refused ACL keeps Oscar running on a key for this
+    // session only; it never falls back to a plain-text file.
+    oscarApiKey = await oscarApiKeyStore.load().catch((error) => {
+      console.warn(`Oscar API key record unavailable (${error?.message || 'error'}); using a session key.`);
+      return Object.freeze({ key: randomBytes(32).toString('hex'), persistent: false, migrated: false });
+    });
+  }
+  const modelHost = astraMaxModelServer ? { endpoint: astraMaxModelServer.endpoint,
+    bearerToken: astraMaxModelServer.bearerToken, hostGeneration: astraMaxModelServer.hostGeneration,
+    modelDigest: astraMaxModelServer.modelDigest, modelDigests: astraMaxModelServer.modelDigests } : null;
+  let env;
+  try {
+    env = prepareAstraRuntimePilotEnvironment({ environment: {
+      ...process.env,
+      MONARCH_UI_PORT: String(port),
+      MONARCH_STRICT_PORT: '1',
+      MONARCH_STARTUP_TRACE: '1',
+      MONARCH_DESKTOP_ATTESTATION_TOKEN: desktopAttestationToken,
+      MONARCH_API_TOKEN: runtimeApiToken,
+      OSCAR_API_TOKEN: oscarApiKey.key,
+      MONARCH_STORE_PROTECTION: 'desktop',
+      ...(runtimeStoreKey ? { MONARCH_STORE_KEY: runtimeStoreKey } : {}),
+      ...(oscarDatabaseKey ? { MONARCH_OSCAR_DB_KEY: oscarDatabaseKey } : {}),
+      MONARCH_MAX_NATIVE_ENDPOINT: astraMaxNativeServer?.endpoint || '',
+      MONARCH_MAX_NATIVE_TOKEN: astraMaxNativeServer?.bearerToken || '',
+      MONARCH_TELEGRAM_HOST_ENDPOINT: telegramSecretServer?.endpoint || '',
+      MONARCH_TELEGRAM_HOST_TOKEN: telegramSecretServer?.bearerToken || '',
+      ...serviceIntegrationRegistry.runtimeEnvironment(),
+      MONARCH_MAX_PREPARED_HOST: astraMaxNativePreparedServer ? JSON.stringify({ endpoint: astraMaxNativePreparedServer.endpoint,
+        bearerToken: astraMaxNativePreparedServer.bearerToken, hostGeneration: astraMaxNativePreparedServer.hostGeneration,
+        modelDigest: astraMaxNativePreparedServer.modelDigest, modelDigests: astraMaxNativePreparedServer.modelDigests,
+        ...(astraMaxNativePreparedServer.dynamicMaxCloud === true ? { dynamicMaxCloud: true } : {}) }) : '',
+    }, mode: astraRuntimePilotMode, telegramMode: astraTelegramPilotMode, hostToken: astraV3HostToken, modelHost,
+      journalKey: astraJournalKey?.toString('base64') ?? null,
+      managedLocal: Boolean(astraRuntimePilotMode && !modelHost && !process.argv.includes('--astra-v3-same-owner-pilot')) });
+  } finally { astraJournalKey?.fill(0); }
+  markDesktopStartup('runtime-environment-ready');
   if (desktopRuntimeIsolationProfile) {
     const isolatedDataRoot = path.join(desktopRuntimeIsolationProfile, 'data');
     const isolatedStateRoot = path.join(desktopRuntimeIsolationProfile, 'state');
@@ -1878,8 +2840,18 @@ async function startRuntime() {
   // Voice Mode owns STT preparation after the shared Qwen warmup settles.
   // Do not let an inherited shell flag race Vosk/sherpa allocation with TTS.
   delete env.MONARCH_STT_PREWARM_ON_ACTIVATE;
+  if (runtimeLaunch.kind === 'source-bundle' || runtimeLaunch.kind === 'bundle') {
+    // Node keys compiled code by source content. Installed caches belong with
+    // the payload on E:/D:, rather than the user profile on the system disk.
+    env.NODE_COMPILE_CACHE = path.join(configuredPayloadRoot || desktopRuntimeRoot,
+      'development', 'node-compile-cache');
+  }
   const outPath = path.join(desktopLogsRoot, `electron-server-${port}.out.log`);
   const errPath = path.join(desktopLogsRoot, `electron-server-${port}.err.log`);
+  // Appended on every start and never rotated, these logs only grew (the dev
+  // ones reached megabytes in weeks). One previous generation is kept.
+  await rotateRuntimeLog(outPath);
+  await rotateRuntimeLog(errPath);
   const out = await import('node:fs').then((fs) => fs.createWriteStream(outPath, { flags: 'a' }));
   const err = await import('node:fs').then((fs) => fs.createWriteStream(errPath, { flags: 'a' }));
   out.write(`[desktop] Runtime entry: ${runtimeLaunch.kind} ${runtimeLaunch.entryPath}\n`);
@@ -1890,25 +2862,33 @@ async function startRuntime() {
   try {
     launchedProcess = spawn(nodePath, [...runtimeLaunch.args, 'serve', '--port', String(port)], {
       cwd: workspaceRoot,
-      env,
+      env: { ...env, MONARCH_PARENT_LIFELINE: 'stdin' },
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
+    // The lifeline is never written to; only its closing matters.
+    launchedProcess.stdin.on('error', () => undefined);
   } catch (error) {
+    if (!preserveModelHostOnFailure) await stopAstraMaxModelServer();
     const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'spawn-error';
     throw new Error(`Runtime spawn failed (${code}) using ${nodePath} and ${runtimeLaunch.kind} entry ${runtimeLaunch.entryPath}.`);
   }
   serverProcess = launchedProcess;
+  markDesktopStartup('runtime-process-spawned');
   launchedProcess.stdout.pipe(out);
   launchedProcess.stderr.pipe(err);
   launchedProcess.once('error', (error) => {
     spawnError = error;
   });
   launchedProcess.once('exit', (code, signal) => {
-    if (!shuttingDown && !smokeMode && runtimeReady) {
-      void showFatalError(new Error(`Monarch runtime exited (${code ?? signal ?? 'unknown'}).`));
-      app.quit();
-    }
+    if (serverProcess !== launchedProcess || shuttingDown || smokeMode || !runtimeReady) return;
+    runtimeReady = false;
+    serverProcess = null;
+    const failure = new Error(`Monarch runtime exited (${code ?? signal ?? 'unknown'}).`);
+    // One runtime fault (live: an EPERM on a state file) used to close the
+    // whole application. Restart it under the same bounded budget the Astra
+    // pilot uses; only repeated faults end the app.
+    void recoverRuntime(port, failure);
   });
 
   const url = `http://127.0.0.1:${port}`;
@@ -1932,10 +2912,79 @@ async function startRuntime() {
       timeoutMs: 60_000,
     });
     runtimeReady = true;
+    markDesktopStartup('runtime-health-ready');
     return url;
   } catch (error) {
+    if (!preserveModelHostOnFailure) await stopAstraMaxModelServer();
     if (serverProcess === launchedProcess) stopRuntime();
     throw error;
+  }
+}
+
+/** Restart a runtime that exited until it stays up; only the person closes
+ * Monarch (see runtime-recovery-policy.mjs for why it no longer gives up). */
+async function recoverRuntime(port, originalFailure) {
+  if (runtimeRecoveryPromise || shuttingDown || quitRequested) return runtimeRecoveryPromise;
+  runtimeRecoveryPromise = (async () => {
+    let failure = originalFailure;
+    while (!shuttingDown && !quitRequested) {
+      const delayMs = runtimeRecovery.nextDelay();
+      console.error(JSON.stringify({ diagnostic: 'runtime-recovery', attempt: runtimeRecovery.attempts, delayMs,
+        cause: String(failure.message).slice(0, 120) }));
+      await sleep(delayMs);
+      if (shuttingDown || quitRequested) return;
+      try {
+        const recoveredUrl = await startRuntime({ requestedPort: port, preserveModelHostOnFailure: true });
+        if (runtimeUrl && recoveredUrl !== runtimeUrl) {
+          // The window and its session belong to the old origin; a runtime on
+          // another port would be unreachable and would hold its port forever.
+          stopRuntime();
+          throw Error('runtime-recovery-origin-changed');
+        }
+        runtimeUrl = recoveredUrl;
+        runtimeRecovery.healthy();
+        if (astraRuntimePilotMode) reloadLinkedAstraPilot();
+        else reloadMainWindowAfterRecovery();
+        return;
+      } catch (error) {
+        failure = error instanceof Error ? error : new Error(String(error));
+      }
+    }
+  })().finally(() => { runtimeRecoveryPromise = null; });
+  return runtimeRecoveryPromise;
+}
+
+/** The page talks to the runtime it was loaded from; after a restart on the
+ * same origin a reload resubscribes it. Conversations and Turns are durable
+ * server-side, so nothing the person saw as finished is lost. */
+function reloadMainWindowAfterRecovery() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  try {
+    if (new URL(mainWindow.webContents.getURL()).origin === runtimeUrl) mainWindow.webContents.reload();
+  } catch {
+    // A window not showing the runtime has nothing to resubscribe.
+  }
+}
+
+function reloadLinkedAstraPilot() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  try {
+    const current = new URL(mainWindow.webContents.getURL());
+    if (current.origin !== runtimeUrl || !(current.searchParams.has('astraTurnId')
+      || current.searchParams.has('astraPendingRequestId'))) return;
+    mainWindow.webContents.reload();
+  } catch {
+    // The renderer can still use its exact retained request manually.
+  }
+}
+
+const RUNTIME_LOG_ROTATE_BYTES = 8 * 1024 * 1024;
+async function rotateRuntimeLog(filePath) {
+  try {
+    const info = await import('node:fs/promises').then((fs) => fs.stat(filePath));
+    if (info.size > RUNTIME_LOG_ROTATE_BYTES) await renameWithRetry(filePath, filePath + '.1');
+  } catch {
+    // Missing or locked: keep appending; the next start tries again.
   }
 }
 
@@ -1954,6 +3003,21 @@ function stopRuntime() {
   }
 }
 
+/** Closing the lifeline lets the server stop its application (task lease,
+ * stores, model hosts) the way SIGTERM would elsewhere; kill() on Windows is
+ * TerminateProcess and skipped all of that. Bounded: a server that does not
+ * exit in time is still killed. */
+async function stopRuntimeGracefully(timeoutMs = 8_000) {
+  const child = serverProcess;
+  if (!child || child.killed || child.exitCode !== null || child.signalCode !== null) { stopRuntime(); return; }
+  runtimeReady = false;
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  try { child.stdin?.end(); } catch { /* fall through to kill */ }
+  const timer = new Promise((resolve) => setTimeout(resolve, timeoutMs));
+  await Promise.race([exited, timer]);
+  if (serverProcess === child) stopRuntime();
+}
+
 function readJsonFileIfPresent(filePath) {
   try {
     const value = JSON.parse(readFileSync(filePath, 'utf8'));
@@ -1966,12 +3030,14 @@ function readJsonFileIfPresent(filePath) {
 function readSecurityStartupState(health) {
   const records = Array.isArray(health?.loadRecords) ? health.loadRecords : [];
   const security = records.find((record) => record?.moduleId === 'security');
-  if (security?.status === 'loaded') return 'active';
+  // Module loading proves availability, not the health of the separate protector.
+  if (security?.status === 'loaded') return 'available';
   return 'invalid';
 }
 
 async function shutdownDesktop() {
   shuttingDown = true;
+  reminderDelivery.stop();
   globalShortcut.unregister('Control+Alt+Escape');
   speechOutput.dispose();
   await speechLogQueue.catch(() => undefined);
@@ -1984,9 +3050,27 @@ async function shutdownDesktop() {
   if (!safeEntryQaMode && !safeLaunchMode && !updateDemoMode && !desktopAcceptanceMode) {
     await stopOscarBackend().catch(() => undefined);
   }
-  stopRuntime();
+  await stopRuntimeGracefully();
+  await stopAstraMaxModelServer();
   await cleanupImageProviderDownloads();
   await cleanupDesktopRuntimeIsolation();
+}
+
+async function stopAstraMaxModelServer() {
+  await serviceIntegrationRegistry.closeAll();
+  telegramSecretBroker.closeCloud();
+  const telegram = telegramSecretServer;
+  telegramSecretServer = null;
+  await telegram?.close().catch(() => undefined);
+  const prepared = astraMaxNativePreparedServer;
+  astraMaxNativePreparedServer = null;
+  await prepared?.close().catch(() => undefined);
+  const native = astraMaxNativeServer;
+  astraMaxNativeServer = null;
+  await native?.close().catch(() => undefined);
+  const active = astraMaxModelServer;
+  astraMaxModelServer = null;
+  await active?.close().catch(() => undefined);
 }
 
 function registerComputerUseEmergencyShortcut() {
@@ -2055,29 +3139,52 @@ async function cleanupDesktopRuntimeIsolation() {
 }
 
 async function stopOscarBackend() {
-  const tokenPath = path.join(configuredSecretsRoot, 'oscar_token.txt');
-  if (!existsSync(tokenPath)) {
-    return;
-  }
-  const token = (await readFile(tokenPath, 'utf8')).trim();
+  // Only a backend this Desktop started knows the key; nothing to stop otherwise.
+  const token = oscarApiKey?.key;
   if (!token) {
     return;
   }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
+  const correlation = randomBytes(18).toString('base64url');
   try {
-    const response = await fetch('http://127.0.0.1:7861/api/backend/stop', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Oscar-Token': token,
-      },
-      body: '{}',
-      signal: controller.signal,
+    const readBinding = async (candidateToken) => {
+      const health = await fetch('http://127.0.0.1:7861/api/health', {
+        headers: { 'X-Oscar-Token': candidateToken }, signal: controller.signal,
+      });
+      if (!health.ok) throw new Error(`Oscar health returned HTTP ${health.status}.`);
+      const payload = await health.json();
+      if (payload?.authenticated !== true) return null;
+      const generation = payload?.lifecycle?.host_generation;
+      const pid = payload?.lifecycle?.process_id;
+      if (typeof generation !== 'string' || !generation.startsWith('backend_') || !Number.isSafeInteger(pid)) {
+        throw new Error('Oscar health returned an invalid host binding.');
+      }
+      return { generation, pid };
+    };
+    const binding = await readBinding(token);
+    if (!binding) throw new Error('Oscar shutdown token was rejected.');
+    const requestStop = (candidateToken, candidateBinding) => fetch('http://127.0.0.1:7861/api/backend/stop', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Oscar-Token': candidateToken,
+        // The backend binds a stop request to this one shutdown attempt. Do
+        // not reuse a value across hosts or expose it outside this request.
+        'X-Monarch-Stop-Correlation': correlation,
+        'X-Monarch-Expected-Host-Generation': candidateBinding.generation,
+        'X-Monarch-Expected-Pid': String(candidateBinding.pid) },
+      body: '{}', signal: controller.signal,
     });
+    const response = await requestStop(token, binding);
+    if (response.status === 401) throw new Error('Oscar shutdown token was rejected.');
     if (!response.ok && response.status !== 404) {
       throw new Error(`Oscar shutdown returned HTTP ${response.status}.`);
+    }
+    if (response.status === 404) return;
+    const receipt = await response.json().catch(() => null);
+    if (!receipt || receipt.ok !== true || receipt.stopping !== true
+      || receipt.correlation !== correlation || receipt.pid !== binding.pid
+      || receipt.hostGeneration !== binding.generation || receipt.staleProcess !== false) {
+      throw new Error('Oscar shutdown returned an invalid stop receipt.');
     }
   } finally {
     clearTimeout(timeout);

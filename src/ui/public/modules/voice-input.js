@@ -9,6 +9,12 @@ const MIN_RECORDING_MS = 500;
 const MAX_RECORDING_MS = 10 * 60_000;
 const RECORDING_CHUNK_MS = 500;
 const MAX_RECORDING_BYTES = 32 * 1024 * 1024;
+const VOICE_CAPTURE_CONSTRAINTS = Object.freeze({
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+  channelCount: 1,
+});
 const FALLBACK_RECORDING_MIME_TYPES = [
   'audio/webm;codecs=opus',
   'audio/webm',
@@ -119,6 +125,7 @@ export function attachVoiceInput(options) {
   const createPcmStream = options.createPcmStream || createVoicePcmStream;
   const encodeAudio = options.encodeAudio || blobToBase64;
   const getInputPreferences = options.getInputPreferences || readVoiceInputPreferences;
+  const updateMascot = options.silentUi === true ? () => {} : setVoiceMascot;
   let activeSession = null;
   let sessionCounter = 0;
   let destroyed = false;
@@ -128,6 +135,7 @@ export function attachVoiceInput(options) {
   const controller = {
     start,
     stop: () => stop(true, 'programmatic'),
+    resetSegment,
     cancel,
     cancelSilently: () => cancelActiveSession({ showFeedback: false }),
     isListening: () => Boolean(activeSession),
@@ -224,7 +232,9 @@ export function attachVoiceInput(options) {
 
   async function startAudioRecording(session) {
     try {
-      const stream = await win.navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await win.navigator.mediaDevices.getUserMedia({
+        audio: VOICE_CAPTURE_CONSTRAINTS,
+      });
       if (!isActiveSession(session)) {
         stopMediaStream(stream);
         return;
@@ -238,11 +248,12 @@ export function attachVoiceInput(options) {
       session.recorder = recorder;
       recorder.ondataavailable = (event) => {
         if (!isActiveSession(session)) return;
-        if (event.data && event.data.size > 0) {
+        if (options.retainFallbackAudio !== false && event.data && event.data.size > 0) {
           session.chunks.push(event.data);
         }
       };
       recorder.onerror = (event) => {
+        notifyVoiceError(options, event, 'media-recorder');
         void cancelPcmSession(session);
         finishSession(session, false, readVoiceError(event), 'error');
       };
@@ -263,13 +274,14 @@ export function attachVoiceInput(options) {
         state: 'listening',
         cancelVisible: true,
       });
-      setVoiceMascot('listening', 'Слушаю голосовой ввод');
+      updateMascot('listening', 'Слушаю голосовой ввод');
       if (options.createPcmStream || canUseDirectVoicePcm(win)) {
         session.pcmStartPromise = Promise.resolve(createPcmStream({
           windowObject: win,
           mediaStream: stream,
           language: readSpeechLanguage(win),
           onTelemetry: options.onPcmTelemetry,
+          onPartial: options.onPartialTranscript,
         })).then((pcmStream) => {
           if (!isActiveSession(session)) {
             void pcmStream?.cancel?.();
@@ -277,16 +289,26 @@ export function attachVoiceInput(options) {
           }
           session.pcmStream = pcmStream;
           return pcmStream;
-        }).catch(() => null);
+        }).catch((error) => {
+          notifyVoiceError(options, error, 'pcm-stream-start');
+          return null;
+        });
       }
       recorder.start(RECORDING_CHUNK_MS);
-      session.maxTimer = setTimeout(() => {
-        if (isActiveSession(session) && session.state === 'recording') {
-          stop(true, 'safety-timeout');
-        }
-      }, MAX_RECORDING_MS);
+      if (options.maxRecordingMs !== 0) {
+        const configuredMaxMs = Number(options.maxRecordingMs);
+        const maxRecordingMs = Number.isFinite(configuredMaxMs)
+          ? Math.max(MIN_RECORDING_MS, Math.min(configuredMaxMs, MAX_RECORDING_MS))
+          : MAX_RECORDING_MS;
+        session.maxTimer = setTimeout(() => {
+          if (isActiveSession(session) && session.state === 'recording') {
+            stop(true, 'safety-timeout');
+          }
+        }, maxRecordingMs);
+      }
       syncAvailability();
     } catch (error) {
+      notifyVoiceError(options, error, 'capture-start');
       if (isActiveSession(session)) {
         finishSession(session, false, readVoiceError(error), 'error');
       }
@@ -307,6 +329,20 @@ export function attachVoiceInput(options) {
 
   function cancel() {
     cancelActiveSession({ showFeedback: true });
+  }
+
+  async function resetSegment() {
+    const session = activeSession;
+    if (!session || session.state !== 'recording') return false;
+    session.chunks = [];
+    session.startedAt = Date.now();
+    const pcmStream = session.pcmStream || (session.pcmStartPromise
+      ? await session.pcmStartPromise.catch(() => null)
+      : null);
+    if (!isActiveSession(session) || session.state !== 'recording') return false;
+    if (typeof pcmStream?.reset !== 'function') return false;
+    await pcmStream.reset();
+    return true;
   }
 
   function destroy() {
@@ -468,7 +504,7 @@ export function attachVoiceInput(options) {
       state: 'recognizing',
       cancelVisible: true,
     });
-    setVoiceMascot('listening', 'Распознаю запись локально');
+    updateMascot('listening', 'Распознаю запись локально');
     try {
       const audioBase64 = await encodeAudio(blob);
       if (!isActiveSession(session)) return;
@@ -483,6 +519,7 @@ export function attachVoiceInput(options) {
       if (!isActiveSession(session)) return;
       commitRecognizedTranscript(session, transcript, language);
     } catch (error) {
+      notifyVoiceError(options, error, 'transcription-final');
       if (isActiveSession(session)) {
         finishSession(session, false, formatVoiceInputError(error), 'error');
       }
@@ -555,11 +592,11 @@ export function attachVoiceInput(options) {
       cancelVisible: false,
     });
     if (state === 'done') {
-      setVoiceMascot('success', 'Голос распознан локально');
+      updateMascot('success', 'Голос распознан локально');
     } else if (state === 'error') {
-      setVoiceMascot('error', message || 'Голос не распознан');
+      updateMascot('error', message || 'Голос не распознан');
     } else {
-      setVoiceMascot('idle', 'Готов к локальной работе');
+      updateMascot('idle', 'Готов к локальной работе');
     }
     syncAvailability();
   }
@@ -590,7 +627,7 @@ export function attachVoiceInput(options) {
         hideAfter: true,
         cancelVisible: false,
       });
-      setVoiceMascot('idle', 'Готов к локальной работе');
+      updateMascot('idle', 'Готов к локальной работе');
     } else {
       showStatus({ hidden: true, cancelVisible: false });
     }
@@ -805,6 +842,18 @@ function readVoiceError(error) {
   if (/no-speech/.test(code)) return 'Речь не распознана';
   if (/network/.test(code)) return 'Локальный голосовой ввод недоступен';
   return 'Голосовой ввод остановлен';
+}
+
+function notifyVoiceError(options, error, stage) {
+  try {
+    options.onError?.({
+      stage,
+      code: String(error?.error || error?.name || error?.code || '').trim().slice(0, 80),
+      message: String(error?.message || error || '').trim().replace(/\s+/g, ' ').slice(0, 240),
+    });
+  } catch {
+    // Diagnostics must not change capture semantics.
+  }
 }
 
 export function formatVoiceInputError(error) {

@@ -3,7 +3,7 @@ import binascii
 import json
 import re
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -11,7 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 Role = Literal["system", "user", "assistant"]
 MAX_CHAT_MESSAGE_CHARS = 20_000
 MAX_CHAT_MESSAGES = 64
-MAX_CAPABILITY_SCHEMA_CHARS = 8192
 MAX_RESOURCE_ID_CHARS = 64
 MAX_ROUTE_HINT_CHARS = 160
 MAX_SEARCH_QUERY_CHARS = 2048
@@ -68,6 +67,11 @@ class ChatSource(BaseModel):
     url: str | None = None
     excerpt: str
     score: float | None = None
+    origin: Literal["engine", "wikipedia", "saved"] | None = None
+    # Publication date of a web page (YYYY-MM-DD) when the page states one.
+    published: str | None = Field(default=None, max_length=10)
+    # When a saved page (origin "saved") was read, YYYY-MM-DD.
+    saved_at: str | None = Field(default=None, max_length=10)
 
 
 class ChatRouteHint(BaseModel):
@@ -105,44 +109,6 @@ class ChatSkillContext(BaseModel):
         return value.strip()
 
 
-class ChatCapabilityContext(BaseModel):
-    id: str = Field(min_length=1, max_length=160)
-    module: str = Field(min_length=1, max_length=80)
-    system: str = Field(default="Monarch System", max_length=120)
-    title: str = Field(min_length=1, max_length=200)
-    description: str = Field(default="", max_length=800)
-    risk: str = Field(default="read", max_length=40)
-    inputSchema: dict[str, Any] | None = None
-
-    @field_validator("id", "module", "system", "title", "risk")
-    @classmethod
-    def validate_required_text(cls, value: str) -> str:
-        return require_non_blank_text(value)
-
-    @field_validator("description")
-    @classmethod
-    def trim_context_text(cls, value: str) -> str:
-        return value.strip()
-
-    @field_validator("inputSchema")
-    @classmethod
-    def validate_input_schema(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        if value is None:
-            return None
-        try:
-            encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("inputSchema must be JSON serializable") from exc
-        if len(encoded) > MAX_CAPABILITY_SCHEMA_CHARS:
-            raise ValueError("inputSchema exceeds size limit")
-        return value
-
-
-class ChatAccessContext(BaseModel):
-    sandboxMode: Literal["read-only", "workspace-write", "danger-full-access"] = "workspace-write"
-    approvalPolicy: Literal["on-request", "never"] = "on-request"
-
-
 class ChatDevModeV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -157,6 +123,8 @@ class ChatDevModeV1(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     messages: list[ChatMessage] = Field(min_length=1, max_length=MAX_CHAT_MESSAGES)
     conversation_id: str | None = Field(default=None, max_length=MAX_RESOURCE_ID_CHARS)
     # Incognito conversations retain only this in-flight request. They may use
@@ -175,8 +143,7 @@ class ChatRequest(BaseModel):
     context_profile: Literal["full", "compact-social"] = "full"
     # Ordinary chat is answer-only. System effects are selected and verified
     # by the TypeScript Agent Runtime, never by this legacy chat flag.
-    allow_tools: bool = False
-    execution_authority: Literal["none", "agent-controller"] = "none"
+    execution_authority: Literal["none"] = "none"
     persistence_owner: Literal["backend", "coordinator"] = "backend"
     turn_id: str | None = Field(default=None, max_length=MAX_RESOURCE_ID_CHARS)
     client_message_id: str | None = Field(default=None, max_length=MAX_RESOURCE_ID_CHARS)
@@ -189,8 +156,6 @@ class ChatRequest(BaseModel):
     deep_thinking_consent: Literal["allow", "deny"] | None = None
     route: ChatRouteHint | None = None
     skills: list[ChatSkillContext] = Field(default_factory=list, max_length=3)
-    capabilities: list[ChatCapabilityContext] = Field(default_factory=list, max_length=80)
-    access: ChatAccessContext | None = None
     inference_lane: Literal["interactive", "agent", "coder", "background"] = "interactive"
     # Trusted internal policy supplied by the Desktop coordinator. It never
     # grants authority; every field can only remove context or capability.
@@ -200,8 +165,6 @@ class ChatRequest(BaseModel):
     def validate_user_message(self) -> "ChatRequest":
         if not any(message.role == "user" for message in self.messages):
             raise ValueError("messages must include a user message")
-        if self.execution_authority == "none" and (self.allow_tools or self.capabilities or self.access):
-            raise ValueError("answer-only chat cannot receive tools, capabilities, or an access profile")
         if self.persistence_owner == "coordinator" and not self.turn_id:
             raise ValueError("coordinator-owned chat requires turn_id")
         return self
@@ -228,12 +191,11 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     ok: bool = True
     answer: str
-    outcome: Literal["answered", "answered:source-grounded", "action-proposed"] = "answered"
+    outcome: Literal["answered", "answered:source-grounded"] = "answered"
     conversation_id: str | None = None
     sources: list[ChatSource] = Field(default_factory=list)
     tool_results: list["WorkspaceToolResult"] = Field(default_factory=list)
-    action_proposals: list[dict[str, Any]] = Field(default_factory=list)
-    usage: dict[str, int | bool | str] = Field(default_factory=dict)
+    usage: dict[str, int | float | bool | str | dict[str, float]] = Field(default_factory=dict)
 
 
 class ChatRoutePreview(BaseModel):
@@ -297,6 +259,7 @@ class ConversationCreate(BaseModel):
 class ConversationUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=160)
     archived: bool | None = None
+    local_only: bool | None = None
 
 
 class ConversationMessageUpdate(BaseModel):
@@ -308,9 +271,17 @@ class ConversationMessageUpdate(BaseModel):
         return require_non_blank_text(value)
 
 
+class ConversationResearchStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["plan", "search", "read", "verify", "write"]
+    detail: str = Field(min_length=1, max_length=240)
+
+
 class ConversationMessageCreate(BaseModel):
     role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=20000)
+    content_mode: Literal["legacy", "exact"] = "legacy"
+    content: str = Field(max_length=20000)
     token_count: int | None = Field(default=None, ge=0)
     elapsed_ms: int | None = Field(default=None, ge=0)
     model_tier: str | None = Field(default=None, max_length=80)
@@ -320,17 +291,34 @@ class ConversationMessageCreate(BaseModel):
     provenance: dict[str, Any] | None = None
     outcome: str | None = Field(default=None, max_length=80)
     integrity_warning: str | None = Field(default=None, max_length=1000)
+    # MAX did not answer and the local model did; the value is why (failure code).
+    max_fallback_code: str | None = Field(default=None, max_length=120)
+    # The steps of the web research behind an answer, shown again after a reload.
+    research_steps: list[ConversationResearchStep] = Field(default_factory=list, max_length=40)
     create_conversation_if_missing: bool = True
     required_previous_message_id: str | None = Field(default=None, max_length=MAX_RESOURCE_ID_CHARS)
+    causal_parent_id: str | None = Field(default=None, max_length=MAX_RESOURCE_ID_CHARS)
     attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
-    sources: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
+    # As many as a Turn may carry (TS displaySources/evidence: 32). With 12, a
+    # deep-research answer with more sources was refused (422) and never saved.
+    sources: list[dict[str, Any]] = Field(default_factory=list, max_length=32)
 
-    @field_validator("content")
-    @classmethod
-    def validate_content(cls, value: str) -> str:
-        return require_non_blank_text(value)
+    @model_validator(mode="after")
+    def validate_content(self):
+        if self.causal_parent_id is not None and (self.role != "assistant" or self.content_mode != "exact"
+                or self.required_previous_message_id is not None or self.causal_parent_id == self.client_message_id):
+            raise ValueError("causal parent requires an exact assistant reply with no latest-row prerequisite")
+        if self.content_mode == "exact":
+            if not self.client_message_id or not self.turn_id:
+                raise ValueError("exact content requires client_message_id and turn_id")
+            # Empty/whitespace literal replies are meaningful. Reject malformed
+            # Unicode rather than storing/replaying different UTF-8 bytes.
+            self.content.encode("utf-8", errors="strict")
+        else:
+            self.content = require_non_blank_text(self.content)
+        return self
 
-    @field_validator("client_message_id", "turn_id", "task_id", "required_previous_message_id")
+    @field_validator("client_message_id", "turn_id", "task_id", "required_previous_message_id", "causal_parent_id")
     @classmethod
     def validate_binding_id(cls, value: str | None) -> str | None:
         if value is None:
@@ -420,6 +408,7 @@ SettingsCommand = Literal[
     "personality.profile.select",
     "personality.personalization.set",
     "personality.scope.copy",
+    "personality.style.set",
     "voice.update",
     "voice.preset.create",
     "voice.preset.update",
@@ -514,12 +503,22 @@ class MemoryEpisodeIndexRequestV1(BaseModel):
         return self
 
 
+class MemoryContextValidityRequestV1(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    schema_version: Literal[1] = Field(alias="schemaVersion")
+    scope: SettingsScopeV1
+
+
 class MemoryContextRequestV1(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     schema_version: Literal[1] = Field(alias="schemaVersion")
     query: str = Field(min_length=1, max_length=MAX_SEARCH_QUERY_CHARS)
     scope: SettingsScopeV1
+    # The chat being answered already carries its own turns as history.
+    exclude_conversation_id: str | None = Field(
+        default=None, alias="excludeConversationId", min_length=1, max_length=256,
+    )
 
     @field_validator("query")
     @classmethod
@@ -541,6 +540,13 @@ class SearchRequest(BaseModel):
         return cleaned
 
 
+class SearchContextRequest(SearchRequest):
+    deep: bool = False
+    # Queries the answer model wrote for this request; `query` stays the
+    # request itself for ranking and for the fallback when none were planned.
+    queries: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=3)
+
+
 class SearchResult(BaseModel):
     title: str
     url: str
@@ -549,6 +555,12 @@ class SearchResult(BaseModel):
     chars: int = 0
     ingestion_status: Literal["pending", "page", "snippet", "blocked", "failed", "skipped"] = "pending"
     status_detail: str = ""
+    # Publication date (YYYY-MM-DD) when the page or the news index states one.
+    published: str = ""
+    # Where it came from: a search engine, Wikipedia when the engines refused,
+    # or a page read earlier (with the date it was saved).
+    origin: Literal["engine", "wikipedia", "saved"] = "engine"
+    saved_at: str = ""
 
 
 ToolKind = Literal["workspace", "memory", "environment"]

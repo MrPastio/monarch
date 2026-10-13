@@ -19,7 +19,7 @@ export function appendUnhydratedLocalAssistant(existingMessages, hydratedMessage
   }
 
   const localTurnId = String(localAssistant.turnId || '').trim();
-  const alreadyHydrated = hydrated.some((message) => sameOscarMessage(localAssistant, message));
+  const alreadyHydrated = hydrated.some((message) => sameOscarAssistantMessage(localAssistant, message));
   if (alreadyHydrated) return hydrated;
   if (hydrated.length === 0) return existing;
 
@@ -27,7 +27,10 @@ export function appendUnhydratedLocalAssistant(existingMessages, hydratedMessage
   const localUser = localUserIndex >= 0 ? existing[localUserIndex] : null;
   if (!localUser) return hydrated;
   const hydratedUser = [...hydrated].reverse().find((message) => message.role === 'user');
-  const matchingUser = hydrated.some((message) => sameOscarMessage(localUser, message))
+  // A reply to an agent question shares its Turn with the original request,
+  // so a Turn match would mistake the request for the still-unpersisted reply
+  // and drop that reply; the reply is found by its own message id only.
+  const matchingUser = hydrated.some((message) => sameOscarMessageId(localUser, message))
     || (!localTurnId
       && String(localUser.content || '').trim()
       && String(localUser.content || '').trim() === String(hydratedUser?.content || '').trim());
@@ -113,6 +116,31 @@ function sameOscarMessage(left, right) {
   const leftTurnId = String(left.turnId || '').trim();
   const rightTurnId = String(right.turnId || '').trim();
   return Boolean(leftTurnId && leftTurnId === rightTurnId);
+}
+
+function sameOscarMessageId(left, right) {
+  if (!left || !right || left.role !== right.role) return false;
+  const rightIds = new Set(stableOscarMessageIds(right));
+  return stableOscarMessageIds(left).some((id) => rightIds.has(id));
+}
+
+function sameOscarAssistantMessage(left, right) {
+  if (left?.role !== 'assistant' || right?.role !== 'assistant') return false;
+  const leftIds = stableOscarMessageIds(left);
+  const rightIds = new Set(stableOscarMessageIds(right));
+  if (leftIds.some((id) => rightIds.has(id))) return true;
+
+  const leftTurnId = String(left.turnId || '').trim();
+  const rightTurnId = String(right.turnId || '').trim();
+  if (!leftTurnId || leftTurnId !== rightTurnId) return false;
+
+  const leftContent = String(left.content || '').trim();
+  const rightContent = String(right.content || '').trim();
+  if (!leftContent || leftContent !== rightContent) return false;
+
+  const leftOutcome = String(left.outcome || '').trim().toLowerCase();
+  const rightOutcome = String(right.outcome || '').trim().toLowerCase();
+  return !leftOutcome || !rightOutcome || leftOutcome === rightOutcome;
 }
 
 function stableOscarMessageIds(message) {

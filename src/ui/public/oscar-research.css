@@ -1,0 +1,261 @@
+/* Oscar research in the chat: the steps a search took and the pages it read.
+   One <details> holds the steps — open while Oscar searches, folded into its
+   own summary line when the answer is done. Source cards rise once from under
+   the answer when they first appear; DOM sync keeps nodes, so a re-render
+   never replays an entrance. No glow, no blinking; reduced motion is honoured. */
+
+.oscar-research-trace {
+  margin: 2px 0 12px;
+  border: 1px solid var(--line, rgba(255, 255, 255, .1));
+  border-radius: 12px;
+  background: var(--surface-soft, rgba(255, 255, 255, .03));
+  interpolate-size: allow-keywords;
+}
+.oscar-research-trace > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 8px 12px;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 12px;
+  color: var(--text-soft, rgba(255, 255, 255, .72));
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.oscar-research-trace > summary::-webkit-details-marker { display: none; }
+.oscar-research-trace > summary::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  margin: 0 2px 0 1px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform .2s cubic-bezier(.16, 1, .3, 1);
+}
+.oscar-research-trace[open] > summary::before { transform: rotate(45deg); }
+.oscar-research-trace > summary:focus-visible { outline: 2px solid var(--monarch-focus, #f2ad27); outline-offset: 2px; }
+.oscar-research-trace-title { color: var(--text, #f0ece4); font-weight: 600; }
+.oscar-research-facts { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted, rgba(255, 255, 255, .56)); }
+.oscar-research-facts:empty { display: none; }
+.oscar-research-fact b { color: var(--text, #f0ece4); font-weight: 600; }
+
+/* The steps unfold out of the summary and fold back into it. */
+.oscar-research-trace::details-content {
+  block-size: 0;
+  overflow: clip;
+  transition: block-size .26s cubic-bezier(.16, 1, .3, 1), content-visibility .26s allow-discrete;
+}
+.oscar-research-trace[open]::details-content { block-size: auto; }
+
+.oscar-research-steps {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 2px 12px 11px;
+  list-style: none;
+}
+.oscar-research-steps li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 10px;
+  padding-left: 14px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  animation: oscar-research-step-in .22s cubic-bezier(.16, 1, .3, 1) both;
+}
+.oscar-research-steps li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: .55em;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line-strong, rgba(255, 255, 255, .24));
+}
+.oscar-research-steps li[data-step-kind="verify"]::before { background: var(--theme-amber-ink, #f2ad27); }
+.oscar-research-steps li[aria-current="step"]::before { background: var(--accent, #f2ad27); }
+.oscar-research-step-label { color: var(--muted, rgba(255, 255, 255, .56)); }
+.oscar-research-step-detail { min-width: 0; color: var(--text-soft, rgba(255, 255, 255, .78)); overflow-wrap: anywhere; }
+
+@keyframes oscar-research-step-in {
+  from { opacity: 0; transform: translateY(4px); }
+}
+
+/* Sources: numbered like the answer's [n], opening the page in the browser. */
+.oscar-sources { display: grid; gap: 8px; margin-top: 14px; }
+.oscar-sources-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 216px), 1fr));
+  gap: 8px;
+}
+.oscar-source-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line, rgba(255, 255, 255, .1));
+  border-radius: 12px;
+  background: var(--surface-soft, rgba(255, 255, 255, .03));
+  color: inherit;
+  text-decoration: none;
+  animation: oscar-source-in .26s cubic-bezier(.16, 1, .3, 1) both;
+  transition: border-color .16s ease, background-color .16s ease, transform .16s ease;
+}
+.oscar-sources-grid > :nth-child(2) { animation-delay: 30ms; }
+.oscar-sources-grid > :nth-child(3) { animation-delay: 60ms; }
+.oscar-sources-grid > :nth-child(4) { animation-delay: 90ms; }
+.oscar-sources-grid > :nth-child(5) { animation-delay: 120ms; }
+.oscar-sources-grid > :nth-child(6) { animation-delay: 150ms; }
+a.oscar-source-card:hover {
+  border-color: var(--accent-line, rgba(242, 173, 39, .42));
+  background: var(--surface-hover, rgba(255, 255, 255, .06));
+  transform: translateY(-1px);
+}
+a.oscar-source-card:focus-visible { outline: 2px solid var(--monarch-focus, #f2ad27); outline-offset: 2px; }
+.oscar-source-n {
+  display: grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 6px;
+  background: rgba(var(--theme-amber-rgb, 242, 173, 39), .13);
+  color: var(--theme-amber-ink, #f2ad27);
+  font: 600 11px/1 var(--mono, ui-monospace, monospace);
+}
+.oscar-source-body { display: grid; gap: 3px; min-width: 0; }
+.oscar-source-title {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text, #f0ece4);
+  font-size: 13px;
+  line-height: 1.35;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+}
+.oscar-source-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 0;
+  min-width: 0;
+  color: var(--muted, rgba(255, 255, 255, .56));
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+.oscar-source-meta > * + *::before { content: '·'; margin: 0 6px; opacity: .6; }
+.oscar-source-host { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
+.oscar-source-origin { color: var(--theme-amber-ink, #f2ad27); }
+
+@keyframes oscar-source-in {
+  from { opacity: 0; transform: translateY(5px); }
+}
+
+.oscar-sources-more { interpolate-size: allow-keywords; }
+.oscar-sources-more > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border: 1px solid var(--line, rgba(255, 255, 255, .1));
+  border-radius: 999px;
+  list-style: none;
+  cursor: pointer;
+  color: var(--text-soft, rgba(255, 255, 255, .72));
+  font-size: 12px;
+}
+.oscar-sources-more > summary::-webkit-details-marker { display: none; }
+.oscar-sources-more > summary:hover { border-color: var(--line-strong, rgba(255, 255, 255, .24)); color: var(--text, #f0ece4); }
+.oscar-sources-more > summary:focus-visible { outline: 2px solid var(--monarch-focus, #f2ad27); outline-offset: 2px; }
+.oscar-sources-more[open] > summary { margin-bottom: 8px; }
+.oscar-sources-more::details-content {
+  block-size: 0;
+  overflow: clip;
+  transition: block-size .26s cubic-bezier(.16, 1, .3, 1), content-visibility .26s allow-discrete;
+}
+.oscar-sources-more[open]::details-content { block-size: auto; }
+/* "Учтена память" sits with the sources and follows the same theme tokens
+   (the older chip style read --surface-inset/--border, unset in light themes). */
+.oscar-sources > .source-chip.is-memory {
+  justify-self: start;
+  padding: 5px 11px;
+  border: 1px solid var(--accent-line, rgba(242, 173, 39, .42));
+  border-radius: 999px;
+  background: var(--accent-soft, rgba(242, 173, 39, .1));
+  color: var(--text, #f0ece4);
+  box-shadow: none;
+  backdrop-filter: none;
+  font-size: 12px;
+}
+.oscar-sources > .source-chip.is-memory:hover { background: var(--surface-hover, rgba(255, 255, 255, .06)); }
+
+/* [n] in the answer: a small numbered link to the same page. */
+.message-text a.oscar-cite {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  margin: 0 1px;
+  padding: 0 4px;
+  border-radius: 5px;
+  background: rgba(var(--theme-amber-rgb, 242, 173, 39), .13);
+  color: var(--theme-amber-ink, #f2ad27);
+  font: 600 10.5px/1 var(--mono, ui-monospace, monospace);
+  text-decoration: none;
+  vertical-align: .14em;
+  transition: background-color .16s ease;
+}
+.message-text a.oscar-cite:hover { background: rgba(var(--theme-amber-rgb, 242, 173, 39), .26); }
+.message-text a.oscar-cite:focus-visible { outline: 2px solid var(--monarch-focus, #f2ad27); outline-offset: 1px; }
+
+@media (max-width: 560px) {
+  .oscar-research-steps li { grid-template-columns: minmax(0, 1fr); gap: 1px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oscar-research-steps li,
+  .oscar-source-card { animation: none; }
+  .oscar-source-card,
+  .oscar-research-trace > summary::before { transition: none; }
+  a.oscar-source-card:hover { transform: none; }
+  .oscar-research-trace::details-content,
+  .oscar-sources-more::details-content { transition: none; }
+}
+
+/* PaperPixel: ink on paper, hairline strokes, no tint. */
+html:root[data-design="pp"] {
+  & :is(.oscar-research-trace, .oscar-source-card, .oscar-sources-more > summary) {
+    border: var(--pp-stroke) solid var(--pp-line-soft);
+    background: var(--pp-paper);
+  }
+  & .oscar-research-trace { border-radius: var(--pp-r-md); }
+  & .oscar-research-trace > summary { border-radius: var(--pp-r-md); color: var(--pp-ink-2); }
+  & :is(.oscar-research-trace-title, .oscar-research-fact b, .oscar-source-title) { color: var(--pp-ink); }
+  & :is(.oscar-research-facts, .oscar-research-step-label, .oscar-source-meta) { color: var(--pp-ink-muted); }
+  & .oscar-research-step-detail { color: var(--pp-ink-2); }
+  & .oscar-research-steps li::before { background: var(--pp-ink-faint); }
+  & .oscar-research-steps li:is([data-step-kind="verify"], [aria-current="step"])::before { background: var(--pp-ink); }
+  & .oscar-source-card { border-radius: var(--pp-r-sm); }
+  & a.oscar-source-card:hover { border-color: var(--pp-ink); background: var(--pp-paper); }
+  & .oscar-source-n { background: var(--pp-paper-2); color: var(--pp-ink); font-family: var(--pp-mono); }
+  & .oscar-source-origin { color: var(--pp-ink); }
+  & .oscar-sources-more > summary { color: var(--pp-ink-2); }
+  & .oscar-sources-more > summary:hover { border-color: var(--pp-ink); color: var(--pp-ink); }
+  & .oscar-sources > .source-chip.is-memory { border: var(--pp-stroke) solid var(--pp-line-soft); background: var(--pp-paper); color: var(--pp-ink-2); }
+  & .oscar-sources > .source-chip.is-memory:hover { border-color: var(--pp-ink); color: var(--pp-ink); }
+  & .message-text a.oscar-cite {
+    background: var(--pp-paper-2);
+    color: var(--pp-ink);
+    font-family: var(--pp-mono);
+    text-decoration: none;
+  }
+  & .message-text a.oscar-cite:hover { background: var(--pp-paper-3); }
+}

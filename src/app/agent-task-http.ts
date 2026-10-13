@@ -1,19 +1,22 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createHash, randomUUID } from 'node:crypto';
 import type { MonarchApplication } from './application';
 import type { MonarchHttpPrincipal } from './http-server';
-import { normalizeAgentBudget } from '../agent/budget-manager';
 import type {
   AgentBudgetLimits,
   AgentExpectedOutput,
   AgentGoalConstraint,
   AgentSuccessCriterion,
-  AgentTaskCheckpoint,
-  AgentTaskEvent,
   AgentTaskSurface,
-} from '../agent/types';
+} from '../agent-protocol';
+import { normalizeAgentBudget } from '../agent-protocol';
+import type { AstraAuthenticatedHttpActor, AstraTaskHttpTask } from './astra-task-facade';
+import type { OscarTurnCheckpoint, OscarTurnV1 } from '../oscar-turn/types';
+import { isAstraAgentTaskSpecification, type AstraAgentTaskSpecification } from '../agent-v3/agent-task-contract';
+import { isExecutableMaxRole } from '../agent-v3/max-native-contract';
+import { isAstraLocalAgentModelChoice } from '../agent-v3/source-goal-contract';
 
 const MAX_AGENT_JSON_BODY_BYTES = 256 * 1024;
-const TERMINAL_EVENTS = new Set(['task.completed', 'task.failed', 'task.cancelled']);
 const AGENT_TASK_SURFACES = new Set(['desktop', 'telegram', 'voice', 'api', 'coder', 'system', 'smoke']);
 const AGENT_OUTPUT_KINDS = new Set(['answer', 'artifact', 'state-change', 'verification', 'other']);
 const AGENT_CONSTRAINT_KINDS = new Set(['safety', 'permission', 'scope', 'format', 'resource', 'other']);
@@ -35,67 +38,87 @@ export interface AgentTaskHttpContext {
   enforceMutation: () => void;
   enforceRead: () => void;
   principal: MonarchHttpPrincipal;
+  astraV3Enabled?: boolean;
+  authenticatedActor?: (source?: Extract<AstraAuthenticatedHttpActor['source'], 'desktop' | 'voice' | 'api' | 'coder'>) => AstraAuthenticatedHttpActor;
 }
 
 export async function handleAgentTaskHttpRequest(context: AgentTaskHttpContext): Promise<boolean> {
   const { app, url, request, response } = context;
   if (url.pathname !== '/api/agent/tasks' && !url.pathname.startsWith('/api/agent/tasks/')) return false;
-  const persistentRuntime = app.agentRuntime;
-  if (!persistentRuntime) {
+  if (!context.astraV3Enabled) {
     sendJson(response, 404, { version: 1, ok: false, error: 'agent-runtime-disabled' });
     return true;
   }
 
-  if (request.method === 'POST' && url.pathname === '/api/agent/tasks') {
+  if (context.astraV3Enabled && request.method === 'POST' && url.pathname === '/api/agent/tasks') {
     context.enforceMutation();
     const body = await readBoundedJson(request);
     assertVersion(body);
     assertKeys(body, [
       'version', 'request', 'clientRequestId', 'conversationId', 'parentTaskId', 'expectedOutputs',
-      'constraints', 'successCriteria', 'userPreferences', 'budgets', 'autoStart', 'source',
+      'constraints', 'successCriteria', 'userPreferences', 'budgets', 'autoStart', 'source', 'model',
     ]);
     const taskRequest = readRequiredText(body.request, 'request', 16_000);
-    const clientRequestId = readOptionalId(body.clientRequestId, 'clientRequestId');
-    const conversationId = readOptionalId(body.conversationId, 'conversationId');
-    const parentTaskId = readOptionalId(body.parentTaskId, 'parentTaskId');
+    const clientRequestId = readOptionalId(body.clientRequestId, 'clientRequestId')
+      ?? `agent_request_${randomUUID().replace(/-/g, '')}`;
+    const conversationId = readOptionalId(body.conversationId, 'conversationId')
+      ?? `agent_conversation_${randomUUID().replace(/-/g, '')}`;
+    if (body.parentTaskId !== undefined) {
+      readOptionalId(body.parentTaskId, 'parentTaskId');
+      throw httpError(409, 'astra-v3-parent-task-unsupported', 'Astra V3 does not silently emulate V2 parent tasks. Submit an independent task or continue its exact question.');
+    }
     const expectedOutputs = readExpectedOutputs(body.expectedOutputs);
     const constraints = readConstraints(body.constraints);
     const successCriteria = readSuccessCriteria(body.successCriteria);
     const userPreferences = readStringArray(body.userPreferences, 'userPreferences', 32, 1_000);
-    const budgets = readBudget(body.budgets);
+    const budgets = readAstraBudget(body.budgets);
     const autoStart = readOptionalBoolean(body.autoStart, 'autoStart');
+    const requestedModel = readAstraAgentModel(body.model);
     const claimedSource = readOptionalSource(body.source);
     const source = resolveHttpTaskSource(claimedSource, context.principal.source);
-    const checkpoint = await app.createAgentTask({
-      request: taskRequest,
-      source: {
-        surface: source,
-        remote: source === 'api',
-        ...(clientRequestId ? { requestId: clientRequestId } : {}),
-        ...(conversationId ? { conversationId } : {}),
-      },
-      ...(clientRequestId ? { clientRequestId } : {}),
-      ...(conversationId ? { conversationId } : {}),
-      ...(parentTaskId ? { parentTaskId } : {}),
-      ...(expectedOutputs ? { expectedOutputs } : {}),
-      ...(constraints ? { constraints } : {}),
-      ...(successCriteria ? { successCriteria } : {}),
-      ...(userPreferences ? { userPreferences } : {}),
-      ...(budgets ? { budgets } : {}),
-      ...(autoStart !== undefined ? { autoStart } : {}),
+    if (!['desktop', 'voice', 'api'].includes(source) || !context.authenticatedActor)
+      throw httpError(503, 'astra-v3-agent-transport-unavailable', 'Authenticated Astra V3 Agent transport is unavailable.');
+    const actor = context.authenticatedActor(source as 'desktop' | 'voice' | 'api');
+    const specification: AstraAgentTaskSpecification = {
+      schemaVersion: 'monarch.astra-v3-agent-task-specification.v1',
+      ...(expectedOutputs?.length ? { expectedOutputs } : {}),
+      ...(constraints?.length ? { constraints } : {}),
+      ...(successCriteria?.length ? { successCriteria } : {}),
+      ...(userPreferences?.length ? { userPreferences } : {}),
+      ...(autoStart === false ? { startPaused: true as const } : {}),
+      ...(budgets && Object.keys(budgets).length ? { budgets } : {}),
+    };
+    if (!isAstraAgentTaskSpecification(specification))
+      throw httpError(413, 'astra-v3-task-contract-too-large', 'The typed V3 task contract exceeds its 12 KiB durable limit.');
+    if (Buffer.byteLength(JSON.stringify({ request: taskRequest, specification }), 'utf8') > 24 * 1024)
+      throw httpError(413, 'astra-v3-task-contract-too-large', 'The combined V3 task request and typed contract exceed 24 KiB.');
+    const checkpoint = await app.oscarTurnCoordinator.submit({
+      clientRequestId,
+      conversationId,
+      inputMessageId: `agent_message_${createHash('sha256').update(actor.id + '/' + clientRequestId).digest('hex').slice(0, 48)}`,
+      text: taskRequest,
+      privacyMode: 'persistent',
+      source: source as 'desktop' | 'voice' | 'api',
+      ...(requestedModel ? { modifiers: { requestedModel } } : {}),
+      authenticatedAgentActor: actor,
+      explicitAgentTask: specification,
     });
-    sendJson(response, 202, { version: 1, ok: true, task: checkpoint.task });
+    sendJson(response, 202, { version: 1, ok: true, astraVersion: 3,
+      task: astraV3TaskProjection(checkpoint.turn, astraV3View(app, checkpoint.turn)) });
     return true;
   }
 
-  if (request.method === 'GET' && url.pathname === '/api/agent/tasks') {
+  if (context.astraV3Enabled && request.method === 'GET' && url.pathname === '/api/agent/tasks') {
     context.enforceRead();
+    if (!context.authenticatedActor) throw httpError(503, 'astra-v3-agent-transport-unavailable', 'Authenticated Astra V3 Agent transport is unavailable.');
+    context.authenticatedActor(); // Collection enumeration itself requires an authenticated owner.
     const limit = normalizeLimit(url.searchParams.get('limit'));
-    const tasks = (await persistentRuntime.listTasks())
-      .filter((task) => agentTaskSourceCanRead(context.principal.source, task.source.surface))
-      .slice(-limit)
-      .reverse();
-    sendJson(response, 200, { version: 1, ok: true, tasks });
+    const turns = (await app.oscarTurnCoordinator.persistentStore.listTurns())
+      .filter(turn => turn.request.astra?.goal.kind === 'agent')
+      .filter(turn => astraTurnReadable(context, turn))
+      .slice(-limit).reverse();
+    sendJson(response, 200, { version: 1, ok: true, astraVersion: 3,
+      tasks: turns.map(turn => astraV3TaskProjection(turn, astraV3View(app, turn))) });
     return true;
   }
 
@@ -106,151 +129,210 @@ export async function handleAgentTaskHttpRequest(context: AgentTaskHttpContext):
   const nestedId = match[3] ? decodePathId(match[3], action === 'approvals' ? 'approvalId' : 'nestedId') : '';
   if (request.method === 'GET') context.enforceRead();
   else if (request.method === 'POST') context.enforceMutation();
-  const runtime = await app.resolveAgentRuntimeForTask(taskId);
-  if (!runtime) throw httpError(404, 'task-not-found', 'Agent task was not found.');
-  if (runtime === app.incognitoAgentRuntime && context.principal.source !== 'desktop') {
-    throw httpError(404, 'task-not-found', 'Agent task was not found.');
-  }
-  const current = await runtime.getTask(taskId);
-  if (!current) throw httpError(404, 'task-not-found', 'Agent task was not found.');
-  assertReadableTaskSource(context.principal.source, current.task.source.surface);
-
-  if (request.method === 'GET' && !action) {
-    sendJson(response, 200, { version: 1, ok: true, checkpoint: current });
-    return true;
-  }
-
-  if (request.method === 'POST' && action === 'messages' && !nestedId) {
-    const body = await readBoundedJson(request);
-    assertVersion(body);
-    assertKeys(body, ['version', 'content', 'messageId']);
-    const messageId = readOptionalId(body.messageId, 'messageId');
-    const checkpoint = await runtime.sendMessage(taskId, {
-      content: readRequiredText(body.content, 'content', 16_000),
-      ...(messageId ? { messageId } : {}),
-    });
-    sendJson(response, 200, { version: 1, ok: true, task: checkpoint.task });
-    return true;
-  }
-
-  if (request.method === 'POST' && (action === 'pause' || action === 'resume' || action === 'cancel') && !nestedId) {
-    const body = await readBoundedJson(request);
-    assertVersion(body);
-    assertKeys(body, ['version']);
-    const checkpoint = action === 'pause'
-      ? await runtime.pause(taskId)
-      : action === 'resume'
-        ? await runtime.resume(taskId)
-        : await runtime.cancel(taskId);
-    sendJson(response, 200, { version: 1, ok: true, task: checkpoint.task });
-    return true;
-  }
-
-  if (request.method === 'POST' && action === 'repeat' && !nestedId) {
-    const body = await readBoundedJson(request);
-    assertVersion(body);
-    assertKeys(body, ['version', 'clientRequestId', 'autoStart']);
-    const clientRequestId = readOptionalId(body.clientRequestId, 'clientRequestId');
-    const autoStart = readOptionalBoolean(body.autoStart, 'autoStart');
-    const checkpoint = await runtime.repeatTask(taskId, {
-      ...(clientRequestId ? { clientRequestId } : {}),
-      ...(autoStart !== undefined ? { autoStart } : {}),
-      source: {
-        surface: context.principal.source,
-        remote: context.principal.source === 'api',
-      },
-    });
-    sendJson(response, 202, { version: 1, ok: true, task: checkpoint.task });
-    return true;
-  }
-
-  if (request.method === 'POST' && action === 'approvals' && nestedId) {
-    const body = await readBoundedJson(request);
-    assertVersion(body);
-    assertKeys(body, [
-      'version',
-      'decision',
-      'grantScope',
-      'requestId',
-      'reason',
-      'canonicalProposalHash',
-      'capabilityId',
-    ]);
-    if (body.decision !== 'arm' && body.decision !== 'approve' && body.decision !== 'deny') {
-      throw httpError(400, 'invalid-approval-decision', 'decision must be arm, approve, or deny.');
-    }
-    if (body.grantScope !== undefined && body.grantScope !== 'once' && body.grantScope !== 'task') {
-      throw httpError(400, 'invalid-grant-scope', 'grantScope must be once or task.');
-    }
-    const requestId = readOptionalId(body.requestId, 'requestId');
-    const reason = readOptionalText(body.reason, 'reason', 1_000);
-    const canonicalProposalHash = readOptionalText(
-      body.canonicalProposalHash,
-      'canonicalProposalHash',
-      256,
-    );
-    const capabilityId = readOptionalText(body.capabilityId, 'capabilityId', 256);
-    assertApprovalSurface(context.principal.source, current.task.source.surface);
-    const approval = current.approvals.find((entry) => entry.id === nestedId && entry.status === 'pending');
-    if (body.decision === 'arm' || body.decision === 'approve') {
-      if (!canonicalProposalHash || !capabilityId) {
-        throw httpError(
-          400,
-          'approval-binding-required',
-          'Approval requires the exact canonical proposal hash and capability id shown to the user.',
-        );
-      }
-      if (
-        current.task.activeApprovalId !== nestedId
-        || !approval
-        || approval.canonicalProposalHash !== canonicalProposalHash
-        || approval.capabilityId !== capabilityId
-      ) {
-        throw httpError(
-          409,
-          'approval-binding-mismatch',
-          'The pending action changed. Review its exact target before approving again.',
-        );
-      }
-    }
-    if (body.decision === 'arm') {
-      const checkpoint = await runtime.armApproval(taskId, nestedId, {
-        canonicalProposalHash: canonicalProposalHash!,
-        capabilityId: capabilityId!,
-        actorSurface: context.principal.source,
-        ...(requestId ? { requestId } : {}),
-      });
-      const armed = checkpoint.approvals.find((entry) => entry.id === nestedId)?.arm;
-      sendJson(response, 200, { version: 1, ok: true, task: checkpoint.task, arm: armed || null });
+  const astraTurn = await app.oscarTurnCoordinator.getTurn(taskId)
+    ?? await app.oscarTurnCoordinator.findTurnByTaskId(taskId);
+  if (astraTurn?.turn.request.astra?.goal.kind === 'agent') {
+    if (!astraTurnReadable(context, astraTurn.turn)) throw httpError(404, 'task-not-found', 'Agent task was not found.');
+    const view = astraV3View(app, astraTurn.turn);
+    if (!view || (view.id !== taskId && astraTurn.turn.id !== taskId)) throw httpError(404, 'task-not-found', 'Agent task was not found.');
+    if (request.method === 'GET' && !action) {
+      sendJson(response, 200, { version: 1, ok: true, astraVersion: 3,
+        task: astraV3TaskProjection(astraTurn.turn, view) });
       return true;
     }
-    const checkpoint = await runtime.resolveApproval(taskId, nestedId, {
-      decision: body.decision,
-      ...(body.grantScope ? { grantScope: body.grantScope } : {}),
-      ...(requestId ? { requestId } : {}),
-      ...(reason ? { reason } : {}),
-      actorSurface: context.principal.source,
-      requireArm: body.decision === 'approve' && requiresSensitiveArm(approval),
-    });
-    sendJson(response, 200, { version: 1, ok: true, task: checkpoint.task });
-    return true;
-  }
-
-  if (request.method === 'GET' && action === 'events' && !nestedId) {
-    const after = readAfterSequence(request, url);
-    if (url.searchParams.get('format') === 'json' || !acceptsEventStream(request)) {
-      sendJson(response, 200, {
-        version: 1,
-        ok: true,
-        events: current.events.filter((event) => event.sequence > after).map(toPublicEvent),
-      });
+    if (request.method === 'GET' && action === 'events' && !nestedId) {
+      const after = readAfterSequence(request, url);
+      if (url.searchParams.get('format') === 'json' || !acceptsEventStream(request)) {
+        sendJson(response, 200, { version: 1, ok: true, astraVersion: 3,
+          events: astraTurn.events.filter(event => event.sequence > after).map(event => ({ version: 1, astraVersion: 3, ...event })) });
+      } else streamAstraTurnEvents(app, astraTurn.turn.id, after, request, response);
       return true;
     }
-    streamTaskEvents(runtime, taskId, after, request, response, current);
-    return true;
+    if (request.method === 'POST' && action === 'messages' && !nestedId) {
+      const body = await readBoundedJson(request); assertVersion(body);
+      assertKeys(body, ['version', 'content', 'messageId', 'requestId', 'questionId', 'questionDigest']);
+      const content = readRequiredText(body.content, 'content', 4_096);
+      const questionId = readOptionalId(body.questionId, 'questionId');
+      const questionDigest = readOptionalText(body.questionDigest, 'questionDigest', 80);
+      if (!view.question || questionId !== view.question.id || questionDigest !== view.question.digest)
+        throw httpError(409, 'astra-input-binding', 'The exact pending question id and digest are required.');
+      const messageId = readOptionalId(body.messageId, 'messageId') ?? 'agent_reply_' + createHash('sha256')
+        .update(JSON.stringify([view.id, questionId, questionDigest, content])).digest('hex').slice(0, 48);
+      const requestId = readOptionalId(body.requestId, 'requestId') ?? 'agent_reply_request_' + createHash('sha256')
+        .update(JSON.stringify([view.id, messageId])).digest('hex').slice(0, 40);
+      const updated = await app.oscarTurnCoordinator.submitAstraInput(astraTurn.turn.id, astraTurn.turn.source, {
+        kind: 'reply', reply: { requestId, questionId, questionDigest, messageId, text: content },
+      });
+      sendJson(response, 200, { version: 1, ok: true, astraVersion: 3,
+        task: astraV3TaskProjection(updated.turn, astraV3View(app, updated.turn)) });
+      return true;
+    }
+    if (request.method === 'POST' && (action === 'pause' || action === 'resume' || action === 'cancel') && !nestedId) {
+      const body = await readBoundedJson(request); assertVersion(body); assertKeys(body, ['version']);
+      const updated = await app.oscarTurnCoordinator.commandAstra(astraTurn.turn.id, astraTurn.turn.source, action);
+      sendJson(response, 200, { version: 1, ok: true, astraVersion: 3,
+        task: astraV3TaskProjection(updated.turn, astraV3View(app, updated.turn)) });
+      return true;
+    }
+    if (request.method === 'POST' && action === 'repeat' && !nestedId) {
+      const body = await readBoundedJson(request); assertVersion(body); assertKeys(body, ['version', 'clientRequestId', 'autoStart', 'model']);
+      const autoStart = readOptionalBoolean(body.autoStart, 'autoStart');
+      const existingModifiers = astraTurn.turn.request.modifiers ?? {};
+      const requestedModel = readAstraAgentModel(body.model) ?? existingModifiers.requestedModel;
+      const clientRequestId = readOptionalId(body.clientRequestId, 'clientRequestId')
+        ?? `agent_repeat_${randomUUID().replace(/-/g, '')}`;
+      const actor = context.authenticatedActor?.(astraTurn.turn.source as 'desktop' | 'voice' | 'api');
+      if (!actor) throw httpError(503, 'astra-v3-agent-transport-unavailable', 'Authenticated Astra V3 Agent transport is unavailable.');
+      const { startPaused: _previousStartMode, ...previousSpecification } = astraTurn.turn.request.explicitAgentTask
+        ?? { schemaVersion: 'monarch.astra-v3-agent-task-specification.v1' as const };
+      const repeated = await app.oscarTurnCoordinator.submit({
+        clientRequestId, conversationId: astraTurn.turn.conversationId,
+        inputMessageId: `agent_message_${createHash('sha256').update(actor.id + '/' + clientRequestId).digest('hex').slice(0, 48)}`,
+        text: astraTurn.turn.request.text, privacyMode: 'persistent', source: astraTurn.turn.source,
+        modifiers: { ...existingModifiers, ...(requestedModel ? { requestedModel } : {}) },
+        authenticatedAgentActor: actor,
+        explicitAgentTask: { ...previousSpecification, ...(autoStart === false ? { startPaused: true as const } : {}) },
+      });
+      sendJson(response, 202, { version: 1, ok: true, astraVersion: 3,
+        task: astraV3TaskProjection(repeated.turn, astraV3View(app, repeated.turn)) });
+      return true;
+    }
+    if (request.method === 'POST' && action === 'approvals' && nestedId) {
+      const body = await readBoundedJson(request); assertVersion(body);
+      assertKeys(body, ['version', 'decision', 'grantScope', 'requestId', 'reason', 'canonicalProposalHash', 'capabilityId']);
+      if (body.decision !== 'arm' && body.decision !== 'approve' && body.decision !== 'deny')
+        throw httpError(400, 'invalid-approval-decision', 'decision must be arm, approve, or deny.');
+      if (body.grantScope !== undefined && body.grantScope !== 'once')
+        throw httpError(400, 'invalid-grant-scope', 'Astra V3 approvals are exact one-shot decisions.');
+      const requestId = readOptionalId(body.requestId, 'requestId');
+      const canonicalProposalHash = readOptionalText(body.canonicalProposalHash, 'canonicalProposalHash', 256);
+      const capabilityId = readOptionalText(body.capabilityId, 'capabilityId', 256);
+      const approval = view.approval;
+      if (!approval || !('capability' in approval) || approval.id !== nestedId
+        || approval.proposalHash !== canonicalProposalHash || approval.capability.id !== capabilityId)
+        throw httpError(409, 'approval-binding-mismatch', 'The pending action changed. Review its exact target before approving again.');
+      if (body.decision === 'arm') {
+        sendJson(response, 200, { version: 1, ok: true, astraVersion: 3,
+          task: astraV3TaskProjection(astraTurn.turn, view),
+          arm: { exactOneShot: true, expiresAt: new Date(approval.expiresAt).toISOString() } });
+        return true;
+      }
+      const messageId = 'astra_decision_' + createHash('sha256').update(JSON.stringify(
+        [view.id, nestedId, requestId ?? '', body.decision])).digest('hex').slice(0, 48);
+      const updated = await app.oscarTurnCoordinator.submitAstraInput(astraTurn.turn.id, astraTurn.turn.source, { kind: 'decide', decision: {
+        approvalId: approval.id, approvalDigest: approval.digest, messageId,
+        decision: body.decision === 'approve' ? 'approve' : 'reject',
+      } });
+      sendJson(response, 200, { version: 1, ok: true, astraVersion: 3,
+        task: astraV3TaskProjection(updated.turn, astraV3View(app, updated.turn)) });
+      return true;
+    }
+    throw httpError(405, 'method-not-allowed', 'Unsupported Astra V3 Agent Task method.');
   }
+  throw httpError(404, 'task-not-found', 'Astra V3 Agent task was not found.');
+}
 
-  throw httpError(405, 'method-not-allowed', 'Unsupported Agent Task method.');
+function readAstraBudget(value: unknown): AstraAgentTaskSpecification['budgets'] | undefined {
+  const budget = readBudget(value);
+  if (!budget) return undefined;
+  const unsupported = ['maxSteps', 'maxFailures', 'maxConsecutiveNoProgress', 'maxComputeClass']
+    .filter(key => (budget as Record<string, unknown>)[key] !== undefined);
+  if (unsupported.length) throw httpError(409, 'astra-v3-budget-unsupported',
+    `Astra V3 does not silently emulate these V2 budgets: ${unsupported.join(', ')}.`);
+  if (budget.maxModelTurns !== undefined && (budget.maxModelTurns < 2 || budget.maxModelTurns > 64)
+    || budget.maxToolCalls !== undefined && (budget.maxToolCalls < 1 || budget.maxToolCalls > 48)
+    || budget.maxWallTimeMs !== undefined && (budget.maxWallTimeMs < 1_000 || budget.maxWallTimeMs > 12 * 60 * 60 * 1_000)) {
+    throw httpError(400, 'invalid-budget', 'Astra V3 budgets exceed the native Agent Runtime limits.');
+  }
+  return {
+    ...(budget.maxModelTurns !== undefined ? { maxModelTurns: budget.maxModelTurns } : {}),
+    ...(budget.maxToolCalls !== undefined ? { maxToolCalls: budget.maxToolCalls } : {}),
+    ...(budget.maxWallTimeMs !== undefined ? { maxWallTimeMs: budget.maxWallTimeMs } : {}),
+  };
+}
+
+function astraTurnReadable(context: AgentTaskHttpContext, turn: OscarTurnV1): boolean {
+  // Legacy test/composition hosts never exposed an Astra actor callback. The
+  // product V3 host always does and therefore takes the exact actor-bound path.
+  if (!context.astraV3Enabled) return context.principal.source === 'desktop' || turn.source === 'api';
+  if (!turn.request.astra || !context.authenticatedActor) return false;
+  if (context.principal.source === 'api' && turn.source !== 'api') return false;
+  // Coder is a desktop-owned projection surface. Its actor is still a separate
+  // domain-separated principal, so a Desktop credential may operate on the
+  // task only after reproducing and matching that exact Coder actor binding.
+  if (context.principal.source === 'desktop' && !['desktop', 'voice', 'coder'].includes(turn.source)) return false;
+  try {
+    const actor = context.authenticatedActor(turn.source as 'desktop' | 'voice' | 'api' | 'coder');
+    return actor.id === turn.request.astra.actor.id && actor.source === turn.request.astra.actor.source;
+  } catch { return false; }
+}
+
+function astraV3TaskProjection(turn: OscarTurnV1, view: AstraTaskHttpTask | null) {
+  const specification = turn.request.explicitAgentTask;
+  return {
+    id: turn.id,
+    turnId: turn.id,
+    ...(view ? { runtimeTaskId: view.id } : turn.taskId ? { runtimeTaskId: turn.taskId } : {}),
+    // Oscar's outer `succeeded` means only that a terminal projection was
+    // delivered. Preserve Astra's actual `partial`/`blocked` outcome so clients
+    // never present an uncertified incomplete task as successful.
+    status: view?.status ?? turn.status,
+    source: { surface: turn.source, remote: turn.source === 'api' },
+    goal: {
+      originalRequest: turn.request.text,
+      ...(specification?.expectedOutputs ? { expectedOutputs: specification.expectedOutputs } : {}),
+      ...(specification?.constraints ? { constraints: specification.constraints } : {}),
+      ...(specification?.successCriteria ? { successCriteria: specification.successCriteria } : {}),
+      ...(specification?.userPreferences ? { userPreferences: specification.userPreferences } : {}),
+    },
+    ...(specification?.budgets ? { budgets: specification.budgets } : {}),
+    ...(turn.request.modifiers?.requestedModel ? { model: turn.request.modifiers.requestedModel } : {}),
+    modelTurns: view?.modelJobs ?? 0,
+    capabilityCalls: view?.capabilityJobs ?? 0,
+    nativeCompletionCertified: view?.nativeCompletionCertified ?? false,
+    ...(view?.failureReason ? { failureReason: view.failureReason } : {}),
+    ...(view?.message ? { message: view.message } : {}),
+    createdAt: turn.createdAt,
+    updatedAt: turn.updatedAt,
+  };
+}
+
+function astraV3View(app: MonarchApplication, turn: OscarTurnV1): AstraTaskHttpTask | null {
+  if (turn.request.astra?.goal.kind !== 'agent' || !app.astraProductPilot) return null;
+  try { return app.astraProductPilot.bridge.find(turn); } catch { return null; }
+}
+
+function streamAstraTurnEvents(
+  app: MonarchApplication,
+  turnId: string,
+  after: number,
+  request: IncomingMessage,
+  response: ServerResponse,
+): void {
+  response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store',
+    Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+  response.flushHeaders?.();
+  let cursor = after, initialized = false, closed = false;
+  const buffered: OscarTurnCheckpoint[] = [];
+  const close = () => { if (closed) return; closed = true; clearInterval(heartbeat); unsubscribe(); if (!response.writableEnded) response.end(); };
+  const emit = (checkpoint: OscarTurnCheckpoint) => {
+    for (const event of checkpoint.events.filter(candidate => candidate.sequence > cursor)) {
+      response.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify({ version: 1, astraVersion: 3, turnId, event })}\n\n`);
+      cursor = event.sequence;
+    }
+    if (['succeeded', 'blocked', 'failed', 'cancelled'].includes(checkpoint.turn.status)) close();
+  };
+  const unsubscribe = app.oscarTurnCoordinator.subscribe(turnId, commit => {
+    if (!initialized) buffered.push({ turn: commit.turn, events: commit.appendedEvents });
+    else emit({ turn: commit.turn, events: commit.appendedEvents });
+  });
+  const heartbeat = setInterval(() => { if (!closed) response.write(': keep-alive\n\n'); }, 15_000);
+  heartbeat.unref?.(); request.once('close', close);
+  void app.oscarTurnCoordinator.getTurn(turnId).then(checkpoint => {
+    if (!checkpoint || closed) return close();
+    emit(checkpoint); initialized = true;
+    for (const commit of buffered.splice(0)) { if (closed) break; emit(commit); }
+  }).catch(close);
 }
 
 function resolveHttpTaskSource(
@@ -270,138 +352,6 @@ function resolveHttpTaskSource(
     );
   }
   return httpSource;
-}
-
-function agentTaskSourceCanRead(
-  httpSource: Extract<AgentTaskSurface, 'desktop' | 'api'>,
-  taskSource: AgentTaskSurface,
-): boolean {
-  return httpSource === 'desktop' || taskSource === 'api';
-}
-
-function assertReadableTaskSource(
-  httpSource: Extract<AgentTaskSurface, 'desktop' | 'api'>,
-  taskSource: AgentTaskSurface,
-): void {
-  if (!agentTaskSourceCanRead(httpSource, taskSource)) {
-    // Hide task existence from public/API principals, matching the Incognito boundary.
-    throw httpError(404, 'task-not-found', 'Agent task was not found.');
-  }
-}
-
-function assertApprovalSurface(
-  httpSource: Extract<AgentTaskSurface, 'desktop' | 'api'>,
-  taskSource: AgentTaskSurface,
-): void {
-  const allowed = httpSource === 'api'
-    ? taskSource === 'api'
-    : taskSource === 'desktop' || taskSource === 'voice' || taskSource === 'coder';
-  if (!allowed) {
-    throw httpError(
-      403,
-      'approval-surface-mismatch',
-      `Approval for ${taskSource} cannot be decided from the ${httpSource} surface.`,
-    );
-  }
-}
-
-function requiresSensitiveArm(approval: AgentTaskCheckpoint['approvals'][number] | undefined): boolean {
-  if (!approval) return false;
-  if (approval.purpose === 'owner-security-override') return true;
-  const riskVector = approval.proposal?.riskVector;
-  const effect = riskVector && typeof riskVector === 'object' && !Array.isArray(riskVector)
-    ? String((riskVector as Record<string, unknown>).effect || '')
-    : '';
-  return /(?:delete|device-control|identity|irreversible|sensitive)/iu.test(effect)
-    || /(?:delete|trash|recycle-bin\.empty|identity|credential)/iu.test(approval.capabilityId);
-}
-
-function streamTaskEvents(
-  runtime: NonNullable<MonarchApplication['agentRuntime']>,
-  taskId: string,
-  after: number,
-  request: IncomingMessage,
-  response: ServerResponse,
-  initialCheckpoint: AgentTaskCheckpoint,
-): void {
-  let lastSequence = after;
-  let replaying = true;
-  let closed = false;
-  let terminalSeen = isTerminalTask(initialCheckpoint);
-  const buffered: AgentTaskEvent[] = [];
-  const unsubscribe = runtime.subscribe(taskId, (commit) => {
-    for (const event of commit.appendedEvents) {
-      if (event.sequence <= lastSequence) continue;
-      if (replaying) buffered.push(event);
-      else emit(event);
-    }
-  });
-  const heartbeat = setInterval(() => {
-    if (!closed) response.write(': heartbeat\n\n');
-  }, 15_000);
-  const cleanup = () => {
-    if (closed) return;
-    closed = true;
-    clearInterval(heartbeat);
-    unsubscribe();
-  };
-  const finish = () => {
-    if (closed) return;
-    cleanup();
-    response.end();
-  };
-  const finishIfSettled = () => {
-    if (!terminalSeen || closed) return;
-    void runtime.getTask(taskId).then((checkpoint) => {
-      if (checkpoint && isTerminalTask(checkpoint)) terminalSeen = true;
-      if (terminalSeen && !checkpoint?.task.runnerClaim) finish();
-    }).catch(finish);
-  };
-  const emit = (event: AgentTaskEvent) => {
-    if (closed || event.sequence <= lastSequence) return;
-    lastSequence = event.sequence;
-    response.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(toPublicEvent(event))}\n\n`);
-    if (TERMINAL_EVENTS.has(event.type)) {
-      terminalSeen = true;
-      finishIfSettled();
-    } else if (event.type === 'runner.released' && terminalSeen) finish();
-  };
-  request.once('close', cleanup);
-  response.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-store',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
-  void runtime.getEvents(taskId, after).then((events) => {
-    for (const event of events) emit(event);
-    replaying = false;
-    for (const event of buffered.sort((left, right) => left.sequence - right.sequence)) emit(event);
-    buffered.length = 0;
-    finishIfSettled();
-  }).catch(() => {
-    cleanup();
-    response.end();
-  });
-}
-
-function isTerminalTask(checkpoint: AgentTaskCheckpoint): boolean {
-  return checkpoint.task.status === 'completed'
-    || checkpoint.task.status === 'failed'
-    || checkpoint.task.status === 'cancelled';
-}
-
-function toPublicEvent(event: AgentTaskEvent) {
-  return {
-    version: 1,
-    id: event.id,
-    sequence: event.sequence,
-    taskId: event.taskId,
-    traceId: event.traceId,
-    type: event.type,
-    createdAt: event.createdAt,
-    ...(event.payload ? { payload: event.payload } : {}),
-  };
 }
 
 async function readBoundedJson(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -578,6 +528,15 @@ function readOptionalSource(value: unknown): AgentTaskSurface | undefined {
     throw httpError(400, 'invalid-source', 'source must be a supported Agent Task surface name.');
   }
   return value as AgentTaskSurface;
+}
+
+function readAstraAgentModel(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  const model = readRequiredText(value, 'model', 200);
+  if (!isExecutableMaxRole(model) && !isAstraLocalAgentModelChoice(model)) {
+    throw httpError(400, 'invalid-agent-model', 'Agent Task model must name an exact executable local or MAX model role.');
+  }
+  return model;
 }
 
 function invalidFieldCode(field: string): string {

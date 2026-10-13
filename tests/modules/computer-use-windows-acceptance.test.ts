@@ -134,7 +134,15 @@ describe.skipIf(!LIVE_QA)('Computer Use Windows live acceptance', () => {
       }
       expect(typedOutput.ownCursor.animation.p95FrameGapMs).toBeLessThanOrEqual(33.34);
       expect(typedOutput.ownCursor.animation.maxFrameGapMs).toBeLessThanOrEqual(150);
-      expect(typedOutput.after.elements.some((element: any) => element.name === 'typed:Oscar QA')).toBe(true);
+      if (!typedOutput.after.elements.some((element: any) => element.name === 'typed:Oscar QA')) {
+        throw new Error(`Synthetic type readback mismatch: ${JSON.stringify({
+          textVerification: typedOutput.textVerification,
+          elements: typedOutput.after.elements.map((element: any) => ({
+            name: element.name, value: element.value, automationId: element.automationId,
+            controlType: element.controlType, enabled: element.enabled, offscreen: element.offscreen,
+          })),
+        })}`);
+      }
       const closed = await module.executeCapability(request('computer.window.close', {
         windowRef: window.windowRef,
         observationId: typedOutput.afterObservationId,
@@ -166,6 +174,83 @@ describe.skipIf(!LIVE_QA)('Computer Use Windows live acceptance', () => {
       await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   }, 90_000);
+
+  it('executes exact semantic UIA work while the user cursor is moving', async () => {
+    const nonce = `cooperative-semantic-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const title = `Monarch Computer Use Cooperative QA ${nonce}`;
+    const root = path.join(LIVE_QA_ROOT, nonce);
+    const target = await launchQaWindow(title, root);
+    const context = { emit: vi.fn(async () => undefined), audit: vi.fn(async () => undefined) } as any;
+    const module = createLiveModule(root);
+    let mover: ChildProcess | null = null;
+
+    try {
+      await module.activate(context);
+      await expectComputerUseEnabled(module, context);
+      const window = await waitForWindow(module, context, title, target);
+      const observed = await module.executeCapability(request('computer.window.observe', {
+        windowRef: window.windowRef,
+      }), context);
+      const before = observed.output as any;
+      const editor = before.elements.find((element: any) => element.automationId === 'qaInput');
+      expect(editor).toBeTruthy();
+
+      mover = await launchCursorMover(root, 120, 1_800);
+      const typed = await module.executeCapability(request('computer.window.type', {
+        windowRef: window.windowRef,
+        observationId: before.observationId,
+        elementId: editor.elementId,
+        text: 'Oscar cooperative QA',
+        textMode: 'replace',
+      }), context);
+
+      if (!typed.ok) throw new Error(`Cooperative semantic type failed: ${JSON.stringify(typed)}`);
+      expect(typed).toMatchObject({
+        ok: true,
+        output: {
+          verified: true,
+          cooperativeMode: 'shared-desktop',
+          ownCursor: {
+            dispatchMode: 'uia-semantic',
+            exactTargetVerified: true,
+            userTakeoverDetected: false,
+          },
+          textVerification: { textMode: 'replace', valueVerifiedAfterDispatch: true },
+        },
+      });
+      expect((typed.output as any).after.elements.some((element: any) => (
+        element.name === 'typed:Oscar cooperative QA'
+      ))).toBe(true);
+      await terminateExactChild(mover);
+      mover = await launchCursorMover(root, 120, 1_800);
+      const button = (typed.output as any).after.elements.find((element: any) => element.name === 'Commit');
+      const clicked = await module.executeCapability(request('computer.window.click', {
+        windowRef: window.windowRef,
+        observationId: (typed.output as any).afterObservationId,
+        elementId: button.elementId,
+      }), context);
+      if (!clicked.ok) throw new Error(`Cooperative semantic click failed: ${JSON.stringify(clicked)}`);
+      expect(clicked).toMatchObject({
+        ok: true,
+        output: {
+          verified: true,
+          cooperativeMode: 'shared-desktop',
+          ownCursor: {
+            dispatchMode: 'uia-semantic',
+            exactTargetVerified: true,
+            userTakeoverDetected: false,
+          },
+        },
+      });
+      expect((clicked.output as any).after.elements.some((element: any) => element.name === 'clicked')).toBe(true);
+      expect(module.control.snapshot()).toMatchObject({ enabled: true, activeLease: null });
+    } finally {
+      await module.deactivate();
+      if (mover) await terminateExactChild(mover);
+      await terminateExactChild(target);
+      await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  }, 60_000);
 
   it('revokes a native click during its warning phase before the target receives input', async () => {
     const nonce = `stop-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -215,7 +300,7 @@ describe.skipIf(!LIVE_QA)('Computer Use Windows live acceptance', () => {
     }
   }, 60_000);
 
-  it('honors the native user-takeover signal and stops before completing long typing', async () => {
+  it('yields only the conflicting native input atom and keeps Computer Use enabled', async () => {
     const nonce = `takeover-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const title = `Monarch Computer Use Takeover QA ${nonce}`;
     const root = path.join(LIVE_QA_ROOT, nonce);
@@ -258,8 +343,11 @@ describe.skipIf(!LIVE_QA)('Computer Use Windows live acceptance', () => {
         error: 'computer-action-state-uncertain',
         output: { performed: 'unknown', verified: false },
       });
-      expect(module.control.snapshot()).toMatchObject({ enabled: false, activeLease: null });
-      await expectComputerUseEnabled(module, context);
+      expect(module.control.snapshot()).toMatchObject({ enabled: true, activeLease: null });
+      expect(context.emit).toHaveBeenCalledWith('computer.action.yielded', 'computer', expect.objectContaining({
+        reason: 'user-cursor-takeover',
+        control: expect.objectContaining({ enabled: true }),
+      }));
       const reconciled = await module.executeCapability(request('computer.window.observe', {
         windowRef: window.windowRef,
       }), context);

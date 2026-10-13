@@ -61,8 +61,19 @@ export function createWindowsSpeechOutput({
   const neuralCachePath = packagedPayloadRoot && path.isAbsolute(packagedPayloadRoot)
     ? path.join(packagedPayloadRoot, 'cache', 'voice', 'hf')
     : path.join(root, 'runtime', 'voice', 'hf-cache');
+  // Optional neural dependencies belong to Voice, outside the immutable base
+  // Python/Oscar environment. The importer publishes its marker only after an
+  // actual import probe, so a partially copied runtime cannot appear installed.
+  const neuralPackagesPath = packagedPayloadRoot && path.isAbsolute(packagedPayloadRoot)
+    ? path.join(packagedPayloadRoot, 'runtimes', 'voice', 'neural', 'python-packages')
+    : null;
+  const neuralRuntimeReady = () => !neuralPackagesPath || (
+    fileExists(path.join(neuralPackagesPath, '..', 'monarch-neural-tts.json'))
+    && fileExists(path.join(neuralPackagesPath, 'qwen_tts', '__init__.py'))
+    && fileExists(path.join(neuralPackagesPath, 'torch', '__init__.py'))
+  );
   const fallbackWorkerPath = path.join(root, 'tools', 'local-windows-tts.ps1');
-  const stressPackagePath = path.resolve(
+  const stressPackagePath = neuralPackagesPath ? path.join(neuralPackagesPath, 'silero_stress') : path.resolve(
     path.dirname(neuralPythonPath), '..', 'Lib', 'site-packages', 'silero_stress',
   );
 
@@ -73,6 +84,7 @@ export function createWindowsSpeechOutput({
       && fileExists(neuralWorkerPath)
       && fileExists(neuralModelPath)
       && fileExists(neuralReferencePath)
+      && neuralRuntimeReady()
     ),
     fallbackInstalled: fileExists(fallbackWorkerPath),
     stressInstalled: fileExists(stressPackagePath),
@@ -115,7 +127,12 @@ export function createWindowsSpeechOutput({
   const speak = async (input) => {
     let request;
     try {
-      request = normalizeSpeechRequest(input);
+      request = {
+        ...normalizeSpeechRequest(input),
+        latencyMode: input?.latencyMode === 'instant'
+          ? 'instant'
+          : input?.latencyMode === 'fast' ? 'fast' : 'natural',
+      };
     } catch (error) {
       return {
         ok: false,
@@ -132,6 +149,22 @@ export function createWindowsSpeechOutput({
 
     stop();
     const runId = ++generation;
+
+    // The entire simplified lane uses `instant`: it never enters the neural
+    // path, even when Qwen happens to be warm from an earlier Full Voice turn.
+    // Regular `fast` speech only uses Qwen when the worker is already ready.
+    if (request.latencyMode === 'instant' || (request.latencyMode === 'fast' && neural?.status !== 'ready')) {
+      const fallbackResult = await speakFallback(request, runId);
+      return fallbackResult.ok || fallbackResult.cancelled
+        ? {
+            ...fallbackResult,
+            fallback: true,
+            fallbackFrom: request.latencyMode === 'instant'
+              ? 'instant-system-path'
+              : 'neural-tts-cold-fast-path',
+          }
+        : fallbackResult;
+    }
 
     // A loading neural worker is not a failure. Await the single shared
     // readiness promise so Qwen remains the primary voice even for the first
@@ -224,11 +257,11 @@ export function createWindowsSpeechOutput({
             summary: 'Предыдущий Qwen TTS-worker не подтвердил завершение; повторный запуск отменён без перекрытия моделей.',
           }));
     }
-    if (!fileExists(neuralPythonPath) || !fileExists(neuralWorkerPath) || !fileExists(neuralModelPath) || !fileExists(neuralReferencePath)) {
+    if (!neuralRuntimeReady() || !fileExists(neuralPythonPath) || !fileExists(neuralWorkerPath) || !fileExists(neuralModelPath) || !fileExists(neuralReferencePath)) {
       return Promise.resolve({
         ok: false,
         error: 'neural-tts-runtime-missing',
-        summary: 'Нейросетевой TTS не установлен. Запусти npm run voice:setup.',
+        summary: 'Нейросетевой голос не установлен, Оскар говорит голосом Windows.',
       });
     }
 
@@ -238,6 +271,7 @@ export function createWindowsSpeechOutput({
         cwd: root,
         env: {
           ...process.env,
+          ...(neuralPackagesPath ? { PYTHONPATH: neuralPackagesPath } : {}),
           HF_HOME: neuralCachePath,
           HF_HUB_CACHE: path.join(neuralCachePath, 'hub'),
           HUGGINGFACE_HUB_CACHE: path.join(neuralCachePath, 'hub'),
@@ -245,11 +279,15 @@ export function createWindowsSpeechOutput({
           MONARCH_TTS_MODEL_PATH: neuralModelPath,
           MONARCH_TTS_REFERENCE_AUDIO: neuralReferencePath,
           PYTHONUTF8: '1',
+          PYTHONDONTWRITEBYTECODE: '1',
         },
         windowsHide: true,
         shell: false,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
+      // EPIPE on a worker that already exited is reported by its exit handling;
+      // an unlistened stream 'error' would end the whole process.
+      child.stdin?.on('error', () => undefined);
     } catch (error) {
       return Promise.resolve({
         ok: false,
@@ -510,6 +548,9 @@ export function createWindowsSpeechOutput({
           shell: false,
           stdio: ['pipe', 'pipe', 'pipe'],
         });
+        // EPIPE on a worker that already exited is reported by its exit handling;
+        // an unlistened stream 'error' would end the whole process.
+        child.stdin?.on('error', () => undefined);
       } catch (error) {
         resolve({ ok: false, error: 'speech-worker-spawn-failed', summary: error instanceof Error ? error.message : String(error) });
         return;

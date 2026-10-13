@@ -68,3 +68,13 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Onest typeface
+
+The PaperPixel design uses the Onest variable typeface (Cyrillic, Cyrillic
+Extended, Latin and Latin Extended subsets as distributed by Fontsource),
+bundled under `src/ui/public/assets/fonts/onest/`.
+
+Copyright 2021 The Onest Project Authors (https://github.com/simpals/onest).
+Licensed under the SIL Open Font License, Version 1.1; the full license text
+ships next to the font files as `OFL.txt`.

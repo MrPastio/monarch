@@ -68,28 +68,18 @@ export async function createVoicePcmStream(options = {}) {
   let totalBytes = 0;
   let stopped = false;
   let finalizing = false;
+  let resetting = false;
   let failure = null;
   let remoteSessionId = '';
   let lastPartial = '';
   let lastPartialAt = 0;
   let pushTail = Promise.resolve();
 
-  const startPromise = Promise.resolve(api.start({
-    language: options.language || 'ru-RU',
-    sampleRate,
-  })).then((result) => {
-    remoteSessionId = typeof result?.sessionId === 'string' ? result.sessionId : '';
-    if (!remoteSessionId) throw new Error('Streaming STT не вернул session id.');
-    emitTelemetry('started', result);
-    return result;
-  }).catch((error) => {
-    markFailure(error);
-    throw error;
-  });
+  let startPromise = beginRemoteSession();
   void startPromise.catch(() => undefined);
 
   node.port.onmessage = (event) => {
-    if (event.data?.type !== 'pcm' || stopped) return;
+    if (event.data?.type !== 'pcm' || stopped || resetting) return;
     const pcm = event.data.pcm;
     if (!(pcm instanceof ArrayBuffer) || !pcm.byteLength) return;
     enqueuePcm(pcm);
@@ -98,12 +88,13 @@ export async function createVoicePcmStream(options = {}) {
   return Object.freeze({
     sampleRate,
     stop,
+    reset,
     cancel,
     snapshot,
   });
 
   function enqueuePcm(pcm) {
-    if (failure || stopped) return;
+    if (failure || stopped || resetting) return;
     const bytes = pcm.byteLength;
     if (bytes > 64 * 1024
       || queuedBytes + bytes > MAX_QUEUED_PCM_BYTES
@@ -131,6 +122,15 @@ export async function createVoicePcmStream(options = {}) {
       if (partial) {
         lastPartial = partial;
         lastPartialAt = Date.now();
+        try {
+          options.onPartial?.({
+            transcript: partial,
+            sequence: batchSequence,
+            enginePath: result?.enginePath,
+          });
+        } catch {
+          // A presentation callback must never break the resident STT stream.
+        }
       }
       emitTelemetry('partial', {
         sequence: batchSequence,
@@ -149,7 +149,7 @@ export async function createVoicePcmStream(options = {}) {
   }
 
   async function stop(captureStoppedAtEpochMs = Date.now()) {
-    if (finalizing) throw new Error('Streaming STT уже завершается.');
+    if (finalizing || resetting) throw new Error('Streaming STT уже меняет сегмент.');
     finalizing = true;
     await flushNode(node, FLUSH_TIMEOUT_MS);
     stopped = true;
@@ -170,6 +170,39 @@ export async function createVoicePcmStream(options = {}) {
       transcriptLength: transcript.length,
     });
     return { ...result, transcript };
+  }
+
+  async function reset() {
+    if (stopped || finalizing || resetting) return false;
+    resetting = true;
+    try {
+      await flushNode(node, FLUSH_TIMEOUT_MS);
+      await pushTail;
+      if (failure) throw failure;
+      const started = await startPromise;
+      await api.cancel({ sessionId: started.sessionId }).catch(() => undefined);
+      remoteSessionId = '';
+      sequence = 0;
+      queuedBytes = 0;
+      totalBytes = 0;
+      lastPartial = '';
+      lastPartialAt = 0;
+      pushTail = Promise.resolve();
+      if (stopped) return false;
+      startPromise = beginRemoteSession();
+      const restarted = await startPromise;
+      if (stopped) {
+        await api.cancel({ sessionId: restarted.sessionId }).catch(() => undefined);
+        return false;
+      }
+      emitTelemetry('reset', { enginePath: 'direct-pcm/resident' });
+      return true;
+    } catch (error) {
+      markFailure(error);
+      throw error;
+    } finally {
+      resetting = false;
+    }
   }
 
   function cancel() {
@@ -201,6 +234,21 @@ export async function createVoicePcmStream(options = {}) {
     if (!failure) failure = error instanceof Error ? error : new Error(String(error));
   }
 
+  function beginRemoteSession() {
+    return Promise.resolve(api.start({
+      language: options.language || 'ru-RU',
+      sampleRate,
+    })).then((result) => {
+      remoteSessionId = typeof result?.sessionId === 'string' ? result.sessionId : '';
+      if (!remoteSessionId) throw new Error('Streaming STT не вернул session id.');
+      emitTelemetry('started', result);
+      return result;
+    }).catch((error) => {
+      markFailure(error);
+      throw error;
+    });
+  }
+
   function emitTelemetry(type, values = {}) {
     options.onTelemetry?.({ type, ...values });
   }
@@ -212,6 +260,7 @@ export async function createVoicePcmStream(options = {}) {
       queuedBytes,
       totalBytes,
       stopped,
+      resetting,
       failed: Boolean(failure),
       lastPartialLength: lastPartial.length,
       partialAgeMs: lastPartialAt ? Date.now() - lastPartialAt : null,

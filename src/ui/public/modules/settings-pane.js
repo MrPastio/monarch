@@ -1,7 +1,12 @@
+import { confirmAction, promptValue } from './ui-dialogs.js';
+import { initTelegramV2Settings } from './telegram-v2-settings.js';
+import { initGmailSettings } from './gmail-settings.js';
+import { initGitHubSettings } from './github-settings.js';
+import { initCalendarSettings } from './calendar-settings.js';
 import {
+  controlTelegram,
   executeCapability,
   createSkillDraft,
-  fetchCoderOverview,
   fetchSkills,
   publishSkillDraft,
   previewPersonality,
@@ -11,9 +16,10 @@ import {
   validateSkillDraft,
   writeLocalSettings,
 } from './api.js';
-import { readErrorMessage } from './utils.js';
+import { escapeHtml, readErrorMessage } from './utils.js';
 import { skillUserFacingDescription, skillUserFacingName } from './skill-ux.js';
 import { initOwnerEnrollment, loadOwnerEnrollment } from './owner-enrollment.js';
+import { initOwnerRedZones } from './owner-red-zones.js';
 import { swapUiSurface } from './ui-motion.js';
 import { state, subscribeState } from './state.js';
 import {
@@ -36,16 +42,14 @@ export const PERSONALITY_DIMENSIONS = Object.freeze({
   directness: 'Прямота',
   initiative: 'Инициативность',
   humor: 'Юмор',
-  skepticism: 'Скептичность',
-  technicalDepth: 'Техническая глубина',
+  skepticism: 'Осторожность в выводах',
+  technicalDepth: 'Технические подробности',
   structure: 'Структура',
 });
 
-const PERSONALITY_VARIANTS = Object.freeze({
-  restrained: 'Сдержанный',
-  direct: 'Прямой',
-  lively: 'Живой',
-});
+/** Each answer-style choice has three positions; the middle one adds nothing to the prompt. */
+const STYLE_LEVELS = Object.freeze([15, 50, 85]);
+const STYLE_SAVE_DELAY_MS = 450;
 
 const CATEGORY_LABELS = Object.freeze({
   fact: 'Факт',
@@ -55,11 +59,12 @@ const CATEGORY_LABELS = Object.freeze({
   note: 'Заметка',
 });
 
-const SETTINGS_TABS = new Set(['general', 'images', 'models', 'memory', 'skills', 'telegram', 'safe', 'system', 'dev']);
+const SETTINGS_TABS = new Set(['style', 'voice', 'images', 'max', 'models', 'memory', 'skills', 'integrations', 'telegram', 'safe', 'access', 'system', 'dev']);
 const SETTINGS_HEADER_COMPACT_AT = 32;
 const SETTINGS_HEADER_EXPAND_AT = 2;
 const SKILL_INITIAL_LIMIT = 12;
 const SKILL_PAGE_SIZE = 12;
+const VOICE_INFORMATION_PROVIDER_AGREEMENT_VERSION = '2026-08-29.1';
 
 export function resolveSettingsHeaderCompactState(scrollTop, isCompact) {
   const position = Number.isFinite(Number(scrollTop)) ? Math.max(0, Number(scrollTop)) : 0;
@@ -69,15 +74,15 @@ export function resolveSettingsHeaderCompactState(scrollTop, isCompact) {
 }
 
 let personalitySettingsRevision = 0;
-let personalitySettingsScope = { type: 'chat' };
 let personalitySettingsDocument = null;
-let personalityScopesLoaded = false;
+let styleSaveTimer = 0;
+let styleSaveQueue = Promise.resolve();
 let memorySettingsRevision = 0;
 let memorySettingsRecords = [];
-let currentSettingsTab = 'general';
-let currentGeneralSettingsView = 'personality';
+let currentSettingsTab = 'models';
 let telegramExpiresAt = '';
 let telegramTimer;
+let telegramAstraAvailable = false;
 let discoveredSkills = [];
 let visibleSkillLimit = SKILL_INITIAL_LIMIT;
 let verifiedSkillDraftHash = '';
@@ -97,13 +102,13 @@ let ownerPromptRevision = 0;
 const loadedSettingsTabs = new Set();
 
 export function initSettingsPane() {
+  initTelegramV2Settings();
+  initGmailSettings();
+  initGitHubSettings();
+  initCalendarSettings();
   initOwnerEnrollment();
-  const personalityForm = document.querySelector('#personality-settings-form');
-  const personalityProfiles = document.querySelector('#personality-profile-list');
-  const personalityEnabled = document.querySelector('#personality-enabled');
-  const personalityScope = document.querySelector('#personality-scope-select');
-  const personalityCopy = document.querySelector('#personality-copy-chat');
-  const personalityPreview = document.querySelector('#personality-preview-button');
+  initOwnerRedZones();
+  initStyleSettings();
   const memoryForm = document.querySelector('#memory-create-form');
   const memoryList = document.querySelector('#memory-settings-list');
   const memoryCrossChat = document.querySelector('#memory-cross-chat-enabled');
@@ -111,9 +116,12 @@ export function initSettingsPane() {
   const memoryCategoryFilter = document.querySelector('#memory-category-filter');
   const memoryComposeToggle = document.querySelector('#memory-compose-toggle');
   const memoryComposeClose = document.querySelector('#memory-compose-close');
+  const memoryDerivedList = document.querySelector('#memory-derived-list');
+  const memoryDerivedForgetAll = document.querySelector('#memory-derived-forget-all');
   const createCodeButton = document.querySelector('#telegram-create-code');
   const copyCodeButton = document.querySelector('#telegram-copy-code');
   const refreshTelegramButton = document.querySelector('#telegram-refresh-status');
+  const toggleTelegramConnectionButton = document.querySelector('#telegram-toggle-connection');
   const toggleTelegramRemoteButton = document.querySelector('#telegram-toggle-remote');
   const revokeTelegramButton = document.querySelector('#telegram-revoke-all');
   const refreshSkillsButton = document.querySelector('#skills-refresh');
@@ -136,6 +144,11 @@ export function initSettingsPane() {
   const voicePronunciationAdd = document.querySelector('#voice-pronunciation-add');
   const voicePronunciationList = document.querySelector('#voice-pronunciation-list');
   const voiceAutoSend = document.querySelector('#voice-input-auto-send');
+  const voiceSimplifiedMode = document.querySelector('#voice-simplified-mode');
+  const voiceBackgroundWake = document.querySelector('#voice-background-wake');
+  const voiceInformationProviders = document.querySelector('#voice-information-providers');
+  const voiceWeatherLocationMode = document.querySelector('#voice-weather-location-mode');
+  const voiceWeatherLocation = document.querySelector('#voice-weather-location');
   const safeSettingsButton = document.querySelector('#safe-open-security-settings');
   const safeShortcutButton = document.querySelector('#safe-shortcut-toggle');
   const safeOpenButton = document.querySelector('#safe-open-now');
@@ -148,6 +161,7 @@ export function initSettingsPane() {
   const settingsFeed = document.querySelector('#settings-section .document-feed');
 
   subscribeState(syncOwnerDevVisibility);
+  subscribeState(renderVoiceRecognitionState);
   syncOwnerDevVisibility();
   document.querySelectorAll('[data-dev-setting]').forEach((input) => {
     input.addEventListener('change', () => void saveOwnerDevSetting(input));
@@ -184,13 +198,6 @@ export function initSettingsPane() {
       void swapUiSurface(document.querySelector('.settings-panel-stack'), () => selectSettingsTab(button.dataset.settingsTab), { direction });
     });
   });
-  document.querySelectorAll('[data-settings-general]').forEach((button) => {
-    button.addEventListener('click', () => void swapUiSurface(
-      document.querySelector('.settings-panel-stack'),
-      () => selectGeneralSettingsView(button.dataset.settingsGeneral),
-      { direction: button.dataset.settingsGeneral === 'voice' ? 1 : -1 },
-    ));
-  });
   ownerModeDisable?.addEventListener('click', () => void disableOwnerMode(ownerModeDisable));
   window.addEventListener('monarch:settings-tab', (event) => {
     selectSettingsTab(event.detail?.tab || event.detail);
@@ -200,10 +207,6 @@ export function initSettingsPane() {
       clearInterval(telegramTimer);
       telegramTimer = undefined;
     }
-  });
-  personalityForm?.addEventListener('submit', (event) => {
-    event.preventDefault();
-    void generatePersonalityProfiles();
   });
   window.addEventListener('monarch:images-policy-changed', (event) => {
     if (event.detail?.policy) {
@@ -226,29 +229,6 @@ export function initSettingsPane() {
         || document.querySelector('#image-adult-attestation')?.checked === true,
     }));
   });
-  personalityForm?.querySelectorAll('[data-personality-dimension]').forEach((slider) => {
-    slider.addEventListener('input', () => syncPersonalityDimensionOutput(slider));
-  });
-  personalityEnabled?.addEventListener('change', () => void setPersonalityEnabled(personalityEnabled));
-  personalityScope?.addEventListener('change', () => {
-    personalitySettingsScope = decodePersonalityScope(personalityScope.value);
-    loadedSettingsTabs.delete('general');
-    void loadPersonalitySettings();
-  });
-  personalityCopy?.addEventListener('click', () => void copyChatPersonality());
-  personalityPreview?.addEventListener('click', () => void runPersonalityPreview());
-  personalityProfiles?.addEventListener('change', (event) => {
-    const select = event.target.closest?.('[data-personality-select]');
-    if (select?.checked) void selectPersonalityProfile(select.dataset.personalitySelect, select);
-  });
-  personalityProfiles?.addEventListener('input', (event) => {
-    const slider = event.target.closest?.('[data-profile-dimension]');
-    if (slider) syncProfileDimensionOutput(slider);
-  });
-  personalityProfiles?.addEventListener('click', (event) => {
-    const save = event.target.closest?.('[data-personality-save]');
-    if (save) void savePersonalityProfile(save.dataset.personalitySave, save);
-  });
   voiceForm?.addEventListener('submit', (event) => {
     event.preventDefault();
     void flushOscarVoiceAutosave();
@@ -260,8 +240,18 @@ export function initSettingsPane() {
       scheduleOscarVoiceAutosave();
     });
   });
-  document.querySelectorAll('[data-voice-preview]').forEach((button) => {
-    button.addEventListener('click', () => void testOscarVoice({ voice: button.dataset.voicePreview, button }));
+  // Arrow keys move between the three voices, as in the answer-style choices.
+  document.querySelector('#voice-settings .style-segment')?.addEventListener('keydown', (event) => {
+    const option = event.target.closest?.('[data-voice-preset]');
+    if (!option || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+    const options = [...option.parentElement.querySelectorAll('[data-voice-preset]')];
+    const index = options.indexOf(option);
+    const next = event.key === 'Home' ? 0
+      : event.key === 'End' ? options.length - 1
+        : (index + (['ArrowLeft', 'ArrowUp'].includes(event.key) ? -1 : 1) + options.length) % options.length;
+    event.preventDefault();
+    options[next].focus();
+    options[next].click();
   });
   document.querySelector('#oscar-voice-style')?.addEventListener('change', () => {
     activeVoicePresetId = null;
@@ -281,6 +271,28 @@ export function initSettingsPane() {
     });
   });
   voiceAutoSend?.addEventListener('change', () => scheduleOscarVoiceAutosave());
+  voiceSimplifiedMode?.addEventListener('change', () => scheduleOscarVoiceAutosave());
+  voiceBackgroundWake?.addEventListener('change', () => scheduleOscarVoiceAutosave());
+  voiceInformationProviders?.addEventListener('change', () => {
+    if (voiceInformationProviders.checked) {
+      voiceInformationProviders.dataset.agreementVersion = VOICE_INFORMATION_PROVIDER_AGREEMENT_VERSION;
+      voiceInformationProviders.dataset.consentedAt = new Date().toISOString();
+    } else {
+      voiceInformationProviders.dataset.agreementVersion = '';
+      voiceInformationProviders.dataset.consentedAt = '';
+    }
+    syncVoiceInformationProviderControls();
+    scheduleOscarVoiceAutosave('Сохраняю сетевое разрешение…');
+  });
+  voiceWeatherLocationMode?.addEventListener('change', () => {
+    syncVoiceInformationProviderControls();
+    scheduleOscarVoiceAutosave();
+  });
+  voiceWeatherLocation?.addEventListener('input', () => scheduleOscarVoiceAutosave());
+  window.addEventListener('monarch:voice-wake-state', (event) => {
+    const label = document.querySelector('#voice-wake-runtime-state');
+    if (label) label.textContent = String(event.detail?.label || 'Отклик на обращение недоступен');
+  });
   resetVoiceTuningButton?.addEventListener('click', () => {
     const current = readOscarVoiceForm();
     renderOscarVoiceForm({
@@ -337,9 +349,19 @@ export function initSettingsPane() {
     if (deleteButton) void deleteMemoryRecord(deleteButton.dataset.memoryDelete, deleteButton);
     if (retryButton) void loadMemorySettings();
   });
+  memoryDerivedList?.addEventListener('click', (event) => {
+    const forgetEpisode = event.target.closest('[data-memory-derived-forget-episode]');
+    const forgetCapsule = event.target.closest('[data-memory-derived-forget-capsule]');
+    const retryButton = event.target.closest('[data-memory-derived-retry]');
+    if (forgetEpisode) void forgetDerivedMemoryEpisode(forgetEpisode.dataset.memoryDerivedForgetEpisode, forgetEpisode);
+    if (forgetCapsule) void forgetDerivedMemoryCapsule(forgetCapsule.dataset.memoryDerivedForgetCapsule, forgetCapsule);
+    if (retryButton) void loadDerivedMemory();
+  });
+  memoryDerivedForgetAll?.addEventListener('click', () => void forgetAllDerivedMemory());
   createCodeButton?.addEventListener('click', () => void rotateTelegramCode());
   copyCodeButton?.addEventListener('click', () => void copyTelegramCode());
   refreshTelegramButton?.addEventListener('click', () => void loadTelegramSettings());
+  toggleTelegramConnectionButton?.addEventListener('click', () => void toggleTelegramConnection());
   toggleTelegramRemoteButton?.addEventListener('click', () => void toggleTelegramRemote());
   revokeTelegramButton?.addEventListener('click', () => void revokeTelegramPairings());
   safeSettingsButton?.addEventListener('click', () => void openSafeSecuritySettings());
@@ -419,6 +441,7 @@ function selectOscarVoicePreset(value, animate) {
     const selected = button.dataset.voicePreset === voice;
     button.classList.toggle('is-selected', selected);
     button.setAttribute('aria-checked', String(selected));
+    button.tabIndex = selected ? 0 : -1;
   });
   const visual = document.querySelector('#oscar-voice-visual');
   const preset = OSCAR_VOICE_PRESETS[voice];
@@ -459,6 +482,22 @@ function renderOscarVoiceDocument(value) {
   renderOscarVoiceForm(voiceSettingsDocument.preferences);
   const autoSend = document.querySelector('#voice-input-auto-send');
   if (autoSend) autoSend.checked = voiceSettingsDocument.input.autoSendAfterDictation === true;
+  const simplifiedMode = document.querySelector('#voice-simplified-mode');
+  if (simplifiedMode) simplifiedMode.checked = voiceSettingsDocument.input.simplifiedModeEnabled !== false;
+  const backgroundWake = document.querySelector('#voice-background-wake');
+  if (backgroundWake) backgroundWake.checked = voiceSettingsDocument.input.backgroundWakeEnabled !== false;
+  const providers = document.querySelector('#voice-information-providers');
+  if (providers) {
+    providers.checked = voiceSettingsDocument.input.informationProvidersEnabled === true
+      && voiceSettingsDocument.input.informationProviderAgreementVersion === VOICE_INFORMATION_PROVIDER_AGREEMENT_VERSION;
+    providers.dataset.agreementVersion = providers.checked ? VOICE_INFORMATION_PROVIDER_AGREEMENT_VERSION : '';
+    providers.dataset.consentedAt = providers.checked
+      ? voiceSettingsDocument.input.informationProviderConsentedAt || ''
+      : '';
+  }
+  setValue('#voice-weather-location-mode', voiceSettingsDocument.input.weatherLocationMode === 'device' ? 'device' : 'manual');
+  setValue('#voice-weather-location', voiceSettingsDocument.input.weatherLocation || '');
+  syncVoiceInformationProviderControls();
   renderOscarVoicePresets();
   renderVoicePronunciations();
 }
@@ -518,13 +557,13 @@ function renderVoicePronunciations() {
     toggle.dataset.voicePronunciationToggle = rule.id;
     toggle.setAttribute('aria-label', `Использовать произношение ${rule.word}`);
     toggle.disabled = !pronunciationAvailable;
-    if (!pronunciationAvailable) toggle.title = 'Текущий Qwen Base не поддерживает проверенное управление ударением';
+    if (!pronunciationAvailable) toggle.title = 'Этот голос пока не умеет ставить ударения по правилам';
     const copy = document.createElement('span');
     copy.className = 'voice-pronunciation-copy';
     const title = document.createElement('strong');
     title.textContent = `${rule.word} → ${rule.pronunciation}`;
     const context = document.createElement('span');
-    context.textContent = rule.context || 'Во всех контекстах';
+    context.textContent = rule.context || 'В любых фразах';
     copy.append(title, context);
     const actions = document.createElement('span');
     actions.className = 'voice-pronunciation-actions';
@@ -534,7 +573,7 @@ function renderVoicePronunciations() {
     test.dataset.voicePronunciationTest = rule.id;
     test.textContent = 'Тест';
     test.disabled = !pronunciationAvailable;
-    if (!pronunciationAvailable) test.title = 'Тест включится для совместимого voice engine';
+    if (!pronunciationAvailable) test.title = 'Проверка заработает, когда голос будет поддерживать ударения';
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'claude-ghost-btn';
@@ -548,28 +587,18 @@ function renderVoicePronunciations() {
 
 function renderVoiceRuntimeCapabilities(value) {
   const capabilities = applyVoiceRuntimeCapabilities(value);
-  const pronunciationAvailable = isVoicePronunciationControlAvailable(capabilities);
-  const qwenStressMarkupUnsupported = capabilities.pronunciationDiagnostic === 'qwen-base-stress-markup-unsupported';
   const strip = document.querySelector('#oscar-voice-runtime');
   if (strip) {
-    strip.replaceChildren();
-    const badges = [
-      [capabilities.primaryEngine === 'qwen3-tts-0.6b-base' ? 'Qwen3-TTS 0.6B · локально' : 'Voice runtime недоступен', capabilities.neuralInstalled],
-      [pronunciationAvailable
-        ? 'Ударения · engine-native'
-        : qwenStressMarkupUnsupported
-          ? 'Ударения · Qwen Base несовместим'
-          : 'Ударения · недоступны', pronunciationAvailable],
-      [capabilities.controls.speed === 'dsp' ? 'Темп/высота · DSP' : 'DSP недоступен', capabilities.controls.speed === 'dsp'],
-      [capabilities.controls.expressiveness === 'generation-parameters' ? 'Манера · generation params' : 'Манера недоступна', capabilities.controls.expressiveness === 'generation-parameters'],
-    ];
-    badges.forEach(([label, ready]) => {
-      const badge = document.createElement('span');
-      badge.textContent = label;
-      badge.className = ready ? 'is-ready' : 'is-unavailable';
-      strip.append(badge);
-    });
+    // One plain line about what the person will hear, not a list of engine features.
+    const badge = document.createElement('span');
+    const neural = capabilities.neuralInstalled === true;
+    badge.textContent = neural
+      ? 'Нейросетевой голос готов'
+      : 'Сейчас Оскар говорит голосом Windows — нейросетевой голос на этом компьютере не установлен';
+    badge.className = neural ? 'is-ready' : 'is-unavailable';
+    strip.replaceChildren(badge);
   }
+  renderVoiceRecognitionState();
   const controls = capabilities.controls;
   const supported = {
     speed: controls.speed === 'dsp',
@@ -593,21 +622,37 @@ function renderVoiceRuntimeCapabilities(value) {
   renderVoicePronunciations();
 }
 
+/** Dictation and Voice need the «Распознавание речи» download; offer it right here. */
+export function renderVoiceRecognitionState() {
+  const host = document.querySelector('#voice-recognition-state');
+  if (!host) return;
+  const extra = (state.data?.components?.extras || []).find((entry) => entry.role === 'voice-recognition');
+  if (!extra) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  const active = ['checking', 'downloading', 'verifying'].includes(extra.phase);
+  const percent = Math.round(Math.max(0, Math.min(1, Number(extra.progress) || 0)) * 100);
+  host.dataset.ready = String(extra.installed === true);
+  host.innerHTML = extra.installed
+    ? '<strong>Распознавание речи готово</strong><small>Оскар понимает голос без интернета.</small>'
+    : active
+      ? `<strong>Скачиваю распознавание речи · ${percent}%</strong><small>Можно продолжать пользоваться Monarch.</small>`
+      : `<span><strong>Распознавание речи не скачано</strong><small>Без него не работают диктовка и голосовой режим.</small></span><button type="button" class="claude-primary-btn" data-model-install="voice-recognition">Скачать</button>`;
+}
+
 function renderVoicePronunciationAvailability(capabilities) {
   const available = isVoicePronunciationControlAvailable(capabilities);
   const qwenIncompatible = capabilities.pronunciationDiagnostic === 'qwen-base-stress-markup-unsupported';
   const section = document.querySelector('.voice-pronunciation');
   if (section) section.dataset.pronunciationControl = available ? 'available' : 'unavailable';
-  setText('#voice-stress-status', available
-    ? 'Управление ударением активно'
-    : qwenIncompatible
-      ? 'Qwen Base · разметка отключена'
-      : 'Разметка ударений недоступна');
+  setText('#voice-stress-status', available ? 'Работает' : 'Пока недоступно');
   setText('#voice-pronunciation-support', available
-    ? 'Правила применяются только к приватному TTS payload.'
+    ? 'Эти правила меняют только произношение. Текст в чате останется прежним.'
     : qwenIncompatible
-      ? 'Silero определяет ударение, но Qwen3-TTS Base не обучен на этой разметке. Monarch озвучивает чистый текст, чтобы не коверкать слова; сохранённые правила не удалены.'
-      : 'Текущий voice engine не предоставляет проверенного управления ударением.');
+      ? 'Этот голос пока не умеет ставить ударения по правилам. Сохранённые правила не пропадут и заработают, когда голос это поддержит.'
+      : 'Ударения для этого голоса пока недоступны.');
   ['#voice-pronunciation-word', '#voice-pronunciation-value', '#voice-pronunciation-context', '#voice-pronunciation-add']
     .forEach((selector) => {
       const control = document.querySelector(selector);
@@ -650,7 +695,7 @@ async function retryOscarVoiceAutosave() {
   const status = document.querySelector('#oscar-voice-save-state');
   const retry = document.querySelector('#oscar-voice-retry');
   const preferences = readOscarVoiceForm();
-  const input = { schemaVersion: 1, autoSendAfterDictation: document.querySelector('#voice-input-auto-send')?.checked === true };
+  const input = readVoiceInputForm();
   setStatus(status, 'Проверяю сохранение…');
   try {
     const context = await readLocalSettings('voice');
@@ -673,6 +718,10 @@ async function retryOscarVoiceAutosave() {
       renderOscarVoiceForm(preferences);
       const autoSend = document.querySelector('#voice-input-auto-send');
       if (autoSend) autoSend.checked = input.autoSendAfterDictation;
+      const simplifiedMode = document.querySelector('#voice-simplified-mode');
+      if (simplifiedMode) simplifiedMode.checked = input.simplifiedModeEnabled;
+      const backgroundWake = document.querySelector('#voice-background-wake');
+      if (backgroundWake) backgroundWake.checked = input.backgroundWakeEnabled;
     }
   }
   voiceMutationVersion += 1;
@@ -683,7 +732,7 @@ async function persistOscarVoiceSettings() {
   const requestedVersion = voiceMutationVersion;
   if (!voiceSettingsLoaded || requestedVersion <= voiceSavedVersion) return readVoiceSettingsSnapshot();
   const preferences = readOscarVoiceForm();
-  const input = { schemaVersion: 1, autoSendAfterDictation: document.querySelector('#voice-input-auto-send')?.checked === true };
+  const input = readVoiceInputForm();
   const status = document.querySelector('#oscar-voice-save-state');
   const retry = document.querySelector('#oscar-voice-retry');
   voiceSaveQueue = voiceSaveQueue.catch(() => undefined).then(async () => {
@@ -705,6 +754,36 @@ async function persistOscarVoiceSettings() {
     }
   });
   return voiceSaveQueue;
+}
+
+function readVoiceInputForm() {
+  const providers = document.querySelector('#voice-information-providers');
+  const providersEnabled = providers?.checked === true;
+  return {
+    schemaVersion: 1,
+    autoSendAfterDictation: document.querySelector('#voice-input-auto-send')?.checked === true,
+    simplifiedModeEnabled: document.querySelector('#voice-simplified-mode')?.checked !== false,
+    backgroundWakeEnabled: document.querySelector('#voice-background-wake')?.checked !== false,
+    informationProvidersEnabled: providersEnabled,
+    informationProviderAgreementVersion: providersEnabled
+      ? providers?.dataset.agreementVersion || VOICE_INFORMATION_PROVIDER_AGREEMENT_VERSION
+      : null,
+    informationProviderConsentedAt: providersEnabled ? providers?.dataset.consentedAt || null : null,
+    weatherLocationMode: document.querySelector('#voice-weather-location-mode')?.value === 'device' ? 'device' : 'manual',
+    weatherLocation: String(document.querySelector('#voice-weather-location')?.value || '').trim().slice(0, 100),
+  };
+}
+
+function syncVoiceInformationProviderControls() {
+  const enabled = document.querySelector('#voice-information-providers')?.checked === true;
+  const mode = document.querySelector('#voice-weather-location-mode');
+  const manual = document.querySelector('#voice-weather-location-field');
+  const disclosure = document.querySelector('#voice-information-provider-state');
+  if (mode) mode.disabled = !enabled;
+  if (manual) manual.hidden = !enabled || mode?.value === 'device';
+  if (disclosure) disclosure.textContent = enabled
+    ? `Разрешено · соглашение ${VOICE_INFORMATION_PROVIDER_AGREEMENT_VERSION}`
+    : 'Сеть выключена · команды устройств остаются локальными';
 }
 
 async function testOscarVoice(options = {}) {
@@ -778,7 +857,7 @@ async function createOscarVoicePreset() {
   } catch (error) {
     setStatus(status, readErrorMessage(error), true);
   } finally {
-    setBusy(button, false, 'Сохранить как пресет');
+    setBusy(button, false, 'Сохранить текущий голос');
   }
 }
 
@@ -933,12 +1012,14 @@ export function filterVisibleSkills(skills, query, limit = 80) {
 
 export function normalizeSettingsTab(value) {
   const tab = String(value || '').trim().toLowerCase();
-  return SETTINGS_TABS.has(tab) ? tab : 'general';
+  // 'general' was the old combined «Личность и голос» tab.
+  if (tab === 'general' || tab === 'personality') return 'style';
+  return SETTINGS_TABS.has(tab) ? tab : 'models';
 }
 
 export function selectSettingsTab(value, load = true) {
   currentSettingsTab = normalizeSettingsTab(value);
-  if (currentSettingsTab === 'dev' && !isVerifiedOwner()) currentSettingsTab = 'general';
+  if (currentSettingsTab === 'dev' && !isVerifiedOwner()) currentSettingsTab = 'models';
   let activeTabButton = null;
   document.querySelectorAll('[data-settings-tab]').forEach((button) => {
     const active = button.dataset.settingsTab === currentSettingsTab;
@@ -949,11 +1030,8 @@ export function selectSettingsTab(value, load = true) {
   let primaryDetailsOpened = false;
   document.querySelectorAll('[data-settings-panel]').forEach((panel) => {
     const active = panel.dataset.settingsPanel === currentSettingsTab;
-    const activeGeneralPanel = currentSettingsTab !== 'general'
-      || !panel.dataset.settingsGeneralPanel
-      || panel.dataset.settingsGeneralPanel === currentGeneralSettingsView;
-    panel.hidden = !active || !activeGeneralPanel;
-    if (active && panel.tagName === 'DETAILS') {
+    panel.hidden = !active;
+    if (active && panel.tagName === 'DETAILS' && !panel.hasAttribute('data-default-collapsed')) {
       panel.open = !primaryDetailsOpened;
       primaryDetailsOpened = true;
     }
@@ -969,20 +1047,7 @@ export function selectSettingsTab(value, load = true) {
     settingsView.querySelector('.document-feed')?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   }
   if (load) void ensureSettingsTabLoaded(currentSettingsTab);
-}
-
-function selectGeneralSettingsView(value) {
-  currentGeneralSettingsView = value === 'voice' ? 'voice' : 'personality';
-  document.querySelectorAll('[data-settings-general]').forEach((button) => {
-    const active = button.dataset.settingsGeneral === currentGeneralSettingsView;
-    button.classList.toggle('active', active);
-    button.setAttribute('aria-pressed', String(active));
-  });
-  document.querySelectorAll('[data-settings-general-panel]').forEach((panel) => {
-    panel.hidden = currentSettingsTab !== 'general'
-      || panel.dataset.settingsGeneralPanel !== currentGeneralSettingsView;
-  });
-  document.querySelector('#settings-section .document-feed')?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  window.dispatchEvent(new CustomEvent('monarch:settings-selection', { detail: { tab: currentSettingsTab } }));
 }
 
 function setMemoryComposerOpen(open) {
@@ -1011,8 +1076,9 @@ async function ensureSettingsTabLoaded(tab) {
   if (loadedSettingsTabs.has(tab)) return;
   loadedSettingsTabs.add(tab);
   try {
-    if (tab === 'general') await Promise.all([loadPersonalitySettings(), loadVoiceSettings()]);
-    else if (tab === 'memory') await loadMemorySettings();
+    if (tab === 'style') await loadPersonalitySettings();
+    else if (tab === 'voice') await loadVoiceSettings();
+    else if (tab === 'memory') await Promise.all([loadMemorySettings(), loadDerivedMemory()]);
     else if (tab === 'skills') await loadSkillSettings();
     else if (tab === 'telegram') await loadTelegramSettings();
     else if (tab === 'safe') await loadSafeSettings();
@@ -1041,7 +1107,7 @@ function syncOwnerDevVisibility() {
   });
   if (!owner && currentSettingsTab === 'dev') {
     loadedSettingsTabs.delete('dev');
-    selectSettingsTab('general', false);
+    selectSettingsTab('models', false);
     return;
   }
   selectSettingsTab(currentSettingsTab, false);
@@ -1403,7 +1469,7 @@ async function loadSafeSettings() {
   const button = document.querySelector('#safe-shortcut-toggle');
   const feedback = document.querySelector('#safe-settings-feedback');
   if (!bridge?.getSafeShortcutStatus) {
-    if (badge) badge.textContent = 'Только Desktop';
+    if (badge) badge.textContent = 'Только в приложении';
     if (button) button.disabled = true;
     setStatus(feedback, 'Ярлык и изолированные настройки доступны в приложении Monarch для Windows.');
     return;
@@ -1464,370 +1530,294 @@ async function loadPersonalitySettings() {
   const saveState = document.querySelector('#personality-save-state');
   setStatus(saveState, 'Загрузка');
   try {
-    if (!personalityScopesLoaded) await populatePersonalityScopes();
-    const select = document.querySelector('#personality-scope-select');
-    if (select) select.value = encodePersonalityScope(personalitySettingsScope);
-    const context = await readLocalSettings('personality', personalitySettingsScope);
-    personalitySettingsRevision = Number(context?.revision) || 0;
-    personalitySettingsDocument = context?.value || null;
-    renderPersonalitySettings(personalitySettingsDocument);
+    const context = await readLocalSettings('personality', { type: 'chat' });
+    acceptPersonalityReadBack(context);
     setStatus(saveState, 'Сохранено');
   } catch (error) {
     personalitySettingsDocument = null;
-    renderPersonalitySettings(null);
+    renderStyleSettings(null);
     setStatus(saveState, readErrorMessage(error), true);
   }
 }
 
-async function populatePersonalityScopes() {
-  const select = document.querySelector('#personality-scope-select');
-  if (!select) return;
-  const previous = encodePersonalityScope(personalitySettingsScope);
-  const options = [{ value: 'chat', label: 'Обычный Chat' }];
-  try {
-    const overview = await fetchCoderOverview();
-    const projects = Array.isArray(overview?.projects?.projects) ? overview.projects.projects : [];
-    projects.forEach((project) => {
-      const id = String(project?.id || '').trim();
-      if (id) options.push({ value: `coder-project:${id}`, label: `Coder · ${String(project.name || id)}` });
-    });
-  } catch {
-    // Personality for Chat remains available when Coder is not initialized.
-  }
-  if (previous !== 'chat' && !options.some((option) => option.value === previous)) {
-    options.push({ value: previous, label: `Coder · ${personalitySettingsScope.projectId}` });
-  }
-  select.replaceChildren(...options.map(({ value, label }) => {
-    const option = document.createElement('option');
-    option.value = value;
-    option.textContent = label;
-    return option;
-  }));
-  select.value = previous;
-  personalityScopesLoaded = true;
+function initStyleSettings() {
+  const root = document.querySelector('#style-settings');
+  if (!root) return;
+  root.addEventListener('click', (event) => {
+    const option = event.target.closest?.('[data-style-dimension], [data-style-address]');
+    if (!option || option.disabled) return;
+    selectStyleOption(option);
+    scheduleStyleSave();
+  });
+  root.addEventListener('keydown', (event) => {
+    const option = event.target.closest?.('[role="radio"]');
+    if (!option || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+    const options = [...option.parentElement.querySelectorAll('[role="radio"]')];
+    const index = options.indexOf(option);
+    const next = event.key === 'Home' ? 0
+      : event.key === 'End' ? options.length - 1
+        : (index + (['ArrowLeft', 'ArrowUp'].includes(event.key) ? -1 : 1) + options.length) % options.length;
+    event.preventDefault();
+    options[next].focus();
+    selectStyleOption(options[next]);
+    scheduleStyleSave();
+  });
+  document.querySelector('#personality-enabled')?.addEventListener('change', () => {
+    syncStyleEnabledState();
+    scheduleStyleSave(0);
+  });
+  document.querySelector('#personality-language')?.addEventListener('change', () => scheduleStyleSave());
+  document.querySelector('#style-rules')?.addEventListener('input', () => scheduleStyleSave(900));
+  document.querySelector('#personality-settings-form')?.addEventListener('submit', (event) => event.preventDefault());
+  document.querySelector('#personality-preview-button')?.addEventListener('click', () => void runPersonalityPreview());
 }
 
-function renderPersonalitySettings(value) {
-  const documentValue = value && typeof value === 'object' ? value : {};
-  const questionnaire = documentValue.questionnaire && typeof documentValue.questionnaire === 'object'
-    ? documentValue.questionnaire
-    : {};
-  Object.keys(PERSONALITY_DIMENSIONS).forEach((key) => {
-    const slider = document.querySelector(`#personality-${key}`);
-    if (!slider) return;
-    slider.value = String(clampPersonalityValue(questionnaire[key], 50));
-    syncPersonalityDimensionOutput(slider);
+/** Exactly one option of a group is checked; it owns the roving tab stop. */
+function selectStyleOption(option) {
+  option.parentElement.querySelectorAll('[role="radio"]').forEach((candidate) => {
+    const checked = candidate === option;
+    candidate.setAttribute('aria-checked', String(checked));
+    candidate.tabIndex = checked ? 0 : -1;
   });
-  setValue('#personality-address-form', questionnaire.addressForm || 'ты');
-  setValue('#personality-language', questionnaire.language || 'auto');
+}
+
+function syncStyleEnabledState() {
+  const enabled = document.querySelector('#personality-enabled')?.checked === true;
+  const choices = document.querySelector('#style-choices');
+  if (choices) choices.dataset.enabled = String(enabled);
+  const previewButton = document.querySelector('#personality-preview-button');
+  if (previewButton) previewButton.disabled = !enabled;
+}
+
+/** Turns, Coder runs and the preview read the stored style, so a short pause batches quick taps. */
+function scheduleStyleSave(delay = STYLE_SAVE_DELAY_MS) {
+  if (styleSaveTimer) window.clearTimeout(styleSaveTimer);
+  setStatus(document.querySelector('#personality-save-state'), 'Сохраняю…');
+  styleSaveTimer = window.setTimeout(() => {
+    styleSaveTimer = 0;
+    styleSaveQueue = styleSaveQueue.then(saveStyleSettings, saveStyleSettings);
+  }, delay);
+}
+
+async function saveStyleSettings() {
+  const saveState = document.querySelector('#personality-save-state');
+  try {
+    const saved = await writeLocalSettings('personality.style.set', readStyleSettings(), {
+      scope: { type: 'chat' },
+      expectedRevision: personalitySettingsRevision,
+    });
+    personalitySettingsRevision = Number(saved?.context?.revision) || personalitySettingsRevision;
+    personalitySettingsDocument = saved?.context?.value || personalitySettingsDocument;
+    setStatus(saveState, 'Сохранено');
+    const output = document.querySelector('#personality-preview-output');
+    if (output) output.textContent = readStyleSettings().enabled
+      ? 'Стиль применится к следующему ответу. Нажми «Показать пример», чтобы проверить.'
+      : 'Свой стиль выключен — Оскар отвечает в обычной манере.';
+  } catch (error) {
+    setStatus(saveState, readErrorMessage(error), true);
+    // A revision conflict means another window changed the style: show what is stored now.
+    await loadPersonalitySettings().catch(() => undefined);
+  }
+}
+
+export function readStyleSettings(root = document) {
+  const dimensions = {};
+  Object.keys(PERSONALITY_DIMENSIONS).forEach((key) => {
+    const checked = root.querySelector(`[data-style-dimension="${key}"][aria-checked="true"]`);
+    dimensions[key] = clampPersonalityValue(checked?.dataset.styleValue, 50);
+  });
+  return {
+    enabled: root.querySelector('#personality-enabled')?.checked === true,
+    dimensions,
+    addressForm: root.querySelector('[data-style-address][aria-checked="true"]')?.dataset.styleAddress || 'ты',
+    language: root.querySelector('#personality-language')?.value || 'auto',
+    customRules: splitSettingsLines(root.querySelector('#style-rules')?.value || '').slice(0, 12),
+  };
+}
+
+/** Stored values from older versions (sliders 0-100) snap to the nearest of the three positions. */
+export function nearestStyleLevel(value) {
+  const number = clampPersonalityValue(value, 50);
+  return number <= 35 ? STYLE_LEVELS[0] : number >= 65 ? STYLE_LEVELS[2] : STYLE_LEVELS[1];
+}
+
+function selectedStyleProfile(documentValue) {
+  const profiles = Array.isArray(documentValue?.profiles) ? documentValue.profiles : [];
+  return profiles.find((profile) => profile?.id === documentValue?.selectedProfileId) || profiles[0] || null;
+}
+
+function renderStyleSettings(value) {
+  const documentValue = value && typeof value === 'object' ? value : {};
+  const profile = selectedStyleProfile(documentValue) || {};
+  const dimensions = profile.dimensions || documentValue.questionnaire || {};
+  Object.keys(PERSONALITY_DIMENSIONS).forEach((key) => {
+    const level = String(nearestStyleLevel(dimensions[key] ?? 50));
+    const option = document.querySelector(`[data-style-dimension="${key}"][data-style-value="${level}"]`);
+    if (option) selectStyleOption(option);
+  });
+  const address = document.querySelector(`[data-style-address="${profile.addressForm || 'ты'}"]`);
+  if (address) selectStyleOption(address);
+  setValue('#personality-language', profile.language || 'auto');
+  const rules = document.querySelector('#style-rules');
+  if (rules) rules.value = Array.isArray(profile.customRules) ? profile.customRules.join('\n') : '';
   const enabled = document.querySelector('#personality-enabled');
   if (enabled) enabled.checked = documentValue.enabled === true;
-  const copy = document.querySelector('#personality-copy-chat');
-  if (copy) copy.hidden = personalitySettingsScope.type === 'chat';
-  renderPersonalityProfiles(Array.isArray(documentValue.profiles) ? documentValue.profiles : [], documentValue.selectedProfileId);
+  syncStyleEnabledState();
   const output = document.querySelector('#personality-preview-output');
   if (output) output.textContent = documentValue.enabled === true
-    ? 'Настройки применятся к следующему ходу. Нажми «Показать пример» для проверки.'
-    : 'Личность выключена: Chat использует чистую базовую манеру Oscar.';
-}
-
-async function generatePersonalityProfiles() {
-  const button = document.querySelector('#personality-generate');
-  const saveState = document.querySelector('#personality-save-state');
-  setBusy(button, true, 'Создаю…');
-  setStatus(saveState, 'Сохранение');
-  try {
-    const saved = await writeLocalSettings('personality.profile.create', {
-      questionnaire: readPersonalityQuestionnaire(),
-    }, {
-      scope: personalitySettingsScope,
-      expectedRevision: personalitySettingsRevision,
-    });
-    acceptPersonalityReadBack(saved.context);
-    setStatus(saveState, '3 варианта сохранены');
-  } catch (error) {
-    setStatus(saveState, readErrorMessage(error), true);
-  } finally {
-    setBusy(button, false, 'Создать 3 варианта');
-  }
-}
-
-async function setPersonalityEnabled(control) {
-  if (!control || control.disabled) return;
-  const requested = control.checked === true;
-  const saveState = document.querySelector('#personality-save-state');
-  control.disabled = true;
-  setStatus(saveState, 'Сохранение');
-  try {
-    const saved = await writeLocalSettings('personality.personalization.set', { enabled: requested }, {
-      scope: personalitySettingsScope,
-      expectedRevision: personalitySettingsRevision,
-    });
-    acceptPersonalityReadBack(saved.context);
-    setStatus(saveState, requested ? 'Личность включена' : 'Личность выключена');
-  } catch (error) {
-    control.checked = !requested;
-    setStatus(saveState, readErrorMessage(error), true);
-  } finally {
-    control.disabled = false;
-  }
-}
-
-async function copyChatPersonality() {
-  if (personalitySettingsScope.type !== 'coder-project') return;
-  const button = document.querySelector('#personality-copy-chat');
-  const saveState = document.querySelector('#personality-save-state');
-  setBusy(button, true, 'Копирую…');
-  try {
-    const saved = await writeLocalSettings('personality.scope.copy', {
-      sourceScope: { type: 'chat' },
-    }, {
-      scope: personalitySettingsScope,
-      expectedRevision: personalitySettingsRevision,
-    });
-    acceptPersonalityReadBack(saved.context);
-    setStatus(saveState, 'Набор явно скопирован из Chat');
-  } catch (error) {
-    setStatus(saveState, readErrorMessage(error), true);
-  } finally {
-    setBusy(button, false, 'Скопировать из Chat');
-  }
-}
-
-async function selectPersonalityProfile(profileId, control) {
-  if (!profileId || control?.disabled) return;
-  const saveState = document.querySelector('#personality-save-state');
-  if (control) control.disabled = true;
-  try {
-    const saved = await writeLocalSettings('personality.profile.select', { profileId }, {
-      scope: personalitySettingsScope,
-      expectedRevision: personalitySettingsRevision,
-    });
-    acceptPersonalityReadBack(saved.context);
-    setStatus(saveState, 'Профиль выбран для следующего хода');
-  } catch (error) {
-    renderPersonalitySettings(personalitySettingsDocument);
-    setStatus(saveState, readErrorMessage(error), true);
-  } finally {
-    if (control) control.disabled = false;
-  }
-}
-
-async function savePersonalityProfile(profileId, button) {
-  const card = button?.closest('.personality-profile-card');
-  if (!card || !profileId) return;
-  const status = card.querySelector('.personality-profile-status');
-  setBusy(button, true, 'Сохраняю…');
-  setStatus(status, 'Сохранение');
-  try {
-    const dimensions = {};
-    card.querySelectorAll('[data-profile-dimension]').forEach((slider) => {
-      dimensions[slider.dataset.profileDimension] = clampPersonalityValue(slider.value, 50);
-    });
-    const saved = await writeLocalSettings('personality.profile.update', {
-      profileId,
-      patch: {
-        name: card.querySelector('[data-personality-name]')?.value?.trim() || PERSONALITY_VARIANTS[card.dataset.variant] || 'Профиль',
-        dimensions,
-        addressForm: card.querySelector('[data-profile-address]')?.value || 'ты',
-        language: card.querySelector('[data-profile-language]')?.value || 'auto',
-        customRules: splitSettingsLines(card.querySelector('[data-profile-rules]')?.value || '').slice(0, 12),
-      },
-    }, {
-      scope: personalitySettingsScope,
-      expectedRevision: personalitySettingsRevision,
-    });
-    acceptPersonalityReadBack(saved.context);
-    setStatus(document.querySelector('#personality-save-state'), 'Профиль сохранён');
-  } catch (error) {
-    setStatus(status, readErrorMessage(error), true);
-  } finally {
-    setBusy(button, false, 'Сохранить профиль');
-  }
+    ? 'Нажми «Показать пример», чтобы услышать, как Оскар ответит в этом стиле.'
+    : 'Свой стиль выключен — Оскар отвечает в обычной манере.';
 }
 
 async function runPersonalityPreview() {
   const button = document.querySelector('#personality-preview-button');
   const output = document.querySelector('#personality-preview-output');
-  setBusy(button, true, 'Генерирую…');
-  if (output) output.textContent = 'Oscar формирует неперсистентный пример…';
+  if (styleSaveTimer) {
+    window.clearTimeout(styleSaveTimer);
+    styleSaveTimer = 0;
+    styleSaveQueue = styleSaveQueue.then(saveStyleSettings, saveStyleSettings);
+  }
+  await styleSaveQueue;
+  setBusy(button, true, 'Пишу пример…');
+  if (output) output.textContent = 'Оскар пишет пример. Он не попадёт в историю.';
   try {
-    const preview = await previewPersonality(personalitySettingsScope);
-    if (output) output.textContent = String(preview?.answer || 'Runtime не вернул текст.');
+    const preview = await previewPersonality({ type: 'chat' });
+    if (output) output.textContent = String(preview?.answer || 'Не удалось получить ответ.');
   } catch (error) {
     if (output) output.textContent = readErrorMessage(error);
   } finally {
     setBusy(button, false, 'Показать пример');
+    syncStyleEnabledState();
   }
 }
 
 function acceptPersonalityReadBack(context) {
   personalitySettingsRevision = Number(context?.revision) || 0;
   personalitySettingsDocument = context?.value || null;
-  renderPersonalitySettings(personalitySettingsDocument);
-}
-
-function renderPersonalityProfiles(profiles, selectedProfileId) {
-  const list = document.querySelector('#personality-profile-list');
-  if (!list) return;
-  list.replaceChildren();
-  if (profiles.length !== 3) {
-    const empty = document.createElement('div');
-    empty.className = 'settings-empty';
-    empty.textContent = 'Набор ещё не создан. Настрой параметры и создай три варианта.';
-    list.append(empty);
-    return;
-  }
-  profiles.forEach((profile) => list.append(createPersonalityProfileCard(profile, profile.id === selectedProfileId)));
-}
-
-function createPersonalityProfileCard(profile, selected) {
-  const card = document.createElement('article');
-  card.className = `personality-profile-card${selected ? ' is-selected' : ''}`;
-  card.dataset.variant = String(profile.variant || 'restrained');
-
-  const header = document.createElement('label');
-  header.className = 'personality-profile-card-header';
-  const radio = document.createElement('input');
-  radio.type = 'radio';
-  radio.name = 'personality-selected-profile';
-  radio.className = 'personality-profile-select';
-  radio.dataset.personalitySelect = String(profile.id || '');
-  radio.checked = selected;
-  radio.setAttribute('aria-label', `Выбрать профиль ${String(profile.name || '')}`);
-  const name = document.createElement('input');
-  name.className = 'personality-profile-name';
-  name.dataset.personalityName = '';
-  name.maxLength = 80;
-  name.value = String(profile.name || PERSONALITY_VARIANTS[profile.variant] || 'Профиль');
-  header.append(radio, name);
-
-  const summary = document.createElement('p');
-  summary.className = 'personality-profile-summary';
-  summary.textContent = describePersonalityProfile(profile);
-
-  const details = document.createElement('details');
-  details.className = 'personality-profile-details';
-  const detailsSummary = document.createElement('summary');
-  detailsSummary.textContent = 'Точная настройка варианта';
-  const editor = document.createElement('div');
-  editor.className = 'personality-profile-editor';
-  const dimensions = document.createElement('div');
-  dimensions.className = 'personality-dimension-grid';
-  Object.entries(PERSONALITY_DIMENSIONS).forEach(([key, label]) => {
-    const wrapper = document.createElement('label');
-    wrapper.className = 'personality-dimension';
-    const caption = document.createElement('span');
-    caption.textContent = label;
-    const output = document.createElement('output');
-    output.textContent = String(clampPersonalityValue(profile.dimensions?.[key], 50));
-    caption.append(output);
-    const slider = document.createElement('input');
-    slider.type = 'range';
-    slider.min = '0';
-    slider.max = '100';
-    slider.value = output.textContent;
-    slider.dataset.profileDimension = key;
-    wrapper.append(caption, slider);
-    dimensions.append(wrapper);
-  });
-  const languageRow = document.createElement('div');
-  languageRow.className = 'personality-language-row';
-  languageRow.append(
-    createPersonalitySelectField('Обращение', 'profileAddress', profile.addressForm || 'ты', [
-      ['ты', 'На «ты»'], ['вы', 'На «вы»'], ['neutral', 'Нейтрально'],
-    ]),
-    createPersonalitySelectField('Язык', 'profileLanguage', profile.language || 'auto', [
-      ['auto', 'Как в запросе'], ['ru', 'Русский'], ['en', 'English'], ['uk', 'Українська'], ['bg', 'Български'],
-    ]),
-  );
-  const rulesLabel = document.createElement('label');
-  rulesLabel.className = 'settings-field';
-  const rulesCaption = document.createElement('span');
-  rulesCaption.textContent = 'Свои правила формы ответа · низший приоритет';
-  const rules = document.createElement('textarea');
-  rules.dataset.profileRules = '';
-  rules.rows = 4;
-  rules.maxLength = 3600;
-  rules.placeholder = 'По одному правилу на строку. Они не меняют Security, identity или инструменты.';
-  rules.value = Array.isArray(profile.customRules) ? profile.customRules.join('\n') : '';
-  rulesLabel.append(rulesCaption, rules);
-  const actions = document.createElement('div');
-  actions.className = 'personality-profile-actions';
-  const status = document.createElement('span');
-  status.className = 'personality-profile-status';
-  status.textContent = `rev ${Number(profile.revision) || 1}`;
-  const save = document.createElement('button');
-  save.type = 'button';
-  save.className = 'claude-ghost-btn';
-  save.dataset.personalitySave = String(profile.id || '');
-  save.textContent = 'Сохранить профиль';
-  actions.append(status, save);
-  editor.append(dimensions, languageRow, rulesLabel, actions);
-  details.append(detailsSummary, editor);
-  card.append(header, summary, details);
-  return card;
-}
-
-function createPersonalitySelectField(label, datasetKey, value, options) {
-  const wrapper = document.createElement('label');
-  wrapper.className = 'settings-field';
-  const caption = document.createElement('span');
-  caption.textContent = label;
-  const select = document.createElement('select');
-  select.dataset[datasetKey] = '';
-  options.forEach(([optionValue, optionLabel]) => {
-    const option = document.createElement('option');
-    option.value = optionValue;
-    option.textContent = optionLabel;
-    select.append(option);
-  });
-  select.value = value;
-  wrapper.append(caption, select);
-  return wrapper;
-}
-
-function describePersonalityProfile(profile) {
-  const dimensions = profile?.dimensions || {};
-  return `${PERSONALITY_VARIANTS[profile?.variant] || 'Профиль'} · краткость ${clampPersonalityValue(dimensions.brevity, 50)} · прямота ${clampPersonalityValue(dimensions.directness, 50)} · теплота ${clampPersonalityValue(dimensions.warmth, 50)}`;
-}
-
-function readPersonalityQuestionnaire() {
-  const questionnaire = {};
-  document.querySelectorAll('#personality-settings-form [data-personality-dimension]').forEach((slider) => {
-    questionnaire[slider.dataset.personalityDimension] = clampPersonalityValue(slider.value, 50);
-  });
-  questionnaire.addressForm = readValue('#personality-address-form') || 'ты';
-  questionnaire.language = readValue('#personality-language') || 'auto';
-  return questionnaire;
-}
-
-function syncPersonalityDimensionOutput(slider) {
-  const output = document.querySelector(`[data-personality-output="${slider?.dataset?.personalityDimension || ''}"]`);
-  if (output) output.textContent = String(clampPersonalityValue(slider.value, 50));
-}
-
-function syncProfileDimensionOutput(slider) {
-  const output = slider?.closest('.personality-dimension')?.querySelector('output');
-  if (output) output.textContent = String(clampPersonalityValue(slider.value, 50));
-}
-
-function encodePersonalityScope(scope) {
-  return scope?.type === 'coder-project' && scope.projectId
-    ? `coder-project:${scope.projectId}`
-    : 'chat';
-}
-
-function decodePersonalityScope(value) {
-  const raw = String(value || '');
-  return raw.startsWith('coder-project:') && raw.slice(14)
-    ? { type: 'coder-project', projectId: raw.slice(14) }
-    : { type: 'chat' };
+  renderStyleSettings(personalitySettingsDocument);
 }
 
 function clampPersonalityValue(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(0, Math.min(Math.round(parsed), 100)) : fallback;
+}
+
+async function loadDerivedMemory() {
+  const list = document.querySelector('#memory-derived-list');
+  const feedback = document.querySelector('#memory-derived-feedback');
+  const summary = document.querySelector('#memory-derived-summary');
+  if (feedback) feedback.textContent = '';
+  try {
+    const result = await runCapability('oscar', 'oscar.memory.derived.manage', { action: 'list' });
+    const episodes = Array.isArray(result?.output?.episodes) ? result.output.episodes : [];
+    const capsules = Array.isArray(result?.output?.capsules) ? result.output.capsules : [];
+    renderDerivedMemory(episodes, capsules);
+    if (summary) {
+      summary.textContent = episodes.length || capsules.length
+        ? `Прошлых ходов: ${episodes.length}, тематических сводок: ${capsules.length}`
+        : 'То, что Oscar сам сохранил из прошлых разговоров';
+    }
+  } catch (error) {
+    if (list) {
+      list.innerHTML = `
+        <div class="memory-unavailable-state">
+          <span><strong>Автоматическая память недоступна</strong><small>${escapeHtml(readErrorMessage(error))}</small></span>
+          <button type="button" class="claude-ghost-btn" data-memory-derived-retry>Повторить</button>
+        </div>
+      `;
+    }
+  }
+}
+
+function renderDerivedMemory(episodes, capsules) {
+  const list = document.querySelector('#memory-derived-list');
+  const forgetAllButton = document.querySelector('#memory-derived-forget-all');
+  if (!list) return;
+  if (forgetAllButton) forgetAllButton.hidden = episodes.length === 0 && capsules.length === 0;
+  if (episodes.length === 0 && capsules.length === 0) {
+    list.innerHTML = '<div class="empty-state">Oscar пока ничего не запомнил сам из прошлых разговоров.</div>';
+    return;
+  }
+  const capsuleItems = capsules.map((capsule) => `
+    <article class="memory-item memory-derived-item" data-memory-derived-capsule="${escapeHtml(capsule.id)}">
+      <p class="memory-derived-text">${escapeHtml(capsule.summary || '')}</p>
+      <div class="memory-item-footer">
+        <span>Тема · ${escapeHtml(capsule.topic || '')} · сводка ${capsule.childCount || 0} ходов</span>
+        <button type="button" class="danger-link" data-memory-derived-forget-capsule="${escapeHtml(capsule.id)}">Забыть</button>
+      </div>
+    </article>
+  `);
+  const episodeItems = episodes.map((episode) => `
+    <article class="memory-item memory-derived-item" data-memory-derived-episode="${escapeHtml(episode.id)}">
+      ${renderEpisodeSummary(episode.summary)}
+      <div class="memory-item-footer">
+        <span>${escapeHtml(episode.title || 'Прошлый чат')} · ${formatMemoryTimestamp(episode.createdAt)}</span>
+        <button type="button" class="danger-link" data-memory-derived-forget-episode="${escapeHtml(episode.id)}">Забыть</button>
+      </div>
+    </article>
+  `);
+  list.innerHTML = capsuleItems.join('') + episodeItems.join('');
+}
+
+/** Episodes are stored as "Запрос: …\nИтог: …". Show the request as the
+ * line you recognise and the outcome as a short, expandable excerpt. */
+export function renderEpisodeSummary(summary) {
+  const text = String(summary || '');
+  const match = /^Запрос:\s*([\s\S]*?)\s*Итог:\s*([\s\S]*)$/u.exec(text);
+  if (!match) return `<p class="memory-derived-text">${escapeHtml(text)}</p>`;
+  const [, request, outcome] = match;
+  return `
+      <p class="memory-derived-request"><span>Ты спросил</span><b>${escapeHtml(request)}</b></p>
+      <details class="memory-derived-outcome">
+        <summary><span class="memory-derived-text">${escapeHtml(outcome)}</span></summary>
+      </details>`;
+}
+
+function formatMemoryTimestamp(value) {
+  const parsed = value ? new Date(value) : null;
+  if (!parsed || Number.isNaN(parsed.getTime())) return '';
+  return parsed.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+async function forgetDerivedMemoryEpisode(id, button) {
+  if (!await confirmAction('Забыть этот прошлый разговор?')) return;
+  setBusy(button, true, 'Забываю…');
+  try {
+    await runCapability('oscar', 'oscar.memory.derived.manage', { action: 'forget_episode', id });
+    await loadDerivedMemory();
+  } catch (error) {
+    const feedback = document.querySelector('#memory-derived-feedback');
+    if (feedback) feedback.textContent = readErrorMessage(error);
+    setBusy(button, false, 'Забыть');
+  }
+}
+
+async function forgetDerivedMemoryCapsule(id, button) {
+  if (!await confirmAction('Забыть эту тематическую сводку?')) return;
+  setBusy(button, true, 'Забываю…');
+  try {
+    await runCapability('oscar', 'oscar.memory.derived.manage', { action: 'forget_capsule', id });
+    await loadDerivedMemory();
+  } catch (error) {
+    const feedback = document.querySelector('#memory-derived-feedback');
+    if (feedback) feedback.textContent = readErrorMessage(error);
+    setBusy(button, false, 'Забыть');
+  }
+}
+
+async function forgetAllDerivedMemory() {
+  if (!await confirmAction('Забыть всё, что Oscar сам сохранил из прошлых разговоров? Явные записи из «Долговременной памяти» это не затронет.')) return;
+  const button = document.querySelector('#memory-derived-forget-all');
+  setBusy(button, true, 'Забываю…');
+  try {
+    await runCapability('oscar', 'oscar.memory.derived.manage', { action: 'forget_all' });
+    await loadDerivedMemory();
+  } catch (error) {
+    const feedback = document.querySelector('#memory-derived-feedback');
+    if (feedback) feedback.textContent = readErrorMessage(error);
+  } finally {
+    setBusy(button, false, 'Забыть всё автоматическое');
+  }
 }
 
 async function loadMemorySettings() {
@@ -1904,7 +1894,7 @@ async function updateMemoryRecord(id, button) {
 }
 
 async function deleteMemoryRecord(id, button) {
-  if (!window.confirm('Удалить эту запись из постоянной памяти?')) return;
+  if (!await confirmAction('Удалить эту запись из постоянной памяти?')) return;
   const item = button.closest('.memory-settings-item');
   setBusy(button, true, 'Удаляю…');
   try {
@@ -2406,7 +2396,7 @@ function createSkillItem(skill) {
     : 'Capability не заявлены · права не добавляются.';
   const activation = document.createElement('p');
   activation.textContent = skill.allowImplicitInvocation
-    ? 'Может подбираться по смыслу; Policy Kernel остаётся обязательным.'
+    ? 'Подбирается под задачу. Проверка разрешений остаётся обязательной.'
     : 'Запускается только явным вызовом.';
   detailsBody.append(technicalMeta, location, capabilities, activation);
   details.append(detailsSummary, detailsBody);
@@ -2414,7 +2404,8 @@ function createSkillItem(skill) {
 
   const action = document.createElement('button');
   action.type = 'button';
-  action.className = 'primary-button';
+  // One primary per screen: every skill row offers the quiet action.
+  action.className = 'secondary-button';
   action.dataset.settingsSkill = String(skill.name || '');
   action.textContent = skill.compatible === false ? 'Недоступен' : 'Использовать в чате';
   action.disabled = skill.compatible === false;
@@ -2476,8 +2467,14 @@ async function loadTelegramSettings() {
   const refresh = document.querySelector('#telegram-refresh-status');
   setBusy(refresh, true, 'Проверяю…');
   try {
-    const result = await runCapability('telegram', 'telegram.status', {});
-    renderTelegramSettings(result.output || {});
+    const [result, appInfo] = await Promise.all([
+      runCapability('telegram', 'telegram.status', {}),
+      typeof window.monarchDesktop?.getAppInfo === 'function'
+        ? window.monarchDesktop.getAppInfo().catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    telegramAstraAvailable = appInfo?.astra?.telegramRead === true;
+    renderTelegramSettings(result.output || {}, appInfo);
     setStatus(document.querySelector('#telegram-feedback'), 'Статус обновлён');
   } catch (error) {
     setStatus(document.querySelector('#telegram-feedback'), readErrorMessage(error), true);
@@ -2490,7 +2487,7 @@ async function rotateTelegramCode() {
   const button = document.querySelector('#telegram-create-code');
   setBusy(button, true, 'Создаю…');
   try {
-    const result = await runCapability('telegram', 'telegram.pairing.rotate', {});
+    const result = await controlTelegram('rotate-pairing');
     renderTelegramSettings(result.output || {});
     setStatus(document.querySelector('#telegram-feedback'), 'Новый код готов. Отправь его боту командой /pair.');
   } catch (error) {
@@ -2500,13 +2497,31 @@ async function rotateTelegramCode() {
   }
 }
 
+async function toggleTelegramConnection() {
+  const button = document.querySelector('#telegram-toggle-connection');
+  const running = button?.dataset.running === 'true';
+  setBusy(button, true, running ? 'Останавливаю…' : 'Подключаю…');
+  try {
+    const result = await controlTelegram(running ? 'stop' : 'start');
+    if (!result?.ok) throw new Error(result?.summary || 'Не удалось изменить Telegram-подключение.');
+    renderTelegramSettings(result.output || {});
+    setStatus(document.querySelector('#telegram-feedback'), running
+      ? 'Telegram polling остановлен'
+      : 'Telegram-бот подключён и готов к привязке');
+  } catch (error) {
+    setStatus(document.querySelector('#telegram-feedback'), readErrorMessage(error), true);
+  } finally {
+    const nowRunning = button?.dataset.running === 'true';
+    setBusy(button, false, nowRunning ? 'Остановить бота' : 'Подключить бота');
+  }
+}
+
 async function toggleTelegramRemote() {
   const button = document.querySelector('#telegram-toggle-remote');
   const paused = button?.dataset.paused === 'true';
   setBusy(button, true, paused ? 'Возобновляю…' : 'Останавливаю…');
   try {
-    const capabilityId = paused ? 'telegram.remote.resume' : 'telegram.remote.pause';
-    const result = await runCapability('telegram', capabilityId, {});
+    const result = await controlTelegram(paused ? 'resume' : 'pause');
     renderTelegramSettings(result.output || {});
     setStatus(document.querySelector('#telegram-feedback'), paused
       ? 'Удалённые задачи снова разрешены'
@@ -2521,9 +2536,10 @@ async function toggleTelegramRemote() {
 
 async function revokeTelegramPairings() {
   const button = document.querySelector('#telegram-revoke-all');
+  if (!await confirmAction('Отозвать все Telegram-привязки и удалить их напоминания?')) return;
   setBusy(button, true, 'Отзываю…');
   try {
-    const result = await runCapability('telegram', 'telegram.pairing.revoke', {});
+    const result = await controlTelegram('revoke-all');
     renderTelegramSettings(result.output || {});
     setStatus(document.querySelector('#telegram-feedback'), 'Все Telegram-привязки и их напоминания удалены');
   } catch (error) {
@@ -2533,7 +2549,7 @@ async function revokeTelegramPairings() {
   }
 }
 
-function renderTelegramSettings(status) {
+function renderTelegramSettings(status, appInfo = null) {
   const username = typeof status.bot?.username === 'string' ? status.bot.username : '';
   const pairings = Array.isArray(status.pairedChats) ? status.pairedChats : [];
   const botName = document.querySelector('#telegram-bot-name');
@@ -2543,18 +2559,22 @@ function renderTelegramSettings(status) {
   const tokenPath = document.querySelector('#telegram-token-path');
   const createCode = document.querySelector('#telegram-create-code');
   const copyCode = document.querySelector('#telegram-copy-code');
+  const toggleConnection = document.querySelector('#telegram-toggle-connection');
   const toggleRemote = document.querySelector('#telegram-toggle-remote');
   const revokeAll = document.querySelector('#telegram-revoke-all');
   const pairingCode = status.remotePaused ? '' : String(status.pairingCode || '');
+  const pendingDeliveries = Math.max(0, Number(status.pendingTaskDeliveries || 0));
 
-  if (botName) botName.textContent = username ? `@${username}` : status.configured ? 'Бот настроен' : 'Токен не добавлен';
+  if (botName) botName.textContent = username ? `@${username}` : status.configured ? 'Бот настроен' : 'Ключ бота не добавлен';
   if (detail) detail.textContent = status.remotePaused
     ? 'Защитный режим · удалённые задачи остановлены'
     : status.running
     ? status.pollingMode === 'standby'
-      ? `Подключён через другой локальный runtime · привязок: ${pairings.length}`
-      : pairings.length ? `Работает локально · привязок: ${pairings.length}` : 'Работает локально · ждёт привязки'
-    : status.configured ? 'Настроен, но локальный процесс остановлен' : 'Добавь токен по инструкции ниже';
+      ? `Бот подключён в другом окне Monarch · чатов: ${pairings.length}`
+      : pendingDeliveries > 0
+        ? `Работает локально · доставляет результатов: ${pendingDeliveries}`
+        : pairings.length ? `Работает локально · привязок: ${pairings.length}` : 'Работает локально · ждёт привязки'
+    : status.configured ? 'Настроен, но не запущен' : 'Добавь ключ бота по инструкции ниже';
   if (badge) {
     badge.textContent = status.remotePaused ? 'Защита' : pairings.length ? 'Привязан' : status.running ? 'Готов' : status.configured ? 'Остановлен' : 'Не настроен';
     badge.dataset.state = status.remotePaused ? 'attention' : pairings.length ? 'paired' : status.running ? 'ready' : 'attention';
@@ -2563,6 +2583,10 @@ function renderTelegramSettings(status) {
   if (tokenPath && status.tokenPath) tokenPath.textContent = String(status.tokenPath);
   if (createCode) createCode.disabled = status.remotePaused === true;
   if (copyCode) copyCode.disabled = status.remotePaused === true || !/^\d{6}$/.test(pairingCode);
+  if (toggleConnection) {
+    toggleConnection.dataset.running = String(status.running === true);
+    toggleConnection.textContent = status.running ? 'Остановить бота' : 'Подключить бота';
+  }
   if (toggleRemote) {
     toggleRemote.dataset.paused = String(status.remotePaused === true);
     toggleRemote.textContent = status.remotePaused ? 'Возобновить удалённый доступ' : 'Остановить удалённый доступ';
@@ -2571,7 +2595,7 @@ function renderTelegramSettings(status) {
   setText('#telegram-task-mode', status.remotePaused
     ? 'Lockdown · задачи остановлены'
     : status.running
-      ? `Agent · ${status.pollingMode || 'owner'}`
+      ? pendingDeliveries > 0 ? `Agent · доставка ${pendingDeliveries}` : `Agent · ${status.pollingMode || 'owner'}`
       : 'Stopped · polling не активен');
   setText('#telegram-security-mode', status.securityMode === 'paired-chat + confirmation-gated'
     ? 'Привязка + подтверждения'
@@ -2579,11 +2603,74 @@ function renderTelegramSettings(status) {
   telegramExpiresAt = String(status.pairingExpiresAt || '');
   renderTelegramExpiry();
   renderTelegramInsights(status, pairings);
+  if (appInfo) telegramAstraAvailable = appInfo?.astra?.telegramRead === true;
+  renderTelegramAstraPairings(status, pairings, telegramAstraAvailable);
+}
+
+function renderTelegramAstraPairings(status, pairings, available) {
+  const host = document.querySelector('#telegram-astra-pairings');
+  const command = document.querySelector('#telegram-astra-command');
+  if (!host) return;
+  host.replaceChildren();
+  if (command) { command.hidden = true; command.textContent = ''; }
+  if (!available) {
+    const note = document.createElement('small');
+    note.textContent = 'Пилот выключен. Для source-сборки нужны оба флага Astra V3 и Telegram read pilot.';
+    host.append(note); return;
+  }
+  if (status.remotePaused) {
+    const note = document.createElement('small'); note.textContent = 'Lockdown включён: выдача новых alias запрещена.'; host.append(note); return;
+  }
+  if (!pairings.length) {
+    const note = document.createElement('small'); note.textContent = 'Сначала привяжи хотя бы один Telegram-чат.'; host.append(note); return;
+  }
+  for (const pairing of pairings) {
+    if (!Number.isSafeInteger(pairing?.chatId) || pairing.chatId === 0
+      || !Number.isSafeInteger(pairing?.userId) || pairing.userId <= 0) continue;
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'claude-primary-btn';
+    const name = typeof pairing.username === 'string' && pairing.username ? '@' + pairing.username : 'чат ' + pairing.chatId;
+    button.textContent = 'Выбрать файл для ' + name;
+    button.addEventListener('click', () => void shareTelegramAstraTarget(pairing, button));
+    host.append(button);
+  }
+}
+
+async function shareTelegramAstraTarget(pairing, button) {
+  const command = document.querySelector('#telegram-astra-command');
+  const idleLabel = button.textContent;
+  setBusy(button, true, 'Выбираю…');
+  try {
+    const picked = await window.monarchDesktop?.astraPilot?.pickTelegramTarget?.({
+      version: 1,
+      chatId: pairing.chatId,
+      userId: pairing.userId,
+      requestId: crypto.randomUUID(),
+      ttlMs: 3_600_000,
+    });
+    if (picked?.status === 'cancelled') return;
+    if (picked?.status !== 'selected' || !/^astra_remote_alias_[a-f0-9]{32}$/u.test(picked.alias?.targetAlias || '')) {
+      throw Error('Хост не подтвердил Telegram alias.');
+    }
+    const text = `/astra_read ${picked.alias.targetAlias} Прочитай выбранный файл и дай точный результат.`;
+    if (command) { command.textContent = text; command.hidden = false; }
+    try { await navigator.clipboard.writeText(text); } catch { /* command remains visible for manual copy */ }
+    setStatus(document.querySelector('#telegram-feedback'), 'Команда готова и скопирована. Отправь её именно выбранному боту/чату до истечения alias.');
+  } catch (error) {
+    setStatus(document.querySelector('#telegram-feedback'), readErrorMessage(error), true);
+  } finally {
+    setBusy(button, false, idleLabel);
+  }
 }
 
 function renderTelegramInsights(status, pairings) {
+  const attachmentMaxBytes = Math.max(0, Number(status.attachmentTransport?.maxBytesPerAttachment || 0));
+  const textDocumentMaxBytes = Math.max(0, Number(status.attachmentTransport?.maxTextDocumentBytes || 0));
+  const artifactOffers = Math.max(0, Number(status.pendingArtifactEgressOffers || 0));
   setText('#telegram-paired-summary', `Привязок: ${pairings.length}`);
-  setText('#telegram-pending-summary', `Подтверждений: ${Number(status.pendingConfirmations || 0)}`);
+  setText('#telegram-pending-summary', `Доставок: ${Math.max(0, Number(status.pendingTaskDeliveries || 0))} · файлов: ${artifactOffers}`);
+  setText('#telegram-photo-summary', attachmentMaxBytes > 0
+    ? `Вложения: ${Math.round(attachmentMaxBytes / 1024 / 1024)} МиБ · текст ${Math.round(textDocumentMaxBytes / 1024)} КиБ`
+    : 'Вложения: недоступны');
   setText('#telegram-reminder-summary', `Напоминаний: ${Number(status.reminders || 0)}`);
   setText('#telegram-mode-summary', status.remotePaused ? 'Режим: защита' : `Режим: ${status.pollingMode || 'stopped'}`);
   setText('#telegram-security-summary', status.remotePaused ? 'Безопасность: lockdown' : 'Безопасность: confirm-gated');

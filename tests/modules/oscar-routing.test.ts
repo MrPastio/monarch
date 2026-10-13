@@ -160,7 +160,7 @@ describe('OscarModule Routing & Filtering', () => {
       explicit: false,
       truncated: false,
     }]);
-    module = new OscarModule(mockClient, { activateForPrompt });
+    module = new OscarModule(mockClient);
 
     await module.executeCapability({
       capabilityId: 'oscar.chat.stream',
@@ -170,9 +170,9 @@ describe('OscarModule Routing & Filtering', () => {
     expect(activateForPrompt).not.toHaveBeenCalled();
     expect(mockClient.streamChat.mock.calls[0][0]).toMatchObject({
       execution_authority: 'none',
-      capabilities: [],
       skills: [],
     });
+    expect(mockClient.streamChat.mock.calls[0][0]).not.toHaveProperty('capabilities');
     expect(mockContext.emit).not.toHaveBeenCalledWith('oscar.skills.activated', 'oscar', expect.anything());
   });
 
@@ -276,8 +276,8 @@ describe('OscarModule Routing & Filtering', () => {
 
     expect(mockClient.streamChat.mock.calls[0][0]).toMatchObject({
       execution_authority: 'none',
-      capabilities: [],
     });
+    expect(mockClient.streamChat.mock.calls[0][0]).not.toHaveProperty('capabilities');
     expect(mockClient.streamChat.mock.calls[0][0].access).toBeUndefined();
   });
 
@@ -289,11 +289,6 @@ describe('OscarModule Routing & Filtering', () => {
       description: 'Launch an installed app.',
       risk: 'device-control',
       inputSchema: { type: 'object', properties: { app: { type: 'string' } } },
-      routing: {
-        aliases: ['открой приложение', 'запусти программу'],
-        keywords: ['телеграм', 'приложение'],
-        examples: ['Оскар, открой Телеграм'],
-      },
     };
     (mockContext.listCapabilities as any).mockReturnValue([
       ...Array.from({ length: 55 }, (_, index) => ({
@@ -313,11 +308,11 @@ describe('OscarModule Routing & Filtering', () => {
 
     const request = mockClient.chat.mock.calls[0][0];
     expect(request.execution_authority).toBe('none');
-    expect(request.capabilities).toEqual([]);
-    expect(request.access).toBeUndefined();
+    expect(request).not.toHaveProperty('capabilities');
+    expect(request).not.toHaveProperty('access');
   });
 
-  it('restricts a trusted Coder turn to coder capabilities', async () => {
+  it('keeps a legacy Coder marker answer-only and outside typed Agent authority', async () => {
     const capabilities = [
       { id: 'workspace.files.write', moduleId: 'workspace', title: 'Workspace write', description: 'write', risk: 'write' },
       { id: 'coder.files.read', moduleId: 'coder', title: 'Coder read', description: 'read', risk: 'read', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } },
@@ -376,24 +371,12 @@ describe('OscarModule Routing & Filtering', () => {
     } as any, mockContext);
 
     const request = mockClient.chat.mock.calls[0][0];
-    expect(request.capabilities.map((capability: any) => capability.id)).toEqual([
-      'coder.files.read',
-      'coder.files.write',
-    ]);
-    expect(request.capabilities.every((capability: any) => capability.inputSchema)).toBe(true);
-    expect(request.messages).toEqual([
-      { role: 'system', content: marker },
-      { role: 'user', content: 'CODER MODE TASK\nПроведи аудит проекта.' },
-      {
-        role: 'user',
-        content: 'CODER TOOL RECEIPTS\nExecution status and capability identity are trusted Kernel facts. '
-          + 'The project contains models and SECURITY_AUDIT.md. Continue from these results.',
-      },
-    ]);
-    expect(request.messages.some((message: any) => message.content.includes('<live_monarch_system>'))).toBe(false);
-    expect(request.messages.some((message: any) => message.content.includes('<local_user_context>'))).toBe(false);
+    expect(request.execution_authority).toBe('none');
+    expect(request).not.toHaveProperty('capabilities');
+    expect(request).not.toHaveProperty('access');
+    expect(request.messages[0]).toEqual({ role: 'system', content: '<monarch_answer_only_authority version="1" />' });
+    expect(request.messages.some((message: any) => message.content.includes('<monarch_coder_mode>'))).toBe(false);
     expect(request.skills).toEqual([]);
-    expect((mockContext as any).execute).not.toHaveBeenCalled();
   });
 
   it('applies zero-retention and context removal to the Coder chat lane too', async () => {
@@ -428,16 +411,15 @@ describe('OscarModule Routing & Filtering', () => {
       incognito: true,
       web_search: false,
       use_memory: false,
-      capabilities: [],
       dev_mode: { zero_retention: true, history_context_enabled: false },
     });
     expect(request.messages).toEqual([
-      { role: 'system', content: marker },
+      { role: 'system', content: '<monarch_answer_only_authority version="1" />' },
       { role: 'user', content: 'Новый Coder ход' },
     ]);
   });
 
-  it('keeps the full Coder index while bounding detailed schemas to the relevant working set', async () => {
+  it('does not expose a Coder capability index through the compatibility chat lane', async () => {
     (mockContext.listCapabilities as any).mockReturnValue(Array.from({ length: 20 }, (_, index) => ({
       id: `coder.demo.${index}`,
       moduleId: 'coder',
@@ -459,10 +441,8 @@ describe('OscarModule Routing & Filtering', () => {
       },
     } as any, mockContext);
 
-    const capabilities = mockClient.chat.mock.calls[0][0].capabilities;
-    expect(capabilities).toHaveLength(20);
-    expect(capabilities.filter((capability: any) => capability.inputSchema)).toHaveLength(12);
-    expect(capabilities.find((capability: any) => capability.id === 'coder.demo.19').inputSchema).toBeTruthy();
+    expect(mockClient.chat.mock.calls[0][0]).not.toHaveProperty('capabilities');
+    expect(mockClient.chat.mock.calls[0][0].execution_authority).toBe('none');
   });
 
   it('keeps the Security action catalog out of answer-only Security conversations', async () => {
@@ -486,8 +466,7 @@ describe('OscarModule Routing & Filtering', () => {
       input: { messages: [{ role: 'user', content: 'расскажи про Monarch Security и доступные проверки' }] },
     } as any, mockContext);
 
-    const catalog = mockClient.streamChat.mock.calls[0][0].capabilities;
-    expect(catalog).toEqual([]);
+    expect(mockClient.streamChat.mock.calls[0][0]).not.toHaveProperty('capabilities');
     expect(mockClient.streamChat.mock.calls[0][0].execution_authority).toBe('none');
   });
 
@@ -545,7 +524,7 @@ describe('OscarModule Routing & Filtering', () => {
     expect(systemContext?.content).toContain('отдельные модули');
     expect(systemContext?.content).toContain('"resolvedMentionIds":["safe","sharing"]');
     expect(systemContext?.content).toContain('не выгружай сырой JSON');
-    expect(request.capabilities).toEqual([]);
+    expect(request).not.toHaveProperty('capabilities');
     expect(request.execution_authority).toBe('none');
   });
 
@@ -576,7 +555,7 @@ describe('OscarModule Routing & Filtering', () => {
 
     const request = mockClient.streamChat.mock.calls[0][0];
     expect(request.messages.some((message: any) => message.content.includes('<live_monarch_system>'))).toBe(false);
-    expect(request.capabilities).toEqual([]);
+    expect(request).not.toHaveProperty('capabilities');
     expect(request.execution_authority).toBe('none');
   });
 
@@ -659,28 +638,6 @@ describe('OscarModule Routing & Filtering', () => {
     expect(mockClient.streamChat).toHaveBeenCalledOnce();
   });
 
-  it('delegates an explicit whole-system check to live Monarch Diagnostics', async () => {
-    const decision = await module.handleIntent({
-      id: 'intent_oscar_system_inspection',
-      text: 'Oscar, проверь всю систему Monarch адаптивно',
-    } as any);
-
-    expect(decision).toMatchObject({
-      targetModuleId: 'diagnostics',
-      capabilityId: 'diagnostics.system.inspect',
-      permissionMode: 'allow',
-    });
-  });
-
-  it('delegates operational Oscar Security commands to the Security module', async () => {
-    const decision = await module.handleIntent({
-      id: 'intent_oscar_security_scan',
-      text: 'Oscar, проверь систему на вирусы через Monarch Security',
-    } as any);
-
-    expect(decision).toBeNull();
-  });
-
   it('raises stream chat risk when web search is requested', () => {
     expect(module.resolveCapabilityRisk({
       capabilityId: 'oscar.chat.stream',
@@ -709,120 +666,6 @@ describe('OscarModule Routing & Filtering', () => {
         messages: [{ role: 'user', content: 'почему ты ушёл в fallback-режим?' }],
       },
     } as any)).toBeUndefined();
-  });
-
-  it('routes Oscar Gemma chat requests with requested_model gemma', async () => {
-    const decision = await module.handleIntent({
-      id: 'intent_gemma',
-      text: 'спроси Oscar через Gemma ответь коротко',
-    } as any);
-
-    expect(decision?.capabilityId).toBe('oscar.chat.local');
-    expect((decision?.input as any)?.requested_model).toBe('gemma');
-  });
-
-  it('keeps Oscar independence followups in chat instead of treating them as bridge requests', async () => {
-    const decision = await module.handleIntent({
-      id: 'intent_oscar_independence_followup',
-      text: 'Oscar, как ты думаешь твой создатель мог создать тебя ради этого,что бы он имел цифровую независимость?',
-    } as any);
-
-    expect(decision?.capabilityId).toBe('oscar.chat.local');
-    expect((decision?.input as any)?.messages?.[0]?.content).toContain('цифровую независимость');
-  });
-
-  it('continues to leave explicit Oscar bridge requests for Astra', async () => {
-    const decision = await module.handleIntent({
-      id: 'intent_oscar_bridge',
-      text: 'Oscar покажи мост с Astra',
-    } as any);
-
-    expect(decision).toBeNull();
-  });
-
-  it('keeps simple Oscar meta chat on low effort and weak route hint', async () => {
-    const decision = await module.handleIntent({
-      id: 'intent_oscar_meta_fast',
-      text: 'Oscar что ты умеешь',
-    } as any);
-
-    expect(decision?.capabilityId).toBe('oscar.chat.local');
-    expect((decision?.input as any)?.reasoning_effort).toBe('low');
-    expect((decision?.input as any)?.route).toMatchObject({
-      intentKind: 'capabilities_question',
-      modelTier: 'weak',
-    });
-  });
-
-  it('routes Russian Oscar unload requests to model unload confirmation', async () => {
-    const decision = await module.handleIntent({
-      id: 'intent_unload_ru',
-      text: 'Oscar выгрузи модель из памяти',
-    } as any);
-
-    expect(decision?.capabilityId).toBe('oscar.model.unload');
-    expect(decision?.permissionMode).toBe('confirm');
-  });
-
-  it('routes and executes Oscar generation cancel without confirmation', async () => {
-    const decision = await module.handleIntent({
-      id: 'intent_cancel_generation_ru',
-      text: 'Oscar сбрось очередь генерации',
-    } as any);
-
-    expect(decision?.capabilityId).toBe('oscar.generation.cancel');
-    expect(decision?.permissionMode).toBe('allow');
-
-    const result = await module.executeCapability({
-      capabilityId: 'oscar.generation.cancel',
-      input: {},
-    } as any, mockContext);
-
-    expect(result.ok).toBe(true);
-    expect(mockClient.cancelGeneration).toHaveBeenCalled();
-  });
-
-  it('routes Russian Oscar backend stop requests to backend stop confirmation', async () => {
-    const decision = await module.handleIntent({
-      id: 'intent_stop_backend_ru',
-      text: 'Oscar останови backend runtime',
-    } as any);
-
-    expect(decision?.capabilityId).toBe('oscar.backend.stop');
-    expect(decision?.permissionMode).toBe('confirm');
-  });
-
-  it('routes Russian Oscar backend start requests to backend start confirmation', async () => {
-    const decision = await module.handleIntent({
-      id: 'intent_start_backend_ru',
-      text: 'Oscar запусти backend runtime',
-    } as any);
-
-    expect(decision?.capabilityId).toBe('oscar.backend.start');
-    expect(decision?.permissionMode).toBe('confirm');
-  });
-
-  it.each([
-    ['Oscar, объясни теорию очередей', 'oscar.chat.local'],
-    ['Oscar, как остановить прокрастинацию?', 'oscar.chat.local'],
-    ['Oscar, что думаешь о модели поведения?', 'oscar.chat.local'],
-    ['Oscar, что такое память человека?', 'oscar.chat.local'],
-    ['Oscar, как работает интернет?', 'oscar.chat.local'],
-    ['Oscar, что означает статус-кво?', 'oscar.chat.local'],
-    ['Oscar, проверь статус системы кровообращения и объясни', 'oscar.chat.local'],
-    ['Oscar, проверь вирус гриппа и объясни риски', 'oscar.chat.local'],
-    ['Oscar, как защитить растения от вредителей?', 'oscar.chat.local'],
-    ['Oscar, найди в интернете новости OpenAI', 'oscar.search.ingest'],
-    ['Oscar, search Monarch', 'oscar.search.ingest'],
-    ['Oscar, найди в памяти прошлый разговор', 'oscar.memory.search'],
-    ['Oscar, найди файл package.json', 'oscar.chat.local'],
-  ])('does not confuse ordinary language with control routes: %s', async (text, capabilityId) => {
-    const decision = await module.handleIntent({
-      id: `intent_${capabilityId}`,
-      text,
-    } as any);
-
-    expect(decision?.capabilityId).toBe(capabilityId);
   });
 
   it('executes Oscar backend start through status auto-start probe', async () => {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import path from 'node:path';
 import {
   MonarchKernel,
   type MonarchActionGuardReaction,
@@ -9,7 +10,7 @@ import {
 import { SecurityModule } from '../../src/modules/security';
 
 describe('Security Action Guard reactions', () => {
-  it('keeps Full Access on Observe when the optional Python Security helper is unavailable', async () => {
+  it('keeps the independent Guard active when the optional Python Security helper is unavailable', async () => {
     const client = new FakeSecurityClient('guard') as FakeSecurityClient & { available: boolean };
     Object.defineProperty(client, 'available', { value: false });
     const kernel = new MonarchKernel({
@@ -24,7 +25,7 @@ describe('Security Action Guard reactions', () => {
     await kernel.start();
     try {
       expect(kernel.getSnapshot().events.find((event) => event.type === 'security.activated')?.payload)
-        .toMatchObject({ available: false, agentSecurityMode: 'observe' });
+        .toMatchObject({ available: false, agentSecurityMode: 'guard' });
     } finally {
       await kernel.stop();
     }
@@ -75,6 +76,134 @@ describe('Security Action Guard reactions', () => {
         .toMatchObject({ response: 'enhanced-readback' });
       expect(harness.kernel.getSnapshot().events.find((event) => event.type === 'security.action.reviewed')?.payload)
         .toMatchObject({ status: 'allowed', disposition: 'informational' });
+    } finally {
+      await harness.kernel.stop();
+    }
+  });
+
+  it('keeps Direct Access under the local Security locator without restoring the legacy remote approval wall', async () => {
+    const harness = await createHarness('guard', 'danger-full-access', 'approval_required', true);
+    try {
+      const result = await harness.kernel.execute(request({
+        input: { path: 'runtime/settings/direct.txt', content: 'ok' },
+      }));
+
+      expect(result).toMatchObject({
+        ok: true,
+        summary: 'Synthetic workspace effect executed.',
+        metadata: { policy: { ownerUnrestrictedOverride: true } },
+      });
+      expect(harness.executions()).toBe(1);
+      expect(harness.remoteChecks()).toBe(0);
+      expect(harness.kernel.getSnapshot().events.find((event) => event.type === 'security.action.reviewed')?.payload)
+        .toMatchObject({ status: 'allowed', disposition: 'informational' });
+    } finally {
+      await harness.kernel.stop();
+    }
+  });
+
+  it('does not let the ambient workspace profile shrink persistent Direct Access back to the workspace', async () => {
+    const harness = await createHarness('guard', 'workspace-write', 'approval_required', true);
+    try {
+      const outsideWorkspace = path.join(path.parse(process.cwd()).root, 'MonarchRuntimeTests', 'direct-access-outside.txt');
+      const result = await harness.kernel.execute(request({
+        input: { path: outsideWorkspace, content: 'synthetic only' },
+        originatingUserText: 'создай внешний тестовый файл',
+      }));
+
+      expect(result).toMatchObject({
+        ok: true,
+        summary: 'Synthetic workspace effect executed.',
+        metadata: { policy: { ownerUnrestrictedOverride: true } },
+      });
+      expect(harness.executions()).toBe(1);
+      expect(harness.remoteChecks()).toBe(0);
+      expect(harness.kernel.getSnapshot().events.find((event) => event.type === 'security.action.reviewed')?.payload)
+        .toMatchObject({ status: 'allowed', disposition: 'informational' });
+    } finally {
+      await harness.kernel.stop();
+    }
+  });
+
+  it('turns an unavailable live target observer into one exact Direct Access Owner decision', async () => {
+    const harness = await createHarness('guard', 'danger-full-access', 'approval_required', true, true);
+    try {
+      const action = request({
+        input: { path: 'runtime/settings/unobserved.txt', content: 'synthetic only' },
+        originatingUserText: 'создай этот тестовый файл',
+      });
+      const held = await harness.kernel.execute(action);
+
+      expect(held).toMatchObject({
+        ok: false,
+        error: 'confirmation-required',
+        metadata: {
+          policy: {
+            outcome: 'confirm',
+            ownerUnrestrictedOverride: true,
+            evidence: expect.arrayContaining([expect.objectContaining({ code: 'security.context.unavailable' })]),
+          },
+          dispatchControl: { dispatched: false, reason: 'policy-confirmation-required' },
+        },
+      });
+      expect(harness.executions()).toBe(0);
+      expect(harness.remoteChecks()).toBe(0);
+
+      const policy = (held.metadata as { policy: { policyDecisionHash: string; authorityTier: 'owner' } }).policy;
+      const approved = await harness.kernel.execute({
+        ...action,
+        id: `${action.id}_approved`,
+        confirmed: true,
+        approvalPurpose: 'policy',
+        approvalPolicyDecisionHash: policy.policyDecisionHash,
+        authorityTierAtApproval: policy.authorityTier,
+      });
+      expect(approved).toMatchObject({ ok: true, summary: 'Synthetic workspace effect executed.' });
+      expect(harness.executions()).toBe(1);
+      expect(harness.remoteChecks()).toBe(0);
+    } finally {
+      await harness.kernel.stop();
+    }
+  });
+
+  it('pauses one large Direct deletion for an exact Owner decision and resumes only that bound action', async () => {
+    const harness = await createHarness('guard', 'danger-full-access', 'approval_required', true);
+    try {
+      const dangerous = request({
+        capabilityId: 'workspace.files.delete',
+        input: { paths: Array.from({ length: 120 }, (_, index) => `E:\\MonarchRuntimeTests\\synthetic-bulk-delete\\${index}.tmp`) },
+        originatingUserText: 'удали этот список тестовых файлов',
+      });
+      const held = await harness.kernel.execute(dangerous);
+      expect(held).toMatchObject({
+        ok: false,
+        error: 'confirmation-required',
+        metadata: {
+          policy: {
+            outcome: 'confirm',
+            ownerUnrestrictedOverride: true,
+            evidence: expect.arrayContaining([expect.objectContaining({ code: 'delete.large-scope' })]),
+          },
+          dispatchControl: { dispatched: false, reason: 'policy-confirmation-required' },
+        },
+      });
+      expect(harness.executions()).toBe(0);
+      expect(harness.remoteChecks()).toBe(0);
+      expect(harness.kernel.getSnapshot().events.find((event) => event.type === 'security.action.reviewed')?.payload)
+        .toMatchObject({ status: 'approval_required', disposition: 'owner-confirmable' });
+
+      const policy = (held.metadata as { policy: { policyDecisionHash: string; authorityTier: 'owner' } }).policy;
+      const approved = await harness.kernel.execute({
+        ...dangerous,
+        id: `${dangerous.id}_approved`,
+        confirmed: true,
+        approvalPurpose: 'policy',
+        approvalPolicyDecisionHash: policy.policyDecisionHash,
+        authorityTierAtApproval: policy.authorityTier,
+      });
+      expect(approved).toMatchObject({ ok: true, summary: 'Synthetic workspace effect executed.' });
+      expect(harness.executions()).toBe(1);
+      expect(harness.remoteChecks()).toBe(0);
     } finally {
       await harness.kernel.stop();
     }
@@ -159,6 +288,8 @@ async function createHarness(
   reaction: MonarchActionGuardReaction,
   sandboxMode: 'workspace-write' | 'danger-full-access' = 'workspace-write',
   remoteStatus: 'allowed' | 'approval_required' = 'allowed',
+  ownerDirect = false,
+  targetContextUnavailable = false,
 ): Promise<{ kernel: MonarchKernel; executions: () => number; remoteChecks: () => number }> {
   let executions = 0;
   const client = new FakeSecurityClient(reaction, remoteStatus);
@@ -169,14 +300,30 @@ async function createHarness(
       approvalPolicy: 'on-request',
       autonomyMode: sandboxMode === 'danger-full-access' ? 'full-local' : 'workspace-autonomous',
     },
+    ...(ownerDirect ? {
+      authorityContext: {
+        tier: 'owner' as const,
+        source: 'signed-device-entitlement' as const,
+        entitlementId: 'owner_security_reaction_test',
+        keyId: 'owner-security-test',
+        verifiedAt: new Date(0).toISOString(),
+        deviceIdPrefix: '0123456789ab',
+        diagnostic: null,
+      },
+    } : {}),
   });
   kernel.registerModule(new SecurityModule(client as any));
-  kernel.registerModule(workspaceFixture(() => { executions += 1; }));
+  kernel.registerModule(workspaceFixture(() => { executions += 1; }, targetContextUnavailable));
   await kernel.start();
+  if (ownerDirect) {
+    await kernel.emitRuntimeEvent('security.owner_override.changed', 'security', {
+      ownerOverride: { enabled: true, lifetime: 'persistent', shellApprovalPolicy: 'never' },
+    });
+  }
   return { kernel, executions: () => executions, remoteChecks: () => client.checks };
 }
 
-function workspaceFixture(onExecute: () => void): MonarchModule {
+function workspaceFixture(onExecute: () => void, targetContextUnavailable = false): MonarchModule {
   return {
     manifest: {
       id: 'workspace',
@@ -185,15 +332,25 @@ function workspaceFixture(onExecute: () => void): MonarchModule {
       kind: 'tooling',
       description: 'Test-only exact Action Guard effect.',
       owns: ['workspace'],
-      permissions: ['write'],
+      permissions: ['write', 'delete'],
       capabilities: [{
         id: 'workspace.files.write',
         moduleId: 'workspace',
         title: 'Write synthetic file',
         risk: 'write',
+      }, {
+        id: 'workspace.files.delete',
+        moduleId: 'workspace',
+        title: 'Delete synthetic files',
+        risk: 'delete',
       }],
     },
     async activate(): Promise<void> {},
+    ...(targetContextUnavailable ? {
+      async resolveSecurityActionContext(): Promise<never> {
+        throw new Error('Synthetic live target observer is unavailable.');
+      },
+    } : {}),
     async executeCapability(): Promise<MonarchExecutionResult> {
       onExecute();
       return { ok: true, summary: 'Synthetic workspace effect executed.' };

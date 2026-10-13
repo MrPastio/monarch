@@ -11,13 +11,14 @@ import {
 } from './core';
 import path from 'node:path';
 import { builtInModulePackages } from './modules';
-import { createLocalSystemRouter } from './modules/models/system-router';
 
 export interface MonarchBootstrapOptions {
   workspaceRoot?: string;
   packages?: readonly MonarchModulePackage[];
   enabledModules?: readonly string[];
   disabledModules?: readonly string[];
+  /** Retained only so older callers can start while migrating. Text-to-capability
+   * routing is retired; every value now creates the same typed-only Kernel. */
   enableLocalSystemRouter?: boolean;
   permissionProfile?: MonarchPermissionProfile;
   authorityContext?: MonarchAuthorityContext;
@@ -37,20 +38,12 @@ export function createMonarchKernel(options: MonarchBootstrapOptions = {}): Mona
 export function createMonarchRuntime(options: MonarchBootstrapOptions = {}): MonarchRuntime {
   const workspaceRoot = options.workspaceRoot || process.cwd();
   const runtimePaths = resolveMonarchRuntimePaths(workspaceRoot);
-  const kernel = options.enableLocalSystemRouter === false
-    ? new MonarchKernel({
-      workspaceRoot: runtimePaths.userWorkspaceRoot,
-      agencyStateDirectory: path.join(runtimePaths.stateRoot, 'agency'),
-      ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
-      ...(options.authorityContext ? { authorityContext: options.authorityContext } : {}),
-    })
-    : new MonarchKernel({
-      workspaceRoot: runtimePaths.userWorkspaceRoot,
-      agencyStateDirectory: path.join(runtimePaths.stateRoot, 'agency'),
-      llmRouter: createLocalSystemRouter({ workspaceRoot }),
-      ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
-      ...(options.authorityContext ? { authorityContext: options.authorityContext } : {}),
-    });
+  const kernel = new MonarchKernel({
+    workspaceRoot: runtimePaths.userWorkspaceRoot,
+    agencyStateDirectory: path.join(runtimePaths.stateRoot, 'agency'),
+    ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
+    ...(options.authorityContext ? { authorityContext: options.authorityContext } : {}),
+  });
   const loader = new MonarchModuleLoader({
     workspaceRoot,
     userWorkspaceRoot: runtimePaths.userWorkspaceRoot,

@@ -1,0 +1,13 @@
+.oscar-astra-attachment { gap: 10px; flex-wrap: wrap; }
+.oscar-astra-attachment > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.oscar-astra-attachment select {
+  color: inherit; background: rgba(var(--theme-plane-rgb, 22, 21, 19), 0.8); border: 1px solid #ffb45440;
+  border-radius: 9px; padding: 5px 8px; font: inherit; max-width: 100%;
+}
+.oscar-astra-attachment :focus-visible { outline: 2px solid #ffb454; outline-offset: 3px; }
+/* The enhanced mode picker sits inside a compact chip. The chip's 24px icon
+   button rule used to squeeze it to a sliver, so its label overflowed above the
+   chip and its popup opened 20px wide. */
+.oscar-astra-attachment > .max-model-trigger { width: auto; min-width: 168px; min-height: 30px; padding: 5px 10px; gap: 8px; font-size: 12px; border-radius: 9px; }
+.oscar-astra-attachment > .max-model-trigger > span:last-child { font-size: 14px; }
+.oscar-action-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }

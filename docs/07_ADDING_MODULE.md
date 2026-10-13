@@ -13,17 +13,6 @@ src/modules/<module-id>/
 
 Для сложного модуля рядом добавляются `adapters/`, `fixtures/`, `tests/`, `policy/`.
 
-Быстрый безопасный путь — использовать встроенный builder в `Monarch Modules`:
-
-1. выбрать рецепт `empty`, `reader` или `workspace-tool`;
-2. проверить draft через `monarch-modules.draft.validate`;
-3. посмотреть все файлы через `monarch-modules.scaffold.preview`;
-4. после подтверждения создать папку через `monarch-modules.scaffold.create`;
-5. проверить сгенерированный код и явно подключить package в catalog.
-
-Builder не перезаписывает существующие папки и специально не редактирует catalog
-автоматически: подключение нового кода остается отдельным проверяемым решением.
-
 ## 2. Описать manifest
 
 ```ts
@@ -59,8 +48,8 @@ export const filesManifest: MonarchModuleManifest = {
 Если модуль входит в продуктовый suite, добавь обе связи:
 
 ```ts
-parentSuiteId: 'monarch-modules',
-dependencies: ['monarch-modules'],
+parentSuiteId: 'example-suite',
+dependencies: ['example-suite'],
 ```
 
 ## 3. Реализовать модуль

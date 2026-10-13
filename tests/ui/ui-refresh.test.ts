@@ -13,7 +13,7 @@ describe('Monarch unified UI refresh', () => {
     expect(styles).toContain('--glass-surface');
     expect(styles).toContain('--radius-lg: 28px');
     expect(styles).toContain('.settings-view-header');
-    expect(styles).toContain('.security-chrome');
+    expect(readFileSync('src/ui/public/security-center.css', 'utf8')).toContain('.security-chrome');
     expect(styles).toContain('input[type="checkbox"]:not(.voice-mode-hidden-input)');
     expect(styles).toContain('::view-transition-old(monarch-main-surface)');
     expect(styles).toContain('@media (prefers-reduced-motion: reduce)');

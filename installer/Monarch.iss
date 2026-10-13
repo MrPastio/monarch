@@ -4,16 +4,19 @@
 #ifndef OutputDir
   #define OutputDir "out"
 #endif
+#ifndef CompressionLevel
+  #define CompressionLevel "ultra64"
+#endif
 
 #define AppName "Monarch"
 #ifndef AppVersion
-  #define AppVersion "0.2.5.0"
+  #define AppVersion "0.3.0.97"
 #endif
 #ifndef RuntimeVersion
-#define RuntimeVersion "2026.07.7"
+#define RuntimeVersion "2026.10.1"
 #endif
 #ifndef BackendEnvironment
-#define BackendEnvironment "backend-0.1.5-offline8"
+#define BackendEnvironment "backend-0.1.6-offline1"
 #endif
 #ifndef DataSchemaVersion
   #define DataSchemaVersion "1"
@@ -45,7 +48,7 @@ AllowNoIcons=yes
 OutputDir={#OutputDir}
 OutputBaseFilename=Monarch-Setup
 SetupIconFile={#SourceRoot}\assets\icon.ico
-Compression=lzma2/ultra64
+Compression=lzma2/{#CompressionLevel}
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
@@ -58,6 +61,10 @@ UninstallDisplayIcon={app}\{#AppExeName}
 VersionInfoVersion={#AppVersion}
 VersionInfoCompany={#AppPublisher}
 VersionInfoDescription=Monarch local-first AI ecosystem installer
+#ifdef MonarchSigned
+SignTool=monarch
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"

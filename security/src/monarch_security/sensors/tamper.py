@@ -3,11 +3,13 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path
 import hashlib
+import stat
 
 from monarch_security.events import SecurityEvent
+from monarch_security.observation import ObservedSensor, ObservationUnavailable
 
 
-class TamperSensor:
+class TamperSensor(ObservedSensor):
     def __init__(
         self,
         paths: Iterable[Path],
@@ -54,15 +56,19 @@ class TamperSensor:
         return changed
 
     def snapshot_signatures(self) -> dict[str, str]:
+        self.begin_observation()
         signatures: dict[str, str] = {}
         for path in self.paths:
             key = str(path)
-            if not path.exists() or path.is_symlink() or not path.is_file():
-                continue
             try:
+                metadata = path.lstat()
+                if not stat.S_ISREG(metadata.st_mode) or getattr(metadata, 'st_file_attributes', 0) & 0x400:
+                    continue
                 signatures[key] = _sha256(path)
-            except OSError:
+            except FileNotFoundError:
                 continue
+            except OSError as exc:
+                raise ObservationUnavailable('self-file-read-unavailable') from exc
         return signatures
 
 

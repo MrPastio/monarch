@@ -6,3 +6,4 @@ export * from './coordinator';
 export * from './attachment-store';
 export * from './data-egress-consent';
 export * from './skill-invocation';
+export * from './direct-tool-access';

@@ -1,9 +1,9 @@
 param(
   [string]$InstallDirectory = "",
   [string]$InstallRoot = "",
-  [string]$AppVersion = "0.2.5.0",
-  [string]$RuntimeVersion = "2026.07.7",
-  [string]$BackendEnvironment = "backend-0.1.5-offline8",
+  [string]$AppVersion = "0.3.0.97",
+  [string]$RuntimeVersion = "2026.10.1",
+  [string]$BackendEnvironment = "backend-0.1.6-offline1",
   [int]$DataSchemaVersion = 1,
   [int]$MinimumReadableDataSchema = 1,
   [int]$MaximumReadableDataSchema = 1,
@@ -403,9 +403,22 @@ if (-not $SkipSecurity) {
 }
 
 if ($InstallVoiceStt) {
-  Write-Step "Installing verified Voice STT model"
-  & (Join-Path $root "tools\setup-sherpa-t-one-stt.ps1")
-  Assert-NativeSuccess "Voice STT model installation"
+  Write-Step "Installing verified Voice STT runtimes"
+  $voiceModelsRoot = if ($InstallRoot) {
+    Join-Path ([string]$layout.modelsRoot) "voice"
+  } else {
+    Join-Path $root "runtime\voice\models"
+  }
+  $voiceRuntimeRoot = if ($InstallRoot) {
+    Join-Path ([string]$layout.payloadRoot) "runtimes\voice\one-shot"
+  } else {
+    Join-Path $root "runtime\voice\one-shot"
+  }
+  & (Join-Path $root "tools\setup-voice-stt.ps1") `
+    -ModelsRoot $voiceModelsRoot `
+    -RuntimeRoot $voiceRuntimeRoot `
+    -PythonExe $python
+  Assert-NativeSuccess "Voice STT runtime installation"
 }
 
 if ($InstallVoiceTts) {

@@ -21,16 +21,7 @@ export const memoryManifest: MonarchModuleManifest = {
       title: 'Remember fact',
       description: 'Store a local memory record.',
       risk: 'write',
-      routing: {
-        aliases: ['remember', 'remember fact', 'save memory', 'store memory', 'запомни', 'сохрани в память'],
-        keywords: ['memory', 'remember', 'save', 'store', 'fact', 'facts', 'память', 'запомни', 'сохрани'],
-        examples: [
-          'remember that Monarch should stay local first',
-          'save this in memory',
-          'запомни в память',
-        ],
-        intentKinds: ['memory.write', 'remember'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -58,16 +49,7 @@ export const memoryManifest: MonarchModuleManifest = {
       title: 'Search memory',
       description: 'Search local memory records.',
       risk: 'read',
-      routing: {
-        aliases: ['recall', 'search memory', 'find memory', 'вспомни', 'найди в памяти'],
-        keywords: ['memory', 'recall', 'search', 'find', 'query', 'память', 'вспомни', 'найди'],
-        examples: [
-          'recall Monarch',
-          'search memory for project notes',
-          'вспомни Monarch',
-        ],
-        intentKinds: ['memory.read', 'memory.search'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -90,15 +72,7 @@ export const memoryManifest: MonarchModuleManifest = {
       title: 'List memory',
       description: 'List recent local memory records.',
       risk: 'read',
-      routing: {
-        aliases: ['list memory', 'show memory', 'recent memories', 'покажи память', 'что ты помнишь'],
-        keywords: ['memory', 'list', 'recent', 'show', 'records', 'память', 'помнишь', 'покажи'],
-        examples: [
-          'list memory',
-          'show recent memories',
-        ],
-        intentKinds: ['memory.read', 'memory.list'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {

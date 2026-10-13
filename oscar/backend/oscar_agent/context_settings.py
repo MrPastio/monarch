@@ -5,6 +5,8 @@ import json
 import re
 import shutil
 import sqlite3
+
+from . import secure_db
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -51,8 +53,7 @@ class ContextSettingsStore:
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
-        con = sqlite3.connect(self.db_path, timeout=10.0)
-        con.row_factory = sqlite3.Row
+        con = secure_db.connect(self.db_path, timeout=10.0)
         con.execute("PRAGMA foreign_keys=ON")
         con.execute("PRAGMA secure_delete=ON")
         con.execute("PRAGMA synchronous=NORMAL")
@@ -213,6 +214,11 @@ class ContextSettingsStore:
             elif command == "personality.scope.copy":
                 kind = "personality"
                 result = self._copy_personality_scope(
+                    con, scope_type, scope_id, expected_revision, payload
+                )
+            elif command == "personality.style.set":
+                kind = "personality"
+                result = self._set_personality_style(
                     con, scope_type, scope_id, expected_revision, payload
                 )
             elif command == "voice.update":
@@ -1198,6 +1204,73 @@ class ContextSettingsStore:
         )
         return {"enabled": enabled, "revision": revision}
 
+    def _set_personality_style(
+        self,
+        con: sqlite3.Connection,
+        scope_type: str,
+        scope_id: str,
+        expected_revision: int,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """One atomic write of the whole answer style: on/off, the choices and own wishes.
+
+        The style is stored in the selected profile so turns keep reading one
+        pinned, hashed profile; the questionnaire mirrors it for older readers.
+        """
+        actual, current, created_at = self._personality_document(
+            con, scope_type, scope_id
+        )
+        assert_revision(expected_revision, actual)
+        unknown = set(payload) - {"enabled", "dimensions", "addressForm", "language", "customRules"}
+        if unknown:
+            raise ValueError(f"Unsupported personality style fields: {', '.join(sorted(unknown))}")
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            raise ValueError("personality.style.set requires boolean enabled.")
+        document = normalize_personality_document(current)
+        selected_id = document["selectedProfileId"]
+        now = utc_now()
+        profiles: list[dict[str, Any]] = []
+        for profile in document["profiles"]:
+            if profile["id"] != selected_id:
+                profiles.append(profile)
+                continue
+            next_profile = {
+                **profile,
+                "dimensions": normalize_personality_dimensions(
+                    payload.get("dimensions", profile["dimensions"])
+                ),
+                "addressForm": normalize_address_form(
+                    payload.get("addressForm", profile["addressForm"])
+                ),
+                "language": normalize_personality_language(
+                    payload.get("language", profile["language"])
+                ),
+                "customRules": bounded_string_list(
+                    payload.get("customRules", profile["customRules"]), 12, 300
+                ),
+                "revision": int(profile["revision"]) + 1,
+                "updatedAt": now,
+            }
+            next_profile["contentHash"] = personality_profile_hash(next_profile)
+            profiles.append(next_profile)
+        selected = next(profile for profile in profiles if profile["id"] == selected_id)
+        value = {
+            **document,
+            "enabled": enabled,
+            "profiles": profiles,
+            "questionnaire": {
+                **selected["dimensions"],
+                "addressForm": selected["addressForm"],
+                "language": selected["language"],
+            },
+            "updatedAt": now,
+        }
+        revision = self._write_personality_document(
+            con, scope_type, scope_id, actual, value, created_at
+        )
+        return {"personality": value, "revision": revision}
+
     def _copy_personality_scope(
         self,
         con: sqlite3.Connection,
@@ -1864,9 +1937,24 @@ def normalize_voice_tuning(value: Any, *, allow_active_preset: bool) -> dict[str
 
 def normalize_voice_input_preferences(value: Any) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
+    location_mode = str(source.get("weatherLocationMode") or "manual").strip().lower()
+    providers_enabled = source.get("informationProvidersEnabled") is True
     return {
         "schemaVersion": 1,
         "autoSendAfterDictation": source.get("autoSendAfterDictation") is True,
+        "simplifiedModeEnabled": source.get("simplifiedModeEnabled") is not False,
+        "backgroundWakeEnabled": source.get("backgroundWakeEnabled") is not False,
+        "informationProvidersEnabled": providers_enabled,
+        "informationProviderAgreementVersion": (
+            bounded_optional_text(source.get("informationProviderAgreementVersion"), 80)
+            if providers_enabled else None
+        ),
+        "informationProviderConsentedAt": (
+            bounded_optional_text(source.get("informationProviderConsentedAt"), 80)
+            if providers_enabled else None
+        ),
+        "weatherLocationMode": location_mode if location_mode in {"manual", "device"} else "manual",
+        "weatherLocation": bounded_optional_text(source.get("weatherLocation"), 100),
     }
 
 

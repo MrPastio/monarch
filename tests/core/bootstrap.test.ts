@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, it, expect } from 'vitest';
 import { createMonarchRuntime } from '../../src/bootstrap';
 import { MonarchKernel, type MonarchModule, type MonarchModulePackage } from '../../src/core';
 
@@ -40,9 +43,16 @@ function createSmokePackage(id: string): MonarchModulePackage {
   };
 }
 
+// Each runtime gets its own folder: the default is the current directory,
+// which in a checkout holds the owner's development state.
+const roots: string[] = [];
+const workspaceRoot = () => { const dir = mkdtempSync(path.join(os.tmpdir(), 'monarch-bootstrap-')); roots.push(dir); return dir; };
+afterEach(() => { for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+
 describe('Bootstrap & Kernel Lifecycle', () => {
   it('should load custom package catalog', () => {
     const runtime = createMonarchRuntime({
+      workspaceRoot: workspaceRoot(),
       packages: [
         createSmokePackage('smoke-catalog-module'),
       ],
@@ -55,6 +65,7 @@ describe('Bootstrap & Kernel Lifecycle', () => {
 
   it('should select only enabled modules', async () => {
     const memoryOnlyRuntime = createMonarchRuntime({
+      workspaceRoot: workspaceRoot(),
       enabledModules: ['memory'],
     });
     const moduleIds = memoryOnlyRuntime.modules.map((module) => module.manifest.id);
@@ -64,10 +75,10 @@ describe('Bootstrap & Kernel Lifecycle', () => {
     expect(diagnosticsRecord?.status).toBe('skipped');
 
     await memoryOnlyRuntime.kernel.start();
-    const diagnosticsResult = await memoryOnlyRuntime.kernel.submitIntent('Покажи модули ядра', 'smoke');
+    const diagnosticsCapability = memoryOnlyRuntime.kernel.getCapability('diagnostics.modules.list');
     await memoryOnlyRuntime.kernel.stop();
 
-    expect(diagnosticsResult.route).toBeNull();
+    expect(diagnosticsCapability).toBeUndefined();
   });
 
   it('should respect dependency lifecycle order', async () => {

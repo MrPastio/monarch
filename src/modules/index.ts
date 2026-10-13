@@ -9,6 +9,8 @@ export * from './models';
 export * from './oscar';
 export * from './profile';
 export * from './plugins';
+export * from './gmail';
+export * from './github';
 export * from './security';
 export * from './sharing';
 export * from './voice';

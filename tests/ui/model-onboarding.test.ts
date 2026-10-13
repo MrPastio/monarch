@@ -7,6 +7,7 @@ const onboarding = readFileSync('src/ui/public/modules/model-onboarding.js', 'ut
 const welcome = readFileSync('src/ui/public/modules/model-setup-welcome.js', 'utf8');
 const models = readFileSync('src/ui/public/modules/model-manager.js', 'utf8');
 const styles = readFileSync('src/ui/public/ui-refresh.css', 'utf8');
+const setupStyles = readFileSync('src/ui/public/setup-flow.css', 'utf8');
 
 describe('first-run model setup UI', () => {
   it('starts with one hardware recommendation and keeps every model voluntarily available', () => {
@@ -16,10 +17,22 @@ describe('first-run model setup UI', () => {
     expect(html).toContain('Пропустить установку моделей');
     expect(html).toContain('Если автоматическая установка не работает :(');
     expect(html).toContain('id="model-setup-manual"');
-    expect(onboarding).toContain('models.filter((model) => model.role === recommendedRole)');
-    expect(onboarding).toContain("installModels(roles, 'onboarding')");
+    expect(onboarding).toContain('models.filter((model) => model.role === recommendedRole || selectedRoles.has(model.role))');
+    expect(onboarding).toContain("installModels(roles, required && flow.mode === 'first' ? 'onboarding' : 'settings')");
     expect(onboarding).toContain('skipModelOnboarding()');
     expect(onboarding).toContain('selectedRoles = elements.allInput.checked ? new Set(roles)');
+  });
+
+  it('asks where Oscar should think and adapts the steps to the answer', () => {
+    for (const mode of ['local', 'max', 'hybrid']) expect(html).toContain(`data-setup-mode="${mode}"`);
+    expect(html).toContain('Где будет думать Оскар?');
+    expect(onboarding).toContain("if (flow.work === 'hybrid') steps.push('local', 'max');");
+    expect(onboarding).toContain("saveModelPreference({ work: flow.work || 'local', maxLocalFallback: flow.fallback })");
+    // MAX connects through the same bridge and the same three disclosures as Settings → MAX.
+    for (const consent of ['nonLocalProcessing', 'selectedContext', 'providerTerms']) expect(html).toContain(`data-setup-consent="${consent}"`);
+    expect(onboarding).toContain('bridge.configureProvider(input)');
+    expect(onboarding).toContain("input.apiKey = ''");
+    expect(html).toContain('id="setup-fallback-input" checked');
   });
 
   it('renders pinned manual files and opens the exact models root through the trusted desktop bridge', () => {
@@ -42,11 +55,14 @@ describe('first-run model setup UI', () => {
     expect(models).toContain("installModels(roles, 'settings')");
   });
 
-  it('uses the Monarch glass system with a responsive reduced-motion path', () => {
-    expect(styles).toContain('.model-setup-panel');
-    expect(styles).toMatch(/\.model-setup-panel\s*\{[^}]*backdrop-filter:\s*blur\(28px\)/s);
-    expect(styles).toContain('@media (prefers-reduced-motion: reduce)');
-    expect(styles).toContain('@media (max-width: 680px)');
+  it('animates through one owner with a responsive reduced-motion path', () => {
+    expect(onboarding).toContain('function goTo(step, direction, options = {})');
+    expect(onboarding).toContain('settleTransitions();');
+    expect(onboarding).toContain('reducedUiMotion.matches');
+    expect(setupStyles).toContain('@media (prefers-reduced-motion: reduce)');
+    expect(setupStyles).toContain('html[data-motion="reduced"] .setup');
+    expect(setupStyles).toContain('@media (max-width: 760px)');
+    expect(setupStyles).not.toMatch(/animation:[^;]*infinite/u);
   });
 
   it('keeps polling from every component state update so installed completion replaces stale progress', () => {

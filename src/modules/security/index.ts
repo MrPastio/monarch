@@ -2,12 +2,10 @@ import type {
   MonarchCapability,
   MonarchExecutionRequest,
   MonarchExecutionResult,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
   MonarchRisk,
-  MonarchRouteDecision,
   MonarchActionGuardReaction,
   MonarchAgentSecurityMode,
 } from '../../core';
@@ -19,6 +17,7 @@ import {
   type SecurityCommandResult,
 } from './client';
 import { securityManifest } from './manifest';
+import { scheduleBackgroundReconciliation } from './background-reconcile';
 import {
   AgentActionGuard,
   type AgentGuardDecision,
@@ -26,6 +25,9 @@ import {
 } from './agent-guard';
 
 type SensorId = 'network' | 'devices' | 'persistence' | 'posture';
+/** Health may show a protector status this old while a fresh one is read. */
+const HEALTH_STATUS_FRESH_MS = 15_000;
+type StatusRead = { at: number; result: SecurityCommandResult } | { at: number; error: unknown };
 type SecurityLevel = 'off' | 'minimal' | 'balanced' | 'strict' | 'maximum';
 
 export class SecurityModule implements MonarchModule {
@@ -36,6 +38,9 @@ export class SecurityModule implements MonarchModule {
   private modelCommandsEnabled = true;
   private actionGuardReaction: MonarchActionGuardReaction = 'guard';
   private agentSecurityMode: MonarchAgentSecurityMode = 'guard';
+  private stopBackgroundReconciliation: (() => void) | undefined;
+  private lastStatus: StatusRead | undefined;
+  private statusInFlight: Promise<SecurityCommandResult> | undefined;
 
   constructor(
     client = new SecurityClient(),
@@ -46,22 +51,25 @@ export class SecurityModule implements MonarchModule {
   }
 
   async activate(context: MonarchKernelContext): Promise<void> {
-    const defaultAgentSecurityMode: MonarchAgentSecurityMode = context.getPermissionProfile().sandboxMode === 'danger-full-access'
-      ? 'observe'
-      : 'guard';
+    const defaultAgentSecurityMode: MonarchAgentSecurityMode = 'guard';
     // The local mode default belongs to the effective execution profile, not
     // to Python availability. A missing Security helper must not silently turn
     // Full Access back into the old Guard wall.
     this.agentSecurityMode = defaultAgentSecurityMode;
     if (this.client.available) {
+      // Two independent reads of the helper; each is a Python start (~0.8 s).
+      const [profileRead, policyRead] = await Promise.allSettled([
+        Promise.resolve().then(() => this.client.profile()), Promise.resolve().then(() => this.client.modelPolicy())]);
       try {
-        const profile = firstJson(await this.client.profile());
+        if (profileRead.status === 'rejected') throw profileRead.reason;
+        const profile = firstJson(profileRead.value);
         this.securityLevel = readSecurityLevel(profile) || 'balanced';
       } catch {
         this.securityLevel = 'balanced';
       }
       try {
-        const policy = firstJson(await this.client.modelPolicy());
+        if (policyRead.status === 'rejected') throw policyRead.reason;
+        const policy = firstJson(policyRead.value);
         const parsed = readModelCommandPolicy(policy, defaultAgentSecurityMode);
         this.modelCommandsEnabled = parsed.enabled;
         this.actionGuardReaction = parsed.actionGuardReaction;
@@ -83,6 +91,17 @@ export class SecurityModule implements MonarchModule {
       agentSecurityMode: this.agentSecurityMode,
       modelConfirmationMode: legacyConfirmationMode(this.actionGuardReaction),
     });
+    // The first UI state read asks for health right after start; it picks up
+    // this read instead of starting the helper then.
+    if (this.client.available) void this.readStatus(context).catch(() => undefined);
+    this.stopBackgroundReconciliation?.();
+    if (process.platform === 'win32' && process.env.MONARCH_INSTALL_ROOT && this.client.available) {
+      this.stopBackgroundReconciliation = scheduleBackgroundReconciliation(async () => {
+        const command = await this.client.reconcileBackground();
+        const value = firstJson(command) as { ok?: boolean; state?: string } | null;
+        return { ok: command.ok && value?.ok === true, state: value?.state || 'startup-reconciliation-unavailable' };
+      }, async result => { await context.emit('security.startup.reconciled', this.manifest.id, result); });
+    }
   }
 
   async health(context: MonarchKernelContext): Promise<MonarchExecutionResult> {
@@ -96,11 +115,16 @@ export class SecurityModule implements MonarchModule {
     }
 
     try {
-      const status = await this.client.status();
+      // Health is read with every UI state refresh. Each protector status is a
+      // Python start (~0.8 s), which made the first screen wait for it; health
+      // shows the last status (at most HEALTH_STATUS_FRESH_MS old, a failed
+      // read included) and refreshes it in the background. The Security pane
+      // reads security.status, which is always fresh.
+      const known = this.lastStatus;
+      if (known && Date.now() - known.at > HEALTH_STATUS_FRESH_MS) void this.readStatus(context).catch(() => undefined);
+      if (known && 'error' in known) throw known.error;
+      const status = known ? known.result : await this.readStatus(context);
       const payload = withAgentGuard(firstJson(status), this.agentGuard.snapshot());
-      await context.emit('security.status.checked', this.manifest.id, {
-        running: readNestedBoolean(payload, 'running'),
-      });
       return commandResult(
         status,
         'Monarch Security protector status checked.',
@@ -113,6 +137,8 @@ export class SecurityModule implements MonarchModule {
   }
 
   async deactivate(context: MonarchKernelContext): Promise<void> {
+    this.stopBackgroundReconciliation?.();
+    this.stopBackgroundReconciliation = undefined;
     const running = this.client.backgroundBenchmarkStatus();
     this.client.dispose();
     if (running?.status === 'running') {
@@ -133,343 +159,6 @@ export class SecurityModule implements MonarchModule {
     return capability.risk;
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.trim();
-    const lower = text.toLowerCase();
-    if (!mentionsSecurity(lower)) {
-      return null;
-    }
-
-    if (/(oscar|llm|модел).*(command|команд)|(?:command|команд).*(oscar|llm|модел)/i.test(lower)) {
-      const requestsChange = /(set|change|enable|disable|always|adaptive|observe|guard|установ|измен|включ|отключ|всегда|адаптив|наблюд|защищ)/i.test(lower);
-      if (requestsChange) {
-        return {
-          intentId: intent.id,
-          targetModuleId: this.manifest.id,
-          capabilityId: 'security.model_policy.set',
-          confidence: 0.98,
-          reason: 'User asks to change Oscar command security policy.',
-          permissionMode: 'confirm',
-          input: {
-            enabled: !/(disable|off|отключ|выключ)/i.test(lower),
-            actionGuardReaction: /(always|всегда|кажд)/i.test(lower)
-              ? 'confirm-all'
-              : /(observe|наблюд)/i.test(lower)
-                ? 'observe'
-                : 'guard',
-          },
-        };
-      }
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.model_policy.get',
-        confidence: 0.96,
-        reason: 'User asks to read Oscar command security policy.',
-        permissionMode: 'allow',
-        input: {},
-      };
-    }
-
-    if (/(profile|level|strictness|режим|уров|строгост)/i.test(lower)) {
-      const level = extractSecurityLevel(lower);
-      if (level && /(set|change|switch|установ|постав|измен|переключ)/i.test(lower)) {
-        return {
-          intentId: intent.id,
-          targetModuleId: this.manifest.id,
-          capabilityId: 'security.profile.set',
-          confidence: 0.98,
-          reason: 'User asks to change Monarch Security strictness.',
-          permissionMode: 'confirm',
-          input: { level },
-        };
-      }
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.profile.get',
-        confidence: 0.96,
-        reason: 'User asks to read Monarch Security strictness.',
-        permissionMode: 'allow',
-        input: {},
-      };
-    }
-
-    if (/(start|enable|turn on|запусти|включи|активируй).*(protect|security|защит|безопас)/i.test(lower)
-      || /(protect|security|защит|безопас).*(start|enable|запусти|включи|активируй)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.protection.start',
-        confidence: 0.94,
-        reason: 'User asks to start Monarch Security background protection.',
-        permissionMode: 'confirm',
-        input: { noLlm: true },
-      };
-    }
-
-    if (/(stop|disable|turn off|останови|выключи).*(protect|security|защит|безопас)/i.test(lower)
-      || /(protect|security|защит|безопас).*(stop|disable|останови|выключи)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.protection.stop',
-        confidence: 0.94,
-        reason: 'User asks to stop Monarch Security background protection.',
-        permissionMode: 'confirm',
-        input: { waitSeconds: 10 },
-      };
-    }
-
-    if (/(live|realistic|реалист|как реальн|реальн.*угроз)/i.test(lower)
-      && /(simulation|simulate|имитац|симуляц|сымитир)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.threat.simulation.live',
-        confidence: 0.97,
-        reason: 'User explicitly asks for a safe realistic threat simulation through the production incident pipeline.',
-        permissionMode: 'confirm',
-        input: {},
-      };
-    }
-
-    if (/(attack|evasion|симуляц|атак)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.attack.simulation',
-        confidence: 0.92,
-        reason: 'User asks to run the inert security attack simulation.',
-        permissionMode: 'confirm',
-        input: { withLlm: false },
-      };
-    }
-
-    if (/(verify protection|self.?test|самопровер|провер.*защит)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.verify.protection',
-        confidence: 0.9,
-        reason: 'User asks to run the protection verification lab.',
-        permissionMode: 'confirm',
-        input: { withLlm: false },
-      };
-    }
-
-    if (/(baseline|норм|базов)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.baseline.preview',
-        confidence: 0.88,
-        reason: 'User asks about a security baseline; preview is required before digest-bound approval.',
-        permissionMode: 'allow',
-        input: { scope: extractBaselineScope(lower) },
-      };
-    }
-
-    if (/(integrity|hmac|целост)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.integrity.verify',
-        confidence: 0.9,
-        reason: 'User asks to verify security audit/state integrity.',
-        permissionMode: 'allow',
-        input: {},
-      };
-    }
-
-    if (/(incident|threat|alert|инцидент|угроз|предупрежден)/i.test(lower)
-      && /(list|show|status|read|покаж|список|статус|прочит|какие)/i.test(lower)) {
-      return {
-        intentId: intent.id, targetModuleId: this.manifest.id,
-        capabilityId: 'security.incidents.list', confidence: 0.94,
-        reason: 'User asks Oscar to inspect durable Security incidents.',
-        permissionMode: 'allow', input: { limit: 20 },
-      };
-    }
-
-    if (/(quarantine|карантин)/i.test(lower) && /(list|show|status|read|покаж|список|статус|прочит|что)/i.test(lower)) {
-      return {
-        intentId: intent.id, targetModuleId: this.manifest.id,
-        capabilityId: 'security.quarantine.list', confidence: 0.94,
-        reason: 'User asks Oscar to inspect Security quarantine.',
-        permissionMode: 'allow', input: {},
-      };
-    }
-
-    if (/(network center|network security|сетев.*центр|сетев.*безопас|подключен|соединен)/i.test(lower)
-      && /(show|status|inspect|покаж|статус|проверь|какие)/i.test(lower)) {
-      return {
-        intentId: intent.id, targetModuleId: this.manifest.id,
-        capabilityId: 'security.network.center', confidence: 0.93,
-        reason: 'User asks Oscar to inspect the Security Network Center.',
-        permissionMode: 'allow', input: { limit: 100 },
-      };
-    }
-
-    if (/(emergency|lockdown|экстрен|аварийн|блокиров)/i.test(lower) && /(status|show|покаж|статус|состояни)/i.test(lower)) {
-      return {
-        intentId: intent.id, targetModuleId: this.manifest.id,
-        capabilityId: 'security.emergency.status', confidence: 0.93,
-        reason: 'User asks Oscar to inspect emergency Security state.',
-        permissionMode: 'allow', input: {},
-      };
-    }
-
-    if (/(pin|парол|код.*безопас)/i.test(lower) && /(status|configured|настро|статус|состояни|установлен)/i.test(lower)) {
-      return {
-        intentId: intent.id, targetModuleId: this.manifest.id,
-        capabilityId: 'security.pin.status', confidence: 0.93,
-        reason: 'User asks Oscar to inspect Security PIN state without exposing the secret.',
-        permissionMode: 'allow', input: {},
-      };
-    }
-
-    if (/(benchmark|бенчмарк|нагрузк.*защит|ресурс.*защит)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.benchmark.start',
-        confidence: 0.9,
-        reason: 'User asks to measure background protection resource usage.',
-        permissionMode: 'confirm',
-        input: { durationSeconds: 300, intervalSeconds: 0.5 },
-      };
-    }
-
-    if (/(report|отчет|отчёт|summary|сводк)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.report.generate',
-        confidence: 0.9,
-        reason: 'User asks to generate a Monarch Security report.',
-        permissionMode: 'allow',
-        input: { noLlm: true, summaryOnly: true, includeFiles: false, includeInstalls: false, fileLimit: 100 },
-      };
-    }
-
-    if (/(process|processes|процесс)/i.test(lower)
-      && /(audit|check|scan|security|аудит|проверь|провер|скан|безопас)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.scan.system',
-        confidence: 0.99,
-        reason: 'User asks Oscar for a real safety audit of current processes through Monarch Security.',
-        permissionMode: 'allow',
-        input: {
-          summaryOnly: false,
-          includeFiles: false,
-          includeInstalls: false,
-          fileLimit: 100,
-          noLlm: true,
-        },
-      };
-    }
-
-    if (/(audit|logs?|лог|аудит)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.audit.tail',
-        confidence: 0.88,
-        reason: 'User asks to read recent Monarch Security audit records.',
-        permissionMode: 'allow',
-        input: { lines: 20 },
-      };
-    }
-
-    if (/(diagnose|diagnostic|settings|runtime|диагност|настрой)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.diagnose',
-        confidence: 0.9,
-        reason: 'User asks to diagnose Monarch Security runtime.',
-        permissionMode: 'allow',
-        input: {},
-      };
-    }
-
-    if (/(deep|глубок)/i.test(lower) && /(file|path|файл|путь)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.deep_scan.file',
-        confidence: 0.88,
-        reason: 'User asks for a deep security scan of a file.',
-        permissionMode: 'allow',
-        input: {
-          path: extractPath(text),
-          defender: /(defender|защитник)/i.test(lower),
-          noLlm: true,
-        },
-      };
-    }
-
-    if (/(file|folder|path|файл|папк|путь)/i.test(lower) && /(scan|check|проверь|скан)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.scan.path',
-        confidence: 0.86,
-        reason: 'User asks to scan a file or folder path.',
-        permissionMode: 'allow',
-        input: {
-          path: extractPath(text),
-          recursive: /(recursive|рекурс)/i.test(lower),
-          limit: 250,
-          noLlm: true,
-        },
-      };
-    }
-
-    const sensor = extractSensor(lower);
-    if (sensor) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: `security.scan.${sensor}`,
-        confidence: 0.86,
-        reason: `User asks to scan security ${sensor}.`,
-        permissionMode: 'allow',
-        input: { noLlm: true },
-      };
-    }
-
-    if (/(scan|check|проверь|скан)/i.test(lower)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'security.scan.system',
-        confidence: 0.86,
-        reason: 'User asks to run a Monarch Security system scan.',
-        permissionMode: 'allow',
-        input: {
-          summaryOnly: true,
-          includeFiles: false,
-          includeInstalls: false,
-          fileLimit: 100,
-          noLlm: true,
-        },
-      };
-    }
-
-    return {
-      intentId: intent.id,
-      targetModuleId: this.manifest.id,
-      capabilityId: 'security.status',
-      confidence: 0.84,
-      reason: 'User asks about Monarch Security or protection status.',
-      permissionMode: 'allow',
-      input: {},
-    };
-  }
 
   async executeCapability(
     request: MonarchExecutionRequest,
@@ -479,6 +168,38 @@ export class SecurityModule implements MonarchModule {
       switch (request.capabilityId) {
       case 'security.status':
         return this.status(context);
+      case 'security.inspection.retry': {
+        const result = await this.client.retryInspection();
+        const payload = firstJson(result);
+        const status = readStringInput(payload, 'status');
+        const summary = !result.ok ? 'Повторная проверка недоступна. Проверь, что наблюдение включено.'
+          : status === 'idle' ? 'Незавершённых проверок нет.'
+            : status === 'running' ? 'Повторная проверка уже выполняется.' : 'Повторная проверка поставлена в очередь.';
+        return commandResult(result, summary, payload, this.runtimeMetadata());
+      }
+      case 'security.scan.start':
+      case 'security.scan.status':
+      case 'security.scan.cancel': {
+        const kind = readStringInput(request.input, 'kind');
+        if (request.capabilityId === 'security.scan.start' && kind !== 'file' && kind !== 'system') {
+          return { ok: false, summary: 'Выбери проверку файла или системы.', error: 'invalid-scan-kind' };
+        }
+        const job = request.capabilityId === 'security.scan.start'
+          ? this.client.scans.start(kind as 'file' | 'system', readStringInput(request.input, 'path'))
+          : request.capabilityId === 'security.scan.cancel'
+            ? this.client.scans.cancel(readStringInput(request.input, 'jobId'))
+            : this.client.scans.status();
+        if (!job && request.capabilityId === 'security.scan.cancel') return { ok: false, summary: 'Проверка не найдена.', error: 'scan-job-not-found' };
+        return { ok: true, summary: 'Состояние проверки обновлено.', output: { payload: job || { status: 'idle' } } };
+      }
+      case 'security.background.enable':
+      case 'security.background.disable': {
+        const enabled = request.capabilityId === 'security.background.enable';
+        const result = enabled ? await this.client.enableBackground() : await this.client.disableBackground(readStringInput(request.input, 'pin'));
+        const payload = firstJson(result);
+        await context.emit('security.protection.changed', this.manifest.id, { action: enabled ? 'background-enable' : 'background-disable', ok: result.ok });
+        return commandResult(result, enabled ? 'Постоянная защита настроена.' : 'Автозапуск защиты отключён.', payload, this.runtimeMetadata());
+      }
       case 'security.profile.get':
         return this.getSecurityProfile(context);
       case 'security.profile.set':
@@ -585,8 +306,23 @@ export class SecurityModule implements MonarchModule {
     }
   }
 
+  /** One protector status read at a time; health and the pane share it. */
+  private readStatus(context: MonarchKernelContext): Promise<SecurityCommandResult> {
+    this.statusInFlight ??= Promise.resolve().then(() => this.client.status()).then(async (result) => {
+      this.lastStatus = { at: Date.now(), result };
+      await context.emit('security.status.checked', this.manifest.id, {
+        running: readNestedBoolean(withAgentGuard(firstJson(result), this.agentGuard.snapshot()), 'running'),
+      });
+      return result;
+    }, (error: unknown) => {
+      this.lastStatus = { at: Date.now(), error };
+      throw error;
+    }).finally(() => { this.statusInFlight = undefined; });
+    return this.statusInFlight;
+  }
+
   private async status(context: MonarchKernelContext): Promise<MonarchExecutionResult> {
-    const result = await this.client.status();
+    const result = await this.readStatus(context);
     const payload = {
       ...withAgentGuard(firstJson(result), this.agentGuard.snapshot()),
       agentSecurityMode: this.agentSecurityMode,
@@ -599,9 +335,6 @@ export class SecurityModule implements MonarchModule {
           ...(event.payload && typeof event.payload === 'object' ? event.payload as Record<string, unknown> : {}),
         })),
     };
-    await context.emit('security.status.checked', this.manifest.id, {
-      running: readNestedBoolean(payload, 'running'),
-    });
     return commandResult(result, securityStatusSummary(payload), payload, this.runtimeMetadata());
   }
 
@@ -1281,6 +1014,9 @@ export class SecurityModule implements MonarchModule {
     const runtimeOwnedExactAction = readBooleanInput(input, 'runtimeOwnedExactAction', false);
     const requestedAgentSecurityMode = readAgentSecurityMode(input);
     const trustedActionContext = readObjectInput(input, 'trustedActionContext') || undefined;
+    const directAccess = readBooleanInput(input, 'directAccess', false);
+    const effectiveAgentSecurityMode: MonarchAgentSecurityMode | null = requestedAgentSecurityMode
+      || (directAccess ? 'guard' : null);
 
     const localDecision = this.agentGuard.assess({
       intentText,
@@ -1292,17 +1028,35 @@ export class SecurityModule implements MonarchModule {
       actionRisk,
       requestedBy,
       ...(trustedActionContext ? { trustedActionContext } : {}),
-      filesystemAuthority: context.getPermissionProfile().sandboxMode === 'danger-full-access'
+      directAccess,
+      ...(effectiveAgentSecurityMode ? { agentSecurityMode: effectiveAgentSecurityMode } : {}),
+      // directAccess is authored by ExecutionEngine from the durable local
+      // Owner override. Do not reintroduce the ambient workspace sandbox here:
+      // Kernel already enforced immutable Safe/owner red zones before this
+      // independent exact-action review.
+      filesystemAuthority: directAccess || context.getPermissionProfile().sandboxMode === 'danger-full-access'
         ? 'full-local'
         : 'workspace',
     });
 
-    if (modelProposed && !this.modelCommandsEnabled) {
+    if (modelProposed && !this.modelCommandsEnabled && !directAccess) {
       const disabled = applyModelCommandsDisabled(localDecision, this.actionGuardReaction);
       await recordActionGuardDecision(context, {
         actionModule, actionCapability, actionRisk, requestedBy, modelProposed,
       }, disabled);
       return localControllerResult(disabled, this.agentGuard.snapshot(), this.client.available);
+    }
+
+    if (directAccess && effectiveAgentSecurityMode) {
+      // Direct Access is governed by the independent exact-action locator in
+      // this module. The optional legacy Python controller must not restore a
+      // blanket hard block after the local guard classified an Owner-decidable
+      // critical action.
+      const payload = applyDirectSecurityMode(localDecision, effectiveAgentSecurityMode);
+      await recordActionGuardDecision(context, {
+        actionModule, actionCapability, actionRisk, requestedBy, modelProposed,
+      }, payload);
+      return localControllerResult(payload, this.agentGuard.snapshot(), this.client.available);
     }
 
     const exactComputerContext = actionModule === 'computer'
@@ -1317,7 +1071,7 @@ export class SecurityModule implements MonarchModule {
       // arbitrary execute capabilities still use the deeper controller path.
       // Hard boundaries and Observe/Guard/Confirm All remain enforced here.
       const payload = requestedAgentSecurityMode
-        ? applyAgentSecurityModeReadback(localDecision, requestedAgentSecurityMode)
+          ? applyAgentSecurityModeReadback(localDecision, requestedAgentSecurityMode)
         : applyActionGuardReaction(localDecision, this.actionGuardReaction, modelProposed);
       await recordActionGuardDecision(context, {
         actionModule, actionCapability, actionRisk, requestedBy, modelProposed,
@@ -1327,7 +1081,7 @@ export class SecurityModule implements MonarchModule {
 
     if (localDecision.disposition === 'hard-deny' || !this.client.available) {
       const payload = requestedAgentSecurityMode
-        ? applyAgentSecurityModeReadback(localDecision, requestedAgentSecurityMode)
+          ? applyAgentSecurityModeReadback(localDecision, requestedAgentSecurityMode)
         : applyActionGuardReaction(localDecision, this.actionGuardReaction, modelProposed);
       await recordActionGuardDecision(context, {
         actionModule, actionCapability, actionRisk, requestedBy, modelProposed,
@@ -1350,7 +1104,7 @@ export class SecurityModule implements MonarchModule {
     });
     const mergedDecision = mergeControllerDecisions(localDecision, firstJson(result));
     const payload = requestedAgentSecurityMode
-      ? applyAgentSecurityModeReadback(mergedDecision, requestedAgentSecurityMode)
+        ? applyAgentSecurityModeReadback(mergedDecision, requestedAgentSecurityMode)
       : applyActionGuardReaction(mergedDecision, this.actionGuardReaction, modelProposed);
     await recordActionGuardDecision(context, {
       actionModule, actionCapability, actionRisk, requestedBy, modelProposed,
@@ -1499,6 +1253,52 @@ function applyActionGuardReaction(
     ...payload,
     actionGuardReaction: reaction,
     evidenceCodes: Array.from(new Set([...evidenceCodes, 'action-guard.guard'])),
+  };
+}
+
+function applyDirectSecurityMode(
+  source: AgentGuardDecision | Record<string, unknown>,
+  mode: MonarchAgentSecurityMode,
+): Record<string, unknown> {
+  const payload = { ...source } as Record<string, unknown>;
+  const disposition = payload.disposition === 'informational'
+    || payload.disposition === 'owner-confirmable'
+    || payload.disposition === 'hard-deny'
+    ? payload.disposition
+    : 'hard-deny';
+  const status = String(payload.status || 'blocked');
+  const evidenceCodes = readStringList(payload.evidenceCodes);
+  if (disposition === 'hard-deny') {
+    return {
+      ...payload,
+      agentSecurityMode: mode,
+      evidenceCodes: Array.from(new Set([...evidenceCodes, 'action-guard.immutable-boundary'])),
+    };
+  }
+  if (mode === 'off' || mode === 'observe') {
+    return {
+      ...payload,
+      ok: true,
+      status: 'allowed',
+      risk: status === 'allowed' ? payload.risk || 'low' : 'elevated',
+      report: mode === 'off'
+        ? 'Наблюдатель выключен: Прямой доступ не останавливает действие.'
+        : 'Действие записано в журнал; режим наблюдения не вмешивается.',
+      disposition: 'informational',
+      agentSecurityMode: mode,
+      observedDecision: {
+        status,
+        disposition,
+        report: String(payload.report || ''),
+      },
+      evidenceCodes: Array.from(new Set([...evidenceCodes, `direct-access.${mode}`])),
+      decision: { action: 'allow', binding: 'direct-access-security-mode' },
+    };
+  }
+  return {
+    ...payload,
+    agentSecurityMode: mode,
+    evidenceCodes: Array.from(new Set([...evidenceCodes, `direct-access.${mode}`])),
   };
 }
 
@@ -1692,15 +1492,6 @@ function securityRuntimeError(error: unknown): MonarchExecutionResult {
   };
 }
 
-function mentionsSecurity(text: string): boolean {
-  const strongTechnicalCue = /\b(?:security|monarch security|protector|defender|firewall|antivirus|malware|trojan|ransomware|quarantine|autorun|persistence|agent guard|usb)\b|монарх\s+security|модул[а-яё]*\s+безопасност|антивирус|троян|карантин|автозапуск|фаервол|защитник\s+windows/i;
-  if (strongTechnicalCue.test(text)) return true;
-  if (/^(?:security|безопасность|проверь безопасность|статус защиты)[.!? ]*$/i.test(text)) return true;
-  const weakSecurityCue = /\b(?:security|protect|virus|threat|incident|emergency|audit|integrity|scan)\b|безопас|защит|вирус|угроз|инцидент|экстрен|скан|аудит|целост/i;
-  const technicalTarget = /\b(?:monarch|oscar|windows|computer|host|system|file|process|network|port|device|code|repo(?:sitory)?)\b|монарх|оскар|windows|компьютер|хост|систем|файл|процесс|сеть|порт|устройств|код|репозитор/i;
-  return weakSecurityCue.test(text) && technicalTarget.test(text);
-}
-
 function stricterDisposition(
   left: AgentGuardDecision['disposition'],
   right: AgentGuardDecision['disposition'],
@@ -1708,62 +1499,6 @@ function stricterDisposition(
   const rank = { informational: 0, 'owner-confirmable': 1, 'hard-deny': 2 } as const;
   return rank[right] > rank[left] ? right : left;
 }
-
-function extractSensor(text: string): SensorId | '' {
-  if (/(network|internet|connection|listener|сеть|сетев)/i.test(text)) {
-    return 'network';
-  }
-  if (/(device|devices|usb|hid|устройств|usb)/i.test(text)) {
-    return 'devices';
-  }
-  if (/(persistence|autorun|startup|scheduled|автозапуск|планировщик)/i.test(text)) {
-    return 'persistence';
-  }
-  if (/(posture|defender|firewall|защитник|фаервол|firewall)/i.test(text)) {
-    return 'posture';
-  }
-  return '';
-}
-
-function extractPath(text: string): string {
-  const quoted = text.match(/["'`](.+?)["'`]/);
-  if (quoted?.[1]) {
-    return quoted[1].trim();
-  }
-
-  const drivePath = text.match(/[A-Za-z]:\\[^\r\n]+/);
-  if (drivePath?.[0]) {
-    return drivePath[0].trim().replace(/[.。]+$/, '');
-  }
-
-  return '';
-}
-
-function extractBaselineScope(text: string): string {
-  if (/(device|usb|устройств)/i.test(text)) {
-    return 'devices';
-  }
-  if (/(install|software|софт|установ)/i.test(text)) {
-    return 'installs';
-  }
-  if (/(file|folder|файл|папк)/i.test(text)) {
-    return 'files';
-  }
-  if (/(network|сеть)/i.test(text)) {
-    return 'network';
-  }
-  if (/(persistence|autorun|автозапуск)/i.test(text)) {
-    return 'persistence';
-  }
-  if (/(posture|defender|firewall|защитник)/i.test(text)) {
-    return 'posture';
-  }
-  if (/(self.?protection|tamper|самозащит|подмен)/i.test(text)) {
-    return 'self-protection';
-  }
-  return 'all';
-}
-
 function readStringInput(input: unknown, key: string): string {
   if (!input || typeof input !== 'object') {
     return '';
@@ -1915,15 +1650,6 @@ function readActionGuardReaction(input: unknown): MonarchActionGuardReaction | n
 
 function legacyConfirmationMode(reaction: MonarchActionGuardReaction): 'adaptive' | 'always' {
   return reaction === 'confirm-all' ? 'always' : 'adaptive';
-}
-
-function extractSecurityLevel(text: string): SecurityLevel | null {
-  if (/(maximum|maximal|максимальн)/i.test(text)) return 'maximum';
-  if (/(strict|строг)/i.test(text)) return 'strict';
-  if (/(balanced|medium|средн|спокойн)/i.test(text)) return 'balanced';
-  if (/(minimal|minimal|минимальн)/i.test(text)) return 'minimal';
-  if (/(off|disabled|отключ[её]н|выключен)/i.test(text)) return 'off';
-  return null;
 }
 
 function readNestedString(payload: unknown, key: string): string {

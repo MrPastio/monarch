@@ -1,3 +1,5 @@
+import { isMaxNativeRole } from '../../agent-v3/max-native-contract';
+import type { MaxCloudRole } from '../../agent-v3/max-cloud-catalog';
 import { open, readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { classifyIntentText } from '../../core/intent-classifier';
@@ -6,6 +8,9 @@ import { resolveMonarchRuntimePaths } from '../../core/runtime-paths';
 import type { MonarchModelRuntimeReport } from './runtime-adapters';
 
 export type MonarchModelRole =
+  | MaxCloudRole
+  | 'max-gpt-oss-120b'
+  | 'max-qwen-3.8-27b'
   | 'router'
   | 'weak'
   | 'medium'
@@ -23,6 +28,7 @@ export const MONARCH_PRO_MODEL_ROLE = 'qwen3.8-27b-pro' as const;
 
 /** Read-time migration for retired Pro/Extra identifiers. */
 export function normalizeMonarchModelRoleAlias(roleInput: string): MonarchModelRole {
+  if (isMaxNativeRole(roleInput)) return roleInput;
   const role = String(roleInput || '').trim().toLowerCase();
   switch (role) {
   case 'router':
@@ -698,6 +704,9 @@ export function selectModelRole(normalizedInput: string): MonarchModelRole {
 
 export function selectionReason(role: MonarchModelRole, normalizedInput: string): string {
   switch (role) {
+  case 'max-gpt-oss-120b':
+  case 'max-qwen-3.8-27b':
+    return 'Explicit MAX cloud selection';
   case 'vision':
     return 'image-processing request';
   case 'powerful':
@@ -720,6 +729,7 @@ export function selectionReason(role: MonarchModelRole, normalizedInput: string)
   case 'qwen3-coder-30b-a3b-instruct':
   case 'deepseek-coder-v2-lite-instruct':
     return `Dedicated Coder Mode model for ${role} request`;
+  default: return 'MAX cloud selection';
   }
 }
 

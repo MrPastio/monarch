@@ -1,7 +1,8 @@
+import { maybeShowWhatsNew, openWhatsNew } from './whats-new.js';
 const STATE_COPY = Object.freeze({
   idle: ['Готово к проверке', 'Проверить обновления'],
-  checking: ['Проверяю канал', 'Проверка…'],
-  'verifying-manifest': ['Проверяю подпись', 'Проверка…'],
+  checking: ['Ищу обновление', 'Проверка…'],
+  'verifying-manifest': ['Проверяю подлинность обновления', 'Проверка…'],
   'up-to-date': ['Последняя версия', 'Проверить снова'],
   'update-available': ['Доступно обновление', 'Обновить и перезапустить'],
   downloading: ['Скачиваю', 'Поставить на паузу'],
@@ -48,6 +49,7 @@ export function initUpdatePane(documentRef = document, desktop = window.monarchD
   documentRef.querySelector('#monarch-update-discard')?.addEventListener('click', () => {
     void desktop.updates.discard().then(renderUpdateSnapshot);
   });
+  documentRef.querySelector('#monarch-whats-new')?.addEventListener('click', () => { void openWhatsNew(); });
   documentRef.querySelector('#monarch-update-notice-action')?.addEventListener('click', () => {
     void runPrimaryIntent(desktop.updates);
   });
@@ -89,11 +91,12 @@ function renderUpdateSnapshot(next) {
   if (!next || typeof next !== 'object') return;
   snapshot = next;
   const state = String(next.state || 'idle');
-  const [statusCopy, actionCopy] = STATE_COPY[state] || STATE_COPY.idle;
+  const development = next.reason === 'development-workspace';
+  const [statusCopy, actionCopy] = development ? ['Режим разработки', 'Проверить снова'] : STATE_COPY[state] || STATE_COPY.idle;
   renderGlobalNotice(next, state, statusCopy, actionCopy);
   setText('#monarch-update-status', statusCopy);
   const status = document.querySelector('#monarch-update-status');
-  if (status) status.dataset.state = state;
+  if (status) status.dataset.state = development ? 'development' : state;
   setText('#monarch-update-primary', actionCopy);
   setText('#monarch-current-version', versionLabel(next.currentVersion));
   setText('#monarch-available-version', next.release?.version ? versionLabel(next.release.version) : '—');
@@ -123,7 +126,13 @@ function renderUpdateSnapshot(next) {
     if (next.release?.releaseNotesUrl) notes.href = next.release.releaseNotesUrl;
   }
   setText('#monarch-update-message', updateMessage(next));
+  // Only a real installation announces its update; source and demo runs never do.
+  if (next.installation?.mode === 'installed' && !whatsNewChecked && next.currentVersion) {
+    whatsNewChecked = true;
+    void maybeShowWhatsNew(String(next.currentVersion));
+  }
 }
+let whatsNewChecked = false;
 
 function renderGlobalNotice(next, state, statusCopy, actionCopy) {
   const notice = document.querySelector('#monarch-update-notice');
@@ -146,18 +155,18 @@ function renderGlobalNotice(next, state, statusCopy, actionCopy) {
 
 function updateMessage(value) {
   if (value.reason === 'development-workspace') {
-    return 'Режим разработки: release-updater отключён, поэтому установщик не скачивается и не предлагается.';
+    return 'Monarch запущен из исходников. Обновления приходят вместе с кодом, установщик здесь не нужен.';
   }
   if (value.error?.code === 'installed-version-mismatch') {
-    return 'Launcher и запущенные файлы указывают на разные версии. Запусти Monarch через Monarch.exe или repair installer.';
+    return 'Запущенные файлы и установка разных версий. Открой Monarch через Monarch.exe или переустанови его поверх.';
   }
   if (value.error?.code === 'installed-layout-missing') {
-    return 'Установка не содержит доверенного launcher-layout. Обновление остановлено до repair installer.';
+    return 'Установка неполная, поэтому обновление остановлено. Переустанови Monarch поверх, данные сохранятся.';
   }
   if (value.error?.code === 'launcher-version-unsupported') {
-    return 'Нужен ручной bootstrap/repair installer: текущий launcher не поддерживает этот layout.';
+    return 'Эта версия запускалки устарела. Скачай установщик с сайта и установи поверх, данные сохранятся.';
   }
-  if (value.error?.message) return value.error.message;
+  if (value.error) return errorMessage(value.error.code);
   if (value.reason === 'current-version-revoked') {
     return 'Эта версия отозвана. Monarch продолжает работать; установи следующий исправленный релиз.';
   }
@@ -165,18 +174,45 @@ function updateMessage(value) {
     return 'Один клик скачает проверенный пакет обновления, дождётся завершения задач и перезапустит Monarch.';
   }
   if (value.state === 'waiting-for-tasks') {
-    return 'Voice, Coder и активные задачи завершаются перед point of no return.';
+    return 'Жду, пока закончатся голос, Coder и активные задачи. После этого обновление уже не прервётся.';
   }
-  return 'UpdateService не отправляет идентификаторы, историю, запросы или hardware inventory.';
+  return 'При проверке не уходят история, запросы и сведения о компьютере.';
 }
 
-function renderBridgeError(error) {
+const ERROR_COPY = Object.freeze({
+  'network-error': 'Нет связи с сервером обновлений. Проверь интернет и попробуй ещё раз — скачанное не пропадёт.',
+  'request-timeout': 'Сервер обновлений отвечает слишком долго. Попробуй ещё раз чуть позже — скачанное не пропадёт.',
+  'download-stalled': 'Загрузка остановилась. Попробуй ещё раз — она продолжится с того же места.',
+  'download-http-error': 'Сервер не отдал установщик. Попробуй ещё раз чуть позже.',
+  'no-valid-manifest': 'Не удалось получить проверенные сведения об обновлении. Попробуй ещё раз чуть позже.',
+  'manifest-expired': 'Сведения об обновлении устарели. Скачай свежую версию с сайта Monarch.',
+  'clock-invalid': 'На компьютере неверные дата или время, поэтому подпись обновления не проверить. Исправь время в Windows.',
+  'insufficient-disk-space': 'Не хватает места на диске для обновления. Освободи место и попробуй ещё раз.',
+  'installer-hash-mismatch': 'Скачанный файл не совпал с подписанным релизом и удалён. Попробуй ещё раз.',
+  'installer-size-mismatch': 'Скачанный файл оказался неполным и удалён. Попробуй ещё раз.',
+  'invalid-installer-format': 'Вместо установщика пришёл другой файл, он удалён. Попробуй ещё раз.',
+  'invalid-installer-content-type': 'Вместо установщика пришла веб-страница. Проверь интернет и попробуй ещё раз.',
+  'unsafe-redirect': 'Загрузку перенаправили на незнакомый адрес, она остановлена ради безопасности.',
+  'updater-version-unsupported': 'Эта версия слишком старая для автообновления. Скачай установщик с сайта и установи поверх, данные сохранятся.',
+  'manifest-replay': 'Пришли устаревшие сведения об обновлении, они отклонены. Попробуй позже.',
+  'manifest-version-replay': 'Пришли устаревшие сведения об обновлении, они отклонены. Попробуй позже.',
+  'manifest-sequence-conflict': 'Сведения об обновлении противоречат уже принятым, обновление остановлено ради безопасности.',
+});
+
+export function errorMessage(code) {
+  return ERROR_COPY[code] || 'Обновление не удалось. Попробуй ещё раз; если повторится — скачай установщик с сайта Monarch.';
+}
+
+function renderBridgeError() {
   setText('#monarch-update-status', 'Проверка недоступна');
-  setText('#monarch-update-message', error instanceof Error ? error.message : String(error));
+  setText('#monarch-update-message', errorMessage(null));
 }
 
-function versionLabel(value) {
-  return value ? `v${String(value).replace(/^v/i, '')}` : '—';
+/** The 0.3 line ships as a Preview; the label says so next to the exact build. */
+export function versionLabel(value) {
+  if (!value) return '—';
+  const version = String(value).replace(/^v/i, '');
+  return /^0\.3(?:\.|$)/u.test(version) ? `v${version} · Preview` : `v${version}`;
 }
 
 function formatBytes(value) {

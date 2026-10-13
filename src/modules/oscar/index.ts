@@ -2,14 +2,11 @@ import path from 'node:path';
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
   MonarchRisk,
-  MonarchRouteDecision,
 } from '../../core';
-import { classifyIntentText } from '../../core';
 import {
   createDefaultOscarChatRequest,
   OscarClient,
@@ -19,28 +16,17 @@ import {
   readStringInput,
   type OscarChatMessage,
   type OscarAgentSkillContext,
-  type OscarCapabilityContext,
-  type OscarRouteHint,
 } from './client';
 import { oscarManifest } from './manifest';
-import {
-  type AgentSkillRegistry,
-  getAgentSkillRegistry,
-} from '../astra/agent-skills';
 import { buildLocalUserContextPrompt } from '../profile/prompt-context';
 
 export class OscarModule implements MonarchModule {
   readonly manifest = oscarManifest;
   private readonly client: OscarClient;
-  private readonly agentSkills: Pick<AgentSkillRegistry, 'activateForPrompt'>;
   private ownerDevSettingsProvider: () => OscarOwnerDevPolicy = () => ({});
 
-  constructor(
-    client = new OscarClient(),
-    agentSkills: Pick<AgentSkillRegistry, 'activateForPrompt'> = getAgentSkillRegistry()
-  ) {
+  constructor(client = new OscarClient()) {
     this.client = client;
-    this.agentSkills = agentSkills;
   }
 
   setOwnerDevSettingsProvider(provider: () => OscarOwnerDevPolicy): void {
@@ -88,140 +74,6 @@ export class OscarModule implements MonarchModule {
     return undefined;
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.trim();
-    const lower = text.toLowerCase();
-    if (!mentionsOscar(lower)) {
-      return null;
-    }
-    const routedText = stripLeadingOscarAddress(text).toLowerCase();
-
-    // Operational Security requests must be executed by the Security module itself.
-    // Oscar remains the conversational surface, while Kernel keeps permission gates,
-    // audit and dynamic risk resolution at the privileged capability boundary.
-    if (isOscarSecurityOperation(routedText)) {
-      return null;
-    }
-
-    if (isOscarWholeSystemInspection(routedText)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: 'diagnostics',
-        capabilityId: 'diagnostics.system.inspect',
-        confidence: 0.96,
-        reason: 'Oscar delegates a requested whole-system inspection to live Monarch Diagnostics.',
-        permissionMode: 'allow',
-        input: { query: text },
-      };
-    }
-
-    if (isOscarGenerationCancel(routedText)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'oscar.generation.cancel',
-        confidence: 0.94,
-        reason: 'User asks to cancel the active Oscar generation queue.',
-        permissionMode: 'allow',
-        input: {},
-      };
-    }
-
-    if (isOscarBackendStop(routedText) || isOscarModelUnload(routedText)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: isOscarBackendStop(routedText)
-          ? 'oscar.backend.stop'
-          : 'oscar.model.unload',
-        confidence: 0.96,
-        reason: 'User asks to stop or unload Oscar runtime memory through Monarch.',
-        permissionMode: 'confirm',
-        input: {},
-      };
-    }
-
-    if (/(?:\b(?:start|launch|boot|run)\b|запусти|включи|подними).*(backend|runtime|server|oscar|оскар)|(?:backend|runtime|server|oscar|оскар).*(?:\b(?:start|launch|boot|run)\b|запусти|включи|подними)/i.test(routedText)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'oscar.backend.start',
-        confidence: 0.96,
-        reason: 'User asks to start the managed Oscar backend.',
-        permissionMode: 'confirm',
-        input: {},
-      };
-    }
-    if (mentionsBridgeOrSkillPreview(lower)) {
-      return null;
-    }
-
-    if (isOscarStatusQuery(routedText)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'oscar.status',
-        confidence: 0.98,
-        reason: 'User asks for Oscar status through Monarch.',
-        permissionMode: 'allow',
-        input: {},
-      };
-    }
-
-    if (isOscarWebSearch(routedText)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'oscar.search.ingest',
-        confidence: 0.9,
-        reason: 'User asks Oscar to run web search through Monarch.',
-        permissionMode: 'confirm',
-        input: {
-          query: extractQuery(text),
-          max_results: 5,
-          fetch_pages: true,
-        },
-      };
-    }
-
-    if (isOscarMemorySearch(routedText)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'oscar.memory.search',
-        confidence: 0.9,
-        reason: 'User asks to search Oscar memory through Monarch.',
-        permissionMode: 'allow',
-        input: {
-          query: extractQuery(text),
-          limit: 6,
-        },
-      };
-    }
-
-    const requestedModel = /(gemma|гемма)/i.test(lower) ? 'gemma' : undefined;
-
-    const chatText = extractQuery(text) || text;
-    const classification = classifyIntentText(chatText);
-    return {
-      intentId: intent.id,
-      targetModuleId: this.manifest.id,
-      capabilityId: 'oscar.chat.local',
-      confidence: 0.88,
-      reason: 'User asks Oscar to chat through Monarch.',
-      permissionMode: 'allow',
-      input: {
-        messages: createUserMessages(chatText),
-        use_memory: true,
-        reasoning_effort: 'low',
-        route: createOscarRouteHint(classification, chatText),
-        max_new_tokens: 65_536,
-        temperature: 0.3,
-        top_p: 0.9,
-        ...(requestedModel ? { requested_model: requestedModel } : {}),
-      },
-    };
-  }
 
   async executeCapability(
     request: MonarchExecutionRequest,
@@ -250,6 +102,8 @@ export class OscarModule implements MonarchModule {
       return this.manageConversations(request.input, context);
     case 'oscar.memory.manage':
       return this.manageMemory(request.input, context);
+    case 'oscar.memory.derived.manage':
+      return this.manageDerivedMemory(request.input, context);
     case 'oscar.memory.search':
       return this.searchMemory(request.input);
     case 'oscar.search.ingest':
@@ -379,7 +233,6 @@ export class OscarModule implements MonarchModule {
     }
 
     const lastUserMessage = messages.slice(-1).find(m => m.role === 'user')?.content || '';
-    const coderMode = isCoderModeMessages(messages);
     const dev = this.ownerDevSettingsProvider();
     let effectiveWebSearch = webSearch;
     if (dev.internetEnabled === false) effectiveWebSearch = false;
@@ -389,25 +242,15 @@ export class OscarModule implements MonarchModule {
 
     try {
       const chatRequest = createDefaultOscarChatRequest(
-        coderMode || dev.zeroRetentionEnabled || dev.memoryEnabled === false || dev.personalityEnabled === false
+        dev.zeroRetentionEnabled || dev.memoryEnabled === false || dev.personalityEnabled === false
           ? messages
           : await withLocalUserContext(messages, context, lastUserMessage),
         effectiveWebSearch,
         input
       );
       applyOwnerDevChatPolicy(chatRequest, dev);
-      if (!coderMode) applyMonarchRegistryRouteFloor(chatRequest, lastUserMessage);
-      if (chatRequest.execution_authority === 'agent-controller' && dev.runtimeContextEnabled !== false) {
-        this.attachCapabilityCatalog(chatRequest, context, lastUserMessage);
-      } else {
-        chatRequest.capabilities = [];
-        delete chatRequest.access;
-      }
-      if (!coderMode && chatRequest.execution_authority === 'agent-controller' && dev.skillsEnabled !== false) {
-        await this.attachAgentSkills(chatRequest, lastUserMessage, context);
-      } else {
-        chatRequest.skills = [];
-      }
+      applyMonarchRegistryRouteFloor(chatRequest, lastUserMessage);
+      chatRequest.skills = [];
       const response = await this.client.chat(chatRequest);
 
       if (effectiveWebSearch === false && response && typeof response === 'object' && Array.isArray((response as Record<string, unknown>).sources)) {
@@ -474,7 +317,6 @@ export class OscarModule implements MonarchModule {
     }
 
     const lastUserMessage = messages.slice(-1).find(m => m.role === 'user')?.content || '';
-    const coderMode = isCoderModeMessages(messages);
     const dev = this.ownerDevSettingsProvider();
     const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
     let effectiveWebSearch = typeof record.web_search === 'boolean' ? record.web_search : undefined;
@@ -485,25 +327,15 @@ export class OscarModule implements MonarchModule {
 
     try {
       const chatRequest = createDefaultOscarChatRequest(
-        coderMode || dev.zeroRetentionEnabled || dev.memoryEnabled === false || dev.personalityEnabled === false
+        dev.zeroRetentionEnabled || dev.memoryEnabled === false || dev.personalityEnabled === false
           ? messages
           : await withLocalUserContext(messages, context, lastUserMessage),
         effectiveWebSearch,
         input
       );
       applyOwnerDevChatPolicy(chatRequest, dev);
-      if (!coderMode) applyMonarchRegistryRouteFloor(chatRequest, lastUserMessage);
-      if (chatRequest.execution_authority === 'agent-controller' && dev.runtimeContextEnabled !== false) {
-        this.attachCapabilityCatalog(chatRequest, context, lastUserMessage);
-      } else {
-        chatRequest.capabilities = [];
-        delete chatRequest.access;
-      }
-      if (!coderMode && chatRequest.execution_authority === 'agent-controller' && dev.skillsEnabled !== false) {
-        await this.attachAgentSkills(chatRequest, lastUserMessage, context);
-      } else {
-        chatRequest.skills = [];
-      }
+      applyMonarchRegistryRouteFloor(chatRequest, lastUserMessage);
+      chatRequest.skills = [];
       const stream = this.client.streamChat(chatRequest);
       
       return {
@@ -535,67 +367,6 @@ export class OscarModule implements MonarchModule {
     } catch (error) {
       return backendUnavailableResult(error);
     }
-  }
-
-  private async attachAgentSkills(
-    request: ReturnType<typeof createDefaultOscarChatRequest>,
-    prompt: string,
-    context: MonarchKernelContext
-  ): Promise<void> {
-    const skills = await this.agentSkills.activateForPrompt(prompt, {
-      limit: 2,
-      minimumScore: 0.55,
-    });
-    const activated = skills.map((skill): OscarAgentSkillContext => ({
-      name: skill.name,
-      description: skill.description,
-      instructions: skill.instructions,
-      source: skill.location,
-      explicit: skill.explicit,
-    }));
-    request.skills = [
-      ...(mentionsOscarSecuritySubsystem(prompt) ? [MONARCH_SECURITY_SKILL] : []),
-      ...activated,
-    ];
-    await context.emit('oscar.skills.activated', this.manifest.id, {
-      skills: request.skills.map((skill) => skill.name),
-      explicit: skills.filter((skill) => skill.explicit).map((skill) => skill.name),
-    });
-  }
-
-  private attachCapabilityCatalog(
-    request: ReturnType<typeof createDefaultOscarChatRequest>,
-    context: MonarchKernelContext,
-    prompt: string,
-  ): void {
-    const coderMode = isCoderModeMessages(request.messages);
-    request.access = context.getPermissionProfile();
-    const catalog = selectCapabilityCatalog(
-      context.listCapabilities()
-        .filter((capability) => !capability.id.startsWith('assistant.')
-          && capability.id !== 'oscar.chat.stream'
-          && (!request.incognito || capability.id !== 'memory.remember')
-          && (!coderMode || capability.id.startsWith('coder.'))),
-      prompt,
-    );
-    const coderSchemaIds = coderMode
-      ? selectCoderDetailedSchemaIds(
-          catalog,
-          request.messages.map((message) => message.content).join('\n').slice(-24_000),
-        )
-      : null;
-    request.capabilities = catalog
-      .map((capability, index): OscarCapabilityContext => ({
-        id: capability.id,
-        module: capability.moduleId,
-        system: subsystemName(capability.moduleId),
-        title: capability.title,
-        description: (capability.description || '').slice(0, 180),
-        risk: capability.risk,
-        ...(((coderSchemaIds?.has(capability.id) || (!coderMode && index < 8))) && capability.inputSchema
-          ? { inputSchema: capability.inputSchema }
-          : {}),
-      }));
   }
 
   private async searchMemory(input: unknown): Promise<MonarchExecutionResult> {
@@ -642,7 +413,11 @@ export class OscarModule implements MonarchModule {
     try {
       let output: unknown;
       if (action === 'list') {
-        output = await this.client.listConversations();
+        const listLimit = readOptionalInteger(record.limit, 1, 200);
+        output = await this.client.listConversations({
+          ...(record.include_archived === true ? { includeArchived: true } : {}),
+          ...(listLimit !== undefined ? { limit: listLimit } : {}),
+        });
       } else if (action === 'clear') {
         output = await this.client.clearConversations();
       } else if (action === 'create') {
@@ -768,6 +543,42 @@ export class OscarModule implements MonarchModule {
     }
   }
 
+  private async manageDerivedMemory(
+    input: unknown,
+    context: MonarchKernelContext
+  ): Promise<MonarchExecutionResult> {
+    const action = readStringInput(input, 'action');
+    const id = readStringInput(input, 'id');
+    try {
+      let output: unknown;
+      if (action === 'list') {
+        output = await this.client.listDerivedMemory();
+      } else if (action === 'forget_episode' && id) {
+        output = await this.client.forgetMemoryEpisode(id);
+      } else if (action === 'forget_capsule' && id) {
+        output = await this.client.forgetMemoryCapsule(id);
+      } else if (action === 'forget_all') {
+        output = await this.client.forgetAllDerivedMemory();
+      } else {
+        return {
+          ok: false,
+          summary: 'Oscar derived-memory action is invalid or missing required data.',
+          error: 'invalid-derived-memory-action',
+        };
+      }
+      if (action !== 'list') {
+        await context.emit('oscar.memory.changed', this.manifest.id, { action, itemId: id });
+      }
+      return {
+        ok: true,
+        summary: `Oscar derived memory ${action} completed.`,
+        output,
+      };
+    } catch (error) {
+      return backendUnavailableResult(error);
+    }
+  }
+
   private async searchAndIngest(
     input: unknown,
     context: MonarchKernelContext
@@ -810,138 +621,6 @@ export class OscarModule implements MonarchModule {
   }
 }
 
-function isCoderModeMessages(messages: readonly OscarChatMessage[]): boolean {
-  return messages.some((message) => message.role === 'system'
-    && message.content.trim().startsWith('<monarch_coder_mode>')
-    && message.content.trim().endsWith('</monarch_coder_mode>'));
-}
-
-function createOscarRouteHint(
-  classification: ReturnType<typeof classifyIntentText>,
-  text: string
-): OscarRouteHint {
-  const hint: OscarRouteHint = {
-    intentKind: classification.kind,
-    riskHint: classification.riskHint,
-    language: /[А-Яа-яЁё]/.test(text) ? 'ru' : 'en',
-  };
-  if (classification.modelRolePreference !== 'vision' && classification.modelRolePreference !== 'router') {
-    hint.modelTier = classification.modelRolePreference;
-  }
-  return hint;
-}
-
-function mentionsOscar(text: string): boolean {
-  return /(oscar|оскар)/i.test(text);
-}
-
-function pairedOperationalMatch(text: string, action: RegExp, target: RegExp): boolean {
-  return action.test(text) && target.test(text);
-}
-
-function isOscarGenerationCancel(text: string): boolean {
-  return pairedOperationalMatch(
-    text,
-    /\b(?:cancel|abort)\b|отмени|прерви|сбрось/i,
-    /\b(?:generation|response|queue)\b|генерац|ответ|очеред/i,
-  );
-}
-
-function isOscarBackendStop(text: string): boolean {
-  return pairedOperationalMatch(
-    text,
-    /\b(?:stop|kill|shutdown|disable)\b|останови|выключи|убей/i,
-    /\b(?:backend|runtime|server|process|service)\b|бэкенд|рантайм|сервер|процесс|сервис/i,
-  );
-}
-
-function isOscarModelUnload(text: string): boolean {
-  return pairedOperationalMatch(
-    text,
-    /\b(?:unload|free|release|stop|clear)\b|свободи|освободи|выгрузи|останови|очисти/i,
-    /\b(?:model|vram|model memory)\b|модел|видеопамят|памят\w*\s+модел/i,
-  );
-}
-
-function isOscarStatusQuery(text: string): boolean {
-  return /^(?:status|health|статус|состояние)[.!? ]*$/i.test(text) || pairedOperationalMatch(
-    text,
-    /\b(?:status|health|state)\b|статус|состояни|здоров/i,
-    /\b(?:oscar|model|backend|runtime)\b|оскар|модел|бэкенд|рантайм/i,
-  ) || /(?:which|what|какая|какой).{0,24}(?:model|модель).{0,24}(?:loaded|active|загруж|активн)/i.test(text);
-}
-
-function isOscarMemorySearch(text: string): boolean {
-  return /\brecall\b|вспомни/i.test(text)
-    || pairedOperationalMatch(
-      text,
-      /\b(?:search|find|show|remember)\b|найди|поищи|покажи|что\s+ты\s+помнишь/i,
-      /\bmemory\b|памят/i,
-    );
-}
-
-function isOscarWebSearch(text: string): boolean {
-  if (/\bmemory\b|памят/i.test(text)) return false;
-  if (/\b(?:file|folder|project|repo(?:sitory)?|code|workspace)\b|файл|папк|проект|репозитор|код|workspace/i.test(text)) return false;
-  return /^(?:search|find|найди|поищи)\b/i.test(text)
-    || /\b(?:web\s+search|search\s+(?:the\s+)?web)\b|веб[- ]?поиск/i.test(text)
-    || pairedOperationalMatch(
-      text,
-      /\b(?:search|find|look\s+up|check)\b|найди|поищи|проверь|посмотри/i,
-      /\b(?:internet|online|web|site)\b|интернет|в\s+сети|сайт/i,
-    );
-}
-
-const MONARCH_SECURITY_SKILL: OscarAgentSkillContext = {
-  name: 'monarch-security',
-  description: 'Native knowledge and operating contract for the Monarch Security subsystem.',
-  source: 'builtin://monarch/security',
-  explicit: false,
-  instructions: [
-    'Monarch Security is the local protection subsystem integrated with Oscar through Monarch Kernel; its explicit user profile can disable both monitoring and controller checks.',
-    'Use declared security.* capabilities for status, incidents, integrity, audit, network center, quarantine, scans, reports, response proposals, emergency state, PIN, baseline and protection control.',
-    'Read-only scans and status may run directly when policy allows. Mutating, privileged, emergency, quarantine restore, trust, protection stop and response actions must retain Kernel confirmation, PIN and dynamic risk checks.',
-    'Never execute Security CLI commands directly, bypass Kernel, invent a scan result, approve a baseline, weaken protection, expose signatures/PIN/recovery codes, or treat LLM output as authorization.',
-    'For a suspicious file prefer security.deep_scan.file or security.scan.path; for the host use security.scan.system; for connections use security.scan.network and security.network.center; for active threats inspect security.incidents.list before proposing a response.',
-    'Only report an action as completed after a real Monarch capability execution result.',
-  ].join('\n'),
-};
-
-function isOscarSecurityOperation(text: string): boolean {
-  const mentionsSubsystem = mentionsOscarSecuritySubsystem(text);
-  const requestsAction = /scan|check|status|start|stop|enable|disable|verify|inspect|list|show|report|audit|diagnos|quarantine|isolate|restore|block|approve|resolve|baseline|benchmark|скан|проверь|провер|статус|запуст|останов|включ|выключ|покаж|список|отч[её]т|аудит|диагност|карантин|изолир|восстанов|заблок|одобр|реши|норм|бенчмарк/i.test(text);
-  return mentionsSubsystem && requestsAction;
-}
-
-function mentionsOscarSecuritySubsystem(text: string): boolean {
-  const strongTechnicalCue = /\b(?:security|monarch security|protector|defender|firewall|antivirus|malware|trojan|ransomware|quarantine|autorun|persistence|agent guard|usb)\b|монарх\s+security|модул[а-яё]*\s+безопасност|антивирус|троян|rat(?:ка|ки)?|карантин|автозапуск|фаервол|защитник\s+windows/i;
-  if (strongTechnicalCue.test(text)) return true;
-  if (/^(?:security|безопасность|проверь безопасность|статус защиты)[.!? ]*$/i.test(text)) return true;
-  const weakSecurityCue = /\b(?:security|protect|virus|threat|incident|emergency|audit|integrity|scan)\b|безопас|защит|вирус|угроз|инцидент|экстрен|скан|аудит|целост/i;
-  const technicalTarget = /\b(?:monarch|oscar|windows|computer|host|system|file|process|network|port|device|code|repo(?:sitory)?)\b|монарх|оскар|windows|компьютер|хост|систем|файл|процесс|сеть|порт|устройств|код|репозитор/i;
-  return weakSecurityCue.test(text) && technicalTarget.test(text);
-}
-
-function isOscarWholeSystemInspection(text: string): boolean {
-  return /\b(?:check|inspect|diagnose|audit|self[- ]?check)\b.{0,48}\b(?:monarch|all\s+modules?|whole\s+system|entire\s+system|full\s+system)\b/i.test(text)
-    || /(?:проверь|проверить|диагност|самопровер|проаудит).{0,48}(?:monarch|монарх|все\s+модул|всю\s+систем|систем\w*\s+целиком)/i.test(text)
-    || /^(?:check|inspect|diagnose)\s+(?:the\s+)?(?:whole\s+|entire\s+|full\s+)?system[.!? ]*$/i.test(text)
-    || /^(?:проверь|диагностируй)\s+(?:всю\s+|полностью\s+)?систему[.!? ]*$/i.test(text);
-}
-
-function extractQuery(text: string): string {
-  return text
-    .replace(/^(ask|chat|search|find|recall|show|status|health|спроси|чат|найди|вспомни|покажи|статус)\s+/i, '')
-    .replace(/\b(oscar|оскар)\b[:,\s-]*/i, '')
-    .replace(/\b(with web|web search|через веб|с вебом|в интернете)\b/ig, '')
-    .trim();
-}
-
-function createUserMessages(content: string): OscarChatMessage[] {
-  const normalized = content.trim();
-  return normalized ? [{ role: 'user', content: normalized }] : [];
-}
-
 function summarizeChatRequest(request: {
   messages: OscarChatMessage[];
   web_search?: boolean;
@@ -952,7 +631,6 @@ function summarizeChatRequest(request: {
   temperature: number;
   top_p: number;
   skills?: OscarAgentSkillContext[];
-  capabilities?: OscarCapabilityContext[];
 }): Record<string, unknown> {
   return {
     messages: request.messages.length,
@@ -964,7 +642,6 @@ function summarizeChatRequest(request: {
     temperature: request.temperature,
     top_p: request.top_p,
     skills: (request.skills || []).map((skill) => skill.name),
-    capabilities: (request.capabilities || []).length,
   };
 }
 
@@ -1025,34 +702,6 @@ function stripLeadingOscarAddress(value: string): string {
   ).trimStart();
 }
 
-function subsystemName(moduleId: string): string {
-  const names: Record<string, string> = {
-    astra: 'Monarch Skills',
-    diagnostics: 'Monarch Diagnostics',
-    device: 'Monarch Device',
-    memory: 'Monarch Memory',
-    models: 'Monarch Models',
-    plugins: 'Monarch Extensions',
-    safe: 'Monarch Safe',
-    security: 'Monarch Security',
-    sharing: 'Monarch Sharing',
-    telegram: 'Monarch Telegram',
-    voice: 'Monarch Voice',
-    workspace: 'Monarch Workspace',
-    'custom-tools': 'Monarch Tools',
-  };
-  return names[moduleId] || `Monarch ${moduleId}`;
-}
-
-function mentionsBridgeOrSkillPreview(text: string): boolean {
-  return /\b(?:bridge|integration|slot|preview|agent card|skill card)\b|интеграц|слот|карточк/i.test(text)
-    || containsRussianBridgeTerm(text);
-}
-
-function containsRussianBridgeTerm(text: string): boolean {
-  return /(?:^|[^\p{L}\p{N}_])(?:мост(?:а|ом|у|ы|е|ах|ами)?|связ(?:ь|и|ью|ям|ями|ях)?)(?=$|[^\p{L}\p{N}_])/iu.test(text);
-}
-
 function shouldKeepOscarQueryLocal(text: string): boolean {
   const lower = text.toLowerCase().trim();
   const explicitWebMarkers = /(найди|поищи|в интернете|актуальная информация|новости|сайт|цена|релиз|документация|поиск|search the web|look up|online)/i;
@@ -1071,8 +720,8 @@ function isMonarchSystemAwarenessQuery(text: string): boolean {
 
 function hasExplicitMonarchScope(text: string): boolean {
   return /\bmonarch\b|монарх/i.test(text)
-    || /(?:\bmodule\b|модул[а-яё]*)\s+(?:oscar|оскар|safe|sharing|security|безопасност|memory|памят|models?|модел|voice|голос|astra|studio|coder|telegram)/i.test(text)
-    || /(?:oscar|оскар|safe|sharing|security|безопасност|memory|памят|models?|модел|voice|голос|astra|studio|coder|telegram)\s+(?:\bmodule\b|модул[а-яё]*)/i.test(text);
+    || /(?:\bmodule\b|модул[а-яё]*)\s+(?:oscar|оскар|safe|sharing|security|безопасност|memory|памят|models?|модел|voice|голос|astra|coder|telegram)/i.test(text)
+    || /(?:oscar|оскар|safe|sharing|security|безопасност|memory|памят|models?|модел|voice|голос|astra|coder|telegram)\s+(?:\bmodule\b|модул[а-яё]*)/i.test(text);
 }
 
 function applyMonarchRegistryRouteFloor(
@@ -1120,7 +769,7 @@ function modulePromptScore(
   const id = normalizeModulePhrase(manifest.id);
   const shortName = normalizeModulePhrase(manifest.name).replace(/^monarch\s+/, '');
   const scoped = hasExplicitMonarchScope(prompt);
-  const unscopedDistinctiveIds = new Set(['safe', 'sharing', 'astra', 'studio', 'coder', 'telegram']);
+  const unscopedDistinctiveIds = new Set(['safe', 'sharing', 'astra', 'coder', 'telegram']);
   if (!scoped && !unscopedDistinctiveIds.has(id) && !unscopedDistinctiveIds.has(shortName)) {
     return 0;
   }
@@ -1145,127 +794,6 @@ function normalizeModulePhrase(value: string): string {
 
 function includesModulePhrase(prompt: string, phrase: string): boolean {
   return ` ${prompt} `.includes(` ${phrase} `);
-}
-
-function capabilityPromptScore(
-  capability: {
-    id: string;
-    moduleId: string;
-    title: string;
-    description?: string;
-    routing?: { aliases?: string[]; keywords?: string[]; examples?: string[]; intentKinds?: string[] };
-  },
-  prompt: string,
-): number {
-  const priorities: Record<string, number> = {
-    coder: 110,
-    device: 95,
-    workspace: 90,
-    models: 80,
-    diagnostics: 75,
-    memory: 70,
-    security: 65,
-    sharing: 64,
-    safe: 63,
-    'custom-tools': 60,
-    astra: 55,
-    plugins: 45,
-    profile: 35,
-    voice: 30,
-    telegram: 28,
-    artifacts: 25,
-    oscar: 20,
-  };
-  const routing = capability.routing;
-  const haystack = [
-    capability.id,
-    capability.moduleId,
-    capability.title,
-    capability.description || '',
-    ...(routing?.aliases || []),
-    ...(routing?.keywords || []),
-    ...(routing?.examples || []),
-    ...(routing?.intentKinds || []),
-  ].join(' ').toLowerCase();
-  const terms = prompt.toLowerCase().split(/[^\p{L}\p{N}._]+/u).filter(term => term.length >= 3);
-  const relevance = terms.reduce((score, term) => score + (haystack.includes(term) ? 50 : 0), 0);
-  return relevance + (priorities[capability.moduleId] || 0);
-}
-
-function selectCapabilityCatalog<T extends {
-  id: string;
-  moduleId: string;
-  title: string;
-  description?: string;
-  routing?: { aliases?: string[]; keywords?: string[]; examples?: string[]; intentKinds?: string[] };
-}>(
-  capabilities: readonly T[],
-  prompt: string,
-): T[] {
-  const ranked = [...capabilities].sort(
-    (left, right) => capabilityPromptScore(right, prompt) - capabilityPromptScore(left, prompt),
-  );
-  const selected: T[] = [];
-  const seen = new Set<string>();
-  const securityFocused = /security|безопасност|защит|угроз|вирус|троян|карантин|инцидент|сеть|автозапуск/i.test(prompt);
-  const systemFocused = isMonarchSystemAwarenessQuery(prompt);
-  if (systemFocused) {
-    for (const capability of ranked.filter((entry) => entry.id === 'diagnostics.system.inspect'
-      || entry.id === 'diagnostics.modules.list')) {
-      selected.push(capability);
-      seen.add(capability.id);
-    }
-  }
-  if (securityFocused) {
-    for (const capability of ranked.filter(entry => entry.moduleId === 'security')) {
-      selected.push(capability);
-      seen.add(capability.id);
-    }
-  }
-  const systemOrder = ['coder', 'device', 'workspace', 'models', 'diagnostics', 'memory', 'astra', 'security', 'sharing', 'safe', 'voice', 'telegram'];
-
-  for (const moduleId of systemOrder) {
-    for (const capability of ranked.filter(entry => entry.moduleId === moduleId).slice(0, 1)) {
-      if (!seen.has(capability.id)) {
-        selected.push(capability);
-        seen.add(capability.id);
-      }
-    }
-  }
-  for (const capability of ranked) {
-    if (selected.length >= 48) break;
-    if (!seen.has(capability.id)) {
-      selected.push(capability);
-      seen.add(capability.id);
-    }
-  }
-  return selected.slice(0, 48);
-}
-
-const MAX_CODER_DETAILED_SCHEMAS = 12;
-const CORE_CODER_SCHEMA_IDS = new Set([
-  'coder.files.list',
-  'coder.files.read',
-  'coder.files.write',
-  'coder.files.patch',
-  'coder.files.delete',
-  'coder.command.run',
-]);
-
-function selectCoderDetailedSchemaIds<T extends { id: string; moduleId: string; title: string; description?: string }>(
-  capabilities: readonly T[],
-  prompt: string,
-): Set<string> {
-  const available = new Set(capabilities.map((capability) => capability.id));
-  const selected = new Set([...CORE_CODER_SCHEMA_IDS].filter((id) => available.has(id)));
-  const ranked = [...capabilities].sort(
-    (left, right) => capabilityPromptScore(right, prompt) - capabilityPromptScore(left, prompt),
-  );
-  for (const capability of ranked) {
-    if (selected.size >= MAX_CODER_DETAILED_SCHEMAS) break;
-    selected.add(capability.id);
-  }
-  return selected;
 }
 
 function backendUnavailableResult(error: unknown): MonarchExecutionResult {
@@ -1327,8 +855,7 @@ function applyOwnerDevChatPolicy(request: ReturnType<typeof createDefaultOscarCh
   }
   if (dev.skillsEnabled === false) request.skills = [];
   if (dev.runtimeContextEnabled === false) {
-    request.capabilities = [];
-    delete request.access;
+    request.messages = request.messages.filter((message) => !message.content.includes('<live_monarch_system>'));
   }
   request.dev_mode = {
     zero_retention: dev.zeroRetentionEnabled === true,

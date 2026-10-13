@@ -10,8 +10,90 @@ import {
 } from '../../src/modules/oscar/client';
 import { oscarManifest } from '../../src/modules/oscar/manifest';
 import { validateAgainstSchema } from '../../src/core/schema-validator';
+import { MONARCH_OPTIONAL_BALANCED_MODEL, MONARCH_REQUIRED_FAST_MODEL } from '../../src/modules/models/component-manager';
 
 describe('OscarClient streaming', () => {
+  it('uses cheap public readiness while keeping the owner token on chat requests', async () => {
+    const calls: Array<{ path: string | undefined; token: string | string[] | undefined }> = [];
+    const server = http.createServer((request, response) => {
+      calls.push({ path: request.url, token: request.headers['x-oscar-token'] });
+      request.resume();
+      if (request.url === '/api/health') {
+        // An authenticated health call would run expensive diagnostics.
+        sendJson(response, request.headers['x-oscar-token'] ? 503 : 200, { ok: true });
+      } else sendJson(response, 200, { answer: 'ready' });
+    });
+    const baseUrl = await listen(server);
+    const client = Object.create(OscarClient.prototype) as OscarClient;
+    Object.assign(client, { config: { apiBase: baseUrl, autoStart: true, apiToken: 'synthetic-owner-token',
+      timeoutMs: 1000, chatTimeoutMs: 1000 } });
+    try {
+      await expect(client.chat(createChatRequest())).resolves.toMatchObject({ answer: 'ready' });
+      expect(calls).toEqual([{ path: '/api/health', token: undefined },
+        { path: '/api/chat', token: 'synthetic-owner-token' }]);
+    } finally { await close(server); }
+  });
+  it('accepts only the closed same-owner local Astra model digest set', async () => {
+    const previousMode = process.env.MONARCH_ASTRA_V3_MODEL_MODE;
+    const previousPilot = process.env.MONARCH_ASTRA_V3_PILOT;
+    process.env.MONARCH_ASTRA_V3_MODEL_MODE = 'managed-local';
+    process.env.MONARCH_ASTRA_V3_PILOT = 'runtime-same-owner-v1';
+    const client = Object.create(OscarClient.prototype) as OscarClient;
+    (client as unknown as { config: { apiBase: string; apiToken: string } }).config = {
+      apiBase: 'http://127.0.0.1:4318', apiToken: 'owner-' + 'x'.repeat(48),
+    };
+    const fastDigest = 'sha256:' + MONARCH_REQUIRED_FAST_MODEL.sha256;
+    const modelDigests = Object.fromEntries([
+      ['gemma4-fast', fastDigest],
+      ['gemma4-balanced', 'sha256:' + MONARCH_OPTIONAL_BALANCED_MODEL.sha256],
+    ]);
+    const available = vi.spyOn(client as never, 'ensureBackendAvailable' as never).mockResolvedValue(undefined as never);
+    const descriptor = vi.spyOn(client as never, 'getJson' as never).mockResolvedValue({
+      schemaVersion: 1, configurationOnly: true, authority: 'none', memoryGuard: 'chat-validity-v1',
+      hostGeneration: 'fixture_host', modelDigest: fastDigest, modelDigests,
+    } as never);
+    try {
+      await expect(client.astraLocalModelHost()).resolves.toMatchObject({ modelDigest: fastDigest, modelDigests });
+      descriptor.mockResolvedValueOnce({
+        schemaVersion: 1, configurationOnly: true, authority: 'none', memoryGuard: 'chat-validity-v1',
+        hostGeneration: 'fixture_host', modelDigest: fastDigest,
+        modelDigests: { ...modelDigests, 'gemma4-balanced': fastDigest },
+      } as never);
+      await expect(client.astraLocalModelHost()).rejects.toThrow('astra-local-host-descriptor');
+    } finally {
+      available.mockRestore();
+      descriptor.mockRestore();
+      if (previousMode === undefined) delete process.env.MONARCH_ASTRA_V3_MODEL_MODE;
+      else process.env.MONARCH_ASTRA_V3_MODEL_MODE = previousMode;
+      if (previousPilot === undefined) delete process.env.MONARCH_ASTRA_V3_PILOT;
+      else process.env.MONARCH_ASTRA_V3_PILOT = previousPilot;
+    }
+  });
+
+  it('checks memory validity via one content-free request without backend startup and supports cancellation', async () => {
+    const calls: Array<{ path?: string; body: string }> = [];
+    const expected = { schemaVersion: 1, scope: { type: 'chat' }, revision: '1:2', crossChatEnabled: true,
+      validityToken: 'sha256:' + 'a'.repeat(64) };
+    const server = http.createServer((request, response) => {
+      let body = '';
+      request.on('data', chunk => { body += chunk; });
+      request.on('end', () => {
+        calls.push({ path: request.url, body });
+        sendJson(response, 200, expected);
+      });
+    });
+    const baseUrl = await listen(server);
+    const client = new OscarClient({ apiBase: baseUrl, autoStart: true });
+    const startup = vi.spyOn(client as any, 'ensureBackendAvailable').mockRejectedValue(new Error('must not start'));
+    try {
+      await expect(client.readMemoryContextValidity({ type: 'chat' })).resolves.toEqual(expected);
+      expect(calls).toEqual([{ path: '/api/memory/context/validity', body: JSON.stringify({ schemaVersion: 1, scope: { type: 'chat' } }) }]);
+      const cancel = new AbortController(); cancel.abort();
+      await expect(client.readMemoryContextValidity({ type: 'chat' }, cancel.signal)).rejects.toThrow();
+      expect(calls).toHaveLength(1);
+      expect(startup).not.toHaveBeenCalled();
+    } finally { startup.mockRestore(); await close(server); }
+  });
   it('preserves an OpenAI-compatible backend error code', async () => {
     const server = http.createServer((request, response) => {
       request.resume();
@@ -394,12 +476,12 @@ describe('OscarClient streaming', () => {
     expect(cancelCount).toBe(1);
   });
 
-  it('cancels and unloads a local Coder model when non-streaming chat fails', async () => {
+  it('does not activate Coder cleanup from a legacy system marker', async () => {
     const cleanupPaths: string[] = [];
     const server = http.createServer((request, response) => {
       if (request.method === 'POST' && request.url === '/api/chat') {
         request.resume();
-        setTimeout(() => sendJson(response, 200, { answer: 'late', action_proposals: [] }), 120);
+        setTimeout(() => sendJson(response, 200, { answer: 'late' }), 120);
         return;
       }
       if (request.method === 'POST' && request.url === '/api/generation/cancel') {
@@ -435,7 +517,7 @@ describe('OscarClient streaming', () => {
       await close(server);
     }
 
-    expect(cleanupPaths).toEqual(['/api/generation/cancel', '/api/model/unload']);
+    expect(cleanupPaths).toEqual([]);
   });
 
   it('does not treat a reachable external backend as an owned managed process', async () => {
@@ -447,7 +529,7 @@ describe('OscarClient streaming', () => {
       }
       if (request.method === 'POST' && request.url === '/api/chat') {
         request.resume();
-        setTimeout(() => sendJson(response, 200, { answer: 'late', action_proposals: [] }), 120);
+        setTimeout(() => sendJson(response, 200, { answer: 'late' }), 120);
         return;
       }
       if (request.method === 'POST' && request.url === '/api/generation/cancel') {
@@ -483,7 +565,7 @@ describe('OscarClient streaming', () => {
       await close(server);
     }
 
-    expect(cleanupPaths).toEqual(['/api/generation/cancel', '/api/model/unload']);
+    expect(cleanupPaths).toEqual([]);
   });
 
   it('keeps partial SSE blocks buffered until flush', () => {
@@ -541,6 +623,29 @@ describe('OscarClient streaming', () => {
     }
 
     expect(capturedUrl).toBe('/api/conversations/chat-1?message_limit=80&before=145');
+  });
+
+  it('asks for archived conversations only when the caller wants them', async () => {
+    // Clearing history archives every chat bound to a поручение instead of
+    // deleting it. Nothing ever asked the backend for those, so they were kept
+    // and unreachable: on this machine 107 of 109 chats had vanished from the
+    // product while still sitting in the store.
+    const seen: string[] = [];
+    const server = http.createServer((request, response) => {
+      seen.push(request.url || '');
+      sendJson(response, 200, { conversations: [] });
+    });
+    const baseUrl = await listen(server);
+    const client = new OscarClient({ apiBase: baseUrl, autoStart: false, timeoutMs: 1000 });
+
+    try {
+      await client.listConversations();
+      await client.listConversations({ includeArchived: true, limit: 200 });
+    } finally {
+      await close(server);
+    }
+
+    expect(seen).toEqual(['/api/conversations', '/api/conversations?include_archived=true&limit=200']);
   });
 
   it('uses the collection DELETE endpoint for a durable history clear', async () => {
@@ -695,6 +800,61 @@ describe('OscarClient streaming', () => {
         provenance: { turnId: 'turn-expected' },
         outcome: 'failed',
       })).rejects.toThrow('receipt for a different append request');
+    } finally {
+      await close(server);
+    }
+  });
+
+  it('validates the derived-memory capability contract and dispatches list/forget actions', () => {
+    const capability = oscarManifest.capabilities.find(({ id }) => id === 'oscar.memory.derived.manage');
+    expect(capability).toBeDefined();
+    expect(validateAgainstSchema({ action: 'list' }, capability?.inputSchema)).toEqual({ ok: true, errors: [] });
+    expect(validateAgainstSchema({ action: 'forget_episode', id: 'ep-1' }, capability?.inputSchema))
+      .toEqual({ ok: true, errors: [] });
+    expect(validateAgainstSchema({ action: 'forget_capsule', id: 'cap-1' }, capability?.inputSchema))
+      .toEqual({ ok: true, errors: [] });
+    expect(validateAgainstSchema({ action: 'forget_all' }, capability?.inputSchema)).toEqual({ ok: true, errors: [] });
+    expect(validateAgainstSchema({}, capability?.inputSchema).ok).toBe(false);
+  });
+
+  it('lists and forgets the automatically captured chat memory through chat scope only', async () => {
+    const requests: Array<{ method: string; url: string }> = [];
+    const server = http.createServer((request, response) => {
+      requests.push({ method: request.method || '', url: request.url || '' });
+      if (request.method === 'GET' && request.url === '/api/memory/episodes?scopeType=chat') {
+        sendJson(response, 200, { scope: { type: 'chat' }, episodes: [{ id: 'ep-1' }], capsules: [] });
+        return;
+      }
+      if (request.method === 'DELETE' && request.url === '/api/memory/episodes/ep-1?scopeType=chat') {
+        sendJson(response, 200, { ok: true, deleted: 'ep-1' });
+        return;
+      }
+      if (request.method === 'DELETE' && request.url === '/api/memory/capsules/cap-1?scopeType=chat') {
+        sendJson(response, 200, { ok: true, deleted: 'cap-1' });
+        return;
+      }
+      if (request.method === 'DELETE' && request.url === '/api/memory/episodes?scopeType=chat') {
+        sendJson(response, 200, { ok: true, episodes: 3, capsules: 1 });
+        return;
+      }
+      sendJson(response, 404, { detail: 'not found' });
+    });
+    const baseUrl = await listen(server);
+    const client = new OscarClient({ apiBase: baseUrl, autoStart: false, timeoutMs: 1000 });
+
+    try {
+      await expect(client.listDerivedMemory()).resolves.toEqual({
+        scope: { type: 'chat' }, episodes: [{ id: 'ep-1' }], capsules: [],
+      });
+      await expect(client.forgetMemoryEpisode('ep-1')).resolves.toEqual({ ok: true, deleted: 'ep-1' });
+      await expect(client.forgetMemoryCapsule('cap-1')).resolves.toEqual({ ok: true, deleted: 'cap-1' });
+      await expect(client.forgetAllDerivedMemory()).resolves.toEqual({ ok: true, episodes: 3, capsules: 1 });
+      expect(requests.map((entry) => `${entry.method} ${entry.url}`)).toEqual([
+        'GET /api/memory/episodes?scopeType=chat',
+        'DELETE /api/memory/episodes/ep-1?scopeType=chat',
+        'DELETE /api/memory/capsules/cap-1?scopeType=chat',
+        'DELETE /api/memory/episodes?scopeType=chat',
+      ]);
     } finally {
       await close(server);
     }

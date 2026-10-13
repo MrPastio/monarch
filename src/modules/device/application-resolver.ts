@@ -1,4 +1,4 @@
-export type InstalledApplicationSource = 'start-apps' | 'app-path';
+export type InstalledApplicationSource = 'start-apps' | 'app-path' | 'shortcut' | 'web-shortcut';
 
 export interface InstalledApplicationCatalogEntry {
   name: string;
@@ -124,11 +124,13 @@ export function sanitizeInstalledApplicationCatalog(value: unknown): InstalledAp
     const record = raw as Record<string, unknown>;
     const name = boundedCatalogValue(record.name, 160);
     const launchId = boundedCatalogValue(record.launchId ?? record.appId, 2_048);
-    if (record.source !== 'start-apps' && record.source !== 'app-path') continue;
-    const source = record.source;
+    if (!['start-apps', 'app-path', 'shortcut', 'web-shortcut'].includes(String(record.source || ''))) continue;
+    const source = record.source as InstalledApplicationSource;
     const executableName = boundedCatalogValue(record.executableName, 160);
     if (!name || !launchId) continue;
     if (source === 'start-apps' && !isApplicationLaunchId(launchId)) continue;
+    if (source === 'shortcut' && !/\.lnk$/iu.test(launchId)) continue;
+    if (source === 'web-shortcut' && !isSafeWebShortcut(launchId)) continue;
     entries.push({ name, launchId, source, ...(executableName ? { executableName } : {}) });
   }
   return deduplicateCatalog(entries);
@@ -412,7 +414,7 @@ function deduplicateCatalog(entries: readonly InstalledApplicationCatalogEntry[]
   for (const entry of entries) {
     const name = comparableText(entry.name);
     const launchId = String(entry.launchId || '').trim();
-    if (!name || !launchId || !['start-apps', 'app-path'].includes(entry.source)) continue;
+    if (!name || !launchId || !['start-apps', 'app-path', 'shortcut', 'web-shortcut'].includes(entry.source)) continue;
     const exactIndex = selected.findIndex((candidate) => (
       candidate.source === entry.source
       && candidate.launchId.toLocaleLowerCase('en-US') === launchId.toLocaleLowerCase('en-US')
@@ -427,7 +429,9 @@ function deduplicateCatalog(entries: readonly InstalledApplicationCatalogEntry[]
       && candidate.source !== entry.source
     ));
     if (crossSourceIndex >= 0) {
-      if (entry.source === 'start-apps') selected[crossSourceIndex] = entry;
+      if (applicationSourcePriority(entry.source) < applicationSourcePriority(selected[crossSourceIndex]!.source)) {
+        selected[crossSourceIndex] = entry;
+      }
       continue;
     }
     selected.push(entry);
@@ -455,6 +459,22 @@ function boundedCatalogValue(value: unknown, maximum: number): string {
 function isApplicationLaunchId(value: string): boolean {
   if (/^(?:https?|file):/iu.test(value)) return false;
   return !/\.(?:url|website|chm|rtf|html?|pdf)(?:$|[?#])/iu.test(value);
+}
+
+function isSafeWebShortcut(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
+function applicationSourcePriority(source: InstalledApplicationSource): number {
+  if (source === 'start-apps') return 0;
+  if (source === 'shortcut') return 1;
+  if (source === 'web-shortcut') return 2;
+  return 3;
 }
 
 function roundedScore(value: number): number {

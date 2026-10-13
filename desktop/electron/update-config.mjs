@@ -5,23 +5,32 @@ const GITHUB_UPDATE_ENDPOINT = Object.freeze({
 });
 
 export const MONARCH_UPDATE_SITES_ORIGIN = 'https://monarch-local-ai.mrpastio.chatgpt.site';
+// The public site on Vercel serves the same signed bytes; it keeps metadata
+// reachable if the older Sites deployment is retired.
+export const MONARCH_UPDATE_VERCEL_ORIGIN = 'https://monarch-site-sigma.vercel.app';
 
 export const MONARCH_RELEASE_KEY_ID = 'monarch-release-2026-01';
 
-export function createMonarchUpdateEndpoints({ sitesOrigin = MONARCH_UPDATE_SITES_ORIGIN } = {}) {
+export function createMonarchUpdateEndpoints({
+  sitesOrigin = MONARCH_UPDATE_SITES_ORIGIN,
+  vercelOrigin = MONARCH_UPDATE_VERCEL_ORIGIN,
+} = {}) {
   const endpoints = [GITHUB_UPDATE_ENDPOINT];
-  if (sitesOrigin) {
-    const origin = new URL(sitesOrigin);
-    if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/') {
-      throw new Error('MONARCH_UPDATE_SITES_ORIGIN must be an HTTPS origin without a path or credentials.');
-    }
-    endpoints.push(Object.freeze({
-      id: 'sites',
-      manifestUrl: new URL('/api/releases/stable/manifest.json', origin).href,
-      signatureUrl: new URL('/api/releases/stable/manifest.sig', origin).href,
-    }));
-  }
+  if (sitesOrigin) endpoints.push(siteEndpoint('sites', sitesOrigin));
+  if (vercelOrigin) endpoints.push(siteEndpoint('vercel', vercelOrigin));
   return Object.freeze(endpoints);
+}
+
+function siteEndpoint(id, value) {
+  const origin = new URL(value);
+  if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/') {
+    throw new Error(`Monarch ${id} update origin must be an HTTPS origin without a path or credentials.`);
+  }
+  return Object.freeze({
+    id,
+    manifestUrl: new URL('/api/releases/stable/manifest.json', origin).href,
+    signatureUrl: new URL('/api/releases/stable/manifest.sig', origin).href,
+  });
 }
 
 export const MONARCH_UPDATE_ENDPOINTS = createMonarchUpdateEndpoints();

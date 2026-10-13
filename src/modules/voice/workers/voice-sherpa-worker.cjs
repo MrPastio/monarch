@@ -42,7 +42,7 @@ function findModelDir() {
   }
   throw new WorkerFailure(
     'voice-stt-language-unavailable',
-    'Локальная streaming T-one модель не найдена. Запусти npm run voice:stt:setup.',
+    'Распознавание речи ещё не скачано. Открой Настройки → Модели → «Распознавание речи».',
   );
 }
 

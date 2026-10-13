@@ -84,7 +84,15 @@ describe('Oscar voice preferences', () => {
           context: 'старый замок',
           enabled: true,
         }],
-        input: { schemaVersion: 1, autoSendAfterDictation: true },
+        input: {
+          schemaVersion: 1,
+          autoSendAfterDictation: true,
+          informationProvidersEnabled: true,
+          informationProviderAgreementVersion: '2026-08-29.1',
+          informationProviderConsentedAt: '2026-08-29T12:00:00.000Z',
+          weatherLocationMode: 'device',
+          weatherLocation: 'Киев',
+        },
       },
     });
     applyVoiceRuntimeCapabilities({
@@ -110,6 +118,14 @@ describe('Oscar voice preferences', () => {
       value: { pronunciations: [expect.objectContaining({ pronunciation: 'за́мок' })] },
     });
     expect(readVoiceInputPreferences().autoSendAfterDictation).toBe(true);
+    expect(readVoiceInputPreferences().simplifiedModeEnabled).toBe(true);
+    expect(readVoiceInputPreferences().backgroundWakeEnabled).toBe(true);
+    expect(readVoiceInputPreferences()).toMatchObject({
+      informationProvidersEnabled: true,
+      informationProviderAgreementVersion: '2026-08-29.1',
+      weatherLocationMode: 'device',
+      weatherLocation: 'Киев',
+    });
     expect(isVoicePronunciationControlAvailable()).toBe(false);
     expect(readOscarVoicePreferences()).toMatchObject({
       voice: 'oscar',

@@ -2,14 +2,15 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
 const MAX_TOKEN_TTL_MS = 60_000;
 
-export function createSafeCapabilityToken({ key, action, resourceId, ttlMs = 30_000, now = Date.now, nonce = randomUUID }) {
+export function createSafeCapabilityToken({ key, action, resourceId, binding, ttlMs = 30_000, now = Date.now, nonce = randomUUID }) {
   const secret = normalizeKey(key);
   const issuedAt = Number(now());
   const lifetime = Number.isSafeInteger(ttlMs) ? Math.max(1, Math.min(MAX_TOKEN_TTL_MS, ttlMs)) : 30_000;
   const payload = {
-    version: 1,
+    version: 2,
     action: normalizeField(action),
     resourceId: normalizeField(resourceId),
+    ...normalizeBinding(binding),
     issuedAt,
     expiresAt: issuedAt + lifetime,
     nonce: normalizeField(nonce()),
@@ -20,20 +21,23 @@ export function createSafeCapabilityToken({ key, action, resourceId, ttlMs = 30_
   return `${encoded}.${signature}`;
 }
 
-export function verifySafeCapabilityToken({ token, key, action, resourceId, usedNonces, now = Date.now }) {
+export function verifySafeCapabilityToken({ token, key, action, resourceId, binding, usedNonces, now = Date.now }) {
   const secret = normalizeKey(key);
   let expected = null;
   let actual = null;
   try {
-    const [encoded, signature, extra] = String(token || '').split('.');
+    if (typeof token !== 'string' || token.length > 2048) return false;
+    const [encoded, signature, extra] = token.split('.');
     if (!encoded || !signature || extra !== undefined) return false;
     expected = Buffer.from(sign(encoded, secret), 'base64url');
     actual = Buffer.from(signature, 'base64url');
     if (expected.byteLength !== 32 || actual.byteLength !== 32 || !timingSafeEqual(expected, actual)) return false;
     const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
-    if (payload?.version !== 1 || payload.action !== normalizeField(action) || payload.resourceId !== normalizeField(resourceId)) return false;
+    if (payload?.version !== 2 || payload.action !== normalizeField(action) || payload.resourceId !== normalizeField(resourceId)) return false;
+    const context = normalizeBinding(binding);
+    if (Object.entries(context).some(([field, value]) => payload[field] !== value)) return false;
     const current = Number(now());
-    if (!Number.isSafeInteger(payload.issuedAt) || !Number.isSafeInteger(payload.expiresAt) || payload.expiresAt < current || payload.issuedAt > current + 5_000 || payload.expiresAt - payload.issuedAt > MAX_TOKEN_TTL_MS) return false;
+    if (!Number.isSafeInteger(payload.issuedAt) || !Number.isSafeInteger(payload.expiresAt) || payload.expiresAt <= current || payload.issuedAt > current + 5_000 || payload.expiresAt <= payload.issuedAt || payload.expiresAt - payload.issuedAt > MAX_TOKEN_TTL_MS) return false;
     if (typeof payload.nonce !== 'string' || !payload.nonce || usedNonces?.has(payload.nonce)) return false;
     usedNonces?.add(payload.nonce);
     return true;
@@ -47,7 +51,11 @@ export function verifySafeCapabilityToken({ token, key, action, resourceId, used
 }
 
 function sign(encoded, key) {
-  return createHmac('sha256', key).update('monarch-safe:capability:v1\0', 'utf8').update(encoded, 'utf8').digest('base64url');
+  return createHmac('sha256', key).update('monarch-safe:capability:v2\0', 'utf8').update(encoded, 'utf8').digest('base64url');
+}
+
+function normalizeBinding(binding) {
+  return { sessionId: normalizeField(binding?.sessionId), resourceVersion: normalizeField(binding?.resourceVersion), payloadDigest: normalizeField(binding?.payloadDigest) };
 }
 
 function normalizeKey(value) {

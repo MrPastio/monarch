@@ -8,9 +8,14 @@ import {
 describe('Monarch UI preferences', () => {
   it('restores the mascot for profiles written by the former default-hidden build', () => {
     expect(normalizeUiPreferences({ inspector: 'closed', mascotVisible: false })).toEqual({
+      design: 'pp',
+      theme: 'light',
+      autoTheme: 'system',
       density: 'comfortable',
       inspector: 'open',
-      contextMeterVisible: true,
+      reasoningEffort: 'auto',
+      motion: 'system',
+      language: null,
     });
   });
 
@@ -19,7 +24,7 @@ describe('Monarch UI preferences', () => {
       mascotPreferenceVersion: MASCOT_PREFERENCE_VERSION,
       mascotVisible: false,
       density: 'compact',
-    })).toEqual({ density: 'compact', inspector: 'closed', contextMeterVisible: true });
+    })).toEqual({ design: 'pp', theme: 'light', autoTheme: 'system', density: 'compact', inspector: 'closed', reasoningEffort: 'auto', motion: 'system', language: null });
   });
 
   it('persists the migration marker with the current user choice', () => {
@@ -28,15 +33,18 @@ describe('Monarch UI preferences', () => {
       inspector: 'open',
       mascotVisible: true,
       mascotPreferenceVersion: MASCOT_PREFERENCE_VERSION,
-      contextMeterVisible: true,
     });
   });
 
-  it('keeps an explicit context meter visibility choice', () => {
-    expect(normalizeUiPreferences({ contextMeterVisible: false })).toMatchObject({
-      contextMeterVisible: false,
-    });
-    expect(serializeUiPreferences({ density: 'comfortable', inspector: 'open', contextMeterVisible: false }))
-      .toMatchObject({ contextMeterVisible: false });
+  it('keeps a valid reasoning depth and drops an unknown one', () => {
+    expect(normalizeUiPreferences({ reasoningEffort: 'high' })).toMatchObject({ reasoningEffort: 'high' });
+    expect(normalizeUiPreferences({ reasoningEffort: 'extreme' })).toMatchObject({ reasoningEffort: 'auto' });
+  });
+
+  it('defaults to the PaperPixel design and keeps an explicit return to the classic one', () => {
+    expect(normalizeUiPreferences({})).toMatchObject({ design: 'pp' });
+    expect(normalizeUiPreferences({ design: 'classic' })).toMatchObject({ design: 'classic' });
+    expect(normalizeUiPreferences({ design: 'neon' })).toMatchObject({ design: 'pp' });
+    expect(serializeUiPreferences(normalizeUiPreferences({ design: 'classic' }))).toMatchObject({ design: 'classic' });
   });
 });

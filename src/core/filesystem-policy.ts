@@ -1,5 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { mkdir, stat } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { uniqueStrings } from './utils';
 
@@ -144,8 +147,7 @@ export function evaluateFilesystemAccess(
     return buildAccessResult(false, 'invalid-path', operation, originalPath, '', fallbackRoot, policy);
   }
 
-  const driveRoot = path.parse(resolvedPath).root;
-  if ((isWriteLike(operation) || isDeleteLike(operation)) && samePath(resolvedPath, driveRoot)) {
+  if ((isWriteLike(operation) || isDeleteLike(operation)) && isFilesystemRoot(resolvedPath)) {
     return buildAccessResult(false, 'drive-root-blocked', operation, originalPath, resolvedPath, fallbackRoot, policy);
   }
 
@@ -184,6 +186,41 @@ export function evaluateFilesystemAccess(
   }
 
   return buildAccessResult(true, 'allowed', operation, originalPath, resolvedPath, fallbackRoot, policy, matchingRedZones);
+}
+
+/** True for `D:\\` / `/`, not for a file that merely lives on that root. */
+export function isFilesystemRoot(targetPath: string): boolean {
+  const resolved = expandPathTokens(targetPath);
+  if (!resolved) return false;
+  const root = path.parse(resolved).root;
+  return Boolean(root) && samePath(resolved, root);
+}
+
+/**
+ * Create missing parents of a file path. Never mkdir a drive root: on Windows
+ * mkdir of `D:\\` throws EPERM even though the volume already exists.
+ * If mkdir fails but the parent is already a directory, continue.
+ */
+export async function ensureWritableParentDirectory(filePath: string): Promise<void> {
+  const resolved = expandPathTokens(filePath);
+  if (!resolved) return;
+  const parent = path.dirname(resolved);
+  if (!parent || isFilesystemRoot(parent)) return;
+  try {
+    await mkdir(parent, { recursive: true });
+  } catch (error) {
+    const existing = await stat(parent).catch(() => undefined);
+    if (existing?.isDirectory()) return;
+    throw error;
+  }
+}
+
+/** Bare drive destination from user text (`D:`, `диск E`), not an ordinary `D:\\folder\\file` path. */
+export function extractDriveRoot(text: string): string {
+  const value = String(text || '');
+  const explicit = value.match(/(?:^|\s)([A-Za-z]):[\\/]?(?:\s|$)/u)?.[1]
+    || value.match(/(?:drive|диск(?:е|а|у|ом)?)\s+([A-Za-z])\b/iu)?.[1];
+  return explicit ? `${explicit.toUpperCase()}:\\` : '';
 }
 
 export function expandPathTokens(rawPath: string, fallbackRoot = process.cwd()): string {
@@ -351,40 +388,70 @@ function windowsKnownUserFolderCandidates(kind: MonarchKnownUserFolder): string[
   if (process.platform !== 'win32') return [];
   const cached = windowsKnownFolderCache.get(kind);
   if (cached) return cached;
-  const valueNames = kind === 'desktop'
-    ? ['Desktop', '{754AC886-DF64-4CBA-86B5-F7FBF4FBCEF5}']
-    : ['Downloads', '{374DE290-123F-4565-9164-39C4925E467B}'];
-  const psArray = valueNames.map((name) => `'${name.replace(/'/g, "''")}'`).join(',');
-  const command = [
-    '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
-    "$ErrorActionPreference = 'SilentlyContinue'",
-    "$keys = @('HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders', 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders')",
-    `$names = @(${psArray})`,
-    'foreach ($key in $keys) {',
-    '  $props = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue',
-    '  if ($null -eq $props) { continue }',
-    '  foreach ($name in $names) {',
-    '    $prop = $props.PSObject.Properties[$name]',
-    '    if ($null -ne $prop -and [string]::IsNullOrWhiteSpace([string]$prop.Value) -eq $false) {',
-    '      [Environment]::ExpandEnvironmentVariables([string]$prop.Value)',
-    '    }',
-    '  }',
-    '}',
-  ].join('; ');
-
-  try {
-    const candidates = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 1500,
-      windowsHide: true,
-    }).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    windowsKnownFolderCache.set(kind, candidates);
-    return candidates;
-  } catch {
-    windowsKnownFolderCache.set(kind, []);
-    return [];
+  // One read per process for both folders. This sits on the policy path of the
+  // agent runtime, so it must stay cheap: a synchronous PowerShell start per
+  // folder (1-3 s, often past its own timeout, which then cached nothing)
+  // froze the event loop long enough to fail model tokenizer deadlines.
+  const keys = WINDOWS_SHELL_FOLDER_KEYS.map(readWindowsRegistryKey);
+  for (const folder of ['desktop', 'downloads'] as const) {
+    windowsKnownFolderCache.set(folder, uniqueStrings(keys.flatMap((values) => WINDOWS_SHELL_FOLDER_NAMES[folder]
+      .map((name) => (values.get(name.toLowerCase()) ?? '').trim())
+      .filter(Boolean)
+      .map(expandWindowsEnvironment))));
   }
+  return windowsKnownFolderCache.get(kind) ?? [];
+}
+
+const WINDOWS_SHELL_FOLDER_KEYS = [
+  'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders',
+  'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders',
+];
+const WINDOWS_SHELL_FOLDER_NAMES: Record<MonarchKnownUserFolder, string[]> = {
+  desktop: ['Desktop', '{754AC886-DF64-4CBA-86B5-F7FBF4FBCEF5}'],
+  downloads: ['Downloads', '{374DE290-123F-4565-9164-39C4925E467B}'],
+};
+
+/** Values of one registry key, names lower-cased. `reg export` writes UTF-16LE
+ * whatever the console code page is, so non-ASCII folder paths survive; plain
+ * `reg query` output is OEM-encoded and locale dependent. */
+function readWindowsRegistryKey(key: string): Map<string, string> {
+  const values = new Map<string, string>();
+  const file = path.join(os.tmpdir(), `monarch-shell-folders-${process.pid}-${randomUUID()}.reg`);
+  try {
+    execFileSync('reg.exe', ['export', key, file, '/y'], { stdio: 'ignore', timeout: 3000, windowsHide: true });
+    return parseWindowsRegistryExport(readFileSync(file).toString('utf16le'));
+  } catch {
+    return values; // Missing key or reg.exe: environment-derived candidates still apply.
+  } finally {
+    rmSync(file, { force: true });
+  }
+}
+
+export function parseWindowsRegistryExport(text: string): Map<string, string> {
+  const values = new Map<string, string>();
+  const joined = text.replace(/^﻿/u, '').replace(/\\\r?\n\s*/gu, '');
+  for (const line of joined.split(/\r?\n/u)) {
+    const match = /^"((?:[^"\\]|\\.)*)"=(.*)$/u.exec(line.trim());
+    if (!match) continue;
+    const name = match[1]!.replace(/\\(.)/gu, '$1').toLowerCase();
+    const raw = match[2]!;
+    if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
+      values.set(name, raw.slice(1, -1).replace(/\\(.)/gu, '$1'));
+    } else if (raw.startsWith('hex(2):')) {
+      const bytes = raw.slice('hex(2):'.length).split(',').map((pair) => pair.trim()).filter(Boolean);
+      if (bytes.length % 2 === 0 && bytes.every((pair) => /^[0-9a-f]{2}$/iu.test(pair))) {
+        values.set(name, Buffer.from(bytes.map((pair) => Number.parseInt(pair, 16))).toString('utf16le').replace(/\0+$/u, ''));
+      }
+    }
+  }
+  return values;
+}
+
+function expandWindowsEnvironment(value: string): string {
+  return value.replace(/%([^%]+)%/gu, (whole, name: string) => {
+    const key = Object.keys(process.env).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+    return key === undefined ? whole : process.env[key] ?? whole;
+  });
 }
 
 function defaultRedZoneRoots(workspaceRoot: string, protectWorkspaceInternals: boolean): string[] {

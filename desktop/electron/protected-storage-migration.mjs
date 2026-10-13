@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { renameWithRetry } from './windows-rename.mjs';
 
 const SUPPORTED_SECRET_FILES = new Set([
   'oscar_token.txt',
@@ -86,5 +87,5 @@ async function atomicWriteBytes(filePath, bytes) {
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   const temporary = `${filePath}.${randomUUID()}.tmp`;
   await writeFile(temporary, bytes, { mode: 0o600 });
-  await rename(temporary, filePath);
+  await renameWithRetry(temporary, filePath);
 }

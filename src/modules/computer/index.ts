@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type {
@@ -18,6 +18,8 @@ import { computerManifest } from './manifest';
 import {
   ComputerUseNativeBridge,
   ComputerUseNativeError,
+  validateComputerWindowSelection,
+  validateComputerTextInput,
   type ComputerElementSnapshot,
   type ComputerNativeAction,
   type ComputerNativeActionTarget,
@@ -42,6 +44,16 @@ const MAX_STORED_OBSERVATIONS = 64;
 const MAX_NATIVE_CLOCK_SKEW_MS = 30_000;
 const OBSERVATION_FILE_PATTERN = /^computer-observation-[0-9a-f-]+\.png$/iu;
 const TEMPORARY_OBSERVATION_FILE_PATTERN = /^computer-observation-[0-9a-f-]+\.png\.(?:preflight|tmp-[0-9a-f-]+)\.png$/iu;
+
+type ComputerActionPhase = 'before-native' | 'prepared' | 'native-entered' | 'receipt-returned';
+/** Preserve effect uncertainty across audit/event/release failures. Error names
+ * alone cannot prove whether a native action ran. Never supplied by the caller. */
+class ComputerActionFailure extends Error {
+  reportingFailed = false;
+  constructor(readonly original: unknown, readonly phase: ComputerActionPhase) {
+    super(original instanceof Error ? original.message : String(original));
+  }
+}
 
 interface StoredVisionTarget extends ComputerVisionTarget {
   visionTargetId: string;
@@ -69,6 +81,8 @@ export interface ComputerModuleOptions {
 }
 
 export class ComputerModule implements MonarchModule {
+  private startingControl = false;
+  private controlGeneration = 0;
   readonly manifest = computerManifest;
   readonly monarchRoot: string;
   readonly runtimeRoot: string;
@@ -104,11 +118,27 @@ export class ComputerModule implements MonarchModule {
     this.visionAnalyzer = options.visionAnalyzer || new OscarComputerVisionAnalyzer({ projectRoot: this.monarchRoot });
   }
 
+  /** Read-only host preflight for issuing a proposal from a retained UI view.
+   * Historical Journal evidence alone is insufficient after process restart,
+   * control epoch change, supersession, expiry or prior consumption. */
+  hasFreshObservation(input: { observationId: string; windowRef: string; processId: number;
+    processInstanceId: string; title: string; screenshotDigest: string }): boolean {
+    try {
+      const stored = this.requireFreshObservation({ observationId: input.observationId, windowRef: input.windowRef }, false);
+      return stored.native.window.processId === input.processId && stored.native.window.processInstanceId === input.processInstanceId
+        && stored.native.window.title === input.title && input.screenshotDigest === 'sha256:' + stored.native.screenshot.sha256;
+    } catch { return false; }
+  }
+
   async activate(context: MonarchKernelContext): Promise<void> {
     await mkdir(this.observationRoot, { recursive: true });
     await this.pruneObservationArtifacts();
-    const provider = await this.nativeProvider.status();
     const control = this.control.snapshot();
+    // A disabled CU session needs no native compiler/process on application
+    // startup. First health/control/use probes the real provider as before;
+    // null means not checked, never a fabricated available/verified result.
+    const provider = control.enabled ? await this.nativeProvider.status()
+      : { available: null, deferred: true, reason: 'not-checked-until-needed' };
     const cursorSession = provider.available === true && control.enabled
       ? await this.nativeProvider.startCursorSession?.(this.control.statePath)
       : null;
@@ -121,6 +151,7 @@ export class ComputerModule implements MonarchModule {
   }
 
   async deactivate(): Promise<void> {
+    this.controlGeneration += 1;
     this.control.shutdown();
     await this.nativeProvider.stopCursorSession?.();
     this.invalidateObservations();
@@ -196,8 +227,8 @@ export class ComputerModule implements MonarchModule {
   ): Promise<MonarchExecutionResult> {
     try {
       if (request.capabilityId === 'computer.control.status') return this.controlStatus();
-      if (request.capabilityId === 'computer.control.stop') return this.stop(request, context);
-      if (request.capabilityId === 'computer.control.start') return this.start(request, context);
+      if (request.capabilityId === 'computer.control.stop') return await this.stop(request, context);
+      if (request.capabilityId === 'computer.control.start') return await this.start(request, context);
       if (immutableComputerSafeBoundary(request.input)) {
         throw new ComputerUseControlError(
           'monarch-safe-isolated',
@@ -250,24 +281,55 @@ export class ComputerModule implements MonarchModule {
         error: 'computer-start-user-required',
       };
     }
-    const snapshot = this.control.start(request.requestedBy);
-    const cursorSession = await this.nativeProvider.startCursorSession?.(this.control.statePath);
-    this.invalidateObservations();
-    await context.emit('computer.control.changed', this.manifest.id, {
-      action: 'start',
-      requestedBy: request.requestedBy,
-      control: snapshot,
-    });
-    await context.audit('computer-use', 'User enabled Computer Use.', {
-      requestedBy: request.requestedBy,
-      controlEpoch: snapshot.controlEpoch,
-    });
-    return {
-      ok: true,
-      summary: 'Computer Use enabled by direct user action.',
-      output: { verified: true, control: snapshot, cursorSession: cursorSession || null },
-      metadata: { observations: [{ ok: true, code: 'computer-control-started', message: 'The persisted Computer Use epoch is enabled.' }] },
-    };
+    if (this.startingControl) throw new ComputerUseControlError('computer-start-in-progress', 'Computer Use is already preparing.');
+    this.startingControl = true;
+    const before = this.control.snapshot();
+    const generation = this.controlGeneration;
+    let startedEpoch: number | undefined;
+    try {
+      const provider = await this.nativeProvider.status();
+      if (this.controlGeneration !== generation || this.control.snapshot().controlEpoch !== before.controlEpoch)
+        throw new ComputerUseControlError('computer-start-interrupted', 'Computer Use start was superseded by another control.');
+      if (provider.available !== true)
+        throw new ComputerUseControlError('computer-provider-unavailable', 'Computer Use native provider is not ready.');
+      const snapshot = this.control.start(request.requestedBy);
+      startedEpoch = snapshot.controlEpoch;
+      const requireCurrent = () => {
+        const current = this.control.snapshot();
+        if (this.controlGeneration !== generation || current.controlEpoch !== startedEpoch || !current.enabled)
+          throw new ComputerUseControlError('computer-start-interrupted', 'Computer Use start was superseded by another control.');
+      };
+      const cursorSession = await this.nativeProvider.startCursorSession?.(this.control.statePath);
+      requireCurrent();
+      if (cursorSession && cursorSession.started !== true)
+        throw new ComputerUseControlError('computer-cursor-unavailable', 'Computer Use cursor could not start.');
+      this.invalidateObservations();
+      await context.emit('computer.control.changed', this.manifest.id, {
+        action: 'start',
+        requestedBy: request.requestedBy,
+        control: snapshot,
+      });
+      requireCurrent();
+      await context.audit('computer-use', 'User enabled Computer Use.', {
+        requestedBy: request.requestedBy,
+        controlEpoch: snapshot.controlEpoch,
+      });
+      requireCurrent();
+      return {
+        ok: true,
+        summary: 'Computer Use enabled by direct user action.',
+        output: { verified: true, control: snapshot, cursorSession: cursorSession || null },
+        metadata: { observations: [{ ok: true, code: 'computer-control-started', message: 'The persisted Computer Use epoch is enabled.' }] },
+      };
+    } catch (error) {
+      // A failed/late preparation cannot leave authority enabled or undo Stop.
+      // Never revoke a newer control epoch owned by another user action.
+      if (startedEpoch !== undefined && this.control.snapshot().controlEpoch === startedEpoch) {
+        this.control.stop('computer-start-failed');
+        void this.nativeProvider.stopCursorSession?.().catch(() => undefined);
+      }
+      throw error;
+    } finally { this.startingControl = false; }
   }
 
   private async stop(request: MonarchExecutionRequest, context: MonarchKernelContext): Promise<MonarchExecutionResult> {
@@ -347,15 +409,21 @@ export class ComputerModule implements MonarchModule {
   ): Promise<MonarchExecutionResult> {
     const input = readRecord(request.input);
     const windowRef = requiredString(input.windowRef, 'windowRef', 80);
+    const selection = input.selectionBinding === undefined ? undefined : validateComputerWindowSelection(input.selectionBinding);
     const observationId = `computer-observation-${randomUUID()}`;
     const screenshotPath = this.screenshotPath(observationId);
-    const native = await this.nativeProvider.observe(windowRef, screenshotPath, signal);
-    if (native.window.windowRef !== windowRef || native.screenshot.path !== screenshotPath) {
-      await rm(screenshotPath, { force: true }).catch(() => undefined);
-      throw new ComputerUseNativeError('native-observation-binding-invalid', 'Native observation did not bind to the exact requested window and screenshot path.');
-    }
+    let native: ComputerNativeObservation;
     let stored: StoredComputerObservation;
     try {
+      native = selection ? await this.nativeProvider.observe(windowRef, screenshotPath, signal, selection)
+        : await this.nativeProvider.observe(windowRef, screenshotPath, signal);
+      if (native?.window?.windowRef !== windowRef || native?.screenshot?.path !== screenshotPath
+        || selection && (native.selectionBinding?.processId !== selection.processId
+          || native.selectionBinding.processInstanceId !== selection.processInstanceId || native.selectionBinding.title !== selection.title
+          || native.window.processId !== selection.processId || native.window.processInstanceId !== selection.processInstanceId
+          || native.window.title !== selection.title)) {
+        throw new ComputerUseNativeError('native-observation-binding-invalid', 'Native observation did not bind to the exact requested window and screenshot path.');
+      }
       stored = await this.storeObservation(observationId, native);
     } catch (error) {
       await rm(screenshotPath, { force: true }).catch(() => undefined);
@@ -479,6 +547,7 @@ export class ComputerModule implements MonarchModule {
     const stored = this.requireFreshObservation(input, false);
     const nativeAction = this.nativeAction(request.capabilityId, input, stored);
     const lease = this.control.acquire(request.id, stored.windowRef, callerSignal);
+    let phase: ComputerActionPhase = 'before-native';
     try {
       // Acquiring a busy lease or rejecting an invalid target performs no
       // Windows input, so it must not burn the observation. Once this short
@@ -488,6 +557,7 @@ export class ComputerModule implements MonarchModule {
         throw new ComputerUseControlError('observation-already-consumed', 'Observation already authorized one action and cannot be reused.');
       }
       stored.consumed = true;
+      phase = 'prepared';
       this.control.assertLease(lease);
       const cursor = actionCursor(nativeAction, stored.native);
       const windowBounds = stored.native.window.bounds;
@@ -511,9 +581,11 @@ export class ComputerModule implements MonarchModule {
       });
       const afterObservationId = `computer-observation-${randomUUID()}`;
       const afterScreenshotPath = this.screenshotPath(afterObservationId);
+      phase = 'native-entered';
       const receipt = await this.nativeProvider.act({
         windowRef: stored.windowRef,
         expectedProcessId: stored.native.window.processId,
+        expectedProcessInstanceId: stored.native.window.processInstanceId,
         expectedTitle: stored.native.window.title,
         expectedBounds: stored.native.window.bounds,
         expectedStateFingerprint: stored.native.stateFingerprint,
@@ -525,6 +597,7 @@ export class ComputerModule implements MonarchModule {
         inputLeaseId: lease.leaseId,
         cursorOrigin,
       }, lease.signal);
+      phase = 'receipt-returned';
       const closeAction = nativeAction.kind === 'close';
       if (
         receipt.inputLeaseId !== lease.leaseId
@@ -535,6 +608,7 @@ export class ComputerModule implements MonarchModule {
           : !receipt.after
             || receipt.after.window.windowRef !== stored.windowRef
             || receipt.after.window.processId !== stored.native.window.processId
+            || receipt.after.window.processInstanceId !== stored.native.window.processInstanceId
             || !sameLocalPath(receipt.after.screenshot.path, afterScreenshotPath))
         || receipt.cursor?.style !== 'oscar-orange'
         || receipt.cursor?.nativeOverlay !== true
@@ -551,27 +625,20 @@ export class ComputerModule implements MonarchModule {
         && receipt.exactTargetVerified === true
         && receipt.cursor?.dispatchMode === 'windows-message'
         && receipt.cursor?.exactTargetVerifiedAtDispatch === true;
-      let takeoverControl = null;
-      if (userTakeoverDetected) {
-        takeoverControl = this.control.stop('user-cursor-takeover');
-        void this.nativeProvider.stopCursorSession?.().catch(() => undefined);
-        this.invalidateObservations();
-        await context.emit('computer.control.changed', this.manifest.id, {
-          action: 'stop',
-          reason: 'user-cursor-takeover',
-          control: takeoverControl,
-        });
-      } else {
-        this.control.assertLease(lease);
-      }
+      // Physical cursor contention yields only this one input atom. It must not
+      // revoke the user's persisted Computer Use preference or tear down the
+      // long-lived Oscar cursor session. Exact semantic UIA actions do not use
+      // the system cursor and can therefore coexist with user mouse movement.
+      this.control.assertLease(lease);
       if (!receipt.foregroundVerified && !exactSemanticDispatch && !exactNativeCloseDispatch) {
-        if (userTakeoverDetected) {
-          throw new ComputerUseControlError(
-            'user-cursor-takeover-stop',
-            'Computer Use stopped after user cursor takeover; a fresh observation is required.',
-          );
-        }
         throw new ComputerUseNativeError('action-verification-invalid', 'Post-action receipt verified neither exact foreground Windows input nor an exact semantic target dispatch.');
+      }
+      if (nativeAction.kind === 'type') {
+        const mode = nativeAction.textMode ?? 'insert', proof = receipt.textVerification;
+        if (proof?.textMode !== mode || proof.textSha256 !== createHash('sha256').update(nativeAction.text, 'utf8').digest('hex')
+          || proof.valueVerifiedAfterDispatch !== (mode === 'replace')
+          || (mode === 'replace' ? !exactSemanticDispatch : !receipt.foregroundVerified || receipt.dispatchMode !== 'windows-input'))
+          throw new ComputerUseNativeError('action-verification-invalid', 'Native text receipt did not match the exact approved text and insert/replace semantics.');
       }
       const actionReceiptId = `computer-action-${randomUUID()}`;
       if (closeAction) {
@@ -635,7 +702,6 @@ export class ComputerModule implements MonarchModule {
         await rm(afterScreenshotPath, { force: true }).catch(() => undefined);
         throw error;
       }
-      if (userTakeoverDetected) this.invalidateObservations();
       await context.emit('computer.action.completed', this.manifest.id, {
         requestId: request.id,
         capabilityId: request.capabilityId,
@@ -680,8 +746,9 @@ export class ComputerModule implements MonarchModule {
             systemCursorRestored: receipt.cursor?.systemCursorRestored === true,
             userTakeoverDetected,
           },
-          ...(takeoverControl ? { computerUseStopped: true, control: takeoverControl } : {}),
+          cooperativeMode: userTakeoverDetected ? 'user-cursor-yielded-after-verified-action' : 'shared-desktop',
           after: publicObservation(after),
+          ...(nativeAction.kind === 'type' ? { textVerification: receipt.textVerification! } : {}),
         },
         metadata: {
           observations: [{ ok: true, code: 'computer-read-after-action', message: 'Native provider captured a new exact-window observation after one input atom.' }],
@@ -689,27 +756,33 @@ export class ComputerModule implements MonarchModule {
         },
       };
     } catch (error) {
-      if (errorCode(error) === 'user-cursor-takeover') {
-        const takeoverControl = this.control.stop('user-cursor-takeover');
-        void this.nativeProvider.stopCursorSession?.().catch(() => undefined);
-        this.invalidateObservations();
-        await context.emit('computer.control.changed', this.manifest.id, {
-          action: 'stop',
-          reason: 'user-cursor-takeover',
-          control: takeoverControl,
+      const failure = new ComputerActionFailure(error, phase);
+      try {
+        if (errorCode(error) === 'user-cursor-takeover') {
+          await context.emit('computer.action.yielded', this.manifest.id, {
+            requestId: request.id,
+            capabilityId: request.capabilityId,
+            observationId: stored.observationId,
+            windowRef: stored.windowRef,
+            inputLeaseId: lease.leaseId,
+            reason: 'user-cursor-takeover',
+            control: this.control.snapshot(),
+            recoveryCapabilityId: 'computer.window.observe',
+          });
+        }
+        await context.emit('computer.action.rejected', this.manifest.id, {
+          requestId: request.id,
+          capabilityId: request.capabilityId,
+          observationId: stored.observationId,
+          windowRef: stored.windowRef,
+          inputLeaseId: lease.leaseId,
+          error: errorCode(error),
         });
-      }
-      await context.emit('computer.action.rejected', this.manifest.id, {
-        requestId: request.id,
-        capabilityId: request.capabilityId,
-        observationId: stored.observationId,
-        windowRef: stored.windowRef,
-        inputLeaseId: lease.leaseId,
-        error: errorCode(error),
-      });
-      throw error;
+      } catch { failure.reportingFailed = true; }
+      throw failure;
     } finally {
-      this.control.release(lease);
+      try { this.control.release(lease); }
+      catch (error) { throw new ComputerActionFailure(error, phase); }
     }
   }
 
@@ -735,7 +808,7 @@ export class ComputerModule implements MonarchModule {
       if (element.password) {
         throw new ComputerUseControlError('password-field-blocked', 'Computer Use never types into an observed password element.');
       }
-      const text = requiredString(input.text, 'text', 4_000);
+      const { text, textMode } = validateComputerTextInput(input.text, input.textMode);
       if (isWindowsExplorerObservation(stored)
         && immutableComputerSafeBoundary(`${element.value || ''}${text}`)) {
         throw new ComputerUseControlError(
@@ -747,6 +820,7 @@ export class ComputerModule implements MonarchModule {
         kind: 'type',
         target: nativeTarget(element),
         text,
+        textMode,
       };
     }
     if (capabilityId === 'computer.window.key') {
@@ -925,6 +999,9 @@ export class ComputerModule implements MonarchModule {
     observationId: string,
     native: ComputerNativeObservation,
   ): Promise<StoredComputerObservation> {
+    if (!/^process:[a-f0-9]{64}$/u.test(native?.window?.processInstanceId ?? '')) {
+      throw new ComputerUseNativeError('process-instance-binding-invalid', 'Native observation omitted the exact process incarnation.');
+    }
     if (immutableComputerSafeBoundary({
       title: native.window.title,
       processName: native.window.processName,
@@ -1064,6 +1141,7 @@ function publicObservation(stored: StoredComputerObservation): Record<string, un
     focusedElementId: stored.native.focusedElementId,
     elements: stored.native.elements,
     truncated: stored.native.truncated,
+    ...(stored.native.selectionBinding ? { selectionBinding: stored.native.selectionBinding } : {}),
   };
 }
 
@@ -1187,6 +1265,9 @@ function centeredElement(element: ComputerElementSnapshot | undefined): { x: num
 }
 
 function computerFailure(error: unknown, capabilityId: string): MonarchExecutionResult {
+  const actionFailure = error instanceof ComputerActionFailure ? error : undefined;
+  const phase = actionFailure?.phase ?? 'before-native';
+  if (actionFailure) error = actionFailure.original;
   const code = errorCode(error);
   const message = error instanceof Error ? error.message : String(error);
   const actionCapability = [
@@ -1196,22 +1277,6 @@ function computerFailure(error: unknown, capabilityId: string): MonarchExecution
     'computer.window.key',
     'computer.window.scroll',
   ].includes(capabilityId);
-  const uncertainCodes = new Set([
-    'computer-action-cancelled',
-    'computer-use-stopped',
-    'computer-input-lease-revoked',
-    'computer-runtime-shutdown',
-    'computer-control-revoked',
-    'user-cursor-takeover',
-    'user-cursor-takeover-stop',
-    'windows-input-rejected',
-    'native-provider-failed',
-    'native-receipt-missing',
-    'native-receipt-too-large',
-    'native-receipt-invalid',
-    'action-verification-invalid',
-    'window-close-state-uncertain',
-  ]);
   const freshObservationCodes = new Set([
     'observation-already-consumed',
     'observation-stale-window',
@@ -1229,12 +1294,16 @@ function computerFailure(error: unknown, capabilityId: string): MonarchExecution
     'cursor-move-failed',
     'window-close-not-verified',
   ]);
-  const uncertain = actionCapability && uncertainCodes.has(code);
-  const requiresFreshObservation = actionCapability && (uncertain || freshObservationCodes.has(code));
+  // A native preflight receipt may prove no dispatch. Once a receipt returned,
+  // later storage/audit errors cannot override the already-crossed boundary.
+  const nativePreflightRejected = phase === 'native-entered' && error instanceof ComputerUseNativeError
+    && error.actionDispatchState === 'not-dispatched';
+  const uncertain = actionCapability && (phase === 'receipt-returned' || phase === 'native-entered' && !nativePreflightRejected);
+  const requiresFreshObservation = actionCapability && (phase !== 'before-native' || freshObservationCodes.has(code));
   return {
     ok: false,
     summary: uncertain
-      ? `Computer Use stopped during native dispatch; no success is claimed: ${message}`
+      ? `Computer Use did not complete the native input atom; no success is claimed: ${message}`
       : requiresFreshObservation
         ? `Computer Use did not dispatch the requested input; a fresh exact-window observation is required: ${message}`
       : `Computer Use rejected the request: ${message}`,
@@ -1249,8 +1318,10 @@ function computerFailure(error: unknown, capabilityId: string): MonarchExecution
       } : {}),
     },
     metadata: {
+      ...(actionCapability ? { computerDispatch: { phase, nativePreflightRejected, mayHaveDispatched: uncertain, failureCode: code,
+        reportingFailed: actionFailure?.reportingFailed === true } } : {}),
       warnings: uncertain
-        ? ['Native dispatch may have started before authority was lost; treat the action state as unknown and observe the exact window again.']
+        ? ['Native dispatch may have started before completion; treat the action state as unknown and observe the exact window again. Computer Use remains enabled unless the user explicitly stops it.']
         : requiresFreshObservation
           ? ['The one-shot observation authority was consumed; observe the exact window again before another input atom.']
           : [],

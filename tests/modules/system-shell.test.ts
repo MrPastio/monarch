@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { MonarchExecutionRequest, MonarchKernelContext } from '../../src/core';
-import { SystemShellModule } from '../../src/modules/system-shell';
+import { SystemShellModule, windowsBatchScript } from '../../src/modules/system-shell';
 
 const roots: string[] = [];
 
@@ -12,6 +12,17 @@ afterEach(async () => {
 });
 
 describe('system.shell.run', () => {
+  it('names Windows batch scripts instead of failing with spawn EINVAL', () => {
+    // Live: an agent ran npm.cmd, got `spawn EINVAL` and spent a turn guessing why.
+    expect(windowsBatchScript('npm.cmd', 'win32')).toBe('npm.cmd');
+    expect(windowsBatchScript(String.raw`C:\Program Files\nodejs\npx`, 'win32')).toBe('npx');
+    expect(windowsBatchScript('build.BAT', 'win32')).toBe('build.BAT');
+    expect(windowsBatchScript('node', 'win32')).toBeNull();
+    expect(windowsBatchScript('cmd.exe', 'win32')).toBeNull();
+    expect(windowsBatchScript('npm', 'linux')).toBeNull();
+  });
+
+
   it('runs one exact executable and argv without shell interpolation and returns a receipt', async () => {
     const root = await temporaryRoot();
     const module = new SystemShellModule(root);
@@ -34,6 +45,22 @@ describe('system.shell.run', () => {
       },
     });
     expect((result.output as { stdout: string }).stdout.trim()).toBe('literal & whoami');
+  });
+
+  it('resolves a relative cwd under the workspace root, as Kernel scopes it', async () => {
+    const root = await temporaryRoot();
+    await mkdir(path.join(root, 'sub'));
+    const module = new SystemShellModule(root);
+    const run = (cwd: string) => module.executeCapability(request({
+      executable: process.execPath, args: ['-e', 'console.log(process.cwd())'],
+      cwd, timeoutMs: 5_000, networkPosture: 'offline',
+    }), context());
+    const atRoot = await run('.');
+    expect(atRoot).toMatchObject({ ok: true });
+    expect(path.resolve((atRoot.output as { stdout: string }).stdout.trim())).toBe(path.resolve(root));
+    const nested = await run('sub');
+    expect(path.resolve((nested.output as { stdout: string }).stdout.trim())).toBe(path.join(path.resolve(root), 'sub'));
+    expect(await run('missing-folder')).toMatchObject({ ok: false });
   });
 
   it('blocks Safe before spawn in every override state', async () => {

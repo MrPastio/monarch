@@ -49,7 +49,7 @@ export class SystemShellModule implements MonarchModule {
     if (control.signal?.aborted) {
       return { ok: false, summary: 'System Shell action was cancelled before dispatch.', error: 'cancelled' };
     }
-    const parsed = await parseShellInput(request.input);
+    const parsed = await parseShellInput(request.input, this.sourceRoot);
     if (!parsed.ok) return parsed.result;
     if (control.signal?.aborted) {
       return { ok: false, summary: 'System Shell action was cancelled before dispatch.', error: 'cancelled' };
@@ -76,6 +76,19 @@ export class SystemShellModule implements MonarchModule {
         ok: false,
         summary: 'The exact argv declares offline posture but contains a network primitive.',
         error: 'network-posture-conflict',
+      };
+    }
+
+    const batchScript = windowsBatchScript(executable);
+    if (batchScript) {
+      // Node refuses .cmd/.bat without a shell (spawn EINVAL), and a bare `npm`
+      // is such a script on Windows. Say what works instead of the errno, so the
+      // agent's next step is the right one rather than a guess.
+      return {
+        ok: false,
+        summary: `"${batchScript}" is a Windows batch script and cannot run as an exact executable. `
+          + 'Run it through cmd.exe with args ["/d", "/c", "<script>", ...] or start node with the package\'s JavaScript entry point.',
+        error: 'windows-batch-script',
       };
     }
 
@@ -161,19 +174,23 @@ interface ParsedShellInput {
   maxOutputBytes: number;
 }
 
-async function parseShellInput(input: unknown): Promise<{ ok: true; value: ParsedShellInput } | { ok: false; result: MonarchExecutionResult }> {
+async function parseShellInput(input: unknown, workspaceRoot: string): Promise<{ ok: true; value: ParsedShellInput } | { ok: false; result: MonarchExecutionResult }> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return invalid('Shell input must be an object.');
   const record = input as Record<string, unknown>;
   const executable = typeof record.executable === 'string' ? record.executable.trim() : '';
   const rawCwd = typeof record.cwd === 'string' ? record.cwd.trim() : '';
-  const cwd = rawCwd && path.isAbsolute(rawCwd) ? path.resolve(rawCwd) : '';
+  // A relative cwd means the same thing Kernel already takes it to mean for the
+  // action's identity and scope: a folder under the workspace root. The model
+  // cannot know the absolute root, so it used to guess `/`, get the root-cwd
+  // refusal and spend a whole round retrying.
+  const cwd = rawCwd ? path.resolve(workspaceRoot, rawCwd) : '';
   const args = Array.isArray(record.args) && record.args.every((entry) => typeof entry === 'string')
     ? record.args as string[] : null;
   const timeoutMs = Number(record.timeoutMs);
   const networkPosture = record.networkPosture;
   const maxOutputBytes = record.maxOutputBytes === undefined ? DEFAULT_MAX_OUTPUT_BYTES : Number(record.maxOutputBytes);
   if (!executable || executable.includes('\0') || executable.length > 1024) return invalid('Executable is invalid.');
-  if (!cwd) return invalid('cwd must be one exact absolute path.');
+  if (!cwd) return invalid('cwd must name one directory: absolute, or relative to the workspace root.');
   if (!args || args.length > 128 || args.some((entry) => entry.includes('\0') || entry.length > 8192)) return invalid('args must be a bounded string array.');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 600_000) return invalid('timeoutMs is outside 100..600000.');
   if (networkPosture !== 'offline' && networkPosture !== 'inherit' && networkPosture !== 'allowed') return invalid('networkPosture is invalid.');
@@ -242,6 +259,14 @@ function runExactProcess(input: {
       resolve({ spawned: true, exitCode, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), timedOut, cancelled, truncated });
     });
   });
+}
+
+const WINDOWS_SCRIPT_SHIMS = new Set(['npm', 'npx', 'pnpm', 'yarn', 'corepack']);
+
+export function windowsBatchScript(executable: string, platform: NodeJS.Platform = process.platform): string | null {
+  if (platform !== 'win32') return null;
+  const name = path.win32.basename(executable);
+  return /\.(?:cmd|bat)$/iu.test(name) || WINDOWS_SCRIPT_SHIMS.has(name.toLowerCase()) ? name : null;
 }
 
 export function immutableSafeBoundary(values: readonly string[]): string | null {

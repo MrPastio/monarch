@@ -218,19 +218,23 @@ describe('Monarch distribution workflows', () => {
     const sample = await read('release/examples/stable-bootstrap.json');
     const packageManifest = JSON.parse(await read('package.json'));
     const releaseSpec = JSON.parse(await read('release/stable-release-spec.json'));
+    const payloadContract = JSON.parse(await read('installer/payload-version-contract.json'));
     const version = packageManifest.version;
     expect(docs).toContain('No production private key or invented public key is committed');
     expect(sample).not.toContain('BEGIN PRIVATE KEY');
     expect(sample).not.toContain('BEGIN PUBLIC KEY');
+    // An armed release: available, with the exact installer asset.
     expect(releaseSpec.available).toBe(true);
     expect(releaseSpec.withdrawnReason).toBeNull();
     expect(releaseSpec.version).toBe(version);
     expect(releaseSpec.releaseNotesUrl).toContain(`/v${version}`);
     expect(releaseSpec.asset.url).toContain(`/v${version}/Monarch-Setup-${version}.exe`);
     expect(releaseSpec.asset.fileName).toBe(`Monarch-Setup-${version}.exe`);
+    const releaseNotes = await read(`release/notes/v${version}.md`);
+    expect(releaseNotes).toContain('Monarch 0.3');
     expect(releaseSpec.compatibility).toMatchObject({
-      runtimeVersion: '2026.07.7',
-      backendEnvironment: 'backend-0.1.5-offline8',
+      runtimeVersion: payloadContract.runtime.version,
+      backendEnvironment: payloadContract.environment.version,
     });
     expect(JSON.stringify(releaseSpec)).not.toContain('bootstrap-pending');
   });

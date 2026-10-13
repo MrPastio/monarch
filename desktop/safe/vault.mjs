@@ -11,15 +11,18 @@ import {
 } from 'node:crypto';
 import {
   mkdir,
+  lstat,
   open,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   stat,
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { MAX_SAFE_FILE_BYTES } from './limits.mjs';
 import { promisify } from 'node:util';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import {
@@ -40,7 +43,7 @@ const CONFIG_VERSION = 2;
 const MANIFEST_VERSION = 3;
 const BLOB_MAGIC = Buffer.from('MSAFEB03', 'ascii');
 const ARCHIVE_MAGIC = Buffer.from('MSAR01', 'ascii');
-const MAX_FILE_BYTES = 256 * 1024 * 1024;
+const MAX_FILE_BYTES = MAX_SAFE_FILE_BYTES;
 const MAX_ARCHIVE_ENTRIES = 10_000;
 const MAX_ARCHIVE_OUTPUT_BYTES = 512 * 1024 * 1024;
 const MAX_ARCHIVE_DESCRIPTOR_BYTES = 4 * 1024 * 1024;
@@ -72,6 +75,7 @@ export class SafeVault {
       throw new SafeVaultError('invalid-root', 'Safe vault root must be an absolute path.');
     }
     this.rootPath = path.resolve(rootPath);
+    this.unlockEpoch = randomUUID();
     this.blobRoot = path.join(this.rootPath, 'blobs');
     this.configPath = path.join(this.rootPath, 'config.safe.json');
     this.manifestPath = path.join(this.rootPath, 'manifest.safe');
@@ -102,6 +106,7 @@ export class SafeVault {
 
   async initialize() {
     await mkdir(this.blobRoot, { recursive: true, mode: 0o700 });
+    await this.assertStoragePaths();
     try {
       this.config = await this.#loadConfig();
       this.configError = null;
@@ -136,11 +141,12 @@ export class SafeVault {
       configured,
       provisioning,
       wiped,
-      setupAvailable: !this.configError && !configured && !provisioning,
+      setupAvailable: !this.configError && !configured && !provisioning
+        && (!this.config || this.configSealStatus === 'valid'),
       blocked: Boolean(this.configError),
       blockReason: this.configError?.code || null,
       pinIntegrity: configured ? this.configSealStatus : null,
-      pinUnlockAvailable: configured && ['valid', 'legacy'].includes(this.configSealStatus),
+      pinUnlockAvailable: configured && this.configSealStatus === 'valid',
       unlocked,
       pinLength: configured ? this.config.pinLength : null,
       attemptsRemaining: configured ? Math.max(0, 3 - failures) : 0,
@@ -174,20 +180,9 @@ export class SafeVault {
   }
 
   async updateSecurityPolicy({ pin, policy, lowSecurityAcknowledged = false }) {
-    this.#requireActiveConfig();
-    if (this.configSealStatus === 'failed') {
-      throw new SafeVaultError('vault-config-integrity-failed', 'Safe security settings cannot change because configuration integrity failed.');
-    }
-    validatePin(pin, this.config.pinLength);
-    let key = null;
-    try {
-      key = await unwrapKey(this.config.pin, pin, `${this.config.vaultId}:pin`, this.deviceKey);
-    } catch (error) {
-      if (!(error instanceof SafeVaultError) || error.code !== 'invalid-credential') throw error;
-      throw new SafeVaultError('invalid-pin', 'Текущий PIN отклонён. Настройки Safe не изменены.');
-    } finally {
-      key?.fill(0);
-    }
+    this.#requireUnlocked();
+    const key = await this.#authenticatePin(pin);
+    key.fill(0);
     const assessment = assessSafeSecurityPolicy(policy);
     if (assessment.level === 'low' && lowSecurityAcknowledged !== true) {
       throw new SafeVaultError(
@@ -199,8 +194,8 @@ export class SafeVault {
     this.config.securityPolicy = assessment.policy;
     this.config.sequence += 1;
     this.config.updatedAt = new Date().toISOString();
-    if (this.configSealStatus === 'legacy' && this.deviceKey) this.configSealStatus = 'valid';
-    await this.#persistConfig();
+    try { await this.#persistConfig(); }
+    catch (error) { this.lock(); throw error; }
     this.autoLockMs = this.autoLockOverrideMs ?? assessment.policy.autoLockMs;
     if (this.autoLockTimer) clearTimeout(this.autoLockTimer);
     this.autoLockTimer = null;
@@ -210,6 +205,9 @@ export class SafeVault {
 
   async setup({ pin, pinLength, emergencyWordCount = EMERGENCY_DEFAULT_WORDS, destructionConfirmed }) {
     if (this.configError) throw this.configError;
+    if (this.config && this.configSealStatus !== 'valid') {
+      throw new SafeVaultError('vault-config-integrity-failed', 'Safe setup requires an intact device-sealed destruction record. Existing payloads were preserved.');
+    }
     if (this.config?.status === 'active' || this.config?.status === 'pending') {
       throw new SafeVaultError('already-configured', 'Monarch Safe is already configured.');
     }
@@ -317,23 +315,45 @@ export class SafeVault {
   }
 
   async unlockWithPin(pin) {
+    const failuresBefore = clampInteger(this.config?.attempts?.pinFailures, 0, 3, 0);
+    const key = await this.#authenticatePin(pin);
+    try { await this.#unlockWithMasterKey(key); }
+    catch (error) { this.lock(); throw error; }
+    finally { key.fill(0); }
+    try {
+      if (this.config.emergency) {
+        if (failuresBefore === 0) {
+          if (this.config.emergency.lastCleanSessionId !== this.runtimeSessionId) {
+            this.config.emergency.cleanPinSessions = Math.min(2, clampInteger(this.config.emergency.cleanPinSessions, 0, 2, 0) + 1);
+            this.config.emergency.lastCleanSessionId = this.runtimeSessionId;
+          }
+          this.config.emergency.armed = this.config.emergency.cleanPinSessions >= 2;
+        } else resetEmergencyTrust(this.config.emergency);
+        this.config.emergency.windowEligible = false;
+        this.config.emergency.attemptUsed = false;
+      }
+      this.config.attempts = { pinFailures: 0 };
+      this.config.sequence += 1;
+      this.config.updatedAt = new Date().toISOString();
+      await this.#persistConfig();
+      return this.status();
+    } catch (error) { this.lock(); throw error; }
+  }
+
+  async #authenticatePin(pin) {
     this.#requireActiveConfig();
-    if (this.configSealStatus === 'failed') {
-      throw new SafeVaultError('vault-config-integrity-failed', 'PIN configuration integrity failed. Use a recovery key; PIN attempts were not changed.');
+    if (this.configSealStatus !== 'valid') {
+      throw new SafeVaultError('vault-config-integrity-failed', 'PIN unlock requires an intact device-sealed configuration. Use a recovery key to restore the Safe.');
     }
     if (this.status().attemptsRemaining <= 0) throw new SafeVaultError('vault-wiped', 'Safe data has been erased. Create a new Safe.');
     validatePin(pin, this.config.pinLength);
-    const failuresBefore = clampInteger(this.config.attempts?.pinFailures, 0, 3, 0);
     let key = null;
     try {
       key = await unwrapKey(this.config.pin, pin, `${this.config.vaultId}:pin`, this.deviceKey);
-      await this.#unlockWithMasterKey(key);
+      return key;
     } catch (error) {
       if (key) key.fill(0);
       if (!(error instanceof SafeVaultError) || error.code !== 'invalid-credential') throw error;
-      if (this.configSealStatus !== 'valid') {
-        throw new SafeVaultError('vault-config-upgrade-required', 'Legacy PIN configuration could not be authenticated. Attempts were not changed; use the exact PIN or a recovery key.');
-      }
       const failures = clampInteger(this.config.attempts?.pinFailures, 0, 3, 0) + 1;
       if (this.config.emergency && failures === 1) {
         this.config.emergency.windowEligible = this.config.emergency.armed === true
@@ -350,32 +370,10 @@ export class SafeVault {
         await this.destroy('pin-attempt-limit');
         throw new SafeVaultError('vault-wiped', 'Three incorrect PIN attempts erased all data inside Safe. Create a new Safe with new credentials.');
       }
-      await this.#persistConfig();
+      try { await this.#persistConfig(); }
+      catch (persistError) { this.lock(); this.configSealStatus = 'failed'; throw persistError; }
       throw new SafeVaultError('invalid-pin', 'Incorrect PIN.', { attemptsRemaining: 3 - failures });
     }
-    key.fill(0);
-    if (this.configSealStatus === 'legacy') this.configSealStatus = 'valid';
-    if (this.config.emergency) {
-      if (failuresBefore === 0) {
-        if (this.config.emergency.lastCleanSessionId !== this.runtimeSessionId) {
-          this.config.emergency.cleanPinSessions = Math.min(
-            2,
-            clampInteger(this.config.emergency.cleanPinSessions, 0, 2, 0) + 1,
-          );
-          this.config.emergency.lastCleanSessionId = this.runtimeSessionId;
-        }
-        this.config.emergency.armed = this.config.emergency.cleanPinSessions >= 2;
-      } else {
-        resetEmergencyTrust(this.config.emergency);
-      }
-      this.config.emergency.windowEligible = false;
-      this.config.emergency.attemptUsed = false;
-    }
-    this.config.attempts = { pinFailures: 0 };
-    this.config.sequence += 1;
-    this.config.updatedAt = new Date().toISOString();
-    await this.#persistConfig();
-    return this.status();
   }
 
   async unlockWithRecoveryKey(value) {
@@ -410,7 +408,7 @@ export class SafeVault {
     matched.tag = '';
     matched.nonce = '';
     matched.salt = '';
-    if (this.configSealStatus !== 'valid') this.configSealStatus = 'legacy';
+    if (this.configSealStatus !== 'valid') this.configSealStatus = this.deviceKey ? 'valid' : 'legacy';
     if (this.config.emergency) resetEmergencyTrust(this.config.emergency);
     this.config.attempts = { pinFailures: 0 };
     this.config.sequence += 1;
@@ -480,6 +478,7 @@ export class SafeVault {
   }
 
   lock() {
+    this.unlockEpoch = randomUUID();
     if (this.masterKey) this.masterKey.fill(0);
     this.masterKey = null;
     this.manifest = null;
@@ -522,6 +521,18 @@ export class SafeVault {
     this.#requireUnlocked();
     this.#armAutoLock();
     return publicManifest(this.manifest);
+  }
+
+  /** Monarch Security 3f: the key Desktop wraps its copy of the profile data
+   * key with. It is derived one way from the master key under its own label,
+   * so it opens no Safe content, and it is the same after a PIN, recovery-key
+   * or emergency unlock. The vault format does not change. */
+  profileKeyBackupKey() {
+    this.#requireUnlocked();
+    return {
+      vaultId: this.config.vaultId,
+      key: deriveSubkey(this.masterKey, this.config.vaultId, 'monarch-profile-key-backup-v1').toString('base64'),
+    };
   }
 
   listChats() {
@@ -775,6 +786,26 @@ export class SafeVault {
     return { file: publicFile(file), bytes: transferable };
   }
 
+  getFileActionContext({ id, action, bytes, text, mime }) {
+    this.#requireUnlocked();
+    if (!['writeFile', 'deleteFile', 'exportRead'].includes(action)) throw new SafeVaultError('unsupported-action', 'Invalid file authorization action.');
+    const file = this.#requireFile(id);
+    let payloadDigest = 'none';
+    if (isChatRecordFile(file)) throw new SafeVaultError('file-not-found', 'Ordinary file authorization cannot access chat records.');
+    if (action === 'writeFile') {
+      const content = bytes === undefined ? Buffer.from(String(text ?? ''), 'utf8') : Buffer.from(normalizeBytes(bytes));
+      try {
+        if (content.byteLength > MAX_FILE_BYTES) throw new SafeVaultError('file-too-large', 'Edited file exceeds the Safe operation limit.');
+        payloadDigest = createHash('sha256').update('monarch-safe:write:v2\0').update(JSON.stringify(mime === undefined ? file.mime : normalizeMime(mime))).update('\0').update(content).digest('hex');
+      } finally { content.fill(0); }
+    }
+    const section = this.manifest.sections.find((entry) => entry.id === file.sectionId);
+    const folder = this.manifest.folders.find((entry) => entry.id === file.folderId);
+    const location = [section?.name, folder?.name].filter(Boolean).join(' / ');
+    const resourceVersion = createHash('sha256').update(JSON.stringify([file.blobId, file.name, location])).digest('hex');
+    return { action, resourceId: file.id, name: file.name, location, sessionId: this.unlockEpoch, resourceVersion, payloadDigest };
+  }
+
   async writeFile({ id, bytes, text, mime }) {
     this.#requireUnlocked();
     const file = this.#requireFile(id);
@@ -886,20 +917,48 @@ export class SafeVault {
     try {
       plain = gunzipSync(compressed, { maxOutputLength: MAX_ARCHIVE_OUTPUT_BYTES });
       const entries = parseArchive(plain);
-      const created = [];
-      for (const entry of entries) {
-        const start = entry.offset;
-        const end = start + entry.size;
-        created.push(await this.importFile({
-          name: entry.name,
-          mime: entry.mime,
-          bytes: plain.subarray(start, end),
-          sectionId,
-          folderId,
-          source: 'archive',
-        }));
+      const staged = [];
+      let committed = false;
+      try {
+        for (const entry of entries) {
+          const fileId = randomUUID();
+          const fileKey = randomBytes(32);
+          const now = new Date().toISOString();
+          try {
+            const file = {
+              id: fileId,
+              blobId: randomUUID(),
+              sectionId,
+              folderId,
+              name: entry.name,
+              mime: entry.mime,
+              size: entry.size,
+              source: 'archive',
+              keyEnvelope: this.#wrapFileKey(fileId, fileKey),
+              createdAt: now,
+              updatedAt: now,
+            };
+            staged.push(file);
+            await this.#writeEncryptedBlob(file, plain.subarray(entry.offset, entry.offset + entry.size), fileKey);
+          } finally {
+            fileKey.fill(0);
+          }
+        }
+        this.manifest.files.push(...staged);
+        try {
+          await this.#persistManifest();
+          committed = true;
+        } catch (error) {
+          const stagedIds = new Set(staged.map((file) => file.id));
+          this.manifest.files = this.manifest.files.filter((file) => !stagedIds.has(file.id));
+          throw error;
+        }
+        return { created: staged.map(publicFile) };
+      } finally {
+        if (!committed) {
+          await Promise.allSettled(staged.map((file) => secureRemove(this.#blobPath(file))));
+        }
       }
-      return { created };
     } catch (error) {
       if (error instanceof SafeVaultError) throw error;
       throw new SafeVaultError('invalid-archive', 'Archive authentication or bounded extraction validation failed.');
@@ -913,8 +972,10 @@ export class SafeVault {
     const manifest = await this.#readManifest(key);
     if (this.masterKey) this.masterKey.fill(0);
     this.masterKey = Buffer.from(key);
+    this.unlockEpoch = randomUUID();
     this.manifest = manifest;
-    await this.#cleanupOrphanedBlobs();
+    try { await this.#cleanupOrphanedBlobs(); }
+    catch (error) { this.lock(); throw error; }
     this.#armAutoLock();
   }
 
@@ -942,7 +1003,8 @@ export class SafeVault {
       }
       return null;
     }
-    candidates.sort((left, right) => compareSecuritySequence(right.value, left.value) || sealRank(right.sealStatus) - sealRank(left.sealStatus));
+    candidates.sort((left, right) => compareSecuritySequence(right.value, left.value)
+      || sealRank(right.sealStatus) - sealRank(left.sealStatus));
     const selected = candidates[0];
     this.configSealStatus = selected.sealStatus;
     if (selected.path !== this.configPath) {
@@ -1156,16 +1218,31 @@ export class SafeVault {
   }
 
   async #removeVaultPayloads() {
+    await this.assertStoragePaths();
     await secureRemove(this.manifestPath);
     await secureRemove(`${this.manifestPath}.previous`);
     await secureRemove(`${this.manifestPath}.next`);
     try {
       const entries = await readdir(this.blobRoot, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.isFile()) await secureRemove(path.join(this.blobRoot, entry.name));
+        if (!entry.isFile() || !/^[0-9a-f-]{36}\.[0-9a-f-]{36}\.blob(?:\.(?:next|previous))?$/i.test(entry.name)) continue;
+        await this.assertStoragePaths();
+        await secureRemove(path.join(this.blobRoot, entry.name));
       }
-    } catch {
-      // A missing blob directory is equivalent to an empty vault.
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+
+  async assertStoragePaths() {
+    for (const directory of [this.rootPath, this.blobRoot]) {
+      const info = await lstat(directory);
+      const resolved = await realpath(directory);
+      const expected = process.platform === 'win32' ? directory.toLowerCase() : directory;
+      const actual = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+      if (!info.isDirectory() || info.isSymbolicLink() || actual !== expected) {
+        throw new SafeVaultError('vault-storage-redirection', 'Safe storage path was redirected outside its verified directory. No data was changed.');
+      }
     }
   }
 
@@ -1273,6 +1350,7 @@ for (const methodName of [
     configurable: true,
     writable: true,
     async value(...args) {
+      if (methodName !== 'initialize') await this.assertStoragePaths();
       return this[AUTO_LOCK_OPERATION](() => operation.apply(this, args));
     },
   });

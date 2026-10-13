@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { rm } from 'node:fs/promises';
 import { createMonarchRuntime } from '../../src/bootstrap';
+import { mkdtemp, readFile, realpath } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { ArtifactsModule } from '../../src/modules/artifacts';
 
 describe('Artifacts Module', () => {
   it('should write and list artifacts safely', async () => {
@@ -52,5 +56,34 @@ describe('Artifacts Module', () => {
         await rm(artifactPath, { force: true });
       }
     }
+  });
+
+  it('writes into its own output root when that root lives outside the workspace (installed layout)', async () => {
+    // Installed Monarch keeps generated files in E:\MonarchData\generated beside,
+    // not inside, the workspace. A workspace-only policy refused every write.
+    const parent = await realpath(await mkdtemp(path.join(os.tmpdir(), 'artifacts-layout-')));
+    const workspaceRoot = path.join(parent, 'workspaces', 'default'), artifactsRoot = path.join(parent, 'generated');
+    const module = new ArtifactsModule({ workspaceRoot, artifactsRoot });
+    const context = { emit: async () => undefined, audit: async () => undefined } as never;
+    try {
+      await module.activate(context);
+      const result = await module.executeCapability({ id: 'exec_layout', intentId: 'intent_layout', moduleId: 'artifacts',
+        capabilityId: 'artifacts.write', input: { type: 'txt', path: 'installed-check/one.txt', content: 'раз' },
+        createdAt: new Date(0).toISOString(), requestedBy: 'test', confirmed: true } as never, context);
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      const written = String((result.output as { path?: unknown }).path);
+      expect(written.startsWith(artifactsRoot)).toBe(true);
+      expect(await readFile(written, 'utf8')).toBe('раз');
+      // Live: path "installed-check" + fileName "two" was written as installed-check.txt.
+      const named = await module.executeCapability({ id: 'exec_layout_named', intentId: 'intent_layout', moduleId: 'artifacts',
+        capabilityId: 'artifacts.write', input: { type: 'txt', path: 'installed-check', fileName: 'two', content: 'два' },
+        createdAt: new Date(0).toISOString(), requestedBy: 'test', confirmed: true } as never, context);
+      expect(named).toMatchObject({ ok: true });
+      expect(String((named.output as { path?: unknown }).path)).toBe(path.join(artifactsRoot, 'installed-check', 'two.txt'));
+      const outside = await module.executeCapability({ id: 'exec_layout_out', intentId: 'intent_layout', moduleId: 'artifacts',
+        capabilityId: 'artifacts.write', input: { type: 'txt', path: path.join(parent, 'elsewhere', 'x.txt'), content: 'x' },
+        createdAt: new Date(0).toISOString(), requestedBy: 'test', confirmed: true } as never, context);
+      expect(outside).toMatchObject({ ok: false, error: 'filesystem-policy-blocked' });
+    } finally { await rm(parent, { recursive: true, force: true }); }
   });
 });

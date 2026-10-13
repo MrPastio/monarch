@@ -1,16 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import {
-  copyFile,
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  stat,
-  writeFile,
-} from 'node:fs/promises';
+import { copyFile, mkdir, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { renameWithRetry } from './windows-rename.mjs';
 
 export const MUTABLE_STORE_IDS = Object.freeze([
   'core',
@@ -412,15 +403,15 @@ async function atomicWriteJson(filePath, value) {
   });
   await rm(previous, { force: true });
   try {
-    await rename(filePath, previous);
+    await renameWithRetry(filePath, previous);
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
   try {
-    await rename(temporary, filePath);
+    await renameWithRetry(temporary, filePath);
     await rm(previous, { force: true });
   } catch (error) {
-    await rename(previous, filePath).catch(() => undefined);
+    await renameWithRetry(previous, filePath).catch(() => undefined);
     throw error;
   }
 }

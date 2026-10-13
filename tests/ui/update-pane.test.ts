@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  errorMessage,
   primaryIntentForState,
   shouldShowUpdateNotice,
 } from '../../src/ui/public/modules/update-pane.js';
@@ -24,5 +25,14 @@ describe('Monarch update pane', () => {
       release,
       installation: { canInstall: false },
     })).toBe(false);
+  });
+
+  it('explains update failures in plain Russian instead of raw service errors', () => {
+    for (const code of ['network-error', 'download-stalled', 'manifest-expired', 'clock-invalid', 'insufficient-disk-space', null, 'something-new']) {
+      const text = errorMessage(code);
+      expect(text).toMatch(/[а-яё]/i);
+      expect(text).not.toMatch(/\b(Update|Installer|Manifest|request)\b/);
+    }
+    expect(errorMessage('download-stalled')).toContain('продолжится');
   });
 });

@@ -1,18 +1,10 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import {
-  lstat,
-  mkdir,
-  open,
-  opendir,
-  realpath,
-  rename,
-  statfs,
-  unlink,
-  writeFile,
-} from 'node:fs/promises';
+import { lstat, mkdir, open, opendir, realpath, rename, rm, statfs, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { MonarchRuntimePaths } from '../../core/runtime-paths';
+import { runInBackground } from '../../core/background-work';
+import { renameWithWindowsRetry } from '../../core/durable-json-file';
 
 export type MonarchComponentPhase =
   | 'idle'
@@ -22,9 +14,14 @@ export type MonarchComponentPhase =
   | 'ready'
   | 'failed';
 
+/** Chat and Coder model roles plus the small helper packs Monarch installs itself. */
+export type MonarchComponentRole = 'gemma4-fast' | 'gemma4-balanced' | 'qwen3.8-27b-pro'
+  | 'qwen3-coder-30b-a3b-instruct' | 'deepseek-coder-v2-lite-instruct'
+  | 'voice-recognition' | 'memory-search';
+
 export interface MonarchManagedModelComponent {
   id: string;
-  role: 'gemma4-fast' | 'gemma4-balanced' | 'qwen3.8-27b-pro';
+  role: MonarchComponentRole;
   label: string;
   required: boolean;
   phase: MonarchComponentPhase;
@@ -53,7 +50,7 @@ export interface MonarchComponentManagerSnapshot {
 
 export interface MonarchModelComponentSpec {
   id: string;
-  role: 'gemma4-fast' | 'gemma4-balanced' | 'qwen3.8-27b-pro';
+  role: MonarchManagedModelComponent['role'];
   label: string;
   provider: string;
   license: string;
@@ -64,7 +61,24 @@ export interface MonarchModelComponentSpec {
   expectedBytes: number;
   sha256: string;
   acceptedExistingVariants?: readonly MonarchModelComponentVariant[];
+  /** Exact https download address for files that are not on Hugging Face. */
+  sourceUrl?: string;
+  /** 'gguf' (default) also checks the GGUF header; 'file' trusts size and SHA-256 only. */
+  format?: 'gguf' | 'file';
+  /** A verified archive is unpacked here and removed; the payload is ready once the files exist. */
+  extract?: MonarchComponentArchiveExtraction;
 }
+
+export interface MonarchComponentArchiveExtraction {
+  /** Folder (relative to the models root) that the archive's single top folder becomes. */
+  targetDirectory: string;
+  /** Files (relative to targetDirectory) that must be present and non-empty. */
+  requiredFiles: readonly string[];
+  /** Pinned hashes of individual files inside the archive, checked after unpacking. */
+  fileSha256?: Readonly<Record<string, string>>;
+}
+
+export type MonarchArchiveExtractor = (archivePath: string, destination: string, signal: AbortSignal) => Promise<void>;
 
 export interface MonarchModelComponentVariant {
   revision: string;
@@ -82,6 +96,7 @@ export interface MonarchModelComponentManagerOptions {
   stateFileName?: string;
   retryDelaysMs?: number[];
   now?: () => Date;
+  extractArchiveImpl?: MonarchArchiveExtractor;
 }
 
 export interface MonarchSystemModelDownloadRequest {
@@ -122,12 +137,19 @@ export const MONARCH_OPTIONAL_BALANCED_MODEL: MonarchModelComponentSpec = Object
   label: 'Gemma 4 Balanced',
   provider: 'Hugging Face · Unsloth',
   license: 'Apache-2.0',
-  revision: '52268a3069f9ba83031088c5ac10e704d3ab7047',
+  revision: 'fc034cfff751157913579611efad8462ac1be606',
   repository: 'unsloth/gemma-4-12b-it-GGUF',
   remoteFile: 'gemma-4-12b-it-Q4_K_M.gguf',
   relativePath: 'gemma_models/Gemma_12B/gemma-4-12B-it-Q4_K_M.gguf',
-  expectedBytes: 7_662_531_872,
-  sha256: 'd333b368be6cd655563fce18aede26027e208fdb13816d35eb06983ce054044b',
+  expectedBytes: 7_121_861_440,
+  sha256: '0a270ec9fe6b34f4a0d33992b6135117b484ebc4766ab76b51d4ae8c457e4c42',
+  acceptedExistingVariants: Object.freeze([
+    Object.freeze({
+      revision: '52268a3069f9ba83031088c5ac10e704d3ab7047',
+      expectedBytes: 7_662_531_872,
+      sha256: 'd333b368be6cd655563fce18aede26027e208fdb13816d35eb06983ce054044b',
+    }),
+  ]),
 });
 
 /**
@@ -177,6 +199,194 @@ export const MONARCH_OPTIONAL_PRO_MODEL_COMPONENTS: readonly MonarchModelCompone
   }),
 ]);
 
+/** Vision (image input) and speed-up files for the Basic tiers, fetched with the chat model. */
+export const MONARCH_FAST_MODEL_ADDONS: readonly MonarchModelComponentSpec[] = Object.freeze([
+  Object.freeze({
+    id: 'model.gemma4-fast.vision',
+    role: 'gemma4-fast',
+    label: 'Gemma 4 Fast Vision',
+    provider: 'Hugging Face · Unsloth',
+    license: 'Apache-2.0',
+    revision: '0314792d7f1f7e229411f620751375812bb9faf2',
+    repository: 'unsloth/gemma-4-E2B-it-GGUF',
+    remoteFile: 'mmproj-BF16.gguf',
+    relativePath: 'gemma_models/vision_other/mmproj-BF16_E2B.gguf',
+    expectedBytes: 986_833_728,
+    sha256: 'a402f10fb5780bf91d03a10cd89061139f522bee2e679b1291bbfdcd71d9547d',
+  }),
+  Object.freeze({
+    id: 'model.gemma4-fast.mtp',
+    role: 'gemma4-fast',
+    label: 'Gemma 4 Fast MTP',
+    provider: 'Hugging Face · Unsloth',
+    license: 'Apache-2.0',
+    revision: '0314792d7f1f7e229411f620751375812bb9faf2',
+    repository: 'unsloth/gemma-4-E2B-it-GGUF',
+    remoteFile: 'mtp-gemma-4-E2B-it.gguf',
+    relativePath: 'gemma_models/mtp_model/mtp-gemma-4-E2B-it.gguf',
+    expectedBytes: 97_817_664,
+    sha256: '9eba819938efccfd6044f8af84e3bbfddc639a2bcf32ebc36420e6a649191919',
+  }),
+]);
+
+export const MONARCH_BALANCED_MODEL_ADDONS: readonly MonarchModelComponentSpec[] = Object.freeze([
+  Object.freeze({
+    id: 'model.gemma4-balanced.vision',
+    role: 'gemma4-balanced',
+    label: 'Gemma 4 Balanced Vision',
+    provider: 'Hugging Face · Unsloth',
+    license: 'Apache-2.0',
+    revision: 'fc034cfff751157913579611efad8462ac1be606',
+    repository: 'unsloth/gemma-4-12b-it-GGUF',
+    remoteFile: 'mmproj-BF16.gguf',
+    relativePath: 'gemma_models/vision_other/mmproj-BF16_12B.gguf',
+    expectedBytes: 175_115_840,
+    sha256: '2e269f906eb15169ee9ce880ea649bd6d42d4964c21f8ede10d0d0efc738bcbb',
+  }),
+  Object.freeze({
+    id: 'model.gemma4-balanced.mtp',
+    role: 'gemma4-balanced',
+    label: 'Gemma 4 Balanced MTP',
+    provider: 'Hugging Face · Unsloth',
+    license: 'Apache-2.0',
+    revision: 'fc034cfff751157913579611efad8462ac1be606',
+    repository: 'unsloth/gemma-4-12b-it-GGUF',
+    remoteFile: 'mtp-gemma-4-12b-it.gguf',
+    relativePath: 'gemma_models/mtp_model/mtp-gemma-4-12b-it.gguf',
+    expectedBytes: 465_109_248,
+    sha256: '145db9094bc0f85f1701e255a2ed216dcc9800fc8bc8631ad00905b456bd451b',
+  }),
+]);
+
+/**
+ * Speech recognition for dictation, Voice and Telegram voice notes: the streaming
+ * T-one model, the Vosk model for recordings and the ffmpeg build Vosk decodes with.
+ * Same pinned archives as tools/setup-sherpa-t-one-stt.ps1 and setup-vosk-telegram-stt.ps1.
+ */
+export const MONARCH_VOICE_RECOGNITION_COMPONENTS: readonly MonarchModelComponentSpec[] = Object.freeze([
+  Object.freeze({
+    id: 'voice.recognition.t-one',
+    role: 'voice-recognition',
+    label: 'T-one (живое распознавание)',
+    provider: 'GitHub · k2-fsa/sherpa-onnx',
+    license: 'Apache-2.0',
+    revision: '2025-09-08',
+    repository: 'k2-fsa/sherpa-onnx',
+    remoteFile: 'sherpa-onnx-streaming-t-one-russian-2025-09-08.tar.bz2',
+    sourceUrl: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-t-one-russian-2025-09-08.tar.bz2',
+    relativePath: 'runtime/voice/models/.downloads/sherpa-onnx-streaming-t-one-russian-2025-09-08.tar.bz2',
+    expectedBytes: 128_468_156,
+    sha256: 'b9c907450e99a6e5049e279bf18368a17db0bdc5e63b7fa978943138debbe3ae',
+    format: 'file',
+    extract: Object.freeze({
+      targetDirectory: 'runtime/voice/models/sherpa-onnx-streaming-t-one-russian-2025-09-08',
+      requiredFiles: Object.freeze(['model.onnx', 'tokens.txt']),
+    }),
+  }),
+  Object.freeze({
+    id: 'voice.recognition.vosk-ru',
+    role: 'voice-recognition',
+    label: 'Vosk (распознавание записей)',
+    provider: 'alphacephei.com',
+    license: 'Apache-2.0',
+    revision: '0.22',
+    repository: 'alphacephei/vosk-models',
+    remoteFile: 'vosk-model-small-ru-0.22.zip',
+    sourceUrl: 'https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip',
+    relativePath: 'runtime/voice/models/.downloads/vosk-model-small-ru-0.22.zip',
+    expectedBytes: 46_236_750,
+    sha256: '961d5ff98a17f4aa6de69864d0aa71fa5bac682301d2b5d17a3f24c5c99a46d4',
+    format: 'file',
+    extract: Object.freeze({
+      targetDirectory: 'runtime/voice/models/vosk-model-small-ru-0.22',
+      requiredFiles: Object.freeze(['am/final.mdl', 'conf/model.conf']),
+    }),
+  }),
+  Object.freeze({
+    id: 'voice.recognition.ffmpeg',
+    role: 'voice-recognition',
+    label: 'ffmpeg (чтение аудио)',
+    provider: 'GitHub · GyanD/codexffmpeg',
+    license: 'GPL-3.0',
+    revision: '8.1.1',
+    repository: 'GyanD/codexffmpeg',
+    remoteFile: 'ffmpeg-8.1.1-essentials_build.zip',
+    sourceUrl: 'https://github.com/GyanD/codexffmpeg/releases/download/8.1.1/ffmpeg-8.1.1-essentials_build.zip',
+    relativePath: 'runtime/voice/models/.downloads/ffmpeg-8.1.1-essentials_build.zip',
+    expectedBytes: 109_282_242,
+    sha256: '6f58ce889f59c311410f7d2b18895b33c03456463486f3b1ebc93d97a0f54541',
+    format: 'file',
+    extract: Object.freeze({
+      targetDirectory: 'runtime/voice/models/ffmpeg-8.1.1-essentials_build',
+      requiredFiles: Object.freeze(['bin/ffmpeg.exe']),
+      fileSha256: Object.freeze({ 'bin/ffmpeg.exe': '228d7a8556258de907fdb55f36850078ebc7680b84ec30d84ea02e99bec1d1eb' }),
+    }),
+  }),
+]);
+
+/** Small multilingual model that ranks memories by meaning instead of exact words. */
+export const MONARCH_MEMORY_SEARCH_COMPONENTS: readonly MonarchModelComponentSpec[] = Object.freeze([
+  Object.freeze({
+    id: 'memory.e5-small.onnx',
+    role: 'memory-search',
+    label: 'multilingual-e5-small',
+    provider: 'Hugging Face · Xenova',
+    license: 'MIT',
+    revision: '761b726dd34fb83930e26aab4e9ac3899aa1fa78',
+    repository: 'Xenova/multilingual-e5-small',
+    remoteFile: 'onnx/model_quantized.onnx',
+    relativePath: 'memory/multilingual-e5-small/onnx/model_quantized.onnx',
+    expectedBytes: 118_308_185,
+    sha256: 'f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193',
+    format: 'file',
+  }),
+  Object.freeze({
+    id: 'memory.e5-small.tokenizer',
+    role: 'memory-search',
+    label: 'multilingual-e5-small tokenizer',
+    provider: 'Hugging Face · Xenova',
+    license: 'MIT',
+    revision: '761b726dd34fb83930e26aab4e9ac3899aa1fa78',
+    repository: 'Xenova/multilingual-e5-small',
+    remoteFile: 'sentencepiece.bpe.model',
+    relativePath: 'memory/multilingual-e5-small/sentencepiece.bpe.model',
+    expectedBytes: 5_069_051,
+    sha256: 'cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865',
+    format: 'file',
+  }),
+]);
+
+/** Exact Coder assets: the same-owner Astra V3 prepared host pins them, and the
+ * Models page downloads them only when the user asks for Coder. */
+export const MONARCH_CODER_MODEL_COMPONENTS: readonly MonarchModelComponentSpec[] = Object.freeze([
+  Object.freeze({
+    id: 'model.qwen3-coder-30b-a3b-instruct.text',
+    role: 'qwen3-coder-30b-a3b-instruct',
+    label: 'Qwen3 Coder Primary',
+    provider: 'Hugging Face · Unsloth',
+    license: 'Apache-2.0',
+    revision: 'b17cb02dd882d5b6ab62fc777ad2995f19668350',
+    repository: 'unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF',
+    remoteFile: 'Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
+    relativePath: 'runtime/coder/models/qwen3-coder-30b-a3b-instruct/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
+    expectedBytes: 18_556_689_568,
+    sha256: 'fadc3e5f8d42bf7e894a785b05082e47daee4df26680389817e2093056f088ad',
+  }),
+  Object.freeze({
+    id: 'model.deepseek-coder-v2-lite-instruct.text',
+    role: 'deepseek-coder-v2-lite-instruct',
+    label: 'DeepSeek Coder Secondary',
+    provider: 'Hugging Face · bartowski',
+    license: 'DeepSeek Model License',
+    revision: '8f248fa2072348f77a8bc37754e470de1f61866e',
+    repository: 'bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF',
+    remoteFile: 'DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf',
+    relativePath: 'runtime/coder/models/deepseek-coder-v2-lite-instruct/DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf',
+    expectedBytes: 10_364_416_768,
+    sha256: '603bd3f8a0281d16571da7c08bd661ee17ff0d1be6fcbd1b42242da257ef0bb8',
+  }),
+]);
+
 export class MonarchModelComponentManager {
   private readonly spec: MonarchModelComponentSpec;
   private readonly fetchImpl: typeof fetch;
@@ -193,6 +403,8 @@ export class MonarchModelComponentManager {
   private readonly legacyQuarantineRoot: string;
   private readonly autoRepairEnabled: boolean;
   private readonly required: boolean;
+  private readonly extractArchiveImpl: MonarchArchiveExtractor;
+  private readonly extractTargetPath: string | null;
   private active: Promise<MonarchComponentManagerSnapshot> | null = null;
   private controller: AbortController | null = null;
   private state: MonarchManagedModelComponent;
@@ -217,7 +429,11 @@ export class MonarchModelComponentManager {
       ?? (runtimePaths.mode === 'installed' && process.env.MONARCH_COMPONENT_AUTO_REPAIR !== '0');
     this.required = options.required ?? true;
     this.modelsRoot = path.resolve(runtimePaths.modelsRoot);
-    this.targetPath = resolveManagedModelPath(this.modelsRoot, this.spec.relativePath);
+    this.targetPath = resolveManagedModelPath(this.modelsRoot, mapLogicalModelPath(runtimePaths, this.spec.relativePath));
+    this.extractArchiveImpl = options.extractArchiveImpl || extractArchiveWithSystemTar;
+    this.extractTargetPath = this.spec.extract
+      ? resolveManagedModelPath(this.modelsRoot, mapLogicalModelPath(runtimePaths, this.spec.extract.targetDirectory))
+      : null;
     this.partialPath = `${this.targetPath}.monarch-download`;
     const stateFileName = options.stateFileName || 'models.v1.json';
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/u.test(stateFileName)) {
@@ -252,7 +468,7 @@ export class MonarchModelComponentManager {
 
   startAutomaticRepair(): void {
     if (!this.autoRepairEnabled) return;
-    void this.ensureRequiredModel();
+    runInBackground('model-auto-repair', this.ensureRequiredModel());
   }
 
   ensureRequiredModel(): Promise<MonarchComponentManagerSnapshot> {
@@ -271,7 +487,9 @@ export class MonarchModelComponentManager {
     this.legacyQuarantineDetected = await containsLegacyQuarantineEntries(
       this.legacyQuarantineRoot,
     );
-    const present = await hasExpectedGgufEnvelope(this.modelsRoot, this.targetPath, this.spec);
+    const present = this.spec.extract
+      ? await this.extractedPayloadReady()
+      : await hasExpectedGgufEnvelope(this.modelsRoot, this.targetPath, this.spec);
     await this.updateState(present
       ? {
         phase: 'ready',
@@ -311,7 +529,7 @@ export class MonarchModelComponentManager {
       }
     }
     const message = signal.aborted
-      ? 'Установка обязательной модели остановлена.'
+      ? 'Загрузка остановлена.'
       : userFacingComponentError(lastError);
     await this.updateState({
       phase: 'failed',
@@ -342,13 +560,16 @@ export class MonarchModelComponentManager {
       'model-component-partial-reparse-point',
     );
 
+    if (this.spec.extract && await this.extractedPayloadReady()) {
+      await this.markReady();
+      return;
+    }
     if (await verifyFile(this.modelsRoot, this.targetPath, this.spec)) {
-      await this.updateState({
-        phase: 'ready',
-        downloadedBytes: this.spec.expectedBytes,
-        progress: 1,
-        error: null,
-      });
+      if (this.spec.extract) {
+        await this.installVerifiedArchive(this.targetPath, signal);
+        return;
+      }
+      await this.markReady();
       return;
     }
 
@@ -370,19 +591,7 @@ export class MonarchModelComponentManager {
         errorCode: null,
       });
       if (await verifyFile(this.modelsRoot, this.partialPath, this.spec)) {
-        await assertPhysicalFileInside(
-          this.modelsRoot,
-          this.targetPath,
-          'model-component-target-reparse-point',
-        );
-        await rename(this.partialPath, this.targetPath);
-        await this.updateState({
-          phase: 'ready',
-          downloadedBytes: this.spec.expectedBytes,
-          progress: 1,
-          error: null,
-          errorCode: null,
-        });
+        await this.activateVerifiedDownload(signal);
         return;
       }
       await this.quarantinePath(this.partialPath, 'invalid-complete-partial');
@@ -401,18 +610,84 @@ export class MonarchModelComponentManager {
       await this.quarantinePath(this.partialPath, 'verification-failed');
       throw new Error('downloaded-model-verification-failed');
     }
+    await this.activateVerifiedDownload(signal);
+  }
+
+  private async activateVerifiedDownload(signal: AbortSignal): Promise<void> {
     await assertPhysicalFileInside(
       this.modelsRoot,
       this.targetPath,
       'model-component-target-reparse-point',
     );
-    await rename(this.partialPath, this.targetPath);
+    await renameWithWindowsRetry(this.partialPath, this.targetPath);
+    if (this.spec.extract) {
+      await this.installVerifiedArchive(this.targetPath, signal);
+      return;
+    }
+    await this.markReady();
+  }
+
+  private async markReady(): Promise<void> {
     await this.updateState({
       phase: 'ready',
       downloadedBytes: this.spec.expectedBytes,
       progress: 1,
       error: null,
+      errorCode: null,
     });
+  }
+
+  /** True when every required file of an unpacked archive is present and non-empty. */
+  private async extractedPayloadReady(): Promise<boolean> {
+    const extract = this.spec.extract;
+    const target = this.extractTargetPath;
+    if (!extract || !target) return false;
+    for (const relative of extract.requiredFiles) {
+      if (!await isNonEmptyRegularFile(resolveManagedModelPath(target, relative))) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Unpack a SHA-256 verified archive next to its final folder, check the expected
+   * files, then move the single top folder into place. The archive is removed after.
+   */
+  private async installVerifiedArchive(archivePath: string, signal: AbortSignal): Promise<void> {
+    const extract = this.spec.extract!;
+    const target = this.extractTargetPath!;
+    await this.updateState({ phase: 'verifying', downloadedBytes: this.spec.expectedBytes, progress: 1, error: null });
+    const parent = path.dirname(target);
+    await ensurePhysicalDirectoryInside(this.modelsRoot, parent, 'model-component-target-ancestor-reparse-point');
+    const staging = path.join(parent, `.monarch-unpack-${this.spec.id}`);
+    assertPathInside(this.modelsRoot, staging, 'model-component-path-outside-models-root');
+    await rm(staging, { recursive: true, force: true });
+    await mkdir(staging, { recursive: true });
+    try {
+      await this.extractArchiveImpl(archivePath, staging, signal);
+      const unpacked = path.join(staging, path.basename(target));
+      for (const relative of extract.requiredFiles) {
+        if (!await isNonEmptyRegularFile(resolveManagedModelPath(unpacked, relative))) {
+          throw new Error(`model-component-archive-incomplete:${relative}`);
+        }
+      }
+      for (const [relative, sha256] of Object.entries(extract.fileSha256 || {})) {
+        const candidate = resolveManagedModelPath(unpacked, relative);
+        if (await sha256File(candidate) !== sha256.toLowerCase()) {
+          throw new Error(`model-component-archive-file-sha-mismatch:${relative}`);
+        }
+      }
+      if (await pathExists(target)) {
+        // An earlier, incomplete copy is kept aside instead of being merged with the fresh one.
+        await ensurePhysicalDirectoryInside(this.modelsRoot, this.quarantineRoot, 'model-quarantine-ancestor-reparse-point');
+        await rename(target, path.join(this.quarantineRoot, `incomplete-${Date.now()}`));
+      }
+      await rename(unpacked, target);
+    } finally {
+      await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    }
+    await unlink(archivePath).catch(() => undefined);
+    if (!await this.extractedPayloadReady()) throw new Error('model-component-archive-incomplete');
+    await this.markReady();
   }
 
   private async download(initialOffset: number, signal: AbortSignal): Promise<void> {
@@ -462,7 +737,7 @@ export class MonarchModelComponentManager {
       if (offset > 0 && response.status !== 206) {
         throw new Error('model-download-resume-not-supported');
       }
-      assertTrustedDownloadUrl(response.url);
+      assertTrustedComponentUrl(response.url, this.spec);
       assertDownloadRange(response, offset, this.spec.expectedBytes);
       if (!response.body) throw new Error('model-download-empty-body');
       await assertPhysicalFileInside(
@@ -571,6 +846,7 @@ export class MonarchModelComponentManager {
   }
 
   private modelUrl(): string {
+    if (this.spec.sourceUrl) return this.spec.sourceUrl;
     const repository = this.spec.repository.split('/').map(encodeURIComponent).join('/');
     const file = this.spec.remoteFile.split('/').map(encodeURIComponent).join('/');
     return `https://huggingface.co/${repository}/resolve/${this.spec.revision}/${file}`;
@@ -619,7 +895,7 @@ export class MonarchModelComponentManager {
       }
       throw new Error(`model-component-quarantine-cap-reached:${reason}`);
     }
-    await rename(resolvedCandidate, this.quarantinePayloadPath);
+    await renameWithWindowsRetry(resolvedCandidate, this.quarantinePayloadPath);
   }
 
   private async hasQuarantineHold(): Promise<boolean> {
@@ -666,6 +942,26 @@ export class MonarchModelComponentManager {
     await mkdir(path.dirname(this.statePath), { recursive: true });
     await writeFile(this.statePath, JSON.stringify(this.snapshot(), null, 2), 'utf8');
   }
+}
+
+/**
+ * Coder and Voice files have historical workspace paths (runtime/coder/models,
+ * runtime/voice/models). With a separate models root they live in coder/ and voice/,
+ * the same mapping the model catalog and the Voice workers use.
+ */
+export function mapLogicalModelPath(
+  runtimePaths: Pick<MonarchRuntimePaths, 'mode' | 'modelsRoot' | 'workspaceRoot'>,
+  relativePath: string,
+): string {
+  const normalized = String(relativePath || '').replace(/\\/gu, '/').replace(/^\/+/u, '');
+  const externalModelsRoot = path.resolve(runtimePaths.modelsRoot) !== path.resolve(runtimePaths.workspaceRoot);
+  if (runtimePaths.mode !== 'installed' && !externalModelsRoot) return normalized;
+  for (const [prefix, replacement] of [['runtime/coder/models', 'coder'], ['runtime/voice/models', 'voice']] as const) {
+    if (normalized === prefix || normalized.startsWith(`${prefix}/`)) {
+      return `${replacement}${normalized.slice(prefix.length)}`;
+    }
+  }
+  return normalized;
 }
 
 function resolveManagedModelPath(modelsRoot: string, relativePath: string): string {
@@ -780,6 +1076,7 @@ async function matchingComponentVariant(
   const size = await managedFileSize(root, candidate);
   const variant = componentVariants(spec).find((entry) => entry.expectedBytes === size) || null;
   if (!variant) return null;
+  if (spec.format === 'file' || spec.extract) return variant;
   const file = await open(candidate, 'r');
   try {
     const magic = Buffer.alloc(4);
@@ -858,7 +1155,27 @@ function isDeterministicComponentFailure(error: unknown): boolean {
     || /^model-download-http-(?:40[0-7]|409|41[0-9]|42[0-8]|43[0-9]|44[0-9]|45[0-9]|46[0-9]|47[0-9]|48[0-9]|49[0-9])$/u.test(message);
 }
 
-function assertTrustedDownloadUrl(value: string): void {
+/** Hosts that serve the pinned non-Hugging-Face components (GitHub releases, Vosk models). */
+const DIRECT_COMPONENT_HOSTS = Object.freeze([
+  'github.com',
+  'objects.githubusercontent.com',
+  'release-assets.githubusercontent.com',
+  'alphacephei.com',
+]);
+
+function assertTrustedComponentUrl(value: string, spec: MonarchModelComponentSpec): void {
+  if (!spec.sourceUrl) {
+    assertTrustedDownloadUrl(value);
+    return;
+  }
+  const url = new URL(value);
+  const host = url.hostname.toLowerCase();
+  if (url.protocol !== 'https:' || !DIRECT_COMPONENT_HOSTS.includes(host)) {
+    throw new Error('model-download-untrusted-redirect');
+  }
+}
+
+export function assertTrustedDownloadUrl(value: string): void {
   const url = new URL(value);
   const host = url.hostname.toLowerCase();
   const trusted = host === 'huggingface.co'
@@ -888,9 +1205,12 @@ function assertDownloadRange(response: Response, offset: number, expectedBytes: 
 function userFacingComponentError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error || '');
   if (message.startsWith('model-download-insufficient-space:')) {
-    return 'Недостаточно места для обязательной локальной модели.';
+    return 'Недостаточно места на диске для этой загрузки.';
   }
-  if (/aborted/i.test(message)) return 'Установка обязательной модели остановлена.';
+  if (/aborted/i.test(message)) return 'Загрузка остановлена.';
+  if (/archive-incomplete|archive-file-sha|archive-extract/i.test(message)) {
+    return 'Архив скачался, но распаковать его не получилось. Попробуй ещё раз.';
+  }
   if (/quarantine-(?:hold|cap)/i.test(message)) {
     return 'Автоповтор остановлен: одна проверочная копия сохранена рядом с моделями. Требуется ручная проверка.';
   }
@@ -900,7 +1220,7 @@ function userFacingComponentError(error: unknown): string {
   if (/verification|sha|size|range|redirect/i.test(message)) {
     return 'Загруженная модель не прошла проверку целостности. Monarch сохранил её отдельно и не активировал.';
   }
-  return 'Monarch не смог установить обязательную локальную модель. Загрузка будет повторена.';
+  return 'Не получилось скачать. Проверь интернет и попробуй ещё раз.';
 }
 
 function componentErrorCode(error: unknown): string {
@@ -947,6 +1267,55 @@ function readModelChunk(
       (error) => finish(() => reject(error)),
     );
   });
+}
+
+/** Read-only check: a regular, non-empty file that is not a link. */
+async function isNonEmptyRegularFile(candidate: string): Promise<boolean> {
+  try {
+    const value = await lstat(candidate);
+    return value.isFile() && !value.isSymbolicLink() && value.size > 0;
+  } catch (error) {
+    if (isMissingFileError(error) || (error && typeof error === 'object' && 'code' in error && error.code === 'ENOTDIR')) return false;
+    throw error;
+  }
+}
+
+async function pathExists(candidate: string): Promise<boolean> {
+  try {
+    await lstat(candidate);
+    return true;
+  } catch (error) {
+    if (isMissingFileError(error)) return false;
+    throw error;
+  }
+}
+
+/** Windows 10+ ships bsdtar, which unpacks both .zip and .tar.bz2 and refuses absolute or ../ paths. */
+async function extractArchiveWithSystemTar(archivePath: string, destination: string, signal: AbortSignal): Promise<void> {
+  const executable = process.platform === 'win32'
+    ? path.join(path.resolve(process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows'), 'System32', 'tar.exe')
+    : 'tar';
+  const child = spawn(executable, ['-xf', archivePath, '-C', destination], {
+    shell: false,
+    windowsHide: true,
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr?.on('data', (chunk: Buffer) => {
+    if (stderr.length < 2_048) stderr += chunk.toString('utf8', 0, 2_048 - stderr.length);
+  });
+  const abort = () => child.kill();
+  signal.addEventListener('abort', abort, { once: true });
+  try {
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', resolve);
+    });
+    if (signal.aborted) throw abortError();
+    if (code !== 0) throw new Error(`model-component-archive-extract-${code ?? 'unknown'}${stderr ? '-stderr' : ''}`);
+  } finally {
+    signal.removeEventListener('abort', abort);
+  }
 }
 
 async function downloadWithWindowsCurl(request: MonarchSystemModelDownloadRequest): Promise<void> {

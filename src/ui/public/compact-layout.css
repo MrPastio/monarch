@@ -1,0 +1,24 @@
+/* Bounded collections retain every record; controls never change action authority. */
+.collection-page-hidden, .collection-pager[hidden], .compact-section-panel[hidden] { display: none !important; }
+.collection-pager { display: flex; align-items: center; justify-content: center; gap: 14px; grid-column: 1 / -1; padding: 10px 0; color: var(--theme-muted, #bcb3a8); font-size: 12px; }
+.collection-pager button, .compact-section-tabs button { font: inherit; color: var(--theme-ink, #ddd6cd); cursor: pointer; border: 1px solid rgba(var(--theme-line-rgb, 255, 255, 255), 0.0941); background: rgba(var(--theme-wash-rgb, 255, 255, 255), 0.0196); border-radius: 10px; min-height: 36px; padding: 7px 14px; }
+.collection-pager button:disabled { opacity: .35; cursor: default; }
+.collection-pager button:not(:disabled):hover, .compact-section-tabs button:hover { background: #ffa72612; border-color: #ffbf664a; }
+.collection-pager button:focus-visible, .compact-section-tabs button:focus-visible, .compact-disclosure > summary:focus-visible { outline: 2px solid #ffc16c; outline-offset: 3px; }
+.compact-section-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 16px; padding: 6px; border: 1px solid rgba(var(--theme-line-rgb, 255, 255, 255), 0.0627); background: rgba(var(--theme-wash-rgb, 255, 255, 255), 0.0118); border-radius: 14px; backdrop-filter: blur(18px); }
+.compact-section-tabs button { border-color: transparent; font-size: 12px; }
+.compact-section-tabs button[aria-pressed="true"] { color: var(--theme-amber-ink, #ffcb83); background: #ffad2514; border-color: #ffbf6626; }
+.compact-section-panel { min-width: 0; animation: compact-panel-enter 160ms ease-out; }
+.compact-disclosure { border: 1px solid rgba(var(--theme-line-rgb, 255, 255, 255), 0.0784); border-radius: 12px; padding: 0 14px; margin: 14px 0; background: rgba(var(--theme-wash-rgb, 255, 255, 255), 0.0118); }
+.compact-disclosure > summary { cursor: pointer; padding: 14px 0; color: var(--theme-ink, #cfc6ba); font-size: 13px; }
+.compact-disclosure[open] > :not(summary) { animation: compact-panel-enter 160ms ease-out; }
+#settings-section .settings-rail { padding: 10px; }
+#settings-section .settings-rail-heading { padding: 12px 10px; }
+#settings-section .settings-tabs { gap: 3px; }
+#settings-section .settings-tabs > button { min-height: 42px; padding: 10px 12px; }
+#settings-section .settings-tabs > button > small { display: none; }
+#settings-section .settings-group-heading { margin-bottom: 12px; }
+#settings-section .settings-feature { padding: 20px; }
+#settings-section .settings-view-header { padding-bottom: 16px; }
+@keyframes compact-panel-enter { from { opacity: .65; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { .compact-section-panel, .compact-disclosure[open] > :not(summary) { animation: none; } }

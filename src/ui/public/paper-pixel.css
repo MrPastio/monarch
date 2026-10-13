@@ -1,0 +1,1671 @@
+/* PaperPixel (PP) — the default Monarch design since 2026-09-27.
+   White paper, black ink. Everything is filled with paper; ink marks only what
+   must stand out: text, outlines, indicators, the current choice. Anything that
+   thinks or answers is made of pixels (rounded black squares with physics,
+   see modules/paper-pixel.js); everything else is rounded and airy.
+
+   The whole layer is scoped to html[data-design="pp"]. Settings → System →
+   Design switches back to the classic warm glass look, which this file then
+   leaves untouched. Loaded last, so equal specificity wins over earlier files;
+   components keep their layout, this file owns material, outline and motion. */
+
+@font-face { font-family: "Onest"; font-style: normal; font-display: swap; font-weight: 100 900;
+  src: url("/assets/fonts/onest/onest-cyrillic-ext-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+460-52F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F; }
+@font-face { font-family: "Onest"; font-style: normal; font-display: swap; font-weight: 100 900;
+  src: url("/assets/fonts/onest/onest-cyrillic-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+301, U+400-45F, U+490-491, U+4B0-4B1, U+2116; }
+@font-face { font-family: "Onest"; font-style: normal; font-display: swap; font-weight: 100 900;
+  src: url("/assets/fonts/onest/onest-latin-ext-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+100-2BA, U+2BD-2C5, U+2C7-2CC, U+2CE-2D7, U+2DD-2FF, U+304, U+308, U+329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Onest"; font-style: normal; font-display: swap; font-weight: 100 900;
+  src: url("/assets/fonts/onest/onest-latin-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+
+/* ============================================================== tokens */
+html:root[data-design="pp"] {
+  /* PaperPixel tokens (Paper theme) */
+  --pp-paper: #ffffff;
+  --pp-paper-2: #f4f4f2;
+  --pp-paper-3: #e9e9e6;
+  --pp-ink: #0b0b0b;
+  --pp-ink-2: #3a3a38;
+  --pp-ink-muted: #696965;
+  --pp-ink-faint: #b4b4af;
+  --pp-ink-hover: #2a2a28;
+  --pp-on-ink: #ffffff;
+  --pp-line-soft: #e2e2de;
+  --pp-scrim: rgba(11, 11, 11, .28);
+  --pp-ink-rgb: 11, 11, 11;
+  --pp-paper-rgb: 255, 255, 255;
+  --pp-stroke: 1.5px;
+  --pp-stroke-bold: 2px;
+  --pp-r-pixel: 2px;
+  --pp-r-xs: 6px;
+  --pp-r-sm: 10px;
+  --pp-r-md: 16px;
+  --pp-r-lg: 22px;
+  --pp-r-xl: 30px;
+  --pp-shadow-thumb: 0 1px 2px rgba(11, 11, 11, .08), 0 2px 6px rgba(11, 11, 11, .06);
+  --pp-shadow-float: 0 1px 2px rgba(11, 11, 11, .04), 0 16px 40px -12px rgba(11, 11, 11, .18);
+  --pp-focus-ring: 0 0 0 2px var(--pp-paper), 0 0 0 4px var(--pp-ink);
+  --pp-dur-instant: 80ms;
+  --pp-dur-fast: 140ms;
+  --pp-dur-base: 240ms;
+  --pp-dur-slow: 380ms;
+  --pp-ease-out: cubic-bezier(.2, 0, 0, 1);
+  --pp-ease-in: cubic-bezier(.4, 0, 1, 1);
+  --pp-ease-spring: cubic-bezier(.34, 1.4, .64, 1);
+  --pp-font: "Onest", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --pp-mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+
+  /* Legacy semantic roles → paper & ink. Every earlier layer reads these. */
+  color-scheme: light;
+  --bg: var(--pp-paper);
+  --bg-elevated: var(--pp-paper);
+  --surface: var(--pp-paper);
+  --surface-strong: var(--pp-paper);
+  --surface-soft: var(--pp-paper-2);
+  --surface-hover: var(--pp-paper-2);
+  --surface-inset: var(--pp-paper-2);
+  --surface-raised: var(--pp-paper);
+  --sidebar-bg: var(--pp-paper);
+  --line: var(--pp-line-soft);
+  --line-strong: var(--pp-ink);
+  --border: var(--pp-line-soft);
+  --border-strong: var(--pp-ink);
+  --text: var(--pp-ink);
+  --text-primary: var(--pp-ink);
+  --text-soft: var(--pp-ink-2);
+  --text-secondary: var(--pp-ink-2);
+  --text-tertiary: var(--pp-ink-muted);
+  --muted: var(--pp-ink-muted);
+  --muted-2: var(--pp-ink-muted);
+  --accent: var(--pp-ink);
+  --accent-2: var(--pp-ink-2);
+  --accent-soft: var(--pp-paper-2);
+  --accent-line: var(--pp-ink);
+  --success: var(--pp-ink);
+  --danger: var(--pp-ink);
+  --warning: var(--pp-ink);
+  --warning-soft: var(--pp-paper-2);
+  --danger-soft: var(--pp-paper-2);
+  --glass-surface: var(--pp-paper);
+  --glass-surface-strong: var(--pp-paper);
+  --glass-line: var(--pp-line-soft);
+  --glass-line-hover: var(--pp-ink);
+  --shadow-glass: var(--pp-shadow-float);
+  --shadow-card: none;
+  --glass-shadow: none;
+  --selection-soft: var(--pp-paper-2);
+  --selection-line: var(--pp-ink);
+  --theme-plane-rgb: var(--pp-paper-rgb);
+  --theme-wash-rgb: var(--pp-ink-rgb);
+  --theme-line-rgb: var(--pp-ink-rgb);
+  --theme-ink-rgb: var(--pp-ink-rgb);
+  --theme-ink: var(--pp-ink);
+  --theme-muted: var(--pp-ink-muted);
+  --theme-text-alpha: .78;
+  --theme-amber-ink: var(--pp-ink);
+  --theme-danger-ink: var(--pp-ink);
+  --theme-success-ink: var(--pp-ink);
+  --theme-info-ink: var(--pp-ink);
+  --theme-amber-rgb: var(--pp-ink-rgb);
+  --theme-danger-rgb: var(--pp-ink-rgb);
+  --theme-success-rgb: var(--pp-ink-rgb);
+  --theme-info-rgb: var(--pp-ink-rgb);
+  --theme-shadow-strength: .5;
+  --coder-orange: var(--pp-ink);
+  --coder-yellow: var(--pp-ink);
+  --coder-ink: var(--pp-ink);
+  --coder-panel: var(--pp-paper);
+  --coder-line: var(--pp-line-soft);
+  --coder-muted: var(--pp-ink-muted);
+  --monarch-surface: var(--pp-paper);
+  --monarch-edge: var(--pp-ink);
+  --monarch-highlight: var(--pp-paper-2);
+  --monarch-focus: var(--pp-ink);
+  --service-accent: var(--pp-ink);
+  --live-accent: var(--pp-ink);
+  --thinking-accent: var(--pp-ink);
+  --voice-a: var(--pp-ink);
+  --voice-b: var(--pp-ink-2);
+  --font: var(--pp-font);
+  --font-sans: var(--pp-font);
+  --font-serif: var(--pp-font);
+  --mono: var(--pp-mono);
+  --font-mono: var(--pp-mono);
+  --radius-sm: var(--pp-r-sm);
+  --radius-md: var(--pp-r-md);
+  --radius-lg: var(--pp-r-lg);
+  --ease-out: var(--pp-ease-out);
+  --ease-spring: var(--pp-ease-spring);
+
+  --ds-ink: var(--pp-ink);
+  --ds-ink-2: var(--pp-ink-2);
+  --ds-ink-3: var(--pp-ink-muted);
+  --ds-line: var(--pp-line-soft);
+  --ds-line-2: var(--pp-ink);
+  --ds-fill-1: var(--pp-paper-2);
+  --ds-fill-2: var(--pp-paper-2);
+  --ds-fill-3: var(--pp-paper-3);
+  --ds-field: var(--pp-paper);
+  --ds-sheet: var(--pp-paper);
+  --ds-sheet-line: var(--pp-ink);
+  --ds-accent: var(--pp-ink);
+  --ds-accent-ink: var(--pp-ink);
+  --ds-accent-fill: var(--pp-paper-2);
+  --ds-accent-line: var(--pp-ink);
+  --ds-on-accent: var(--pp-on-ink);
+  --ds-primary: linear-gradient(var(--pp-ink), var(--pp-ink));
+  --ds-danger-ink: var(--pp-ink);
+  --ds-focus: var(--pp-ink);
+  --ds-r-control: 999px;
+  --ds-r-card: var(--pp-r-lg);
+  --ds-r-sheet: var(--pp-r-xl);
+  --ds-shadow-sheet: var(--pp-shadow-float);
+  --ds-shadow-menu: var(--pp-shadow-float);
+  --ds-ease: var(--pp-ease-out);
+}
+html:root[data-design="pp"][data-theme] {
+  /* Beats :root[data-theme="light"] in themes.css / white-theme.css / monarch-design.css. */
+  --bg: var(--pp-paper); --bg-elevated: var(--pp-paper); --surface: var(--pp-paper); --surface-strong: var(--pp-paper);
+  --surface-soft: var(--pp-paper-2); --surface-hover: var(--pp-paper-2); --line: var(--pp-line-soft); --line-strong: var(--pp-ink);
+  --text: var(--pp-ink); --text-soft: var(--pp-ink-2); --muted: var(--pp-ink-muted);
+  --accent: var(--pp-ink); --accent-2: var(--pp-ink-2); --accent-soft: var(--pp-paper-2); --accent-line: var(--pp-ink);
+  --success: var(--pp-ink); --danger: var(--pp-ink); --warning: var(--pp-ink);
+  --glass-surface: var(--pp-paper); --glass-surface-strong: var(--pp-paper); --glass-line: var(--pp-line-soft); --glass-line-hover: var(--pp-ink);
+  --shadow-glass: var(--pp-shadow-float); --shadow-card: none; --glass-shadow: none;
+  --selection-soft: var(--pp-paper-2); --selection-line: var(--pp-ink);
+  --theme-plane-rgb: var(--pp-paper-rgb); --theme-wash-rgb: var(--pp-ink-rgb); --theme-line-rgb: var(--pp-ink-rgb); --theme-ink-rgb: var(--pp-ink-rgb);
+  --theme-ink: var(--pp-ink); --theme-muted: var(--pp-ink-muted); --theme-text-alpha: .78;
+  --theme-amber-ink: var(--pp-ink); --theme-danger-ink: var(--pp-ink); --theme-success-ink: var(--pp-ink); --theme-info-ink: var(--pp-ink);
+  --theme-amber-rgb: var(--pp-ink-rgb); --theme-danger-rgb: var(--pp-ink-rgb); --theme-success-rgb: var(--pp-ink-rgb); --theme-info-rgb: var(--pp-ink-rgb);
+  --theme-shadow-strength: .5;
+  --coder-panel: var(--pp-paper); --coder-line: var(--pp-line-soft); --coder-muted: var(--pp-ink-muted);
+  --monarch-surface: var(--pp-paper); --monarch-edge: var(--pp-ink); --monarch-highlight: var(--pp-paper-2); --monarch-focus: var(--pp-ink);
+  --ds-ink: var(--pp-ink); --ds-ink-2: var(--pp-ink-2); --ds-ink-3: var(--pp-ink-muted); --ds-field: var(--pp-paper); --ds-sheet: var(--pp-paper);
+  --ds-sheet-line: var(--pp-ink); --ds-accent: var(--pp-ink); --ds-accent-ink: var(--pp-ink); --ds-accent-fill: var(--pp-paper-2);
+  --ds-accent-line: var(--pp-ink); --ds-focus: var(--pp-ink); --ds-shadow-sheet: var(--pp-shadow-float); --ds-shadow-menu: var(--pp-shadow-float);
+}
+/* Chrome floors a border to whole device pixels, so 1.5px is 1 device pixel at
+   125% and a thin, stair-stepped line on rounded corners. Every stroke is snapped
+   to two device pixels (three from 200%) so curves are drawn with enough coverage. */
+@media (min-resolution: 1.2dppx) and (max-resolution: 1.39dppx) {
+  html:root[data-design="pp"] { --pp-stroke: 1.61px; --pp-stroke-bold: 2.41px; }
+}
+@media (min-resolution: 1.4dppx) and (max-resolution: 1.69dppx) {
+  html:root[data-design="pp"] { --pp-stroke: 1.34px; --pp-stroke-bold: 2.01px; }
+}
+@media (min-resolution: 1.7dppx) and (max-resolution: 1.99dppx) {
+  html:root[data-design="pp"] { --pp-stroke: 1.15px; --pp-stroke-bold: 1.72px; }
+}
+/* Ink theme: the same sheet turned over — black paper, white ink. */
+html:root[data-design="pp"][data-theme="dark"] {
+  color-scheme: dark;
+  --pp-paper: #0b0b0b;
+  --pp-paper-2: #171716;
+  --pp-paper-3: #232322;
+  --pp-ink: #f7f7f5;
+  --pp-ink-2: #c9c9c5;
+  --pp-ink-muted: #9b9b96;
+  --pp-ink-faint: #4a4a47;
+  --pp-ink-hover: #dcdcd8;
+  --pp-on-ink: #0b0b0b;
+  --pp-line-soft: #2a2a28;
+  --pp-scrim: rgba(0, 0, 0, .64);
+  --pp-ink-rgb: 247, 247, 245;
+  --pp-paper-rgb: 11, 11, 11;
+  --pp-shadow-thumb: 0 1px 2px rgba(0, 0, 0, .6);
+  --pp-shadow-float: 0 16px 40px -12px rgba(0, 0, 0, .8);
+}
+
+/* ============================================================ foundation */
+html:root[data-design="pp"] {
+  & body {
+    background: var(--pp-paper);
+    color: var(--pp-ink);
+    font-family: var(--pp-font);
+    font-feature-settings: "ss01" 0;
+    -webkit-font-smoothing: antialiased;
+  }
+  & :is(button, input, textarea, select, kbd) { font-family: inherit; }
+  & :is(code, pre, kbd, samp, .mono) { font-family: var(--pp-mono); }
+
+  /* No glass: paper is opaque. Blur stays only where it hides private content. */
+  & *:not(.pp-keep-blur), & *::before, & *::after { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+
+  & ::selection { color: var(--pp-on-ink); background: var(--pp-ink); }
+  & :is(input, textarea)::placeholder { color: var(--pp-ink-muted); opacity: 1; }
+  & * { scrollbar-width: thin; scrollbar-color: var(--pp-ink-faint) transparent; }
+
+  /* Focus: 2px paper gap, then 2px solid ink — follows the radius. */
+  & :where(button, a, summary, input, textarea, select, [role="button"], [role="tab"], [role="option"], [role="radio"], [role="switch"], [role="menuitem"], [tabindex]):focus-visible {
+    outline: 2px solid var(--pp-ink);
+    outline-offset: 2px;
+  }
+
+  & :is(h1, h2, h3, h4) { color: var(--pp-ink); letter-spacing: -.015em; }
+  & h1 { letter-spacing: -.03em; }
+  & :is(.section-kicker, .eyebrow, .settings-kicker, .setup-kicker, .empty-kicker) {
+    color: var(--pp-ink-muted);
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+  & a:not([class]) { color: var(--pp-ink); text-decoration: underline; text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+
+  & dialog::backdrop { background: var(--pp-scrim) !important; backdrop-filter: none !important; }
+}
+
+/* ============================================================== buttons */
+html:root[data-design="pp"] {
+  & :is(.claude-primary-btn, .primary-button, .claude-secondary-btn, .secondary-button, .claude-ghost-btn) {
+    min-height: 38px;
+    padding: 0 18px;
+    border: var(--pp-stroke) solid var(--pp-ink);
+    border-radius: 999px;
+    background: var(--pp-paper);
+    color: var(--pp-ink);
+    font-family: var(--pp-font);
+    font-size: 13.5px;
+    font-weight: 500;
+    letter-spacing: -.005em;
+    box-shadow: none;
+    filter: none;
+    transition: background-color var(--pp-dur-instant) linear, border-color var(--pp-dur-instant) linear, color var(--pp-dur-instant) linear, transform var(--pp-dur-base) var(--pp-ease-spring);
+  }
+  & :is(.claude-primary-btn, .primary-button) { background: var(--pp-ink); border-color: var(--pp-ink); color: var(--pp-on-ink); }
+  & :is(.claude-primary-btn, .primary-button):hover:not(:disabled) { background: var(--pp-ink-hover); border-color: var(--pp-ink-hover); filter: none; box-shadow: none; transform: none; }
+  & :is(.claude-secondary-btn, .secondary-button):hover:not(:disabled) { background: var(--pp-paper-2); border-color: var(--pp-ink); color: var(--pp-ink); }
+  & .claude-ghost-btn { border-color: transparent; background: transparent; color: var(--pp-ink); }
+  & .claude-ghost-btn:hover:not(:disabled) { border-color: transparent; background: var(--pp-paper-2); }
+  & :is(.claude-secondary-btn, .secondary-button, .claude-ghost-btn):active:not(:disabled) { background: var(--pp-paper-3); }
+  & :is(.claude-primary-btn, .primary-button, .claude-secondary-btn, .secondary-button, .claude-ghost-btn):active:not(:disabled) { transform: scale(.97); transition-duration: var(--pp-dur-instant); }
+  & :is(.claude-primary-btn, .primary-button, .claude-secondary-btn, .secondary-button, .claude-ghost-btn):is(:disabled, [aria-disabled="true"]) {
+    border-color: transparent;
+    background: var(--pp-paper-2);
+    color: var(--pp-ink-faint);
+    opacity: 1;
+  }
+  & .claude-ghost-btn:is(:disabled, [aria-disabled="true"]) { background: transparent; }
+  & :is(.claude-primary-btn, .claude-secondary-btn, .claude-ghost-btn).danger { color: var(--pp-ink); }
+  & .claude-primary-btn.danger { color: var(--pp-on-ink); }
+  & .monarch-question-dialog[data-tone="danger"] .claude-primary-btn { border-color: var(--pp-ink); background: var(--pp-ink); color: var(--pp-on-ink); box-shadow: none; }
+
+  /* Round icon buttons */
+  & :is(.ds-icon-btn, .topbar-icon-button, .claude-attach-btn, .claude-voice-btn, .claude-voice-mode-btn, .sidebar-history-trigger, .setup-close) {
+    border-radius: 999px;
+    color: var(--pp-ink-2);
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+  }
+  & :is(.ds-icon-btn, .topbar-icon-button, .claude-attach-btn, .claude-voice-btn, .claude-voice-mode-btn, .sidebar-history-trigger, .setup-close):hover:not(:disabled) {
+    color: var(--pp-ink);
+    background: var(--pp-paper-2);
+  }
+  & :is(.topbar-icon-button, .sidebar-history-trigger)[aria-expanded="true"],
+  & .topbar-icon-button[aria-pressed="true"] { color: var(--pp-on-ink); background: var(--pp-ink); }
+}
+
+/* =============================================================== fields */
+html:root[data-design="pp"] {
+  & :is(#settings-section, #security-section, #images-section, #sharing-section, dialog, .memory-compose-panel, .skill-authoring-panel, .navigation-search, .coder-onboarding, .setup, .oscar-memory-panel, [id="oscar-history-panel"])
+    :is(input:is([type="text"], [type="search"], [type="url"], [type="email"], [type="password"], [type="number"], :not([type])), textarea, select):not(.max-model-popup input) {
+    min-height: 42px;
+    border: var(--pp-stroke) solid var(--pp-ink);
+    border-radius: 14px;
+    background: var(--pp-paper);
+    color: var(--pp-ink);
+    font-family: var(--pp-font);
+    font-size: 14px;
+    box-shadow: none;
+  }
+  & :is(#settings-section, #security-section, #images-section, #sharing-section, dialog, .memory-compose-panel, .skill-authoring-panel, .navigation-search, .coder-onboarding, .setup, .oscar-memory-panel, [id="oscar-history-panel"])
+    :is(input:is([type="text"], [type="search"], [type="url"], [type="email"], [type="password"], [type="number"], :not([type])), textarea, select):not(.max-model-popup input):focus {
+    border-color: var(--pp-ink);
+    outline: none;
+    box-shadow: inset 0 0 0 .5px var(--pp-ink), 0 0 0 4px var(--pp-paper-2);
+  }
+  & :is(input, textarea, select):disabled { background: var(--pp-paper-2); border-color: transparent !important; color: var(--pp-ink-muted); }
+
+  /* Styled select (ui-select.js) */
+  & .max-model-trigger { min-height: 42px; border: var(--pp-stroke) solid var(--pp-ink); border-radius: 14px; background: var(--pp-paper); color: var(--pp-ink); }
+  & .max-model-trigger:hover:not(:disabled), & .max-model-trigger[aria-expanded="true"] { border-color: var(--pp-ink); background: var(--pp-paper); box-shadow: 0 0 0 4px var(--pp-paper-2); }
+  & .max-model-trigger[aria-expanded="true"] > .max-select-chevron { color: var(--pp-ink); }
+  & .max-model-popup { padding: 6px; border: var(--pp-stroke) solid var(--pp-ink); border-radius: var(--pp-r-lg); background: var(--pp-paper); box-shadow: var(--pp-shadow-float); }
+  & .max-model-option { min-height: 38px; border-radius: var(--pp-r-md); color: var(--pp-ink); }
+  & .max-model-option[aria-selected="true"] { color: var(--pp-ink); font-weight: 600; }
+  & .max-model-option:hover, & .max-model-option[data-highlighted="true"] { background: var(--pp-paper-2); }
+}
+
+/* ========================================= switch: the square rolls 90° */
+html:root[data-design="pp"] {
+  & input[type="checkbox"]:not(.voice-mode-hidden-input):not(.pp-native-check):not(:where(.setup, .ds-confirm, .security-switch, .max-memory-confirm, .max-fallback-card, .monarch-switch-row, .memory-cross-chat-card, .memory-pin-control, .dev-switch, .dev-toggle-card, .tg-check) input) {
+    -webkit-appearance: none;
+    appearance: none;
+    position: relative;
+    flex: none;
+    width: 46px;
+    min-width: 46px;
+    height: 28px;
+    min-height: 28px;
+    margin: 0;
+    padding: 0;
+    border: var(--pp-stroke) solid var(--pp-ink);
+    border-radius: 999px;
+    background: var(--pp-paper);
+    box-shadow: none;
+    cursor: pointer;
+    transition: background-color var(--pp-dur-base) var(--pp-ease-out);
+  }
+  & input[type="checkbox"]:not(.voice-mode-hidden-input):not(.pp-native-check):not(:where(.setup, .ds-confirm, .security-switch, .max-memory-confirm, .max-fallback-card, .monarch-switch-row, .memory-cross-chat-card, .memory-pin-control, .dev-switch, .dev-toggle-card, .tg-check) input)::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 4.5px;
+    width: 15px;
+    height: 15px;
+    margin-top: -7.5px;
+    border-radius: 3.5px;
+    background: var(--pp-ink);
+    transition: transform var(--pp-dur-slow) var(--pp-ease-spring), background-color var(--pp-dur-base) linear;
+  }
+  & input[type="checkbox"]:not(.voice-mode-hidden-input):not(.pp-native-check):not(:where(.setup, .ds-confirm, .security-switch, .max-memory-confirm, .max-fallback-card, .monarch-switch-row, .memory-cross-chat-card, .memory-pin-control, .dev-switch, .dev-toggle-card, .tg-check) input):checked { background: var(--pp-ink); border-color: var(--pp-ink); }
+  & input[type="checkbox"]:not(.voice-mode-hidden-input):not(.pp-native-check):not(:where(.setup, .ds-confirm, .security-switch, .max-memory-confirm, .max-fallback-card, .monarch-switch-row, .memory-cross-chat-card, .memory-pin-control, .dev-switch, .dev-toggle-card, .tg-check) input):checked::after { background: var(--pp-on-ink); transform: translateX(18px) rotate(90deg); }
+  & input[type="checkbox"]:not(.voice-mode-hidden-input):not(.pp-native-check):not(:where(.setup, .ds-confirm, .security-switch, .max-memory-confirm, .max-fallback-card, .monarch-switch-row, .memory-cross-chat-card, .memory-pin-control, .dev-switch, .dev-toggle-card, .tg-check) input):disabled { opacity: .4; cursor: not-allowed; }
+  & input[type="checkbox"]:not(.voice-mode-hidden-input):not(.pp-native-check):not(:where(.setup, .ds-confirm, .security-switch, .max-memory-confirm, .max-fallback-card, .monarch-switch-row, .memory-cross-chat-card, .memory-pin-control, .dev-switch, .dev-toggle-card, .tg-check) input):focus-visible { outline: none; box-shadow: var(--pp-focus-ring); }
+
+  & .monarch-switch { width: 46px; height: 28px; border: var(--pp-stroke) solid var(--pp-ink); border-radius: 999px; background: var(--pp-paper); box-shadow: none; }
+  & .monarch-switch::after { top: 50%; left: 4.5px; width: 15px; height: 15px; margin-top: -7.5px; border-radius: 3.5px; background: var(--pp-ink); box-shadow: none; transition: transform var(--pp-dur-slow) var(--pp-ease-spring), background-color var(--pp-dur-base) linear; }
+  & .monarch-switch-row input:checked + .monarch-switch { border-color: var(--pp-ink); background: var(--pp-ink); }
+  & .monarch-switch-row input:checked + .monarch-switch::after { transform: translateX(18px) rotate(90deg); background: var(--pp-on-ink); }
+  & :is(.dev-switch span, .dev-toggle-card i) {
+    border: var(--pp-stroke) solid var(--pp-ink);
+    background: var(--pp-paper);
+    box-shadow: none;
+  }
+  & :is(.dev-switch span, .dev-toggle-card i)::after {
+    border-radius: var(--pp-r-pixel);
+    background: var(--pp-ink);
+    box-shadow: none;
+  }
+  & :is(.dev-switch input:checked + span, .dev-toggle-card input:checked + i) {
+    border-color: var(--pp-ink);
+    background: var(--pp-ink);
+    box-shadow: none;
+  }
+  &[data-theme="light"] :is(.dev-switch input:checked + span, .dev-toggle-card input:checked + i) {
+    border-color: var(--pp-ink);
+    background: var(--pp-ink);
+  }
+  & :is(.dev-switch input:checked + span, .dev-toggle-card input:checked + i)::after { background: var(--pp-on-ink); }
+  & .dev-switch input:checked + span::after { transform: translateX(22px) rotate(90deg); }
+  & .dev-toggle-card input:checked + i::after { transform: translateX(14px) rotate(90deg); }
+  & :is(.dev-switch input:focus-visible + span, .dev-toggle-card input:focus-visible + i) { outline: 2px solid var(--pp-ink); outline-offset: 3px; }
+
+  /* Telegram permissions are small checkboxes, not 46px on/off switches. */
+  & #telegram-v2-settings .tg-check:not(.ds-confirm) input[type="checkbox"] {
+    -webkit-appearance: none;
+    appearance: none;
+    position: relative;
+    width: 20px;
+    min-width: 20px;
+    height: 20px;
+    min-height: 20px;
+    margin: 0;
+    border: var(--pp-stroke) solid var(--pp-ink);
+    border-radius: var(--pp-r-xs);
+    background: var(--pp-paper);
+    box-shadow: none;
+  }
+  & #telegram-v2-settings .tg-check:not(.ds-confirm) input[type="checkbox"]::after {
+    content: "";
+    position: absolute;
+    left: 2.6px;
+    top: 7.8px;
+    width: 3px;
+    height: 3px;
+    border-radius: .8px;
+    background: var(--pp-on-ink);
+    box-shadow: 0 2.6px var(--pp-on-ink), 2.6px 2.6px var(--pp-on-ink), 2.6px 5.2px var(--pp-on-ink), 5.2px 2.6px var(--pp-on-ink), 5.2px 0 var(--pp-on-ink), 7.8px 0 var(--pp-on-ink), 7.8px -2.6px var(--pp-on-ink), 10.4px -2.6px var(--pp-on-ink), 10.4px -5.2px var(--pp-on-ink);
+    transform: scale(0);
+    transform-origin: 6px 1px;
+  }
+  & #telegram-v2-settings .tg-check:not(.ds-confirm) input[type="checkbox"]:checked { background: var(--pp-ink); }
+  & #telegram-v2-settings .tg-check:not(.ds-confirm) input[type="checkbox"]:checked::after { transform: scale(1); }
+  & #telegram-v2-settings .tg-check:not(.ds-confirm) input[type="checkbox"]:focus-visible { outline: 2px solid var(--pp-ink); outline-offset: 2px; }
+
+  /* Radios: a circle, the choice is a pixel inside it. */
+  & input[type="radio"]:not(.pp-native-radio) {
+    -webkit-appearance: none;
+    appearance: none;
+    display: inline-grid;
+    place-items: center;
+    flex: none;
+    width: 20px;
+    height: 20px;
+    margin: 0;
+    border: var(--pp-stroke) solid var(--pp-ink);
+    border-radius: 50%;
+    background: var(--pp-paper);
+    cursor: pointer;
+  }
+  & input[type="radio"]:not(.pp-native-radio)::after {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: var(--pp-r-pixel);
+    background: var(--pp-ink);
+    transform: scale(0) rotate(-90deg);
+    transition: transform var(--pp-dur-base) var(--pp-ease-spring);
+  }
+  & input[type="radio"]:not(.pp-native-radio):checked::after { transform: none; }
+
+  /* "I agree" cards: the tick is five pixels, not a stroke. */
+  & :is(label.ds-confirm, .max-memory-confirm) { border: var(--pp-stroke) solid var(--pp-line-soft); border-radius: var(--pp-r-md); background: var(--pp-paper); color: var(--pp-ink-2); }
+  & :is(label.ds-confirm, .max-memory-confirm):hover { border-color: var(--pp-ink); background: var(--pp-paper); }
+  & :is(label.ds-confirm, .max-memory-confirm):has(input:checked) { border-color: var(--pp-ink); background: var(--pp-paper); color: var(--pp-ink); }
+  & label.ds-confirm a { color: var(--pp-ink); }
+  & :is(.ds-check, .max-memory-check) { position: relative; width: 20px; height: 20px; border: var(--pp-stroke) solid var(--pp-ink); border-radius: var(--pp-r-xs); background: var(--pp-paper); }
+  & :is(.ds-check, .max-memory-check) svg { display: none; }
+  & :is(.ds-check, .max-memory-check)::after {
+    content: "";
+    position: absolute;
+    left: 2.6px;
+    top: 7.8px;
+    width: 3px;
+    height: 3px;
+    border-radius: .8px;
+    background: var(--pp-on-ink);
+    box-shadow: 0 2.6px var(--pp-on-ink), 2.6px 2.6px var(--pp-on-ink), 2.6px 5.2px var(--pp-on-ink), 5.2px 2.6px var(--pp-on-ink), 5.2px 0 var(--pp-on-ink), 7.8px 0 var(--pp-on-ink), 7.8px -2.6px var(--pp-on-ink), 10.4px -2.6px var(--pp-on-ink), 10.4px -5.2px var(--pp-on-ink);
+    transform: scale(0);
+    transform-origin: 6px 1px;
+    transition: transform var(--pp-dur-base) var(--pp-ease-spring);
+  }
+  & :is(label.ds-confirm, .max-memory-confirm) input:checked + :is(.ds-check, .max-memory-check) { border-color: var(--pp-ink); background: var(--pp-ink); transform: none; }
+  & :is(label.ds-confirm, .max-memory-confirm) input:checked + :is(.ds-check, .max-memory-check)::after { transform: scale(1); }
+
+  /* Ranges: one smooth rounded track; the filled part is ink (value synced by paper-pixel.js). */
+  & input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 24px;
+    background: transparent;
+    accent-color: var(--pp-ink);
+    cursor: pointer;
+  }
+  & input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px;
+    border: 0;
+    border-radius: 999px;
+    background: linear-gradient(var(--pp-ink), var(--pp-ink)) 0 0 / var(--pp-range-fill, 50%) 100% no-repeat, var(--pp-paper-3);
+  }
+  & input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 20px;
+    height: 20px;
+    margin-top: -8px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--pp-paper);
+    box-shadow: inset 0 0 0 2px var(--pp-ink), var(--pp-shadow-thumb);
+    transition: transform var(--pp-dur-base) var(--pp-ease-spring);
+  }
+  & input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.12); }
+  & input[type="range"]:focus-visible { outline: none; }
+  & input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: inset 0 0 0 2px var(--pp-ink), var(--pp-focus-ring); }
+
+  /* Progress: one smooth rounded bar. */
+  & progress {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 6px;
+    border: 0;
+    border-radius: 999px;
+    overflow: hidden;
+    background: var(--pp-paper-3);
+  }
+  & progress::-webkit-progress-bar { border-radius: 999px; background: var(--pp-paper-3); }
+  & progress::-webkit-progress-value {
+    border-radius: 999px;
+    background: var(--pp-ink);
+    transition: width var(--pp-dur-base) var(--pp-ease-out);
+  }
+}
+
+/* ======================================== segmented controls & tab rows */
+html:root[data-design="pp"] {
+  /* Чат / Coder — the reference control: sunken paper track, a white paper
+     thumb with a black outline that springs to the chosen side. */
+  & .chat-mode-switch {
+    padding: 3px;
+    --chat-mode-padding: 3px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--pp-paper-2);
+    box-shadow: none;
+  }
+  & .chat-mode-switch::before {
+    border: var(--pp-stroke) solid var(--pp-ink);
+    background: var(--pp-paper);
+    box-shadow: var(--pp-shadow-thumb);
+    transition: transform var(--pp-dur-base) var(--pp-ease-spring);
+  }
+  & .chat-mode-switch button { height: 32px; min-width: 64px; padding: 0 18px; color: var(--pp-ink-muted); font: 500 14px/1 var(--pp-font); }
+  & .chat-mode-switch button[aria-selected="true"] { color: var(--pp-ink); }
+  & .chat-mode-switch button:not([aria-selected="true"]):hover { color: var(--pp-ink); }
+  & .chat-mode-switch button:focus-visible { outline: 2px solid var(--pp-ink); }
+
+  & :is(.network-view-tabs, .ui-language-options, .setup-segmented, .sharing-tabs, .settings-auto-theme, .style-segment) {
+    border: 0;
+    border-radius: 999px;
+    background: var(--pp-paper-2);
+    box-shadow: none;
+  }
+  & :is(.network-view-tabs, .ui-language-options, .setup-segmented, .sharing-tabs, .style-segment) > :is(button, [role="tab"], [role="radio"]) {
+    border: var(--pp-stroke) solid transparent;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--pp-ink-muted);
+    box-shadow: none;
+    font-weight: 500;
+    transition: color var(--pp-dur-fast) linear, background-color var(--pp-dur-fast) linear, border-color var(--pp-dur-fast) linear;
+  }
+  & :is(.network-view-tabs, .ui-language-options, .setup-segmented, .sharing-tabs, .style-segment) > :is(button, [role="tab"], [role="radio"]):hover { color: var(--pp-ink); }
+  & :is(.network-view-tabs, .ui-language-options, .setup-segmented, .sharing-tabs, .style-segment) > :is(button, [role="tab"], [role="radio"]):is([aria-selected="true"], [aria-checked="true"], [aria-pressed="true"], .active, .is-active) {
+    border-color: var(--pp-ink);
+    background: var(--pp-paper);
+    color: var(--pp-ink);
+    box-shadow: var(--pp-shadow-thumb);
+  }
+}
+
+/* ============================================================== sidebar */
+html:root[data-design="pp"] {
+  & .sidebar {
+    background: var(--pp-paper);
+    border-right: 1px solid var(--pp-line-soft);
+    box-shadow: none;
+  }
+  & .sidebar :is(.monarch-brand-word, .sidebar-brand-mark strong) { color: var(--pp-ink); font-family: var(--pp-font); font-weight: 700; letter-spacing: -.02em; }
+  & .product-stage-badge {
+    border: var(--pp-stroke) solid var(--pp-ink);
+    border-radius: 999px;
+    background: var(--pp-paper);
+    color: var(--pp-ink);
+    font-weight: 600;
+    letter-spacing: .02em;
+  }
+  & .sidebar .claude-new-chat-btn {
+    border: var(--pp-stroke) solid var(--pp-ink);
+    border-radius: 999px;
+    background: var(--pp-paper);
+    color: var(--pp-ink);
+    box-shadow: none;
+    font-weight: 500;
+  }
+  & .sidebar .claude-new-chat-btn:hover { background: var(--pp-paper-2); }
+  & .sidebar .claude-new-chat-btn svg { color: var(--pp-ink); }
+  & .navigation-search-trigger {
+    border: 0;
+    border-radius: 999px;
+    background: var(--pp-paper-2);
+    color: var(--pp-ink-muted);
+    box-shadow: none;
+  }
+  & .navigation-search-trigger:hover { color: var(--pp-ink); background: var(--pp-paper-3); }
+  & .navigation-search-trigger kbd { border: 0; background: transparent; color: var(--pp-ink-muted); font-family: var(--pp-mono); font-size: 11px; box-shadow: none; }
+  & .nav-section-title { color: var(--pp-ink-muted); }
+
+  & .sidebar .nav-item { position: relative; border: 0; border-radius: 999px; color: var(--pp-ink-2); background: transparent; font-weight: 500; }
+  & .sidebar .nav-item svg { color: currentColor; }
+  & .sidebar .nav-item:hover { color: var(--pp-ink); background: var(--pp-paper-2); }
+  & .sidebar .nav-item.active { color: var(--pp-ink); background: var(--pp-paper-2); font-weight: 600; box-shadow: none; }
+  & .sidebar .nav-item.active svg { color: var(--pp-ink); }
+  /* the current section is marked by one pixel */
+  & .sidebar .nav-item::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    right: 12px;
+    width: 6px;
+    height: 6px;
+    margin-top: -3px;
+    border-radius: var(--pp-r-pixel);
+    background: var(--pp-ink);
+    transform: scale(0) rotate(-90deg);
+    transition: transform var(--pp-dur-base) var(--pp-ease-spring);
+  }
+  & .sidebar .nav-item.active::after { transform: none; }
+  & .sidebar-selection { border: 0; background: var(--pp-paper-2); box-shadow: none; border-radius: 999px; }
+  & .monarch-update-notice { border: var(--pp-stroke) solid var(--pp-ink); border-radius: var(--pp-r-lg); background: var(--pp-paper); box-shadow: none; }
+  & .monarch-update-notice-mark { border-radius: var(--pp-r-pixel); background: var(--pp-ink); color: var(--pp-on-ink); }
+  & .monarch-update-notice button { border-radius: 999px; background: var(--pp-ink); color: var(--pp-on-ink); border: 0; }
+}
+
+/* =============================================================== topbar */
+html:root[data-design="pp"] {
+  & :is(.oscar-topbar, .topbar) {
+    border: 1px solid var(--pp-line-soft);
+    border-radius: var(--pp-r-lg);
+    background: var(--pp-paper);
+    box-shadow: none;
+  }
+  & .oscar-breadcrumb, & #oscar-chat-title { color: var(--pp-ink); font-weight: 600; }
+  & .status-pills :is(span, button, .status-pill) { border: var(--pp-stroke) solid var(--pp-ink); border-radius: 999px; background: var(--pp-paper); color: var(--pp-ink); box-shadow: none; }
+  & .desktop-titlebar { background: var(--pp-paper); color: var(--pp-ink-2); font-family: var(--pp-font); }
+}
+
+/* ============================================================= composer */
+html:root[data-design="pp"] {
+  & .claude-composer {
+    border: var(--pp-stroke) solid var(--pp-ink);
+    border-radius: 26px;
+    background: var(--pp-paper);
+    box-shadow: 0 8px 28px -14px rgba(var(--pp-ink-rgb), .22);
+  }
+  & .claude-composer:focus-within { border-color: var(--pp-ink); box-shadow: 0 0 0 4px var(--pp-paper-2), 0 8px 28px -14px rgba(var(--pp-ink-rgb), .22); }
+  & .claude-composer :is(textarea, input) { color: var(--pp-ink); font-family: var(--pp-font); }
+  & .claude-attach-btn { border: var(--pp-stroke) solid var(--pp-line-soft); }
+  & .claude-attach-btn:hover { border-color: var(--pp-ink); }
+
+  & .claude-send-btn {
+    border: 0;
+    border-radius: 50%;
+    background: var(--pp-ink);
+    color: var(--pp-on-ink);
+    box-shadow: none;
+    filter: none;
+    transition: background-color var(--pp-dur-instant) linear, transform var(--pp-dur-base) var(--pp-ease-spring);
+  }
+  & .claude-send-btn:hover:not(:disabled) { background: var(--pp-ink-hover); transform: none; filter: none; }
+  & .claude-send-btn:active:not(:disabled) { transform: scale(.94); }
+  & .claude-send-btn:disabled { background: var(--pp-paper-2); color: var(--pp-ink-faint); border: 0; }
+  & .claude-stop-btn { border: var(--pp-stroke) solid var(--pp-ink); border-radius: 50%; background: var(--pp-paper); color: var(--pp-ink); box-shadow: none; }
+
+  & .composer-web-chip { border: var(--pp-stroke) solid var(--pp-line-soft); border-radius: 999px; background: var(--pp-paper); color: var(--pp-ink-2); box-shadow: none; }
+  & .composer-web-chip:hover { border-color: var(--pp-ink); color: var(--pp-ink); }
+  & .composer-web-chip:is([aria-pressed="true"], .active, .is-active, [data-state="on"]) { border-color: var(--pp-ink); background: var(--pp-ink); color: var(--pp-on-ink); }
+
+  /* model chip */
+  & :is(.mode-chip, .oscar-inline-model > button) {
+    border: var(--pp-stroke) solid var(--pp-ink) !important;
+    border-radius: 999px !important;
+    background: var(--pp-paper) !important;
+    color: var(--pp-ink) !important;
+    box-shadow: none !important;
+  }
+  & :is(.mode-chip, .oscar-inline-model > button):hover { background: var(--pp-paper-2) !important; }
+  & .oscar-context-meter-track { background: var(--pp-paper-3); }
+  & .oscar-context-meter-track > * { background: var(--pp-ink); }
+
+  & :is(.oscar-empty-focus, .empty-mark) { color: var(--pp-ink); }
+  & .oscar-empty-focus :is(h1, h2, .empty-title) { font-family: var(--pp-font); font-weight: 600; letter-spacing: -.03em; }
+}
+
+/* ========================================================== starter chips */
+html:root[data-design="pp"] {
+  & :is(.oscar-starter-prompt, .starter-prompt, .oscar-starter-prompts button, .suggestion-chip, .quick-prompt) {
+    border: var(--pp-stroke) solid var(--pp-line-soft);
+    border-radius: 999px;
+    background: var(--pp-paper);
+    color: var(--pp-ink-2);
+    box-shadow: none;
+    transition: border-color var(--pp-dur-fast) linear, color var(--pp-dur-fast) linear, transform var(--pp-dur-base) var(--pp-ease-spring);
+  }
+  & :is(.oscar-starter-prompt, .starter-prompt, .oscar-starter-prompts button, .suggestion-chip, .quick-prompt):hover { border-color: var(--pp-ink); color: var(--pp-ink); background: var(--pp-paper); }
+}
+
+/* ============================================ menus, popovers and sheets */
+html:root[data-design="pp"] {
+  & :is(.dropdown-popover, .composer-options-popover, .coder-action-menu-popover, .oscar-memory-panel, .oscar-missions-panel, [id="oscar-history-panel"], .sidebar-history-menu-body, .oscar-skill-picker, .oscar-function-picker, .max-model-popup) {
+    border: var(--pp-stroke) solid var(--pp-ink) !important;
+    border-radius: var(--pp-r-lg) !important;
+    background: var(--pp-paper) !important;
+    box-shadow: var(--pp-shadow-float) !important;
+  }
+  & :is(.dropdown-item, .oscar-conversation-item, .history-item, [role="menuitem"], [role="option"]) { border-radius: var(--pp-r-md); color: var(--pp-ink); }
+  & :is(.dropdown-item, .oscar-conversation-item, .history-item, [role="menuitem"], [role="option"]):hover { background: var(--pp-paper-2); }
+  & :is(.dropdown-item, [role="menuitem"], [role="option"]):is(.active, .is-selected, [aria-selected="true"], [aria-checked="true"]) { background: var(--pp-paper-2); color: var(--pp-ink); font-weight: 600; }
+  & :is(.oscar-skill-picker-heading) { color: var(--pp-ink-muted); }
+
+  /* All modal sheets */
+  & dialog:is(.image-confirm-dialog, .monarch-question-dialog, .coder-project-dialog, .max-connection-dialog, .navigation-search, .attachment-viewer, .max-memory-dialog),
+  & dialog {
+    border: var(--pp-stroke) solid var(--pp-ink);
+    border-radius: var(--pp-r-xl);
+    background: var(--pp-paper);
+    color: var(--pp-ink);
+    box-shadow: var(--pp-shadow-float);
+    transition: opacity var(--pp-dur-base) var(--pp-ease-out), transform var(--pp-dur-slow) var(--pp-ease-spring), overlay var(--pp-dur-slow) allow-discrete, display var(--pp-dur-slow) allow-discrete;
+  }
+  & .navigation-search :is(.navigation-search-result, [role="option"]) { border-radius: var(--pp-r-md); }
+  & .navigation-search :is(.navigation-search-result, [role="option"]):is([aria-selected="true"], .active, :hover) { background: var(--pp-paper-2); }
+}
+
+/* =========================================================== content cards */
+html:root[data-design="pp"] {
+  /* First-level cards carry the black outline; cards nested in them are soft paper-2. */
+  & #settings-section .settings-panel-stack > .settings-group,
+  & :is(#security-section, #images-section, #sharing-section, #oscar-section) :is(.settings-group, .panel-card, .claude-card) {
+    border: var(--pp-stroke) solid var(--pp-ink) !important;
+    border-radius: var(--pp-r-lg) !important;
+    background: var(--pp-paper) !important;
+    box-shadow: none !important;
+  }
+  & #settings-section .settings-panel-stack > .settings-group :is(.model-record-card, .max-provider-card, .dev-toggle-card, article, .settings-appearance-row, .max-journey) {
+    border-color: transparent !important;
+    background: var(--pp-paper-2) !important;
+    box-shadow: none !important;
+  }
+  & #settings-section :is(.settings-rail) { border: 0; background: transparent; box-shadow: none; }
+  & #settings-section .settings-tabs > button { border-radius: 999px; position: relative; }
+  & #settings-section .settings-tabs > button strong { color: var(--pp-ink-2); font-weight: 500; }
+  & #settings-section .settings-tabs > button:hover { background: var(--pp-paper-2); }
+  & #settings-section .settings-tabs > button[aria-selected="true"] { background: var(--pp-paper-2) !important; }
+  & #settings-section .settings-tabs > button[aria-selected="true"] strong { color: var(--pp-ink) !important; font-weight: 600; }
+  & #settings-section .settings-tabs > button::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    right: 12px;
+    width: 6px;
+    height: 6px;
+    margin-top: -3px;
+    border-radius: var(--pp-r-pixel);
+    background: var(--pp-ink);
+    transform: scale(0) rotate(-90deg);
+    transition: transform var(--pp-dur-base) var(--pp-ease-spring);
+  }
+  & #settings-section .settings-tabs > button[aria-selected="true"]::after { transform: none; }
+  & #settings-section .settings-tabs-group { color: var(--pp-ink-muted); }
+}
+
+/* ============================================================ badges / tags */
+html:root[data-design="pp"] {
+  & :is(.status-badge, .badge, .tag, .pill, .model-badge, .settings-badge, .monarch-update-status, .chip) {
+    border-color: var(--pp-ink);
+    color: var(--pp-ink);
+  }
+}
+
+/* ================================================================ pixels */
+/* Pixel loader (modules/paper-pixel.js mounts <canvas class="pp-loader">). */
+.pp-loader { display: inline-block; flex: none; vertical-align: middle; color: inherit; line-height: 0; }
+.pp-loader canvas { display: block; }
+html:root[data-design="pp"] .pp-host-hidden { visibility: hidden !important; }
+
+/* Pixel burst layer */
+.pp-burst { position: fixed; pointer-events: none; z-index: 2400; }
+
+/* ======================================================== design picker */
+/* Visible in both designs: the PaperPixel card must look like PaperPixel even
+   while the classic design is on. */
+.settings-appearance-label { margin: 14px 0 8px; color: var(--ds-ink-3, var(--muted)); font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.settings-appearance-label:first-of-type { margin-top: 2px; }
+.settings-design-grid { grid-template-columns: repeat(2, minmax(0, 220px)); }
+.settings-design-card small { padding: 0 4px; color: var(--ds-ink-3, var(--muted)); font-size: 12px; line-height: 1.35; }
+.pp-design-preview {
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1.5px solid #0b0b0b;
+  border-radius: 10px;
+  background: #ffffff;
+}
+.pp-design-preview i { position: absolute; inset: 0 auto 0 0; width: 26%; border-right: 1px solid #e2e2de; background: #ffffff; }
+.pp-design-preview b { position: absolute; left: 6%; width: 13%; height: 6%; border-radius: 99px; background: #0b0b0b; }
+.pp-design-preview b:nth-of-type(1) { top: 16%; }
+.pp-design-preview b:nth-of-type(2) { top: 28%; width: 9%; background: #b4b4af; }
+.pp-design-preview em { position: absolute; top: 18%; right: 8%; width: 34%; height: 14%; border-radius: 7px; background: #f4f4f2; }
+.pp-design-preview u { position: absolute; left: 34%; right: 8%; bottom: 10%; height: 15%; border: 1.5px solid #0b0b0b; border-radius: 99px; background: #ffffff; }
+.pp-design-preview u::after { content: ""; position: absolute; right: 4%; top: 18%; width: 9%; aspect-ratio: 1; border-radius: 50%; background: #0b0b0b; }
+/* four pixels gathering into a ring above the composer */
+.pp-design-preview s { position: absolute; width: 4.5%; aspect-ratio: 1; border-radius: 1.5px; background: #0b0b0b; text-decoration: none; }
+.pp-design-preview s:nth-of-type(1) { left: 52%; top: 44%; transform: rotate(12deg); }
+.pp-design-preview s:nth-of-type(2) { left: 60%; top: 41%; transform: rotate(45deg); }
+.pp-design-preview s:nth-of-type(3) { left: 65%; top: 50%; transform: rotate(70deg); }
+.pp-design-preview s:nth-of-type(4) { left: 56%; top: 55%; transform: rotate(28deg); }
+
+html:root[data-design="pp"] {
+  & .settings-theme-card {
+    border: var(--pp-stroke) solid var(--pp-line-soft);
+    border-radius: var(--pp-r-lg);
+    background: var(--pp-paper);
+    box-shadow: none;
+    transition: border-color var(--pp-dur-fast) linear, transform var(--pp-dur-base) var(--pp-ease-spring);
+  }
+  & .settings-theme-card:hover { border-color: var(--pp-ink); transform: none; }
+  & .settings-theme-card[aria-checked="true"] { position: relative; border-color: var(--pp-ink); box-shadow: inset 0 0 0 .5px var(--pp-ink); }
+  & .settings-theme-card[aria-checked="true"]::after {
+    content: "";
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 8px;
+    height: 8px;
+    border-radius: var(--pp-r-pixel);
+    background: var(--pp-ink);
+  }
+  & .settings-theme-card strong { color: var(--pp-ink); font-weight: 600; }
+  /* theme previews describe PaperPixel's own Paper and Ink */
+  & .setup-theme-preview:not(.pp-classic-preview)[data-preview="light"] { --p-bg: #ffffff; --p-side: #ffffff; --p-line: #0b0b0b; --p-bubble: #f4f4f2; --p-mine: #f4f4f2; --p-ink: #0b0b0b; }
+  & .setup-theme-preview:not(.pp-classic-preview)[data-preview="dark"] { --p-bg: #0b0b0b; --p-side: #0b0b0b; --p-line: #f7f7f5; --p-bubble: #171716; --p-mine: #171716; --p-ink: #f7f7f5; }
+  & .setup-theme-preview:not(.pp-classic-preview) u { border-width: 1.5px; border-radius: 99px; }
+  & .setup-theme-preview:not(.pp-classic-preview) u::after { background: var(--p-ink); }
+  & .setup-theme-preview:not(.pp-classic-preview) i { border-right-color: color-mix(in srgb, var(--p-line) 18%, transparent); }
+}
+
+/* ============================================================ leftovers */
+html:root[data-design="pp"] {
+  & .nav-item.active::before { display: none; }
+
+  /* composer "+" menu: one outlined sheet, not a frame in a frame */
+  & :is(.topbar-icon-button, .dropdown-item) img:not(.oscar-incognito-icon) { filter: grayscale(1) brightness(0); }
+  &[data-theme="dark"] :is(.topbar-icon-button, .dropdown-item) img:not(.oscar-incognito-icon) { filter: grayscale(1) brightness(0) invert(1); }
+
+  /* model menu: the intelligence scale is one smooth track */
+
+  /* notices */
+  & .early-access-note { border: var(--pp-stroke) solid var(--pp-ink); border-radius: var(--pp-r-lg); background: var(--pp-paper); box-shadow: var(--pp-shadow-float); }
+  & .safe-fixed-boundaries { border: 0; border-radius: var(--pp-r-md); background: var(--pp-paper-2); }
+  & .safe-fixed-boundaries span { color: var(--pp-ink-muted); }
+
+  /* coder */
+  & .coder-live-dot { border-radius: var(--pp-r-pixel); background: var(--pp-ink); box-shadow: none; }
+  & .coder-onboarding-card { border: var(--pp-stroke) solid var(--pp-ink); border-radius: var(--pp-r-lg); background: var(--pp-paper); box-shadow: none; }
+  & .coder-onboarding-option { border: var(--pp-stroke) solid var(--pp-line-soft); border-radius: var(--pp-r-lg); background: var(--pp-paper); box-shadow: none; }
+  & .coder-onboarding-option:hover { border-color: var(--pp-ink); }
+  & .coder-onboarding-option.coder-primary { border-color: var(--pp-ink); background: var(--pp-paper); }
+
+  /* memory */
+  & .memory-count-pill { border: var(--pp-stroke) solid var(--pp-ink); background: var(--pp-paper); color: var(--pp-ink); }
+  & .memory-cross-chat-card { border: 0; border-radius: var(--pp-r-md); background: var(--pp-paper-2); box-shadow: none; }
+
+  /* every custom switch: pill track with the rolling square */
+  & :is(.control-switch, .max-fallback-card .ds-switch) {
+    width: 46px;
+    height: 28px;
+    border: var(--pp-stroke) solid var(--pp-ink);
+    border-radius: 999px;
+    background: var(--pp-paper);
+    box-shadow: none;
+  }
+  & :is(.control-switch, .max-fallback-card .ds-switch)::after {
+    top: 50%;
+    left: 4.5px;
+    width: 15px;
+    height: 15px;
+    margin-top: -7.5px;
+    border-radius: 3.5px;
+    background: var(--pp-ink);
+    box-shadow: none;
+    transition: transform var(--pp-dur-slow) var(--pp-ease-spring), background-color var(--pp-dur-base) linear;
+  }
+  & :is(label:has(input:checked) > .control-switch, .max-fallback-card input:checked + .ds-switch) { border-color: var(--pp-ink); background: var(--pp-ink); }
+  & :is(label:has(input:checked) > .control-switch, .max-fallback-card input:checked + .ds-switch)::after { background: var(--pp-on-ink); transform: translateX(18px) rotate(90deg); }
+
+  /* services and telegram */
+  & .service-settings { --service-accent: var(--pp-ink); }
+  & .service-mark { border: var(--pp-stroke) solid var(--pp-ink); border-radius: var(--pp-r-md); background: var(--pp-paper); color: var(--pp-ink); }
+  & .service-setup-note { border: 0; border-radius: var(--pp-r-md); background: var(--pp-paper-2); }
+  & #telegram-v2-settings .tg-hero-icon { border: var(--pp-stroke) solid var(--pp-ink); border-radius: var(--pp-r-lg); background: var(--pp-paper); color: var(--pp-ink); box-shadow: none; }
+
+  /* access: allow / confirm / deny are shapes, not colours */
+  & .access-matrix-wrap { border: var(--pp-stroke) solid var(--pp-ink); border-radius: var(--pp-r-lg); background: var(--pp-paper); }
+  & .access-matrix [data-active="true"] { background: var(--pp-paper-2); }
+  & .access-matrix thead th[data-active="true"] { color: var(--pp-ink); }
+  &[data-theme] .access-matrix td[data-decision] { color: var(--pp-ink); }
+  & .access-matrix td > span::before { width: 8px; height: 8px; border-radius: var(--pp-r-pixel); }
+  & .access-matrix td[data-decision="confirm"] > span::before { background: transparent; box-shadow: inset 0 0 0 1.5px var(--pp-ink); }
+  &[data-theme] .access-matrix td[data-decision="deny"] { color: var(--pp-ink-muted); }
+  & .access-matrix td[data-decision="deny"] > span::before { height: 2px; border-radius: 1px; }
+  & .red-zone-board { border: var(--pp-stroke) solid var(--pp-ink); border-radius: var(--pp-r-lg); background: var(--pp-paper); box-shadow: none; }
+  & .red-zone-mark { border: 0; border-radius: var(--pp-r-sm); background: var(--pp-ink); box-shadow: none; }
+  & .red-zone-well { border: var(--pp-stroke) dashed var(--pp-ink); background: var(--pp-paper-2); }
+  & #red-zone-well-copy { color: var(--pp-ink); }
+
+  /* the pixel loader takes over the thinking orb and spinners */
+  & :is(.monarch-thinking-orb, .spinner, .memory-loading-state > span):has(> .pp-loader) { display: inline-grid; place-items: center; width: auto; height: auto; border: 0 !important; background: none !important; box-shadow: none !important; animation: none !important; color: var(--pp-ink); }
+  & .monarch-thinking-orb:has(> .pp-loader) { width: 18px; height: 18px; flex-basis: 18px; }
+  & .monarch-thinking-orb:has(> .pp-loader) > :not(.pp-loader) { display: none !important; }
+  & .monarch-thinking-orb:has(> .pp-loader)::after { display: none; }
+  & .attachment-loading:has(> .pp-loader) { gap: 8px; }
+  & .attachment-loading:has(> .pp-loader)::before { display: none; }
+}
+
+/* =============================================================== thread */
+html:root[data-design="pp"] {
+  & .oscar-message.user .oscar-message-card {
+    border: 0;
+    border-radius: 22px 22px 6px 22px;
+    background: var(--pp-paper-2);
+    color: var(--pp-ink);
+    box-shadow: none;
+  }
+  & .oscar-message .message-text { color: var(--pp-ink); font-family: var(--pp-font); }
+  & .oscar-message.assistant .message-text { font-size: 15.5px; line-height: 1.65; }
+  & .message-meta, & .message-meta-row { color: var(--pp-ink-muted); }
+  & .message-text blockquote {
+    margin: 12px 0;
+    padding: 12px 16px;
+    border: 0;
+    border-radius: var(--pp-r-md);
+    background: var(--pp-paper-2);
+    color: var(--pp-ink-2);
+  }
+  & .message-text :not(pre) > code {
+    padding: 1px 6px;
+    border: 0;
+    border-radius: 6px;
+    background: var(--pp-paper-2);
+    color: var(--pp-ink);
+    font-family: var(--pp-mono);
+    font-size: .9em;
+  }
+  & .message-text a { color: var(--pp-ink); text-decoration: underline; text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+  & .message-text :is(ol, ul) li::marker { color: var(--pp-ink-muted); }
+  & .message-text strong { font-weight: 650; }
+  & .oscar-code-block { border: 0; border-radius: var(--pp-r-md); background: var(--pp-paper-2); box-shadow: none; overflow: hidden; }
+  & .oscar-code-header { border: 0; background: transparent; color: var(--pp-ink-muted); font-family: var(--pp-mono); }
+  & .oscar-code-block pre { background: transparent; color: var(--pp-ink); }
+  & .oscar-code-header button { border-radius: 999px; color: var(--pp-ink-2); }
+  & .oscar-code-header button:hover { background: var(--pp-paper-3); color: var(--pp-ink); }
+  & .source-chip {
+    border: var(--pp-stroke) solid var(--pp-line-soft);
+    border-radius: 999px;
+    background: var(--pp-paper);
+    color: var(--pp-ink-2);
+    box-shadow: none;
+  }
+  & .source-chip:hover { border-color: var(--pp-ink); color: var(--pp-ink); }
+  & .oscar-message-actions button { border-radius: 999px; color: var(--pp-ink-muted); }
+  & .oscar-message-actions button:hover { background: var(--pp-paper-2); color: var(--pp-ink); }
+  & .oscar-reasoning-block { border: 0; border-radius: var(--pp-r-md); background: var(--pp-paper-2); }
+  & :is(.oscar-live-stage, .oscar-thinking-only) { color: var(--pp-ink); }
+  & .oscar-live-stage :is(strong, .oscar-live-label) { color: var(--pp-ink); font-weight: 600; }
+  & .oscar-message.error .oscar-message-card, & .oscar-message[data-error="true"] .oscar-message-card { border: var(--pp-stroke) dashed var(--pp-ink); background: var(--pp-paper); }
+
+  /* Voice mode: the loudest control in the composer, drawn in ink. */
+  & .claude-voice-mode-btn {
+    border: 0 !important;
+    background: var(--pp-ink) !important;
+    color: var(--pp-on-ink) !important;
+    box-shadow: none !important;
+    filter: none !important;
+  }
+  & .claude-voice-mode-btn:hover { background: var(--pp-ink-hover) !important; transform: none; }
+  & .claude-voice-mode-btn:active { transform: scale(.94); }
+}
+
+/* ================================================== second audit pass */
+html:root[data-design="pp"] {
+  /* Oscar stands on paper, no halo */
+  & .mascot-view::before { background: none !important; }
+
+  /* coder */
+  & .coder-mode-root { background: var(--pp-paper) !important; }
+  & .coder-onboarding-option.coder-primary, & .coder-onboarding-option.coder-primary :is(strong, span) { color: var(--pp-ink); }
+  & .coder-mode-root button.is-active {
+    border: var(--pp-stroke) solid var(--pp-ink);
+    background: var(--pp-ink);
+    color: var(--pp-on-ink);
+    box-shadow: none;
+  }
+
+  /* memory, security, sharing, telegram, safe */
+  & .memory-unavailable-state { border: 0; border-radius: var(--pp-r-md); background: var(--pp-paper-2); }
+  & :is(.sharing-main-tabs, .sharing-preset-tabs) { border: 0; border-radius: 999px; background: var(--pp-paper-2); box-shadow: none; }
+  & :is(.sharing-main-tabs, .sharing-preset-tabs) > [role="tab"] { border: var(--pp-stroke) solid transparent; border-radius: 999px; background: transparent; color: var(--pp-ink-muted); box-shadow: none; }
+  & :is(.sharing-main-tabs, .sharing-preset-tabs) > [role="tab"]:hover { color: var(--pp-ink); }
+  & :is(.sharing-main-tabs, .sharing-preset-tabs) > [role="tab"][aria-selected="true"] { border-color: var(--pp-ink); background: var(--pp-paper); color: var(--pp-ink); box-shadow: var(--pp-shadow-thumb); }
+  & #sharing-section i { box-shadow: none; }
+  & #telegram-v2-settings .tg-feedback { border-radius: var(--pp-r-md); background: var(--pp-paper-2); color: var(--pp-ink); }
+  & .monarch-safe-settings::before { display: none; }
+  & .monarch-safe-settings { border-color: var(--pp-ink); }
+  & .settings-rail-footnote > span { border-radius: var(--pp-r-pixel); background: var(--pp-ink); box-shadow: none; }
+
+  /* settings general: the chosen card is outlined in ink */
+
+  /* the language picker is a segmented control */
+  & .ui-language-option { border: var(--pp-stroke) solid transparent; border-radius: 999px; color: var(--pp-ink-muted); box-shadow: none; }
+  & .ui-language-option:hover { color: var(--pp-ink); }
+  & .ui-language-option[aria-checked="true"] { border-color: var(--pp-ink); background: var(--pp-paper); color: var(--pp-ink); box-shadow: var(--pp-shadow-thumb); }
+  & .ui-language-option:focus-visible { outline: 2px solid var(--pp-ink); }
+
+  /* updates */
+  & .monarch-update-panel::after { display: none; }
+  & .monarch-update-status { border: var(--pp-stroke) solid var(--pp-ink); border-radius: 999px; background: var(--pp-paper); color: var(--pp-ink); }
+
+  /* model RAM fit: one smooth bar */
+  & .model-ram-bar { height: 6px; border-radius: 999px; overflow: hidden; background: var(--pp-paper-3); }
+  & .model-ram-bar > i { border-radius: 999px; background: var(--pp-ink); }
+  & .model-ram-fit[data-fit="short"] .model-ram-bar > i { background: var(--pp-ink-muted); }
+
+  /* first setup: the same paper and ink */
+  & .setup {
+    --su-bg: var(--pp-paper);
+    --su-ink: var(--pp-ink);
+    --su-ink-2: var(--pp-ink-2);
+    --su-ink-3: var(--pp-ink-muted);
+    --su-line: var(--pp-line-soft);
+    --su-line-2: var(--pp-ink);
+    --su-card: var(--pp-paper);
+    --su-fill: var(--pp-paper-2);
+    --su-fill-2: var(--pp-paper-3);
+    --su-accent: var(--pp-ink);
+    --su-accent-2: var(--pp-ink);
+    --su-accent-ink: var(--pp-ink);
+    --su-accent-fill: var(--pp-paper-2);
+    --su-ring: var(--pp-paper-2);
+    --su-on-accent: var(--pp-on-ink);
+    --su-good: var(--pp-ink);
+    --su-shadow: none;
+    --su-shadow-lift: var(--pp-shadow-float);
+    background: var(--pp-paper);
+    color: var(--pp-ink);
+  }
+  & .setup-wash { display: none; }
+  & .setup :is(h1, h2) { font-family: var(--pp-font); letter-spacing: -.03em; }
+  & .setup :is(h1, h2, [tabindex="-1"]):focus { outline: none; }
+  & .setup .setup-primary {
+    border: 0;
+    border-radius: 999px;
+    background: var(--pp-ink);
+    color: var(--pp-on-ink);
+    box-shadow: none;
+  }
+  & .setup .setup-primary:hover:not(:disabled) { background: var(--pp-ink-hover); transform: none; box-shadow: none; }
+  & .setup .setup-primary:disabled { background: var(--pp-paper-2); color: var(--pp-ink-faint); }
+  & .setup .setup-ghost:hover { background: var(--pp-paper-2); }
+}
+
+/* =================================================== third audit pass */
+html:root[data-design="pp"] {
+  & .compact-section-tabs { border: 0; border-radius: 999px; background: var(--pp-paper-2); box-shadow: none; }
+  & .compact-section-tabs > button { border: var(--pp-stroke) solid transparent !important; border-radius: 999px; background: transparent !important; color: var(--pp-ink-muted); box-shadow: none !important; }
+  & .compact-section-tabs > button:hover { color: var(--pp-ink); }
+  & .compact-section-tabs > button[aria-pressed="true"] { border-color: var(--pp-ink) !important; background: var(--pp-paper) !important; color: var(--pp-ink); box-shadow: var(--pp-shadow-thumb) !important; }
+  /* "Auto" in the model menu: five pixels instead of amber bars */
+}
+
+/* ======================================= progress and meters are smooth bars */
+html:root[data-design="pp"] {
+  & :is(.coder-context-meter) {
+    height: 6px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: var(--pp-paper-3);
+  }
+  & :is(.coder-context-meter) i {
+    border-radius: 999px;
+    background: var(--pp-ink);
+  }
+  & .setup-model-meter i { border-radius: 1.5px; background: var(--pp-paper-3); }
+  & .setup-model-meter:is([data-tier], [data-level]) i { background: var(--pp-ink); }
+  & .setup-progress { border-radius: var(--pp-r-md); background: var(--pp-paper-2); }
+  & .setup-progress > div span { color: var(--pp-ink); font-family: var(--pp-mono); }
+
+  /* coder run steps: each step is a pixel — hollow, current, filled */
+  & .coder-progress i { width: 8px; height: 8px; border: 1.5px solid var(--pp-ink-faint); border-radius: var(--pp-r-pixel); background: var(--pp-paper); box-shadow: none; }
+  & .coder-progress li[data-state="current"] { color: var(--pp-ink); }
+  & .coder-progress li[data-state="current"] i { border-color: var(--pp-ink); background: var(--pp-paper); box-shadow: inset 0 0 0 2px var(--pp-paper), inset 0 0 0 4px var(--pp-ink); }
+  & .coder-progress li[data-state="done"] i { border-color: var(--pp-ink); background: var(--pp-ink); }
+  & .coder-progress li[data-state="warning"] { color: var(--pp-ink); }
+  & .coder-progress li[data-state="warning"] i { border-style: dashed; border-color: var(--pp-ink); }
+  & .coder-progress li:not(:last-child)::after { background: var(--pp-line-soft); }
+  & .coder-progress li[data-state="done"]:not(:last-child)::after { background: var(--pp-ink); }
+
+  & .oscar-agent-thought__text { border-left-color: var(--pp-ink); }
+}
+
+/* Service and Security feedback keeps its meaning through shape and copy.
+   These states still carry literal amber fills in their classic styles. */
+html:root[data-design="pp"] {
+  & .ui-service-feedback {
+    border: var(--pp-stroke) dashed var(--pp-ink);
+    border-radius: var(--pp-r-md);
+    background: var(--pp-paper);
+    color: var(--pp-ink);
+    box-shadow: none;
+  }
+  & .image-generate-button {
+    border: var(--pp-stroke) solid var(--pp-ink);
+    border-radius: 999px;
+    background: var(--pp-ink);
+    color: var(--pp-on-ink);
+    box-shadow: none;
+    font-family: var(--pp-font);
+    font-weight: 600;
+  }
+  & .image-generate-button:hover:not(:disabled) {
+    transform: none;
+    background: var(--pp-ink-hover);
+    box-shadow: none;
+  }
+  & .image-generate-button:disabled {
+    border-color: transparent;
+    background: var(--pp-paper-2);
+    color: var(--pp-ink-muted);
+    opacity: 1;
+  }
+  & .custom-drop-icon { background: var(--pp-paper-2); }
+  & .max-journey i { background: var(--pp-line-soft); }
+  & .red-zone-feedback { color: var(--pp-ink); }
+}
+
+/* ============================================ permission lists: checkboxes */
+/* A grant ("allow Oscar to read") is a checkbox, not an on/off setting:
+   a rounded square that fills with ink and shows a tick of ten pixels. */
+html:root[data-design="pp"] {
+  & .service-scope-list label { border: var(--pp-stroke) solid var(--pp-line-soft); border-radius: var(--pp-r-md); background: var(--pp-paper); }
+  & .service-scope-list label:has(input:checked) { border-color: var(--pp-ink); }
+  & .service-scope-list input[type="checkbox"]:not(.voice-mode-hidden-input):not(.pp-native-check) {
+    width: 20px;
+    min-width: 20px;
+    height: 20px;
+    min-height: 20px;
+    margin: 0;
+    border-radius: var(--pp-r-xs);
+  }
+  & .service-scope-list input[type="checkbox"]:not(.voice-mode-hidden-input):not(.pp-native-check)::after {
+    left: 2.6px;
+    top: 7.8px;
+    width: 3px;
+    height: 3px;
+    margin: 0;
+    border-radius: .8px;
+    background: var(--pp-on-ink);
+    box-shadow: 0 2.6px var(--pp-on-ink), 2.6px 2.6px var(--pp-on-ink), 2.6px 5.2px var(--pp-on-ink), 5.2px 2.6px var(--pp-on-ink), 5.2px 0 var(--pp-on-ink), 7.8px 0 var(--pp-on-ink), 7.8px -2.6px var(--pp-on-ink), 10.4px -2.6px var(--pp-on-ink), 10.4px -5.2px var(--pp-on-ink);
+    transform: scale(0);
+    transform-origin: 6px 1px;
+    transition: transform var(--pp-dur-base) var(--pp-ease-spring);
+  }
+  & .service-scope-list input[type="checkbox"]:not(.voice-mode-hidden-input):not(.pp-native-check):checked::after { transform: scale(1); }
+
+  /* a field inside a soft card stands on paper */
+  & :is(.service-connect-form, .settings-group) .settings-field input:disabled { background: var(--pp-paper-3); }
+
+  /* only what floats has a shadow */
+  & #sharing-section :is(.sharing-hero, .sharing-card, section, article) { box-shadow: none; }
+}
+
+/* ============================================== one owner for "working" */
+/* The pixel loader already says "working"; the label beside it stays still. */
+html:root[data-design="pp"] {
+  & .oscar-live-copy { animation: none !important; color: var(--pp-ink); }
+}
+
+/* ============================================================= startup */
+/* The owner's crest assembles on plain paper; the wordmark is set in Onest. */
+html:root[data-design="pp"] {
+  & .startup-motion { background: var(--pp-paper); }
+  & .startup-assembly-backdrop { background: var(--pp-paper); }
+  & .startup-assembly-glow { display: none; }
+  & .startup-assembly-word { color: var(--pp-ink); font-family: var(--pp-font); font-weight: 700; letter-spacing: -.01em; }
+  & .startup-motion:not(.is-exiting) + .app-shell { filter: none; }
+}
+
+/* ================================================= first setup: design */
+/* Shown in both designs, so the base look uses the setup's own tokens. */
+.setup-design-switch {
+  display: grid;
+  grid-auto-flow: column;
+  width: max-content;
+  gap: 2px;
+  margin: 22px 0 0;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--su-fill, rgba(24, 22, 15, .035));
+}
+.setup-design-switch > button {
+  min-height: 34px;
+  padding: 0 18px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--su-ink-2, #57534b);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 150ms ease, background-color 150ms ease, border-color 150ms ease;
+}
+.setup-design-switch > button:hover { color: var(--su-ink, #18160f); }
+.setup-design-switch > button[aria-checked="true"] { border-color: var(--su-line-2, rgba(24, 22, 15, .15)); background: var(--su-card, #ffffff); color: var(--su-ink, #18160f); }
+html:root[data-design="pp"] {
+  & .setup-design-switch { background: var(--pp-paper-2); }
+  & .setup-design-switch > button { border-width: var(--pp-stroke); color: var(--pp-ink-muted); font-weight: 500; }
+  & .setup-design-switch > button:hover { color: var(--pp-ink); }
+  & .setup-design-switch > button[aria-checked="true"] { border-color: var(--pp-ink); background: var(--pp-paper); color: var(--pp-ink); box-shadow: var(--pp-shadow-thumb); }
+}
+
+/* ============================================ focus, what's new, voice */
+html:root[data-design="pp"][data-theme] {
+  /* themes.css paints the light focus ring amber with a stronger selector */
+  & :is(button, input, textarea, select, summary, a, [tabindex], [role]):focus-visible { outline-color: var(--pp-ink); }
+}
+html:root[data-design="pp"] {
+  & .whats-new-dialog { border: var(--pp-stroke) solid var(--pp-ink); border-radius: var(--pp-r-xl); background: var(--pp-paper); box-shadow: var(--pp-shadow-float); }
+  & .whats-new-filters { gap: 2px; width: max-content; margin: 8px 20px 12px; padding: 3px; border-radius: 999px; background: var(--pp-paper-2); }
+  & .whats-new-filters button { border: var(--pp-stroke) solid transparent; border-radius: 999px; background: transparent; color: var(--pp-ink-muted); }
+  & .whats-new-filters button:hover { color: var(--pp-ink); }
+  & .whats-new-filters button[aria-checked="true"] { border-color: var(--pp-ink); background: var(--pp-paper); color: var(--pp-ink); box-shadow: var(--pp-shadow-thumb); }
+  & .whats-new-list li { border: 0; border-radius: var(--pp-r-md); background: var(--pp-paper-2); }
+  & .whats-new-list li > span { color: var(--pp-ink-muted); }
+  & .whats-new-list li[data-type] > span { color: var(--pp-ink); }
+
+  /* voice mode: paper stage, the orb is a ring of pixels */
+  & .oscar-voice-mode { background: var(--pp-paper); color: var(--pp-ink); }
+  & .voice-mode-ambient { display: none; }
+  & .voice-mode-orb > :not(.pp-voice-ring) { display: none !important; }
+  & .voice-mode-orb { filter: none !important; opacity: 1; }
+  & .pp-voice-ring { position: relative; display: block; color: var(--pp-ink); }
+  & .voice-mode-orb:focus-visible::after { inset: auto; width: 256px; height: 256px; border: 2px solid var(--pp-ink); border-radius: 50%; box-shadow: none; }
+  & .voice-mode-eyebrow i { border-radius: var(--pp-r-pixel); background: var(--pp-ink); box-shadow: none; animation: none; }
+  & :is(.voice-mode-detail, .voice-mode-transcript) { border-color: transparent; color: var(--pp-ink-2); }
+  & .voice-mode-kicker { color: var(--pp-ink-muted); }
+  & .voice-mode-icon-btn { border: var(--pp-stroke) solid var(--pp-line-soft); border-radius: 999px; background: var(--pp-paper); color: var(--pp-ink); }
+  & .voice-mode-icon-btn:hover { border-color: var(--pp-ink); background: var(--pp-paper-2); }
+  & .voice-mode-control { border: var(--pp-stroke) solid var(--pp-ink); border-radius: 999px; background: var(--pp-paper); color: var(--pp-ink); box-shadow: none; }
+  & .voice-mode-control[aria-pressed="true"] { background: var(--pp-ink); color: var(--pp-on-ink); }
+  & .voice-mode-stability-warning { color: var(--pp-ink-muted); }
+}
+
+html:root[data-design="pp"] .oscar-voice-mode :is(.voice-mode-detail, .voice-mode-transcript) { border-color: transparent !important; background: transparent; }
+
+/* In the compact shell, the settings rail becomes one horizontal row. The
+   simple-settings grid otherwise overrides the responsive layout and pushes
+   the selected panel below the first viewport. */
+@media (max-width: 900px) {
+  html:root[data-design="pp"] #settings-section .settings-rail {
+    overflow: hidden;
+    padding: 3px;
+    border-bottom: 1px solid var(--pp-line-soft);
+    border-radius: 0;
+    background: var(--pp-paper);
+  }
+  html:root[data-design="pp"] #settings-section .settings-rail .settings-tabs {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 4px;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: none;
+  }
+  html:root[data-design="pp"] #settings-section .settings-tabs::-webkit-scrollbar { display: none; }
+  html:root[data-design="pp"] #settings-section .settings-tabs-group { display: none; }
+  html:root[data-design="pp"] #settings-section .settings-tabs > button {
+    flex: 0 0 auto;
+    min-width: 0;
+    min-height: 40px;
+    padding: 0 27px 0 14px;
+    border-radius: 999px;
+  }
+  html:root[data-design="pp"] #settings-section .settings-tabs > button small { display: none; }
+}
+
+/* The setup flow draws its own checks and switches. Its native inputs stay
+   focusable, but must not join the generic PaperPixel switch layout. */
+html:root[data-design="pp"] {
+  & .setup input[type="checkbox"] {
+    position: absolute;
+    width: 1px;
+    min-width: 1px;
+    height: 1px;
+    min-height: 1px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+  & .setup input[type="checkbox"]::after { display: none; }
+  & .setup .setup-model {
+    grid-template-columns: 30px minmax(0, 1fr) auto 24px;
+    gap: 12px;
+    min-height: 90px;
+    padding: 16px 18px;
+    border: var(--pp-stroke) solid var(--pp-line-soft);
+    border-radius: var(--pp-r-lg);
+    box-shadow: none;
+  }
+  & .setup .setup-model:hover { border-color: var(--pp-ink); box-shadow: none; }
+  & .setup .setup-model.is-selected { border-color: var(--pp-ink); box-shadow: inset 0 0 0 .5px var(--pp-ink); }
+  & .setup .setup-model-meter { width: 28px; justify-content: flex-start; }
+  & .setup .setup-model-copy > small { line-height: 1.45; }
+  & .setup .setup-model-size { justify-self: end; font-variant-numeric: tabular-nums; }
+  & .setup .setup-model .setup-tick { justify-self: end; }
+  & .setup .setup-state.is-ready { color: var(--pp-ink-2); background: var(--pp-paper-2); }
+  & .setup .setup-state.is-recommended { color: var(--pp-ink); background: var(--pp-paper-2); }
+  & .setup .setup-fallback {
+    grid-template-columns: minmax(0, 1fr) 46px;
+    gap: 22px;
+    border-color: var(--pp-line-soft);
+    border-radius: var(--pp-r-lg);
+    box-shadow: none;
+  }
+  & .setup .setup-fallback-copy { min-width: 0; }
+  & .setup .setup-fallback .setup-switch { grid-column: 2; grid-row: 1; justify-self: end; }
+  & .setup .setup-fallback .setup-switch { border: var(--pp-stroke) solid var(--pp-ink); background: var(--pp-paper); box-shadow: none; }
+  & .setup .setup-fallback .setup-switch::after {
+    top: 50%;
+    left: 4.5px;
+    width: 15px;
+    height: 15px;
+    margin-top: -7.5px;
+    border-radius: var(--pp-r-pixel);
+    background: var(--pp-ink);
+    box-shadow: none;
+  }
+  & .setup .setup-fallback input:checked + .setup-switch { background: var(--pp-ink); }
+  & .setup .setup-fallback input:checked + .setup-switch::after { background: var(--pp-on-ink); transform: translateX(18px) rotate(90deg); }
+  & .setup .setup-done-mark {
+    border: var(--pp-stroke) solid var(--pp-ink);
+    background: var(--pp-ink);
+    box-shadow: none;
+  }
+  & .setup .setup-done-mark svg { stroke: var(--pp-on-ink); }
+  & .setup .setup-summary-tile { border-color: var(--pp-line-soft); border-radius: var(--pp-r-md); box-shadow: none; }
+  & .setup .setup-summary-tile small { color: var(--pp-ink-muted); }
+
+  /* Run states use a shape and readable label; the action stays legible. */
+  & .coder-progress i { flex: 0 0 12px; width: 12px; height: 12px; font-size: 0; line-height: 0; }
+  & .coder-progress li { gap: 10px; font-size: 12.5px; }
+  & .coder-progress li[data-state="idle"] { color: var(--pp-ink-muted); }
+  & .coder-run-summary { border-color: var(--pp-line-soft); background: var(--pp-paper-2); box-shadow: none; }
+  & .coder-run-summary[data-status="completed"] { border-style: solid; border-color: var(--pp-ink); }
+  & .coder-run-summary:is([data-status="failed"], [data-status="warning"], [data-status="disconnected"]) { border-style: dashed; border-color: var(--pp-ink); box-shadow: none; }
+  & .coder-run-summary p { font-size: 13px; line-height: 1.5; }
+  & .coder-run-summary button, & .coder-primary {
+    border: var(--pp-stroke) solid var(--pp-ink);
+    border-radius: 999px;
+    color: var(--pp-on-ink);
+    background: var(--pp-ink);
+    box-shadow: none;
+  }
+  & .coder-run-summary button:hover, & .coder-primary:hover { background: var(--pp-ink-hover); }
+  & .coder-event p { font-size: 13px; line-height: 1.55; }
+  & .coder-event strong { font-size: 13px; }
+
+  /* Composer menus keep their full content visible; the compact layout below
+     redistributes sections instead of introducing a second scroll region. */
+  & #oscar-composer .composer-options-popover {
+    max-height: none;
+    overflow: visible;
+    scrollbar-width: none;
+  }
+  & #settings-section .memory-derived-item .memory-derived-text { font-size: 14px; line-height: 1.55; }
+  & #settings-section .memory-derived-outcome:not([open]) .memory-derived-text { -webkit-line-clamp: 2; }
+}
+@media (max-height: 760px) {
+  html:root[data-design="pp"] #oscar-composer .composer-options-popover {
+    width: min(560px, calc(100vw - 24px));
+  }
+
+}
+@media (max-width: 760px) {
+  html:root[data-design="pp"] .setup .setup-model { grid-template-columns: 28px minmax(0, 1fr) 24px; }
+  html:root[data-design="pp"] .setup .setup-model-size { grid-column: 2; grid-row: 2; justify-self: start; }
+  html:root[data-design="pp"] .setup .setup-model .setup-tick { grid-column: 3; grid-row: 1; }
+}
+
+/* A failed protection-state check needs an identifiable retry action. */
+
+/* The generated section switchers stay one reachable row on compact views. */
+html:root[data-design="pp"] .compact-section-tabs {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+html:root[data-design="pp"] .compact-section-tabs::-webkit-scrollbar { display: none; }
+html:root[data-design="pp"] .compact-section-tabs > button {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding-inline: 10px;
+  white-space: nowrap;
+}
+
+/* The compact navigation has seven destinations. Long labels must not set
+   intrinsic flex widths that hide the final destination behind the edge. */
+@media (max-width: 620px) {
+  html:root[data-design="pp"] .sidebar .nav-stack .nav-item {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  html:root[data-design="pp"] .sidebar .nav-stack .nav-item > span {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 10.5px;
+  }
+  html:root[data-design="pp"] .sidebar .nav-item:is([data-scroll-target="images-section"], [data-scroll-target="sharing-section"]) > span { font-size: 0; }
+  html:root[data-design="pp"] .sidebar .nav-item[data-scroll-target="images-section"] > span::after { content: "Изобр."; font-size: 10.5px; }
+  html:root[data-design="pp"] .sidebar .nav-item[data-scroll-target="sharing-section"] > span::after { content: "Доступ"; font-size: 10.5px; }
+}
+@media (max-width: 420px) {
+  html:root[data-design="pp"] .sidebar .nav-stack .nav-item { flex: 0 0 40px; }
+  html:root[data-design="pp"] .sidebar .nav-stack .nav-item > span { display: none; }
+}
+
+/* ========================================================= reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  html:root[data-design="pp"] *, html:root[data-design="pp"] *::before, html:root[data-design="pp"] *::after { transition-duration: 1ms !important; transition-delay: 0ms !important; }
+}
+html:root[data-design="pp"][data-motion="reduced"] *, html:root[data-design="pp"][data-motion="reduced"] *::before, html:root[data-design="pp"][data-motion="reduced"] *::after { transition-duration: 1ms !important; transition-delay: 0ms !important; }
+
+/* ====================== quality pass 2026-09-29: smooth lines, one screen */
+/* Wells and drop zones are soft filled shapes, not dashed lines: a dashed 1.5px
+   stroke on a rounded corner is the grainiest thing the layer draws. Error
+   states keep their dashed outline because the dash is what marks them. */
+html:root[data-design="pp"] {
+  & .red-zone-well, & .custom-drop { border: var(--pp-stroke) solid var(--pp-line-soft); background: var(--pp-paper-2); }
+  & .red-zone-well.drag-over, & .custom-drop.drag-over { border-color: var(--pp-ink); }
+
+  /* A field that lives inside a bordered wrapper must not draw a second outline. */
+  & #oscar-history-panel .sidebar-history-search input:is([type="search"], [type="text"], :not([type])),
+  & #oscar-history-panel .sidebar-history-search input:is([type="search"], [type="text"], :not([type])):focus {
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    outline: none;
+    box-shadow: none;
+  }
+  & .sidebar-history-search { border: var(--pp-stroke) solid var(--pp-line-soft); border-radius: 999px; background: var(--pp-paper-2); overflow: visible; }
+  & .sidebar-history-search:focus-within { border-color: var(--pp-ink); background: var(--pp-paper); box-shadow: none; }
+
+  /* Popup search: one inset ring instead of a border plus a focus outline. */
+  & .max-model-popup input {
+    min-height: 38px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--pp-paper-2);
+    box-shadow: none;
+    outline: none;
+  }
+  & .max-model-popup input:focus, & .max-model-popup input:focus-visible { outline: none; background: var(--pp-paper); box-shadow: inset 0 0 0 var(--pp-stroke) var(--pp-ink); }
+
+  /* Text fields draw their focus with the border, not with a second outline. */
+  & :is(input:is([type="text"], [type="search"], [type="url"], [type="email"], [type="password"], [type="number"], :not([type])), textarea, select):focus-visible { outline: none; }
+
+  /* Models: three cards side by side so the page fits one screen. */
+  & #settings-section .models-page-content .models-card-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  & #settings-section .models-page-content .model-record-card,
+  & #settings-section .settings-panel-stack > .settings-group .models-page-content .model-record-card {
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    gap: 8px;
+    min-height: 0;
+    padding: 14px 16px;
+    border: 0 !important;
+    border-radius: var(--pp-r-lg);
+    background: var(--pp-paper-2) !important;
+  }
+  & #settings-section .models-page-content .model-record-card > header { position: relative; display: block; }
+  & #settings-section .models-page-content .model-record-side { position: absolute; top: 0; right: 0; }
+  & #settings-section .models-page-content .model-record-card h3 { margin: 6px 0 0; padding-right: 76px; font-size: 15px; }
+  & #settings-section .models-page-content .model-role-description { max-width: none; font-size: 12.5px; line-height: 1.45; }
+  & #settings-section .models-page-content .model-record-card .model-ram-fit { max-width: none; gap: 5px; }
+  & #settings-section .models-page-content .model-ram-fit > small { font-size: 11.5px; }
+  & #settings-section .models-page-content .models-summary-strip { display: none; }
+  & #settings-section .models-page-content .models-summary-strip:has(button) { display: flex; margin-bottom: 8px; }
+  & #settings-section .models-settings-panel .settings-section-copy { margin-bottom: 10px; }
+  & #settings-section .custom-models { margin-top: 12px; padding-top: 12px; }
+  & #settings-section .custom-models-head { margin-bottom: 8px; }
+  & #settings-section .custom-models-head p { margin: 2px 0 0; }
+  & #settings-section .custom-drop { min-height: 0; padding: 12px 16px; }
+}
+@media (max-width: 900px) {
+  html:root[data-design="pp"] #settings-section .models-page-content .models-card-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Settings header is tighter so a page with a form fits the window. */
+html:root[data-design="pp"] {
+  & #settings-section > .document-feed { padding-bottom: 8px; }
+  & #settings-section .settings-view-header { height: auto; min-height: 0; margin-bottom: 8px; padding-top: 20px; padding-bottom: 8px; }
+  & #settings-section .settings-view-header h2 { font-size: 30px; line-height: 1.15; }
+  & #settings-section .settings-content { padding-bottom: 0; }
+}
+
+/* The Telegram card sets `a { color: inherit }` by id, which turned the
+   "Open the bot" link into ink on ink. */
+html:root[data-design="pp"] {
+  & #telegram-v2-settings a:is(.claude-primary-btn, .primary-button) { color: var(--pp-on-ink); }
+}
+
+/* Select lists: one line per option, the label is cut with an ellipsis. */
+html:root[data-design="pp"] {
+  & .max-model-option > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  & .max-model-trigger > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  & .oscar-memory-panel .memory-create-row { align-items: center; }
+}
+
+
+/* Security → Settings → Mode: choices on the left, the action policy on the
+   right, so the page fits one screen instead of a column of four blocks. */
+@media (min-width: 1000px) {
+  html:root[data-design="pp"] {
+    /* Policy center: measures side by side, rare ones below at full width. */
+  }
+}
+
+
+/* Sharing: header and status card are one compact strip so the tab content fits. */
+html:root[data-design="pp"] {
+  & #sharing-section .sharing-document-feed { padding-bottom: 20px; }
+  & #sharing-section .sharing-page-header { margin-bottom: 8px; padding-top: 20px; padding-bottom: 6px; }
+  & #sharing-section .sharing-page-header h2 { font-size: 30px; line-height: 1.15; }
+  & #sharing-section .sharing-page-root { gap: 12px; padding-bottom: 8px; }
+  & #sharing-section .sharing-status-card { min-height: 0; padding: 14px 22px; }
+  & #sharing-section .sharing-status-copy { gap: 4px; }
+  & #sharing-section .sharing-status-copy h3 { font-size: 22px; letter-spacing: -.02em; }
+  & #sharing-section .sharing-status-actions .claude-ghost-btn { border-color: var(--pp-ink); }
+}
+
+html:root[data-design="pp"] {
+  & :is(#settings-section, #sharing-section, #images-section) .view-header { min-height: 0; }
+}
+
+/* Personality: eight sliders sit in four columns, two rows. */
+@media (min-width: 1100px) {
+  html:root[data-design="pp"] {
+    & #settings-section .settings-panel-stack > .settings-group { padding-block: 16px; }
+  }
+}
+
+/* Services: one service at a time, its form in two columns. */
+html:root[data-design="pp"] {
+  & .service-switcher { display: inline-flex; gap: 2px; margin: 0 0 8px; padding: 4px; border-radius: 999px; background: var(--pp-paper-2); }
+  & .service-switcher > button { min-height: 34px; padding: 0 18px; border: var(--pp-stroke) solid transparent; border-radius: 999px; background: transparent; color: var(--pp-ink-muted); font: inherit; font-size: 13.5px; font-weight: 500; cursor: pointer; }
+  & .service-switcher > button:hover { color: var(--pp-ink); }
+  & .service-switcher > button[aria-selected="true"] { border-color: var(--pp-ink); background: var(--pp-paper); color: var(--pp-ink); box-shadow: var(--pp-shadow-thumb); }
+  & .service-settings[data-service-tabs] > .service-card:not([data-service-active]) { display: none; }
+}
+@media (min-width: 1000px) {
+  html:root[data-design="pp"] {
+    & .service-settings[data-service-tabs] .service-connect-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px 24px; align-items: start; }
+    & .service-settings[data-service-tabs] .service-connect-form > :is(.service-setup-note, .settings-field, .service-advanced) { grid-column: 1; }
+    & .service-settings[data-service-tabs] .service-connect-form > .service-scope-list { grid-column: 2; grid-row: 1 / span 3; margin: 0; }
+    & .service-settings[data-service-tabs] .service-connect-form > .service-disclosure { grid-column: 1 / -1; margin: 0; }
+    & .service-settings[data-service-tabs] .service-connect-form > .claude-primary-btn { grid-column: 1 / -1; justify-self: start; min-width: 260px; }
+    & .service-settings[data-service-tabs] .service-card { padding-block: 12px; }
+    & .service-settings[data-service-tabs] .service-card-heading { margin-bottom: 8px; gap: 12px; }
+    & .service-settings[data-service-tabs] .service-mark { width: 36px; height: 36px; font-size: 13px; }
+    & .service-settings[data-service-tabs] .service-setup-note { padding: 10px 14px; }
+    & .service-settings[data-service-tabs] .service-setup-note p { margin: 4px 0 6px; }
+    & .service-settings[data-service-tabs] .settings-feedback:empty { display: none; }
+    & .service-settings[data-service-tabs] textarea { min-height: 0; height: 60px; }
+    & .service-settings[data-service-tabs] .settings-group-heading .section-kicker { display: none; }
+    & .service-settings[data-service-tabs] .settings-section-copy { margin: 0 0 8px; }
+    & .service-settings[data-service-tabs] .service-disclosure { font-size: 12px; line-height: 1.45; }
+  }
+}
+
+/* System: the row above shows one group at a time. */
+html:root[data-design="pp"] {
+  & .settings-panel-stack[data-system-tabs] > [data-settings-panel="system"]:not([data-system-active], .system-switcher) { display: none; }
+  & .system-switcher { margin-bottom: 10px; }
+  & .service-switcher[hidden] { display: none; }
+}
+
+/* Appearance: design and theme sit side by side. */
+@media (min-width: 1100px) {
+  html:root[data-design="pp"] {
+    & #settings-section .settings-appearance { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 22px; align-items: start; }
+    & #settings-section .settings-appearance > * { grid-column: 1 / -1; }
+    & #settings-section .settings-appearance > #settings-design-label { grid-column: 1; grid-row: 2; }
+    & #settings-section .settings-appearance > #settings-design-label + .settings-appearance-grid { grid-column: 1; grid-row: 3; }
+    & #settings-section .settings-appearance > #settings-theme-label { grid-column: 2; grid-row: 2; }
+    & #settings-section .settings-appearance > #settings-theme-label + .settings-appearance-grid { grid-column: 2; grid-row: 3; }
+    & #settings-section .settings-appearance .settings-appearance-grid { gap: 8px; }
+  }
+}
+
+/* Access: the autonomy table on the left, the red-zone board on the right. */
+@media (min-width: 1100px) {
+  html:root[data-design="pp"] {
+    & #settings-section .access-settings:not([hidden]) { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); column-gap: 22px; align-content: start; }
+    & #settings-section .access-settings > * { grid-column: 1; }
+    & #settings-section .access-settings > .access-settings-heading { grid-column: 1 / -1; }
+    & #settings-section .access-settings > .red-zone-board { grid-column: 2; grid-row: 2 / span 5; margin: 0; align-self: start; }
+    & #settings-section .access-matrix th, & #settings-section .access-matrix td { padding: 8px 10px; font-size: 12.5px; }
+    & #settings-section .access-matrix tbody th { min-width: 178px; white-space: nowrap; }
+  }
+}
+
+/* Plain tiles inside a settings group (Safe) keep the group's rounding. */
+html:root[data-design="pp"] {
+  & #settings-section article:not([class]) { border-radius: var(--pp-r-md); }
+  & #settings-section :is(.image-settings-row, .settings-appearance-row) { border-radius: var(--pp-r-md); }
+}
+
+/* Empty states and drop areas: a soft solid shape, never a dashed line. */
+html:root[data-design="pp"] {
+  & :is(.empty-state, .image-perchance-placeholder) { border-style: solid; border-color: var(--pp-line-soft); background: var(--pp-paper-2); }
+}
+
+/* Model menu: the little signal icon above the thumb said nothing the slider does not. */
+
+/* "Perchance не работает" is an action, not a status: muted and underlined. */
+html:root[data-design="pp"] {
+  & #image-perchance-unavailable { color: var(--pp-ink-muted); font-weight: 500; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  & #image-perchance-unavailable:hover { color: var(--pp-ink); background: transparent; }
+}
+
+/* Reminders: paper cards, the dot is the only colour. */
+html:root[data-design="pp"] {
+  & .oscar-reminder { border: var(--pp-stroke) solid var(--pp-line-soft); border-radius: var(--pp-r-md); background: var(--pp-paper); }
+  & .oscar-reminder-dot { border-radius: 2px; background: var(--pp-ink); }
+  & .oscar-reminder[data-status="delivered"] .oscar-reminder-dot { background: #f28a1e; box-shadow: none; }
+  & .oscar-reminders-count { color: var(--pp-ink); background: var(--pp-paper-2); }
+  & .reminder-toast { border: var(--pp-stroke) solid var(--pp-ink); border-radius: var(--pp-r-lg); color: var(--pp-ink); background: var(--pp-paper); box-shadow: var(--pp-shadow-thumb); backdrop-filter: none; }
+  & .reminder-toast-kicker { color: var(--pp-ink-muted); }
+}
+html:root[data-design="pp"] #settings-section .models-page-content .model-extra-card:not(:has(.model-record-side)) h3 { padding-right: 0; }

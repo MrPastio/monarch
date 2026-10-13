@@ -14,7 +14,15 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.concurrency import iterate_in_threadpool
 
-from .model_runtime import LocalModelRuntime, normalize_generation_stop_reason
+from .model_runtime import (
+    LocalModelRuntime,
+    local_tier_swap_needs_fresh_process,
+    normalize_generation_stop_reason,
+)
+
+# The host recognises this code and replays the request once against a
+# fresh backend process. Keep it identical to the chat lane's code.
+TIER_RECYCLE_REQUIRED_CODE = "model-tier-recycle-required"
 from .inference_coordinator import InferenceLane, InferenceSlotLease
 from .router import select_model_tier
 from .schemas import ChatMessage, MAX_CHAT_MESSAGE_CHARS, MAX_CHAT_MESSAGES
@@ -59,7 +67,6 @@ MODEL_ALIASES = {
 AUTO_MODEL_ALIASES = {"auto", "monarch", "monarch-auto"}
 AGENT_RESIDENT_REUSE_MIN_FREE_RAM_GB = 1.0
 AGENT_SESSION_RESIDENT_REUSE_MIN_FREE_RAM_GB = 0.5
-AGENT_SESSION_RECYCLE_DELAY_SECONDS = 45.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,7 +246,8 @@ async def create_openai_chat_completion(
     *,
     runtime: LocalModelRuntime,
     acquire_inference_slot: Callable[[InferenceLane], Awaitable[InferenceSlotLease | None]],
-    unload_after_generation: Callable[[float], None],
+    unload_after_generation: Callable[..., None],
+    request_backend_recycle: Callable[[float], None] | None = None,
     qwen_runtime: QwenSharingRuntime | None = None,
 ):
     qwen_runtime = qwen_runtime or QwenSharingRuntime(runtime.settings)
@@ -275,6 +283,23 @@ async def create_openai_chat_completion(
             code="provider_handoff_failed",
         )
 
+    if target.provider == "gemma" and local_tier_swap_needs_fresh_process(runtime, target.model_id):
+        # Swapping tiers inside one CUDA process aborts the native runtime and
+        # kills this request outright. Decline; the host replays once against a
+        # fresh process, which the swap was going to cost anyway.
+        inference_slot.release()
+        # Keep the OpenAI-shaped response structured, but do not leave the
+        # process resident with the wrong tier. The callback is owned by the
+        # application lifecycle; library callers may omit it in unit fixtures.
+        if request_backend_recycle is not None:
+            request_backend_recycle(0.25)
+        return openai_error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Preparing a different local model. Send the request again in a moment.",
+            error_type="server_error",
+            code=TIER_RECYCLE_REQUIRED_CODE,
+        )
+
     runtime.reset_generation_cancel()
     qwen_runtime.reset_generation_cancel()
     try:
@@ -301,11 +326,14 @@ async def create_openai_chat_completion(
     created = int(time.time())
     messages = request.chat_messages()
     max_tokens = request.output_token_limit()
-    release_model = (
-        lambda: unload_after_generation(AGENT_SESSION_RECYCLE_DELAY_SECONDS)
-        if request.inference_lane == "agent" and request.agent_session_id
-        else lambda: unload_after_generation(5.0)
-    )
+    # An agent session is mid-task, so its model is owed to the next request;
+    # every other caller gets the ordinary residency window for the tier it just
+    # used. The previous form read as a conditional but was one lambda whose
+    # else-branch *returned* another lambda, so an interactive completion on
+    # this lane never released its model at all.
+    agent_session = bool(request.inference_lane == "agent" and request.agent_session_id)
+    released_tier = target.model_id if target.provider == "gemma" else None
+    release_model = lambda: unload_after_generation(released_tier, agent_session=agent_session)
 
     if target.provider == "qwen":
         release_model = (
@@ -344,6 +372,7 @@ async def create_openai_chat_completion(
     generator = None
     pieces: list[str] = []
     generation_started_at = time.perf_counter()
+    next_disconnect_check = 0.0
     try:
         generator = stream_target_chat(
             target,
@@ -358,6 +387,20 @@ async def create_openai_chat_completion(
             enable_thinking=request.reasoning_effort == "high",
         )
         async for piece in iterate_in_threadpool(generator):
+            now = time.monotonic()
+            if now >= next_disconnect_check:
+                next_disconnect_check = now + 0.05
+                if await http_request.is_disconnected():
+                    if target.provider == "qwen":
+                        qwen_runtime.cancel_generation()
+                    else:
+                        runtime.cancel_generation()
+                    return openai_error_response(
+                        499,
+                        "The caller disconnected before generation completed.",
+                        error_type="request_error",
+                        code="caller_disconnected",
+                    )
             pieces.append(piece)
         answer = "".join(pieces)
         if not answer.strip():

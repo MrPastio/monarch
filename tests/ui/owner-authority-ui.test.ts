@@ -9,7 +9,7 @@ const html = readFileSync('src/ui/public/index.html', 'utf8');
 const app = readFileSync('src/ui/public/app.js', 'utf8');
 const styles = readFileSync('src/ui/public/styles-v2.css', 'utf8');
 const enrollment = readFileSync('src/ui/public/modules/owner-enrollment.js', 'utf8');
-const preload = readFileSync('desktop/electron/preload.mjs', 'utf8');
+const preload = readFileSync('desktop/electron/preload.cjs', 'utf8');
 
 describe('Owner authority UI', () => {
   it('shows a glass authority badge without a client-side Owner switch', () => {

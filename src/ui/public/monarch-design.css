@@ -1,0 +1,414 @@
+/* Monarch Design — canonical primitives.
+   Loaded last: one definition for buttons, fields, switches, focus, sheets and
+   menus. Components keep layout; this file owns how controls look and move.
+   Motion follows the owner rule: things arrive from and return to a place,
+   interruptible, no idle glow, and reduced motion is honoured. */
+
+:root {
+  --ds-ink: var(--text, #f4f2ee);
+  --ds-ink-2: var(--text-soft, #c3c2c0);
+  --ds-ink-3: var(--muted, #a2a3a6);
+  --ds-line: rgba(var(--theme-line-rgb, 255, 255, 255), .09);
+  --ds-line-2: rgba(var(--theme-line-rgb, 255, 255, 255), .15);
+  --ds-fill-1: rgba(var(--theme-wash-rgb, 255, 255, 255), .03);
+  --ds-fill-2: rgba(var(--theme-wash-rgb, 255, 255, 255), .055);
+  --ds-fill-3: rgba(var(--theme-wash-rgb, 255, 255, 255), .085);
+  --ds-field: rgba(var(--theme-plane-rgb, 0, 0, 0), .26);
+  --ds-sheet: rgb(var(--theme-plane-rgb, 23, 22, 20));
+  --ds-sheet-line: rgba(255, 196, 92, .16);
+  --ds-accent: #ffb52b;
+  --ds-accent-ink: var(--theme-amber-ink, #ffc862);
+  --ds-accent-fill: rgba(255, 176, 36, .1);
+  --ds-accent-line: rgba(255, 184, 48, .36);
+  --ds-on-accent: #1a1206;
+  --ds-primary: linear-gradient(180deg, #ffc746 0%, #ffa326 100%);
+  --ds-danger-ink: var(--theme-danger-ink, #ff8f86);
+  --ds-focus: rgba(255, 190, 70, .72);
+  --ds-r-control: 11px;
+  --ds-r-card: 16px;
+  --ds-r-sheet: 22px;
+  --ds-h-sm: 30px;
+  --ds-h-md: 36px;
+  --ds-h-lg: 44px;
+  --ds-shadow-sheet: 0 28px 80px rgba(0, 0, 0, calc(.55 * var(--theme-shadow-strength, 1))), 0 2px 0 rgba(255, 255, 255, .03) inset;
+  --ds-shadow-menu: 0 18px 48px rgba(0, 0, 0, calc(.5 * var(--theme-shadow-strength, 1))), 0 1px 0 rgba(255, 255, 255, .04) inset;
+  --ds-ease: cubic-bezier(.2, .8, .2, 1);
+  --ds-ease-out: cubic-bezier(.4, 0, 1, 1);
+  --ds-t-touch: 150ms;
+  --ds-t-move: 240ms;
+}
+:root[data-theme="light"] {
+  --ds-field: rgba(255, 255, 255, .9);
+  --ds-sheet: rgb(255, 253, 249);
+  --ds-sheet-line: rgba(150, 96, 20, .18);
+  --ds-accent-fill: rgba(221, 132, 20, .1);
+  --ds-accent-line: rgba(162, 91, 12, .34);
+  --ds-focus: rgba(168, 90, 16, .7);
+  --ds-shadow-sheet: 0 28px 70px rgba(70, 45, 18, .16), 0 1px 0 rgba(255, 255, 255, .9) inset;
+  --ds-shadow-menu: 0 16px 40px rgba(70, 45, 18, .14), 0 1px 0 rgba(255, 255, 255, .9) inset;
+}
+
+/* ---------- Focus: one quiet ring, keyboard only ---------- */
+:where(button, a, summary, input, textarea, select, [role="button"], [role="tab"], [role="option"], [role="radio"], [tabindex]):focus-visible {
+  outline: 2px solid var(--ds-focus);
+  outline-offset: 2px;
+}
+:where(button, a, summary, [role="button"], [role="tab"]):focus:not(:focus-visible) { outline: none; }
+
+/* ---------- Buttons ---------- */
+:is(.claude-primary-btn, .primary-button, .claude-secondary-btn, .secondary-button, .claude-ghost-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--ds-h-md);
+  padding: 0 15px;
+  border: 1px solid var(--ds-line-2);
+  border-radius: var(--ds-r-control);
+  background: var(--ds-fill-2);
+  color: var(--ds-ink);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -.005em;
+  white-space: nowrap;
+  box-shadow: none;
+  filter: none;
+  cursor: pointer;
+  transition: background-color var(--ds-t-touch) ease, border-color var(--ds-t-touch) ease, color var(--ds-t-touch) ease, box-shadow var(--ds-t-move) var(--ds-ease), transform var(--ds-t-touch) var(--ds-ease), opacity var(--ds-t-touch) ease;
+}
+:is(.claude-secondary-btn, .secondary-button):hover:not(:disabled) { border-color: rgba(var(--theme-line-rgb, 255, 255, 255), .22); background: var(--ds-fill-3); color: var(--ds-ink); }
+/* Ghost is the quiet action, not bare text: a faint resting fill keeps it
+   readable as a button next to headings and labels. */
+.claude-ghost-btn { border-color: transparent; background: var(--ds-fill-1); color: var(--ds-ink-2); }
+.claude-ghost-btn:hover:not(:disabled) { border-color: var(--ds-line); background: var(--ds-fill-3); color: var(--ds-ink); }
+:is(.claude-primary-btn, .primary-button) {
+  border-color: rgba(255, 196, 70, .7);
+  background: var(--ds-primary);
+  color: var(--ds-on-accent);
+  box-shadow: 0 1px 0 rgba(255, 244, 214, .55) inset, 0 6px 18px rgba(255, 146, 24, calc(.2 * var(--theme-shadow-strength, 1)));
+}
+:is(.claude-primary-btn, .primary-button):hover:not(:disabled) {
+  filter: brightness(1.05);
+  box-shadow: 0 1px 0 rgba(255, 244, 214, .6) inset, 0 9px 24px rgba(255, 146, 24, calc(.28 * var(--theme-shadow-strength, 1)));
+}
+/* Weight: only the primary action lifts. Rows, tabs and chips stay put. */
+:is(.claude-primary-btn, .primary-button):hover:not(:disabled) { transform: translateY(-1px); }
+:is(.claude-primary-btn, .primary-button, .claude-secondary-btn, .secondary-button, .claude-ghost-btn):active:not(:disabled) { transform: translateY(0) scale(.97); transition-duration: 80ms; }
+/* Disabled reads as "not yet", never as a dirty version of the colour. */
+:is(.claude-primary-btn, .primary-button, .claude-secondary-btn, .secondary-button, .claude-ghost-btn):disabled,
+:is(.claude-primary-btn, .primary-button, .claude-secondary-btn, .secondary-button, .claude-ghost-btn)[aria-disabled="true"] {
+  border-color: var(--ds-line);
+  background: var(--ds-fill-1);
+  color: var(--ds-ink-3);
+  box-shadow: none;
+  filter: none;
+  opacity: .72;
+  cursor: not-allowed;
+  transform: none;
+}
+:is(.claude-primary-btn, .primary-button, .claude-secondary-btn, .claude-ghost-btn) > svg { flex: none; }
+:is(.claude-primary-btn, .claude-secondary-btn, .claude-ghost-btn).danger,
+.telegram-danger-button { color: var(--ds-danger-ink); }
+
+/* ---------- Fields ---------- */
+:is(#settings-section, #security-section, #images-section, #sharing-section, dialog, .memory-compose-panel, .skill-authoring-panel, .navigation-search, .coder-onboarding)
+  :is(input:is([type="text"], [type="search"], [type="url"], [type="email"], [type="password"], [type="number"], :not([type])), textarea):not(.max-model-popup input) {
+  min-height: 40px;
+  border: 1px solid var(--ds-line-2);
+  border-radius: var(--ds-r-control);
+  background: var(--ds-field);
+  color: var(--ds-ink);
+  font-size: 13.5px;
+  box-shadow: none;
+  transition: border-color var(--ds-t-touch) ease, box-shadow var(--ds-t-move) var(--ds-ease), background-color var(--ds-t-touch) ease;
+}
+:is(#settings-section, #security-section, #images-section, #sharing-section, dialog, .memory-compose-panel, .skill-authoring-panel, .navigation-search, .coder-onboarding)
+  :is(input:is([type="text"], [type="search"], [type="url"], [type="email"], [type="password"], [type="number"], :not([type])), textarea):not(.max-model-popup input):focus {
+  border-color: var(--ds-accent-line);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--ds-accent-fill);
+}
+:is(input, textarea)::placeholder { color: var(--ds-ink-3); opacity: .85; }
+
+/* Styled select trigger (ui-select.js) */
+.max-model-trigger {
+  min-height: 40px;
+  padding: 0 12px 0 14px;
+  border-color: var(--ds-line-2);
+  border-radius: var(--ds-r-control);
+  background: var(--ds-field);
+  color: var(--ds-ink);
+  font-size: 13.5px;
+}
+.max-model-trigger:hover:not(:disabled), .max-model-trigger[aria-expanded="true"] { border-color: var(--ds-accent-line); background: var(--ds-field); }
+.max-model-trigger > .max-select-chevron { display: grid; place-items: center; width: 18px; height: 18px; color: var(--ds-ink-3); font-size: 0; transition: transform var(--ds-t-move) var(--ds-ease), color var(--ds-t-touch) ease; }
+.max-model-trigger > .max-select-chevron svg { width: 14px; height: 14px; }
+.max-model-trigger[aria-expanded="true"] > .max-select-chevron { transform: rotate(180deg); color: var(--ds-accent-ink); }
+.max-model-popup { padding: 6px; border-color: var(--ds-sheet-line); border-radius: 14px; background: var(--ds-sheet); box-shadow: var(--ds-shadow-menu); }
+.max-model-popup:popover-open { animation: none; transform-origin: 50% 0; transition: opacity var(--ds-t-touch) ease, transform var(--ds-t-move) var(--ds-ease), overlay var(--ds-t-move) allow-discrete, display var(--ds-t-move) allow-discrete; }
+.max-model-popup[data-side="above"]:popover-open { transform-origin: 50% 100%; }
+@starting-style {
+  .max-model-popup:popover-open { opacity: 0; transform: translateY(-4px) scale(.98); }
+  .max-model-popup[data-side="above"]:popover-open { transform: translateY(4px) scale(.98); }
+}
+.max-model-option { min-height: 38px; padding: 8px 11px; border-radius: 9px; font-size: 13px; }
+.max-model-option[aria-selected="true"] { color: var(--ds-accent-ink); font-weight: 600; }
+.max-model-option:hover, .max-model-option[data-highlighted="true"] { background: var(--ds-fill-2); }
+
+/* ---------- Switches: the knob travels, it never jumps ---------- */
+input[type="checkbox"]:not(.voice-mode-hidden-input) {
+  width: 40px;
+  min-width: 40px;
+  height: 24px;
+  min-height: 24px;
+  border: 1px solid var(--ds-line-2);
+  background:
+    radial-gradient(circle closest-side, rgba(var(--theme-wash-rgb, 226, 224, 219), 1) 0 calc(100% - 1px), transparent 100%) no-repeat 3px 50% / 18px 18px,
+    var(--ds-fill-3);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, calc(.28 * var(--theme-shadow-strength, 1)));
+  transition: background-position var(--ds-t-move) var(--ds-ease), background-color var(--ds-t-touch) ease, border-color var(--ds-t-touch) ease, transform var(--ds-t-touch) var(--ds-ease);
+}
+input[type="checkbox"]:not(.voice-mode-hidden-input):checked {
+  border-color: rgba(255, 190, 64, .7);
+  background:
+    radial-gradient(circle closest-side, #fffaf0 0 calc(100% - 1px), transparent 100%) no-repeat calc(100% - 3px) 50% / 18px 18px,
+    #ffae2a;
+}
+input[type="checkbox"]:not(.voice-mode-hidden-input):disabled { opacity: .45; cursor: not-allowed; }
+.monarch-switch { width: 40px; height: 24px; border-color: var(--ds-line-2); background: var(--ds-fill-3); box-shadow: inset 0 1px 3px rgba(0, 0, 0, calc(.28 * var(--theme-shadow-strength, 1))); }
+.monarch-switch::after { top: 2px; left: 2px; width: 18px; height: 18px; box-shadow: 0 2px 6px rgba(0, 0, 0, calc(.3 * var(--theme-shadow-strength, 1))); }
+.monarch-switch-row input:checked + .monarch-switch { border-color: rgba(255, 190, 64, .7); background: #ffae2a; }
+.monarch-switch-row input:checked + .monarch-switch::after { transform: translateX(16px); background: #fffaf0; }
+
+/* ---------- Confirmation card ----------
+   "I agree / I confirm" is a checkbox whose tick is drawn in; an on/off
+   setting is a switch. The card itself answers the click, not a tiny target. */
+label.ds-confirm {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+  margin: 0;
+  padding: 13px 14px;
+  border: 1px solid var(--ds-line);
+  border-radius: 14px;
+  background: var(--ds-fill-1);
+  color: var(--ds-ink-2);
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: border-color var(--ds-t-touch) ease, background-color var(--ds-t-touch) ease, color var(--ds-t-touch) ease;
+}
+label.ds-confirm:hover { border-color: var(--ds-line-2); background: var(--ds-fill-2); }
+label.ds-confirm > input[type="checkbox"] { position: absolute; width: 1px; min-width: 1px; height: 1px; min-height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+label.ds-confirm > span:not(.ds-check) { display: grid; gap: 3px; min-width: 0; }
+label.ds-confirm strong { color: var(--ds-ink); font-size: 13px; font-weight: 600; }
+label.ds-confirm small { color: var(--ds-ink-3); font-size: 12px; line-height: 1.45; }
+label.ds-confirm a { color: var(--ds-accent-ink); }
+.ds-check {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-top: -1px;
+  border: 1.5px solid var(--ds-line-2);
+  border-radius: 7px;
+  background: var(--ds-field);
+  transition: border-color var(--ds-t-touch) ease, background-color var(--ds-t-touch) ease, transform var(--ds-t-move) var(--ds-ease);
+}
+.ds-check svg { width: 14px; height: 14px; fill: none; stroke: var(--ds-on-accent); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.ds-check path { stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset 260ms var(--ds-ease) 50ms; }
+label.ds-confirm:has(input:checked) { border-color: var(--ds-accent-line); background: var(--ds-accent-fill); color: var(--ds-ink); }
+label.ds-confirm input:checked + .ds-check { border-color: var(--ds-accent); background: var(--ds-accent); transform: scale(1.05); }
+label.ds-confirm input:checked + .ds-check path { stroke-dashoffset: 0; }
+label.ds-confirm input:focus-visible + .ds-check { outline: 2px solid var(--ds-focus); outline-offset: 2px; }
+label.ds-confirm:has(input:disabled) { opacity: .55; cursor: not-allowed; }
+
+/* ---------- Sheets (all modal dialogs) ---------- */
+dialog:is(.image-confirm-dialog, .monarch-question-dialog, .coder-project-dialog, .max-connection-dialog, .navigation-search, .attachment-viewer) {
+  border: 1px solid var(--ds-sheet-line);
+  border-radius: var(--ds-r-sheet);
+  background: var(--ds-sheet);
+  color: var(--ds-ink);
+  box-shadow: var(--ds-shadow-sheet);
+  backdrop-filter: blur(28px) saturate(1.1);
+  opacity: 0;
+  transform: translateY(12px) scale(.975);
+  transition: opacity 180ms ease, transform 280ms var(--ds-ease), overlay 280ms allow-discrete, display 280ms allow-discrete;
+  animation: none;
+}
+dialog:is(.image-confirm-dialog, .monarch-question-dialog, .coder-project-dialog, .max-connection-dialog, .navigation-search, .attachment-viewer)[open] { opacity: 1; transform: none; }
+@starting-style {
+  dialog:is(.image-confirm-dialog, .monarch-question-dialog, .coder-project-dialog, .max-connection-dialog, .navigation-search, .attachment-viewer)[open] { opacity: 0; transform: translateY(12px) scale(.975); }
+}
+dialog:is(.image-confirm-dialog, .monarch-question-dialog, .coder-project-dialog, .max-connection-dialog, .navigation-search, .attachment-viewer)::backdrop {
+  background: rgba(var(--theme-plane-rgb, 4, 4, 5), .6);
+  backdrop-filter: blur(8px);
+  opacity: 0;
+  animation: none;
+  transition: opacity 220ms ease, overlay 280ms allow-discrete, display 280ms allow-discrete;
+}
+dialog:is(.image-confirm-dialog, .monarch-question-dialog, .coder-project-dialog, .max-connection-dialog, .navigation-search, .attachment-viewer)[open]::backdrop { opacity: 1; }
+@starting-style {
+  dialog:is(.image-confirm-dialog, .monarch-question-dialog, .coder-project-dialog, .max-connection-dialog, .navigation-search, .attachment-viewer)[open]::backdrop { opacity: 0; }
+}
+:root[data-theme="light"] dialog::backdrop { background: rgba(48, 37, 23, .22); }
+
+/* Sheet anatomy shared by generated questions and confirmations */
+.monarch-question-dialog { width: min(440px, calc(100vw - 32px)); padding: 26px 26px 22px; }
+.monarch-question-dialog h2 { margin: 0 0 8px; font-size: 19px; font-weight: 700; letter-spacing: -.02em; }
+.monarch-question-dialog p { margin: 0 0 22px; color: var(--ds-ink-2); font-size: 14px; line-height: 1.55; }
+.monarch-question-dialog[data-tone="danger"] .claude-primary-btn { border-color: rgba(255, 120, 108, .6); background: linear-gradient(180deg, #ff8a7a, #f0584a); color: #1c0806; box-shadow: 0 6px 18px rgba(240, 88, 74, calc(.22 * var(--theme-shadow-strength, 1))); }
+.monarch-question-dialog input { margin-bottom: 22px; }
+.monarch-question-actions { gap: 8px; }
+.monarch-question-actions button { min-height: var(--ds-h-md); border-radius: var(--ds-r-control); padding: 0 16px; }
+
+/* ---------- Menus and popovers ---------- */
+:is(.dropdown-popover, .composer-options-popover, .coder-action-menu-popover) {
+  border-color: var(--ds-sheet-line);
+  background: var(--ds-sheet);
+  box-shadow: var(--ds-shadow-menu);
+  backdrop-filter: blur(26px) saturate(1.12);
+}
+:root[data-theme="light"] :is(.dropdown-popover, .composer-options-popover, .coder-action-menu-popover) { background: var(--ds-sheet); }
+
+/* ---------- Tabs & segmented controls: selection is a surface, not a glow ---------- */
+:is(.network-view-tabs) button[aria-selected="true"] { box-shadow: none; }
+
+/* ---------- Kicker: small caps label above a title ---------- */
+:is(.section-kicker, .eyebrow, .settings-kicker) { font-size: 11px; font-weight: 700; letter-spacing: .1em; }
+
+/* ---------- Scrollbars ---------- */
+* { scrollbar-width: thin; scrollbar-color: rgba(var(--theme-line-rgb, 255, 255, 255), .16) transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  :is(.claude-primary-btn, .primary-button, .claude-secondary-btn, .secondary-button, .claude-ghost-btn, input[type="checkbox"], .max-model-popup, .max-model-trigger > .max-select-chevron, .ds-check, .ds-check path, label.ds-confirm) { transition-duration: 1ms; transition-delay: 0ms; }
+  dialog:is(.image-confirm-dialog, .monarch-question-dialog, .coder-project-dialog, .max-connection-dialog, .navigation-search, .attachment-viewer),
+  dialog:is(.image-confirm-dialog, .monarch-question-dialog, .coder-project-dialog, .max-connection-dialog, .navigation-search, .attachment-viewer)::backdrop { transform: none; transition: opacity 120ms ease, overlay 120ms allow-discrete, display 120ms allow-discrete; }
+  :is(.claude-primary-btn, .primary-button):hover:not(:disabled) { transform: none; }
+}
+#telegram-v2-settings .tg-check.ds-confirm { grid-template-columns: 22px minmax(0, 1fr); gap: 12px; margin: 16px 0; }
+
+/* ---------- Settings: a source list, not a card inside a card ---------- */
+#settings-section .settings-rail {
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--ds-line);
+  border-radius: var(--ds-r-card);
+  background: var(--ds-fill-1);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+#settings-section .settings-rail-heading { display: none; }
+#settings-section .settings-tabs { gap: 2px; }
+#settings-section .settings-tabs > button {
+  min-height: 38px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  box-shadow: none;
+  align-content: center;
+  transform: none;
+}
+#settings-section .settings-tabs > button::before { display: none; }
+#settings-section .settings-tabs > button strong { color: var(--ds-ink-2); font-size: 13.5px; font-weight: 550; }
+#settings-section .settings-tabs > button:hover { background: var(--ds-fill-2); }
+#settings-section .settings-tabs > button:hover strong { color: var(--ds-ink); }
+#settings-section .settings-tabs > button[aria-selected="true"] { background: var(--ds-accent-fill); }
+#settings-section .settings-tabs > button[aria-selected="true"] strong { color: var(--ds-accent-ink); font-weight: 650; }
+
+/* ---------- Sidebar: amber means "act", location is a calm surface ---------- */
+.sidebar-selection {
+  border-color: var(--ds-line);
+  background: var(--ds-fill-3);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .04) inset;
+}
+.sidebar .nav-item.active { color: var(--ds-ink); font-weight: 600; }
+.sidebar .nav-item.active svg { color: var(--ds-accent-ink); }
+.sidebar .nav-item:hover { transform: none; background: var(--ds-fill-1); }
+.sidebar .nav-item:hover svg, .sidebar .nav-item:hover img { transform: none; }
+.sidebar .nav-item:active { transform: scale(.98); }
+.sidebar .claude-new-chat-btn:hover { transform: none; }
+
+/* ---------- Model menu: room for the real type scale ---------- */
+
+/* ---------- Floating panels over content ----------
+   .main-canvas carries a view-transition-name, which makes it a backdrop root:
+   blur cannot reach the chat below, so a panel must be a near-opaque sheet. */
+:is(.oscar-memory-panel, .oscar-missions-panel, #oscar-history-panel, .sidebar-history-menu-body) {
+  border-color: var(--ds-sheet-line);
+  background: var(--ds-sheet);
+  box-shadow: var(--ds-shadow-menu);
+}
+
+/* ---------- Icon button & sheet action row ---------- */
+.ds-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ds-ink-3);
+  cursor: pointer;
+  transition: background-color var(--ds-t-touch) ease, color var(--ds-t-touch) ease;
+}
+.ds-icon-btn:hover { background: var(--ds-fill-2); color: var(--ds-ink); }
+.ds-icon-btn svg { width: 16px; height: 16px; }
+.ds-sheet-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
+
+/* ---------- Notices inside sheets ----------
+   Several stacked amber frames read as alarm. A notice is a calm card whose
+   label carries the colour; the full disclosure text stays unchanged. */
+:is(.image-perchance-beta-notice, .image-agreement-boundary, .image-perchance-intro-boundary) {
+  border: 1px solid var(--ds-line);
+  border-radius: 14px;
+  background: var(--ds-fill-1);
+  padding: 12px 14px;
+}
+:is(.image-perchance-beta-notice, .image-agreement-boundary, .image-perchance-intro-boundary) > strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ds-accent-ink);
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-transform: none;
+}
+:is(.image-perchance-beta-notice, .image-agreement-boundary, .image-perchance-intro-boundary) > strong::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ds-accent);
+}
+:is(.image-perchance-beta-notice, .image-agreement-boundary, .image-perchance-intro-boundary) p { color: var(--ds-ink-2); font-size: 12.5px; line-height: 1.55; }
+.image-perchance-intro-grid article { border-color: var(--ds-line); background: var(--ds-fill-1); }
+.image-provider-agreement-content { border-color: var(--ds-line); background: var(--ds-field); border-radius: 14px; }
+.image-agreement-checks legend { color: var(--ds-ink-3); font-size: 11px; letter-spacing: .1em; }
+
+/* ---------- Layer order: Oscar is scenery, menus are foreground ----------
+   The mascot inspector is fixed at z 48 and takes no clicks. .main-canvas is its
+   own stacking context (view-transition-name), so nothing inside it could rise
+   above Oscar: the model menu and topbar panels were drawn under the cat. */
+.main-canvas { z-index: 1; }
+
+/* ---------- Compact sidebar keeps the wordmark whole ---------- */
+@media (max-width: 980px) {
+  .sidebar .sidebar-brand-mark { flex-direction: column; gap: 4px; }
+  .sidebar .sidebar-brand-mark strong { max-width: none; font-size: 12px; line-height: 1; white-space: nowrap; letter-spacing: -.01em; }
+  .sidebar .sidebar-brand-mark .product-stage-badge { display: none; }
+}
+
+/* ---------- Phone: the model menu spans the composer instead of leaving the screen ---------- */
+@media (max-width: 620px) {
+  .claude-composer .oscar-context-controls,
+  .claude-composer .oscar-inline-model { position: static; }
+}

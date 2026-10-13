@@ -1,5 +1,7 @@
 # Astra: подсистема навыков для Monarch
 
+> Naming boundary, 2026-08-26: **Astra V3** — официальное имя целевой новой Agent Runtime architecture family для Monarch `0.3.0`. Этот документ описывает уже существующий bounded-компонент **Astra Skills** (`src/modules/astra`, module version `0.1.0`). Astra Skills не является всем Astra V3, не исполняет capabilities и не получает runtime authority автоматически; в будущей миграции он может стать только discovery/skill adapter под Goal/Kernel/Evidence/Completion boundaries Astra V3.
+
 Astra - локальная подсистема Monarch, которая отвечает за подключение, описание, маршрутизацию и безопасное применение навыков для AI-агента Oscar.
 
 Если сказать коротко: Monarch - это локальная операционная среда, Oscar - агент, а Astra - слой, который превращает плагины и модули в понятные, проверяемые и вызываемые способности агента.

@@ -1,6 +1,7 @@
 import { createReadStream } from 'node:fs';
+import { pipeline } from 'node:stream';
 import { readFile, realpath, stat } from 'node:fs/promises';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
   createServer,
   type IncomingMessage,
@@ -15,23 +16,34 @@ import type {
   MonarchCapabilityExecution,
   MonarchIntentJobSubmission,
   MonarchIntentSubmission,
+  TelegramDesktopControlAction,
 } from './application';
-import { classifyOscarRequestDisposition, MONARCH_PUBLIC_AUTHORITY_CONTEXT } from '../core';
+import { classifyOscarRequestDisposition, MONARCH_PUBLIC_AUTHORITY_CONTEXT, OwnerRedZoneError } from '../core';
 import { classifyOscarServerDisposition } from '../oscar-turn/disposition';
 import { getAgentSkillRegistry } from '../modules/astra/agent-skills';
 import { getAgentSkillAuthoringService } from '../modules/astra/skill-authoring';
 import type { MonarchApprovalPolicy, MonarchAutonomyMode, MonarchIntentResult, MonarchSandboxMode } from '../core';
 import { CoderAgentController } from './coder-agent-controller';
-import type { CoderModelId } from '../modules/coder/types';
-import type { MonarchInstallableModelRole } from '../modules/models/model-provisioning-manager';
+import { isCoderModelId, type CoderModelId, type CoderRun } from '../modules/coder/types';
+import { isCoderSessionId } from '../modules/coder/context-manager';
+import type { MonarchInstallableGroupId } from '../modules/models/model-provisioning-manager';
 import { handleAgentTaskHttpRequest } from './agent-task-http';
 import { handleOscarTurnHttpRequest } from './oscar-turn-http';
+import { handleAstraReadTaskHttpRequest, handleAstraCreateTaskHttpRequest, handleAstraComputerObserveTaskHttpRequest,
+  handleAstraComputerActionTaskHttpRequest } from './astra-read-task-http';
+import type { AstraAuthenticatedHttpActor, MonarchAstraReadTaskFacade } from './astra-read-task-facade';
+import type { MonarchAstraTaskFacade, AstraTaskHttpSurface } from './astra-task-facade';
 import type { OscarTurnCheckpoint, OscarTurnV1 } from '../oscar-turn';
+import type { AstraTargetSelectionSurface } from './astra-target-selection-store';
+import type { AstraProductPilotRuntime } from './astra-product-pilot';
 import type {
   MonarchSettingsCommandRequestV1,
   MonarchSettingsReadRequestV1,
 } from '../settings';
 import { IMAGE_PROVIDER_AGREEMENT } from '../image-generation';
+import { MAX_MEMORY_CONSENT_VERSION } from '../settings/max-memory-consent';
+import { SecurityPolicyError } from '../settings/security-policy';
+import { CustomModelError } from '../modules/models/custom-models';
 
 export interface MonarchHttpServerOptions {
   app: MonarchApplication;
@@ -42,6 +54,16 @@ export interface MonarchHttpServerOptions {
   desktopAttestationToken?: string;
   requireApiToken?: boolean;
   allowNonLoopbackMutations?: boolean;
+  /** Explicit isolated host injection only; normal product bootstrap supplies none. */
+  astraReadTasks?: MonarchAstraReadTaskFacade;
+  /** Unified isolated read/create host; legacy read injection alone does not expose creates. */
+  astraTasks?: MonarchAstraTaskFacade;
+  /** Explicit typed Astra submissions on the existing Oscar Turn transport. */
+  astraOscarTurns?: boolean;
+  /** Read/revoke only. Target issuance belongs to a trusted host picker, not HTTP. */
+  astraSelections?: AstraTargetSelectionSurface;
+  /** Separate main-process-only token; never exposed through the renderer preload. */
+  astraHost?: AstraProductPilotRuntime;
 }
 
 export interface MonarchHttpServerHandle {
@@ -66,6 +88,15 @@ interface MonarchHttpSession {
   allowNonLoopbackMutations: boolean;
 }
 
+const TELEGRAM_DESKTOP_CONTROL_ACTIONS = new Set<TelegramDesktopControlAction>([
+  'start',
+  'stop',
+  'pause',
+  'resume',
+  'revoke-all',
+  'rotate-pairing',
+]);
+
 export type MonarchHttpOriginState = 'absent' | 'same-origin' | 'mismatch';
 export type MonarchHttpCredentialState = 'disabled' | 'absent' | 'valid' | 'invalid';
 
@@ -85,19 +116,30 @@ const STREAM_ERROR_MESSAGE = 'Поток ответа прервался. Поп
 const coderControllers = new WeakMap<MonarchApplication, CoderAgentController>();
 
 export function createMonarchHttpServer(options: MonarchHttpServerOptions): Server {
+  if (options.astraTasks && options.astraReadTasks && options.astraTasks !== options.astraReadTasks) throw Error('astra-http-host-conflict');
   const publicRoot = path.resolve(options.publicDirectory);
   const session = createHttpSession(options);
 
   return createServer((request, response) => {
-    void handleRequest(options.app, publicRoot, session, request, response).catch((error: unknown) => {
-      const normalized = normalizeError(error);
-      sendJson(response, normalized.statusCode, {
-        ...(isAgentTaskApiRequest(request.url) ? { version: 1 } : {}),
-        ok: false,
-        error: normalized.code,
-        message: normalized.message,
-      });
-    });
+    void handleRequest(options.app, publicRoot, session, request, response, options.astraTasks ?? options.astraReadTasks,
+      options.astraTasks?.createTasks, options.astraOscarTurns === true,
+      options.astraSelections, options.astraTasks?.computerTasks,
+      options.astraTasks?.computerActionTasks, options.astraHost)
+      .catch((error: unknown) => respondWithRequestError(request, response, error));
+  });
+}
+
+/** An error after the reply started (a stream, a partial body) cannot get a
+ * JSON status any more: writeHead threw inside this handler and ended the whole
+ * server with an unhandled rejection. Such a reply is cut instead. */
+export function respondWithRequestError(request: IncomingMessage, response: ServerResponse, error: unknown): void {
+  if (response.headersSent) { response.destroy(); return; }
+  const normalized = normalizeError(error);
+  sendJson(response, normalized.statusCode, {
+    ...(isAgentTaskApiRequest(request.url) ? { version: 1 } : {}),
+    ok: false,
+    error: normalized.code,
+    message: normalized.message,
   });
 }
 
@@ -120,11 +162,19 @@ export async function startMonarchHttpServer(
   options: MonarchHttpServerOptions
 ): Promise<MonarchHttpServerHandle> {
   await options.app.start();
+  // Managed local discovery completes in Application.start(). Bind HTTP only
+  // after that composition, so all routes use the same restored facade/owner.
+  const productAstra = options.app.astraProductPilot;
+  if (productAstra && (options.astraHost && options.astraHost !== productAstra
+    || options.astraTasks && options.astraTasks !== productAstra.facade
+    || options.astraSelections && options.astraSelections !== productAstra.selections)) throw Error('astra-http-host-conflict');
   const host = options.host || '127.0.0.1';
   const port = options.port || 4317;
   const session = createHttpSession({ ...options, host, port });
   const server = createMonarchHttpServer({
     ...options,
+    ...(productAstra ? { astraTasks: productAstra.facade, astraOscarTurns: true,
+      astraSelections: productAstra.selections, astraHost: productAstra } : {}),
     host,
     port,
     apiToken: session.apiToken,
@@ -155,10 +205,88 @@ async function handleRequest(
   publicRoot: string,
   session: MonarchHttpSession,
   request: IncomingMessage,
-  response: ServerResponse
+  response: ServerResponse,
+  astraReadTasks?: MonarchAstraReadTaskFacade,
+  astraCreateTasks?: AstraTaskHttpSurface,
+  astraOscarTurns = false,
+  astraSelections?: AstraTargetSelectionSurface,
+  astraComputerTasks?: AstraTaskHttpSurface,
+  astraComputerActionTasks?: AstraTaskHttpSurface,
+  astraHost?: AstraProductPilotRuntime,
 ): Promise<void> {
   const url = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`);
   const principal = deriveMonarchHttpPrincipal(request, session);
+  let ordinaryAgentActor: AstraAuthenticatedHttpActor | undefined;
+  if (astraOscarTurns && principal.loopback) {
+    try { ordinaryAgentActor = deriveAstraHttpActor(principal, session, undefined, astraHost); }
+    catch { /* Legacy answer-only calls remain available without Astra authentication. */ }
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/astra/v3/availability') {
+    enforceReadApiToken(principal);
+    sendJson(response, 200, app.astraAvailability()); return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/astra/v3/host/target-selections') {
+    enforceMutationGuards(principal); const actor = authenticateAstraHost(request, astraHost, principal, session);
+    const body = await readJsonBody<unknown>(request, 16 * 1024);
+    const selection = astraHost!.issuePickedTarget(actor, body);
+    sendJson(response, 201, { ok: true, selection }); return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/astra/v3/host/telegram-target-aliases') {
+    enforceMutationGuards(principal); const actor = authenticateAstraHost(request, astraHost, principal, session);
+    const body = await readJsonBody<unknown>(request, 16 * 1024);
+    const alias = await app.issueTelegramAstraTargetAlias(actor, body);
+    sendJson(response, 201, { ok: true, alias }); return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/astra/v3/host/window-candidates') {
+    enforceMutationGuards(principal); const actor = authenticateAstraHost(request, astraHost, principal, session);
+    const body = await readJsonBody<unknown>(request, 8 * 1024);
+    sendJson(response, 200, { ok: true, candidates: await astraHost!.listComputerCandidates(actor, body) }); return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/astra/v3/host/window-selections') {
+    enforceMutationGuards(principal); const actor = authenticateAstraHost(request, astraHost, principal, session);
+    const body = await readJsonBody<unknown>(request, 8 * 1024);
+    sendJson(response, 201, { ok: true, selection: astraHost!.issueComputerWindow(actor, body) }); return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/astra/v3/host/window-selections/control') {
+    enforceMutationGuards(principal); const actor = authenticateAstraHost(request, astraHost, principal, session);
+    const body = await readJsonBody<unknown>(request, 8 * 1024);
+    sendJson(response, 200, { ok: true, selections: astraHost!.controlComputerWindows(actor, body) }); return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/astra/v3/host/computer-action-plans') {
+    enforceMutationGuards(principal); const actor = authenticateAstraHost(request, astraHost, principal, session);
+    const body = await readJsonBody<unknown>(request, 16 * 1024);
+    const plan = await astraHost!.issueComputerActionPlan(actor, body, () => app.oscarTurnCoordinator.flushOutbox());
+    sendJson(response, 201, { ok: true, plan }); return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/astra/v3/host/computer-action-plans/control') {
+    enforceMutationGuards(principal); const actor = authenticateAstraHost(request, astraHost, principal, session);
+    const body = await readJsonBody<unknown>(request, 8 * 1024);
+    sendJson(response, 200, { ok: true, plans: astraHost!.controlComputerActionPlans(actor, body) }); return;
+  }
+
+  if (await handleAstraReadTaskHttpRequest({ ...(astraReadTasks ? { facade: astraReadTasks } : {}), url, request, response, principal,
+    enforceMutation: () => enforceMutationGuards(principal), enforceRead: () => enforceReadApiToken(principal),
+    authenticatedActor: () => deriveAstraHttpActor(principal, session, undefined, astraHost) })) return;
+
+  if (await handleAstraCreateTaskHttpRequest({ ...(astraCreateTasks ? { facade: astraCreateTasks } : {}), url, request, response, principal,
+    enforceMutation: () => enforceMutationGuards(principal), enforceRead: () => enforceReadApiToken(principal),
+    authenticatedActor: () => deriveAstraHttpActor(principal, session, undefined, astraHost) })) return;
+
+  if (await handleAstraComputerObserveTaskHttpRequest({ ...(astraComputerTasks ? { facade: astraComputerTasks } : {}), url, request, response, principal,
+    enforceMutation: () => enforceMutationGuards(principal), enforceRead: () => enforceReadApiToken(principal),
+    authenticatedActor: () => deriveAstraHttpActor(principal, session, undefined, astraHost) })) return;
+
+  if (await handleAstraComputerActionTaskHttpRequest({ ...(astraComputerActionTasks ? { facade: astraComputerActionTasks } : {}),
+    url, request, response, principal, enforceMutation: () => enforceMutationGuards(principal), enforceRead: () => enforceReadApiToken(principal),
+    authenticatedActor: () => deriveAstraHttpActor(principal, session, undefined, astraHost) })) return;
 
   if (request.method === 'GET' && url.pathname === '/api/ready') {
     sendJson(response, 200, { ok: true, ready: true });
@@ -173,6 +301,9 @@ async function handleRequest(
     enforceMutation: () => enforceMutationGuards(principal),
     enforceRead: () => enforceReadApiToken(principal),
     principal,
+    astra: { enabled: astraOscarTurns, loopback: principal.loopback,
+      authenticatedActor: source => deriveAstraHttpActor(principal, session, source, astraHost),
+      ...(astraSelections ? { selections: astraSelections } : {}) },
   })) {
     return;
   }
@@ -199,6 +330,39 @@ async function handleRequest(
     if (!body.scope) throw badRequest('personality-scope-required', 'Personality preview requires an explicit scope.');
     const preview = await app.previewPersonality(body.scope);
     sendJson(response, 200, { ok: true, preview });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/security/control') {
+    enforceDesktopSettingsPrincipal(principal, true);
+    const body = await readJsonBody<{ schemaVersion?: unknown; capabilityId?: unknown; input?: unknown }>(request, 16 * 1024);
+    if (!body || typeof body !== 'object' || Array.isArray(body) || body.schemaVersion !== 1 || typeof body.capabilityId !== 'string'
+      || Object.keys(body).some(key => !['schemaVersion', 'capabilityId', 'input'].includes(key))) {
+      throw badRequest('security-control-request-invalid', 'Выбери одно действие в панели Security.');
+    }
+    const result = await app.executeSecurityDesktopControl(body.capabilityId, body.input ?? {});
+    sendJson(response, 200, { ok: result.ok, result });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/telegram/control') {
+    enforceDesktopSettingsPrincipal(principal, true);
+    const body = await readJsonBody<{ schemaVersion?: unknown; action?: unknown }>(request, 8 * 1024);
+    if (body.schemaVersion !== 1
+      || typeof body.action !== 'string'
+      || !TELEGRAM_DESKTOP_CONTROL_ACTIONS.has(body.action as TelegramDesktopControlAction)) {
+      throw badRequest('telegram-control-request-invalid', 'Telegram control requires one exact supported action.');
+    }
+    const result = await app.executeTelegramDesktopControl(body.action as TelegramDesktopControlAction);
+    sendJson(response, 200, { ok: result.ok, result });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/telegram/v2') {
+    enforceDesktopSettingsPrincipal(principal, true);
+    const body = await readJsonBody<Record<string, unknown>>(request, 16 * 1024);
+    const result = await app.executeTelegramV2DesktopControl(body);
+    sendJson(response, 200, { ok: true, result });
     return;
   }
 
@@ -350,7 +514,7 @@ async function handleRequest(
       'Cache-Control': 'private, max-age=300',
       'X-Content-Type-Options': 'nosniff',
     });
-    createReadStream(asset.filePath).pipe(response);
+    streamFileToResponse(asset.filePath, response);
     return;
   }
 
@@ -362,15 +526,53 @@ async function handleRequest(
     return;
   }
 
+  if (url.pathname === '/api/max/memory-consent' && (request.method === 'GET' || request.method === 'POST')) {
+    const consent = app.maxMemoryConsentStore;
+    if (!consent) throw { statusCode: 503, code: 'max-memory-consent-unavailable', message: 'MAX memory consent is unavailable.' } satisfies JsonError;
+    if (request.method === 'GET') {
+      enforceReadApiToken(principal);
+      const providerId = url.searchParams.get('provider') || '';
+      if (!/^[a-z]{2,20}$/u.test(providerId)) throw badRequest('max-memory-consent-provider', 'MAX provider is required.');
+      sendJson(response, 200, { ok: true, providerId, decision: consent.decision(providerId), version: MAX_MEMORY_CONSENT_VERSION });
+      return;
+    }
+    enforceMutationGuards(principal);
+    const body = await readJsonBody<{ providerId?: unknown; decision?: unknown; confirmed?: unknown; version?: unknown }>(request, 1024);
+    let decision: string;
+    try { decision = consent.decide(body); }
+    catch (error) { throw badRequest(String((error as Error).message), 'MAX memory consent was not saved.'); }
+    sendJson(response, 200, { ok: true, providerId: body.providerId, decision, version: MAX_MEMORY_CONSENT_VERSION });
+    return;
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/oscar/request-disposition') {
     enforceReadApiToken(principal);
-    const body = await readJsonBody<{ text?: unknown; history?: unknown }>(request, MAX_OSCAR_DISPOSITION_BODY_BYTES);
+    const body = await readJsonBody<{ text?: unknown; history?: unknown; conversationId?: unknown; webAllowed?: unknown; requestedModel?: unknown }>(request, MAX_OSCAR_DISPOSITION_BODY_BYTES);
     const text = typeof body.text === 'string' ? body.text.trim() : '';
     if (!text) throw badRequest('empty-oscar-request', 'Oscar request text is required.');
     if (text.length > 16_000) throw badRequest('oscar-request-too-long', 'Oscar request text is too long.');
-    const history = readOscarDispositionHistory(body.history);
+    // The owner's history switch is decided here, before anything is read:
+    // with it off neither the saved chat nor the copy the window sent may
+    // reach the routing model. A saved chat is otherwise routed on what was
+    // saved, like the Turn itself; zero retention never reads a saved chat.
+    const devSettings = app.getOwnerDevSettings();
+    const historyAllowed = devSettings.historyContextEnabled !== false;
+    const savedConversationId = typeof body.conversationId === 'string' && /^[A-Za-z0-9_:.-]{1,128}$/u.test(body.conversationId)
+      ? body.conversationId : '';
+    const savedHistory = historyAllowed && !devSettings.zeroRetentionEnabled && savedConversationId
+      ? await app.readOscarConversationHistory(savedConversationId) : null;
+    const history = !historyAllowed ? []
+      : savedHistory
+        ? savedHistory.slice(-4).map((message) => ({ role: message.role, content: message.content.slice(0, 4_000) }))
+        : readOscarDispositionHistory(body.history);
     const deterministic = classifyOscarRequestDisposition(text);
     const contextual = await classifyOscarServerDisposition(text, undefined, { history });
+    // Internet switched on is permission, not an order: search only when the
+    // request needs fresh data, never for a greeting or general knowledge.
+    const wantsWeb = body.webAllowed === true && contextual.requiresExternalResearch !== true && contextual.lane !== 'agent'
+      ? await app.oscarTurnCoordinator.requestNeedsWeb(text, history,
+        typeof body.requestedModel === 'string' && body.requestedModel.length <= 200 ? body.requestedModel : undefined)
+      : contextual.requiresExternalResearch === true;
     response.setHeader('Cache-Control', 'no-store');
     sendJson(response, 200, {
       ok: true,
@@ -381,6 +583,7 @@ async function handleRequest(
         confidence: contextual.confidence,
         reason: contextual.reason,
         requiresExternalResearch: contextual.requiresExternalResearch === true,
+        wantsWeb,
       },
     });
     return;
@@ -402,6 +605,8 @@ async function handleRequest(
     enforceMutation: () => enforceMutationGuards(principal),
     enforceRead: () => enforceReadApiToken(principal),
     principal,
+    astraV3Enabled: astraOscarTurns,
+    ...(astraOscarTurns ? { authenticatedActor: (source?: 'desktop' | 'voice' | 'api' | 'coder') => deriveAstraHttpActor(principal, session, source, astraHost) } : {}),
   })) {
     return;
   }
@@ -413,7 +618,8 @@ async function handleRequest(
     const active = projects.activeProjectId
       ? await coder.projectSnapshot(projects.activeProjectId).catch(() => null)
       : null;
-    sendJson(response, 200, { ok: true, projects, active, runs: coder.runs.list(projects.activeProjectId || undefined) });
+    sendJson(response, 200, { ok: true, projects, active, runs: coder.runs.list(projects.activeProjectId || undefined),
+      runtime: coder.modelCatalog() });
     return;
   }
 
@@ -430,6 +636,13 @@ async function handleRequest(
     return;
   }
 
+  const coderChangesMatch = url.pathname.match(/^\/api\/coder\/projects\/([^/]+)\/changes$/);
+  if (request.method === 'GET' && coderChangesMatch?.[1]) {
+    enforceReadApiToken(principal);
+    sendJson(response, 200, { ok: true, changes: await getCoderController(app).changes(decodeURIComponent(coderChangesMatch[1])) });
+    return;
+  }
+
   const coderProjectMatch = url.pathname.match(/^\/api\/coder\/projects\/([^/]+)$/);
   if (request.method === 'GET' && coderProjectMatch?.[1]) {
     enforceReadApiToken(principal);
@@ -440,9 +653,13 @@ async function handleRequest(
 
   if (request.method === 'POST' && url.pathname === '/api/coder/runs') {
     enforceMutationGuards(principal);
-    const body = await readJsonBody<{ prompt?: string; projectId?: string; model?: string }>(request);
+    const body = await readJsonBody<{ prompt?: string; projectId?: string; model?: string; clientRequestId?: string;
+      sessionId?: string }>(request);
     const projectId = String(body.projectId || '').trim();
     if (!projectId) throw badRequest('missing-coder-project', 'Select an explicit Coder project before starting a run.');
+    if (body.model !== undefined && !isCoderModelId(body.model)) {
+      throw badRequest('invalid-coder-model', 'Choose a listed Coder model or the exact selected MAX provider.');
+    }
     if (app.getOwnerDevSettings().zeroRetentionEnabled) {
       throw {
         statusCode: 409,
@@ -450,11 +667,44 @@ async function handleRequest(
         message: 'Coder хранит журнал выполнения, поэтому новые Coder-сессии отключены при полной незаписи.',
       } satisfies JsonError;
     }
-    const model: CoderModelId = body.model === 'deepseek-coder-v2-lite-instruct'
-      ? 'deepseek-coder-v2-lite-instruct'
-      : 'qwen3-coder-30b-a3b-instruct';
-    const run = await getCoderController(app).start(String(body.prompt || ''), projectId, model);
+    const model: CoderModelId = body.model ?? getCoderController(app).modelCatalog().defaultModel ?? 'gemma4-balanced';
+    if (body.sessionId !== undefined && !isCoderSessionId(body.sessionId)) {
+      throw badRequest('invalid-coder-session', 'Continue an existing Coder session or start a new one.');
+    }
+    const run = await getCoderController(app).start(String(body.prompt || ''), projectId, model, body.clientRequestId,
+      body.sessionId);
     sendJson(response, 202, { ok: true, run });
+    return;
+  }
+
+  // Live run snapshots. The journal stays the single source; this only
+  // forwards each durable change, so a reconnect simply starts from `run`.
+  const coderStreamMatch = url.pathname.match(/^\/api\/coder\/runs\/([^/]+)\/stream$/);
+  if (request.method === 'GET' && coderStreamMatch?.[1]) {
+    enforceReadApiToken(principal);
+    const runs = getCoderController(app).runs;
+    const runId = decodeURIComponent(coderStreamMatch[1]);
+    const initial = runs.get(runId);
+    if (!initial) { sendJson(response, 404, { ok: false, error: 'coder-run-not-found' }); return; }
+    response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store',
+      Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+    response.flushHeaders?.();
+    let closed = false;
+    const terminal = (run: CoderRun) => run.status === 'completed' || run.status === 'failed'
+      || run.status === 'cancelled' || run.status === 'interrupted';
+    const close = () => {
+      if (closed) return; closed = true; clearInterval(heartbeat); unsubscribe();
+      if (!response.writableEnded) response.end();
+    };
+    const emit = (run: CoderRun) => {
+      if (closed) return;
+      response.write(`event: run\ndata: ${JSON.stringify({ version: 1, run })}\n\n`);
+      if (terminal(run) && !run.agentQuestion && !run.agentApproval) close();
+    };
+    const unsubscribe = runs.subscribe(run => { if (run.id === runId) emit(run); });
+    const heartbeat = setInterval(() => { if (!closed) response.write(': keep-alive\n\n'); }, 15_000);
+    heartbeat.unref?.(); request.once('close', close);
+    emit(runs.get(runId) ?? initial);
     return;
   }
 
@@ -500,6 +750,25 @@ async function handleRequest(
     return;
   }
 
+  const coderReplyMatch = url.pathname.match(/^\/api\/coder\/runs\/([^/]+)\/reply$/);
+  if (request.method === 'POST' && coderReplyMatch?.[1]) {
+    enforceMutationGuards(principal);
+    const body = await readJsonBody<{ questionId?: unknown; questionDigest?: unknown; text?: unknown }>(request, 8 * 1024);
+    if (!body || Object.keys(body).some((key) => !['questionId', 'questionDigest', 'text'].includes(key))
+      || typeof body.questionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(body.questionId)
+      || typeof body.questionDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(body.questionDigest)
+      || typeof body.text !== 'string' || !body.text.trim() || Buffer.byteLength(body.text) > 4096) {
+      throw badRequest('invalid-coder-reply', 'Send the exact current Coder question binding and 1 to 4096 UTF-8 bytes of reply text.');
+    }
+    const run = await getCoderController(app).reply(decodeURIComponent(coderReplyMatch[1]), {
+      questionId: body.questionId,
+      questionDigest: body.questionDigest,
+      text: body.text,
+    });
+    sendJson(response, 202, { ok: true, run });
+    return;
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/coder/fast-chat') {
     enforceMutationGuards(principal);
     const body = await readJsonBody<{ message?: string; history?: Array<{ role: string; content: string }> }>(request);
@@ -534,7 +803,7 @@ async function handleRequest(
   if (request.method === 'GET' && url.pathname === '/api/state') {
     enforceReadApiToken(principal);
     const state = await app.getState(url.searchParams.get('input') || '');
-    sendJson(response, 200, projectMonarchStateForPrincipal(state, principal));
+    sendJson(response, 200, boundStateHistory(projectMonarchStateForPrincipal(state, principal)));
     return;
   }
 
@@ -554,20 +823,24 @@ async function handleRequest(
   if (request.method === 'POST' && url.pathname === '/api/models/install') {
     enforceMutationGuards(principal);
     const body = await readJsonBody<{ roles?: unknown; source?: unknown }>(request, 16 * 1024);
-    if (!Array.isArray(body.roles) || body.roles.length < 1 || body.roles.length > 3) {
+    if (!Array.isArray(body.roles) || body.roles.length < 1 || body.roles.length > 7) {
       throw {
         statusCode: 400,
         code: 'model-selection-invalid',
         message: 'Выбери хотя бы одну модель.',
       } satisfies JsonError;
     }
-    const allowed = new Set<MonarchInstallableModelRole>([
+    const allowed = new Set<MonarchInstallableGroupId>([
       'gemma4-fast',
       'gemma4-balanced',
       'qwen3.8-27b-pro',
+      'coder',
+      'coder-backup',
+      'voice-recognition',
+      'memory-search',
     ]);
     const roles = [...new Set(body.roles.map((value) => String(value).trim()))];
-    if (!roles.every((role): role is MonarchInstallableModelRole => allowed.has(role as MonarchInstallableModelRole))) {
+    if (!roles.every((role): role is MonarchInstallableGroupId => allowed.has(role as MonarchInstallableGroupId))) {
       throw {
         statusCode: 400,
         code: 'model-selection-invalid',
@@ -578,6 +851,127 @@ async function handleRequest(
     const snapshot = app.startModelInstall(roles, source);
     sendJson(response, snapshot.ready && !('activeInstall' in snapshot && snapshot.activeInstall) ? 200 : 202, snapshot);
     return;
+  }
+
+  // Reminders: personal data, so only the local Desktop window and host read or change them.
+  if (url.pathname === '/api/reminders' || url.pathname === '/api/reminders/due') {
+    if (request.method === 'GET') {
+      enforceDesktopSettingsPrincipal(principal, false);
+      const reminders = url.pathname.endsWith('/due')
+        ? await app.reminderStore.due()
+        : await app.reminderStore.list();
+      sendJson(response, 200, { reminders });
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/reminders') {
+      enforceDesktopSettingsPrincipal(principal, true);
+      const body = await readJsonBody<{ text?: unknown; dueAt?: unknown; recurrence?: unknown }>(request, 8 * 1024);
+      const dueAt = new Date(String(body.dueAt || ''));
+      const text = typeof body.text === 'string' ? body.text.trim() : '';
+      if (!text || Number.isNaN(dueAt.getTime())) {
+        throw badRequest('reminder-invalid', 'Напиши, что и когда напомнить.');
+      }
+      const recurrence = body.recurrence === 'daily' || body.recurrence === 'weekly' ? body.recurrence : 'none';
+      sendJson(response, 201, { reminder: await app.reminderStore.create({ text, dueAt, recurrence }) });
+      return;
+    }
+  }
+  const reminderAction = url.pathname.match(/^\/api\/reminders\/(rem_[a-f0-9]{32})\/(delivered|done|cancel|snooze)$/u);
+  if (reminderAction && request.method === 'POST') {
+    enforceDesktopSettingsPrincipal(principal, true);
+    const [, id = '', action] = reminderAction;
+    const reminder = action === 'delivered' ? await app.reminderStore.markDelivered(id)
+      : action === 'done' ? await app.reminderStore.complete(id)
+        : action === 'cancel' ? await app.reminderStore.cancel(id)
+          : await app.reminderStore.snooze(id, Number((await readJsonBody<{ minutes?: unknown }>(request, 1024)).minutes));
+    if (!reminder) {
+      sendJson(response, 404, { ok: false, error: 'reminder-not-found' });
+      return;
+    }
+    sendJson(response, 200, { reminder });
+    return;
+  }
+
+  // Monarch Security policy center: read by any local principal, changed only
+  // by a person in the Desktop window; weakening needs explicit confirmation.
+  if (url.pathname === '/api/security/policy' && (request.method === 'GET' || request.method === 'POST')) {
+    if (request.method === 'GET') {
+      enforceReadApiToken(principal);
+      sendJson(response, 200, app.securityPolicyStore.view());
+      return;
+    }
+    enforceDesktopSettingsPrincipal(principal, true);
+    const body = await readJsonBody<{ control?: unknown; level?: unknown; confirmWeakening?: unknown }>(request, 1024);
+    try { sendJson(response, 200, app.securityPolicyStore.set(body)); }
+    catch (error) {
+      if (error instanceof SecurityPolicyError && error.code === 'weakening-unconfirmed') {
+        throw { statusCode: 409, code: 'security-policy-weakening-unconfirmed',
+          message: 'Ослабление защиты нужно подтвердить.' } satisfies JsonError;
+      }
+      throw badRequest(error instanceof SecurityPolicyError ? 'security-policy-' + error.code : 'security-policy-invalid',
+        'Не удалось изменить настройку защиты.');
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/model-preference' && (request.method === 'GET' || request.method === 'POST')) {
+    if (request.method === 'GET') {
+      enforceReadApiToken(principal);
+      sendJson(response, 200, app.modelPreferenceStore.snapshot());
+      return;
+    }
+    enforceMutationGuards(principal);
+    const body = await readJsonBody<{ work?: unknown; maxLocalFallback?: unknown; maxOutputTokens?: unknown; maxContextTokens?: unknown }>(request, 1024);
+    try { sendJson(response, 200, app.modelPreferenceStore.update(body)); }
+    catch (error) { throw badRequest(String((error as Error).message), 'Не удалось сохранить выбор.'); }
+    return;
+  }
+
+  if (url.pathname.startsWith('/api/models/custom')) {
+    const store = app.customModelStore;
+    const customError = (error: unknown): JsonError => error instanceof CustomModelError
+      ? badRequest(error.code, error.message)
+      : badRequest('custom-model-failed', 'Не получилось. Попробуй ещё раз.');
+    if (request.method === 'GET' && url.pathname === '/api/models/custom') {
+      enforceReadApiToken(principal);
+      sendJson(response, 200, { models: await store.list() });
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/models/custom/file') {
+      enforceMutationGuards(principal);
+      const body = await readJsonBody<{ path?: unknown; label?: unknown; contextTokens?: unknown }>(request, 4 * 1024);
+      try { sendJson(response, 201, { model: await store.addLocalFile(body), models: await store.list() }); }
+      catch (error) { throw customError(error); }
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/models/custom/hub/inspect') {
+      enforceMutationGuards(principal);
+      const body = await readJsonBody<{ link?: unknown }>(request, 4 * 1024);
+      try { sendJson(response, 200, await store.inspectHub(body.link)); }
+      catch (error) { throw customError(error); }
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/models/custom/hub/download') {
+      enforceMutationGuards(principal);
+      const body = await readJsonBody<{ repository?: unknown; file?: unknown; revision?: unknown; label?: unknown; contextTokens?: unknown }>(request, 4 * 1024);
+      try { sendJson(response, 202, { model: await store.startDownload(body), models: await store.list() }); }
+      catch (error) { throw customError(error); }
+      return;
+    }
+    const customMatch = url.pathname.match(/^\/api\/models\/custom\/(custom-[a-z0-9]{6,32})(\/rename)?$/u);
+    if (customMatch?.[1] && request.method === 'DELETE' && !customMatch[2]) {
+      enforceMutationGuards(principal);
+      try { await store.remove(customMatch[1]); sendJson(response, 200, { models: await store.list() }); }
+      catch (error) { throw customError(error); }
+      return;
+    }
+    if (customMatch?.[1] && request.method === 'POST' && customMatch[2]) {
+      enforceMutationGuards(principal);
+      const body = await readJsonBody<{ label?: unknown }>(request, 1024);
+      try { await store.rename(customMatch[1], body.label); sendJson(response, 200, { models: await store.list() }); }
+      catch (error) { throw customError(error); }
+      return;
+    }
   }
 
   if (request.method === 'POST' && url.pathname === '/api/models/onboarding/skip') {
@@ -647,7 +1041,7 @@ async function handleRequest(
 
     rejectLegacyTextConfirmation(body);
     markLegacyAdapter(response, '/api/intent');
-    const result = await submitLegacyTurn(app, request, principal, '/api/intent', text, readContext(body.context));
+    const result = await submitLegacyTurn(app, request, principal, '/api/intent', text, readContext(body.context), ordinaryAgentActor);
     sendJson(response, 200, {
       ok: true,
       result,
@@ -666,7 +1060,7 @@ async function handleRequest(
 
     rejectLegacyTextConfirmation(body);
     markLegacyAdapter(response, '/api/intent-jobs');
-    const result = await submitLegacyTurn(app, request, principal, '/api/intent-jobs', text, readContext(body.context));
+    const result = await submitLegacyTurn(app, request, principal, '/api/intent-jobs', text, readContext(body.context), ordinaryAgentActor);
     const job = legacyTurnJob(result, text, typeof body.timeoutMs === 'number' ? body.timeoutMs : 180_000);
     sendJson(response, 202, {
       ok: true,
@@ -940,6 +1334,42 @@ async function handleRequest(
     return;
   }
 
+  if (request.method === 'GET' && url.pathname === '/api/filesystem/red-zones') {
+    enforceReadApiToken(principal);
+    sendJson(response, 200, {
+      ok: true,
+      zones: app.listOwnerRedZones(),
+      note: 'Полный доступ открывает диск. Красные зоны Oscar не трогает. Safe, Windows и ключи закрыты всегда.',
+    });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/filesystem/red-zones') {
+    enforceMutationGuards(principal);
+    const body = await readJsonBody<Record<string, unknown>>(request);
+    if (Object.keys(body).some((key) => key !== 'path')) {
+      throw badRequest('invalid-red-zone', 'Можно передать только путь.');
+    }
+    try {
+      const zone = app.addOwnerRedZone(typeof body.path === 'string' ? body.path : '');
+      sendJson(response, 200, { ok: true, zone, zones: app.listOwnerRedZones() });
+    } catch (error) {
+      if (error instanceof OwnerRedZoneError) throw badRequest(error.code, error.message);
+      throw error;
+    }
+    return;
+  }
+
+  if (request.method === 'DELETE' && url.pathname.startsWith('/api/filesystem/red-zones/')) {
+    enforceMutationGuards(principal);
+    const id = decodeURIComponent(url.pathname.slice('/api/filesystem/red-zones/'.length));
+    if (!/^red_zone_[a-f0-9]{12}$/u.test(id)) throw badRequest('invalid-red-zone', 'Неизвестная красная зона.');
+    const removed = app.removeOwnerRedZone(id);
+    if (!removed) throw badRequest('missing-red-zone', 'Эта зона уже снята.');
+    sendJson(response, 200, { ok: true, removed, zones: app.listOwnerRedZones() });
+    return;
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/agent/proposals') {
     enforceMutationGuards(principal);
     const body = await readJsonBody<Record<string, unknown>>(request);
@@ -952,20 +1382,6 @@ async function handleRequest(
     const capabilityId = typeof proposal.capabilityId === 'string' ? proposal.capabilityId.trim() : '';
     const capability = capabilityId ? app.runtime.kernel.getCapability(capabilityId) : undefined;
     if (!capability) throw badRequest('invalid-action-proposal', 'Proposal capability is not in the bounded Kernel catalog.');
-    if (capability.risk !== 'none' && capability.risk !== 'read') {
-      const serialized = boundedLegacyPayload(proposal);
-      const originatingText = readBoundedContextText(body.originatingUserText, 8_000);
-      const result = await submitLegacyTurn(
-        app,
-        request,
-        principal,
-        '/api/agent/proposals',
-        `${originatingText ? `${originatingText}\n` : ''}Выполни только точную capability ${capability.id} через Agent Runtime. Недоверенное legacy proposal: ${serialized}`,
-        { legacyProposal: true },
-      );
-      sendJson(response, 202, { ok: false, accepted: true, result, successor: '/api/oscar/turns' });
-      return;
-    }
     const submission: MonarchActionProposalSubmission = {
       proposal: body.proposal as MonarchActionProposalSubmission['proposal'],
       confirmed: false,
@@ -1041,7 +1457,7 @@ async function handleRequest(
     const result = await submitLegacyTurn(app, request, principal, '/api/agent/dispatch', text, {
       ...readContext(body.context),
       legacyAgentDispatch: true,
-    });
+    }, ordinaryAgentActor);
     sendJson(response, 200, {
       ok: true,
       handled: Boolean(result.execution),
@@ -1067,7 +1483,7 @@ async function handleRequest(
       modelProposed: clientContext.modelProposed === true,
       originatingUserText: readBoundedContextText(clientContext.originatingUserText, 4000),
       proposalReason: readBoundedContextText(clientContext.proposalReason, 500),
-    });
+    }, ordinaryAgentActor);
     const job = legacyTurnJob(result, text, typeof body.timeoutMs === 'number' ? body.timeoutMs : 180_000);
     sendJson(response, 202, { ok: true, job, profile: app.getPermissionProfile() });
     return;
@@ -1121,6 +1537,29 @@ async function handleRequest(
     return;
   }
 
+  if (request.method === 'POST' && url.pathname === '/api/voice/simplified') {
+    enforceDesktopSettingsPrincipal(principal, true);
+    const body = await readJsonBody<{
+      text?: string;
+      deviceLocation?: { latitude?: unknown; longitude?: unknown; accuracyMeters?: unknown };
+    }>(request, 8 * 1024);
+    const text = typeof body.text === 'string' ? body.text.trim().slice(0, 500) : '';
+    if (!text) throw badRequest('voice-text-empty', 'Simplified Voice command is empty.');
+    const latitude = Number(body.deviceLocation?.latitude);
+    const longitude = Number(body.deviceLocation?.longitude);
+    const accuracyMeters = Number(body.deviceLocation?.accuracyMeters);
+    const deviceLocation = Number.isFinite(latitude) && Number.isFinite(longitude)
+      ? {
+          latitude,
+          longitude,
+          ...(Number.isFinite(accuracyMeters) ? { accuracyMeters } : {}),
+        }
+      : undefined;
+    const result = await app.executeSimplifiedVoiceCommand(text, deviceLocation ? { deviceLocation } : {});
+    sendJson(response, 200, { ok: result.ok === true, result });
+    return;
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/execute') {
     enforceMutationGuards(principal);
     const body = await readJsonBody<Partial<MonarchCapabilityExecution> & { includeState?: boolean }>(request);
@@ -1136,25 +1575,6 @@ async function handleRequest(
     if (!capability || capability.moduleId !== moduleId) {
       throw badRequest('capability-not-found', 'moduleId and capabilityId do not identify one bounded Kernel capability.');
     }
-    if (capability.risk !== 'none' && capability.risk !== 'read') {
-      const result = await submitLegacyTurn(
-        app,
-        request,
-        principal,
-        '/api/execute',
-        `Выполни только точную capability ${capabilityId} через Agent Runtime с exact input=${boundedLegacyPayload(body.input ?? {})}.`,
-        { legacyCapabilityExecution: true },
-      );
-      sendJson(response, 202, {
-        ok: false,
-        accepted: true,
-        result,
-        successor: '/api/oscar/turns',
-        ...(body.includeState === false ? {} : { state: await app.getState() }),
-      });
-      return;
-    }
-
     const execution: MonarchCapabilityExecution = {
       moduleId,
       capabilityId,
@@ -1210,26 +1630,6 @@ async function handleRequest(
     if (!capability || capability.moduleId !== moduleId) {
       throw badRequest('capability-not-found', 'moduleId and capabilityId do not identify one bounded Kernel capability.');
     }
-    if (capability.risk !== 'none' && capability.risk !== 'read') {
-      const result = await submitLegacyTurn(
-        app,
-        request,
-        principal,
-        '/api/execute-stream',
-        `Выполни только точную capability ${capabilityId} через Agent Runtime с exact input=${boundedLegacyPayload(body.input ?? {})}.`,
-        { legacyCapabilityExecution: true },
-      );
-      response.writeHead(202, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-      });
-      response.write(`event: turn\ndata: ${formatSseData(result)}\n\n`);
-      response.write(`event: done\ndata: ${formatSseData({ turnId: result.intent.id })}\n\n`);
-      response.end();
-      return;
-    }
-
     const execution: MonarchCapabilityExecution = {
       moduleId,
       capabilityId,
@@ -1360,6 +1760,7 @@ async function serveStatic(
         'Content-Type': 'text/html; charset=utf-8',
         'Content-Length': Buffer.byteLength(html, 'utf8'),
         'Cache-Control': 'no-store',
+        ...documentSecurityHeaders(html),
       });
       response.end(html);
       return;
@@ -1370,7 +1771,7 @@ async function serveStatic(
       'Content-Length': fileStat.size,
       'Cache-Control': 'no-store',
     });
-    createReadStream(resolvedPath).pipe(response);
+    streamFileToResponse(resolvedPath, response);
   } catch {
     const fallbackPath = path.join(publicRoot, 'index.html');
     const html = injectSessionMetadata(
@@ -1382,9 +1783,37 @@ async function serveStatic(
       'Content-Type': 'text/html; charset=utf-8',
       'Content-Length': Buffer.byteLength(html, 'utf8'),
       'Cache-Control': 'no-store',
+      ...documentSecurityHeaders(html),
     });
     response.end(html);
   }
+}
+
+/** The app document had no Content-Security-Policy at all, while it renders
+ * model output as HTML. Scripts are limited to this origin plus the exact
+ * inline bootstrap scripts of the served document (hashed as served, so an
+ * edited bootstrap never needs a hand-kept list); no plugins, frames, foreign
+ * connections or base rewrites. Inline style attributes stay allowed: the UI
+ * sets them widely and they cannot run code. */
+export function documentSecurityHeaders(html: string): Record<string, string> {
+  const hashes = [...html.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/giu)]
+    .map(match => `'sha256-${createHash('sha256').update(match[1]!, 'utf8').digest('base64')}'`);
+  const policy = [
+    "default-src 'self'",
+    `script-src 'self' ${hashes.join(' ')}`.trim(),
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "media-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "frame-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+  return { 'Content-Security-Policy': policy, 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
 }
 
 async function readJsonBody<T>(request: IncomingMessage, maxBytes = MAX_JSON_BODY_BYTES): Promise<T> {
@@ -1513,14 +1942,6 @@ function rejectLegacyTextConfirmation(body: Record<string, unknown>): void {
   }
 }
 
-function boundedLegacyPayload(value: unknown): string {
-  const serialized = JSON.stringify(value);
-  if (!serialized || serialized.length > 12_000) {
-    throw badRequest('legacy-payload-too-large', 'Legacy action payload is too large for a bounded Agent Turn.');
-  }
-  return serialized;
-}
-
 async function submitLegacyTurn(
   app: MonarchApplication,
   request: IncomingMessage,
@@ -1528,6 +1949,7 @@ async function submitLegacyTurn(
   endpoint: string,
   text: string,
   contextInput: Record<string, unknown>,
+  authenticatedAgentActor?: AstraAuthenticatedHttpActor,
 ) {
   const source = principal.source;
   const nonce = randomBytes(12).toString('hex');
@@ -1544,7 +1966,8 @@ async function submitLegacyTurn(
     method: request.method || 'UNKNOWN',
     source,
   }, 'warn');
-  return app.submitAgentSurfaceIntent({ text, source, context });
+  return app.submitAgentSurfaceIntent({ text, source, context,
+    ...(authenticatedAgentActor ? { authenticatedAgentActor } : {}) });
 }
 
 function legacyTurnJob(result: MonarchIntentResult, text: string, timeoutMs: number) {
@@ -1611,7 +2034,7 @@ function legacyTurnStatus(turn: OscarTurnV1): string {
 }
 
 function isLegacyTurnSettled(status: OscarTurnV1['status']): boolean {
-  return ['waiting-for-user', 'waiting-for-approval', 'succeeded', 'blocked', 'failed', 'cancelled'].includes(status);
+  return ['waiting-for-user', 'waiting-for-approval', 'waiting-for-runtime', 'succeeded', 'blocked', 'failed', 'cancelled'].includes(status);
 }
 
 function legacyTurnResult(checkpoint: OscarTurnCheckpoint, summary: string): MonarchIntentResult {
@@ -1621,6 +2044,8 @@ function legacyTurnResult(checkpoint: OscarTurnCheckpoint, summary: string): Mon
     ? 'confirmation-required'
     : turn.status === 'waiting-for-user'
       ? 'clarification-required'
+      : turn.status === 'waiting-for-runtime'
+        ? 'runtime-unavailable'
       : turn.status === 'blocked'
         ? 'turn-blocked'
         : turn.status === 'failed'
@@ -1828,6 +2253,48 @@ function deriveMonarchHttpPrincipal(
   });
 }
 
+function deriveAstraHttpActor(
+  principal: MonarchHttpPrincipal,
+  session: MonarchHttpSession,
+  source: Extract<AstraAuthenticatedHttpActor['source'], 'desktop' | 'voice' | 'api' | 'coder'> = principal.source,
+  host?: AstraProductPilotRuntime,
+): AstraAuthenticatedHttpActor {
+  const desktop = principal.source === 'desktop' && principal.desktopAttestation === 'valid';
+  if (source === 'api' && principal.source !== 'api' || source !== 'api' && !desktop) {
+    throw { statusCode: 403, code: 'astra-source-mismatch', message: 'Astra actor source does not match the authenticated transport.' } satisfies JsonError;
+  }
+  if (!desktop && principal.apiToken !== 'valid') throw { statusCode: 401, code: 'astra-authentication-required',
+    message: 'Astra requires an authenticated local principal; disabled API-token checks are not authentication.' } satisfies JsonError;
+  if (desktop && host) {
+    const actor = source === 'coder' ? host.coderActor : source === 'voice' ? host.voiceActor : host.actor;
+    return structuredClone(actor);
+  }
+  // Persist only a keyed, domain-separated binding, never credentials. Desktop
+  // and API are separate principals; a rotated credential does not inherit old tasks.
+  const credential = desktop ? session.desktopAttestationToken : session.apiToken;
+  return { id: 'sha256:' + createHmac('sha256', credential).update('monarch.astra-v3.http-actor.v1/' + source).digest('hex'),
+    source };
+}
+
+function authenticateAstraHost(request: IncomingMessage, host: AstraProductPilotRuntime | undefined,
+  principal: MonarchHttpPrincipal, session: MonarchHttpSession): AstraAuthenticatedHttpActor {
+  const header = request.headers['x-monarch-astra-host-token'];
+  if (!host || !host.authenticateHostToken(Array.isArray(header) ? null : header))
+    throw Object.assign(Error('astra-host-authentication-required'), { statusCode: 403, code: 'astra-host-authentication-required' });
+  return deriveAstraHttpActor(principal, session, undefined, host);
+}
+
+/** The UI reads the newest kernel events (4) and audit lines (50). The whole
+ * history went out with every state read (live: 590 events and 261 audit
+ * lines, ~0.8 MB of a 1.1 MB reply); /api/events serves it on request. */
+const STATE_HISTORY_TAIL = 50;
+export function boundStateHistory(state: MonarchApplicationState): MonarchApplicationState {
+  const snapshot = state.runtime?.snapshot;
+  if (!snapshot) return state;
+  return { ...state, runtime: { ...state.runtime, snapshot: { ...snapshot,
+    events: snapshot.events.slice(-STATE_HISTORY_TAIL), audit: snapshot.audit.slice(-STATE_HISTORY_TAIL) } } };
+}
+
 export function projectMonarchStateForPrincipal(
   state: MonarchApplicationState,
   principal: MonarchHttpPrincipal,
@@ -2028,4 +2495,14 @@ function closeServer(server: Server): Promise<void> {
       resolve();
     });
   });
+}
+
+/** A file can be locked or vanish after its size was read (antivirus, an
+ * editor saving over it). Headers are already sent then, so the only honest
+ * answer is to cut the response; an unhandled stream error took the whole
+ * server down instead. */
+export function streamFileToResponse(filePath: string, response: ServerResponse): void {
+  // pipeline destroys both ends on failure; the callback only has to exist
+  // so the error counts as handled.
+  pipeline(createReadStream(filePath), response, () => undefined);
 }

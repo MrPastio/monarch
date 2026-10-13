@@ -4,15 +4,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 import json
 import os
-import subprocess
 import sys
+import time
+import threading
+import math
+
+from .worker_transport import ProcessWorkerPool, WorkerError, decode_frame, encode_frame
 
 if TYPE_CHECKING:
     from .config import FileConfig
     from .events import SecurityEvent
 
 
-PROTOCOL_SCHEMA = 1
+PROTOCOL_SCHEMA = 2
 MAX_REQUEST_BYTES = 65_536
 MAX_RESPONSE_BYTES = 1_048_576
 MIN_MEMORY_LIMIT_BYTES = 128 * 1024 * 1024
@@ -20,11 +24,16 @@ MAX_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
 MIN_TIMEOUT_SECONDS = 0.5
 MAX_TIMEOUT_SECONDS = 10.0
 _JOB_HANDLES: list[object] = []
+PARSER_PHASES = ('request-validated', 'sandbox-ready', 'inspect-started', 'inspect-finished')
+_PARSER_GUARD = threading.Lock()
+_PARSER_ACTIVE = 0
+_FAILED_PARSER_POOLS: list[ProcessWorkerPool] = []
 
 
 def inspect_file_isolated(path: Path, config: FileConfig) -> SecurityEvent:
     from .events import SecurityEvent
 
+    path = path.resolve()
     timeout = _bounded_float(
         config.parser_timeout_seconds,
         MIN_TIMEOUT_SECONDS,
@@ -56,69 +65,19 @@ def inspect_file_isolated(path: Path, config: FileConfig) -> SecurityEvent:
     if len(serialized) > MAX_REQUEST_BYTES:
         return _failure_event(path, "protocol_error", "file parser request is too large", timeout, memory_limit)
 
-    command = [
-        sys.executable,
-        "-S",
-        "-m",
-        "monarch_security.file_parser_worker",
-        "--worker",
-    ]
     try:
-        completed = subprocess.run(
-            command,
-            input=serialized,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(Path(__file__).resolve().parents[1]),
-            env=_worker_environment(),
-            timeout=timeout,
-            check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except subprocess.TimeoutExpired:
-        return _failure_event(
-            path,
-            "timeout",
-            "file parser exceeded its wall-clock budget",
-            timeout,
-            memory_limit,
-        )
-    except OSError as exc:
-        return _failure_event(
-            path,
-            "worker_error",
-            f"file parser could not start: {type(exc).__name__}",
-            timeout,
-            memory_limit,
-        )
-
-    if len(completed.stdout) > MAX_RESPONSE_BYTES:
-        return _failure_event(
-            path,
-            "protocol_error",
-            "file parser response exceeded its size budget",
-            timeout,
-            memory_limit,
-        )
-    if completed.returncode != 0:
-        return _failure_event(
-            path,
-            "worker_error",
-            f"file parser exited unexpectedly ({completed.returncode})",
-            timeout,
-            memory_limit,
-        )
-    try:
-        response = json.loads(completed.stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return _failure_event(
-            path,
-            "worker_error",
-            f"file parser returned invalid output (exit {completed.returncode})",
-            timeout,
-            memory_limit,
-        )
-    if not isinstance(response, dict) or response.get("schema") != PROTOCOL_SCHEMA:
+        response = _run_parser_request(request, timeout, memory_limit)
+    except ParserExecutionError as exc:
+        event = _failure_event(path, exc.status, str(exc), timeout, memory_limit)
+        return SecurityEvent(kind=event.kind, source=event.source, subject=event.subject,
+                             event_id=event.event_id, timestamp=event.timestamp,
+                             facts={**event.facts, 'content_parser_phase': exc.phase})
+    if (not isinstance(response, dict) or type(response.get('schema')) is not int
+            or response['schema'] != PROTOCOL_SCHEMA or type(response.get('ok')) is not bool
+            or (response['ok'] and set(response) != {'schema', 'ok', 'event', 'sandbox'})
+            or (not response['ok'] and set(response) not in (
+                {'schema', 'ok', 'error_kind', 'error_type', 'errno', 'error'},
+                {'schema', 'ok', 'error_kind', 'error'}))):
         return _failure_event(
             path,
             "protocol_error",
@@ -136,7 +95,17 @@ def inspect_file_isolated(path: Path, config: FileConfig) -> SecurityEvent:
 
     event_payload = response.get("event")
     sandbox = response.get("sandbox")
-    if not isinstance(event_payload, dict) or not isinstance(sandbox, dict):
+    if (not isinstance(event_payload, dict) or set(event_payload) != {
+            'event_id', 'timestamp', 'kind', 'source', 'subject', 'facts'}
+            or any(type(event_payload[field]) is not str or not event_payload[field]
+                   for field in ('event_id', 'timestamp', 'kind', 'source', 'subject'))
+            or not isinstance(sandbox, dict) or set(sandbox) != {
+                'process', 'integrity', 'memory_limit', 'memory_limit_bytes'}
+            or sandbox['process'] != 'isolated-worker'
+            or type(sandbox['memory_limit_bytes']) is not int or sandbox['memory_limit_bytes'] != memory_limit
+            or (os.name == 'nt' and (sandbox['integrity'] != 'low' or sandbox['memory_limit'] != 'windows-job'))
+            or (os.name != 'nt' and (sandbox['integrity'] != 'platform-default'
+                or sandbox['memory_limit'] not in ('rlimit-as', 'parser-budgets-only')))):
         return _failure_event(
             path,
             "protocol_error",
@@ -154,6 +123,10 @@ def inspect_file_isolated(path: Path, config: FileConfig) -> SecurityEvent:
             timeout,
             memory_limit,
         )
+    absolute = os.path.abspath(os.fspath(path))
+    if (event.kind != 'file.scanned' or event.source != 'file_scanner'
+            or event.subject != absolute or event.facts.get('path') != absolute):
+        return _failure_event(path, 'protocol_error', 'file parser event target is invalid', timeout, memory_limit)
     facts = dict(event.facts)
     facts.update(
         {
@@ -162,16 +135,65 @@ def inspect_file_isolated(path: Path, config: FileConfig) -> SecurityEvent:
             "content_parser_timeout_seconds": timeout,
             "content_parser_memory_limit_bytes": memory_limit,
             "content_parser_sandbox": sandbox,
+            "content_parser_phase": "inspect-finished",
         }
     )
-    return SecurityEvent(
-        kind=event.kind,
-        source=event.source,
-        subject=event.subject,
-        facts=facts,
-        event_id=event.event_id,
-        timestamp=event.timestamp,
-    )
+    return SecurityEvent(kind=event.kind, source=event.source, subject=event.subject,
+                         facts=facts, event_id=event.event_id, timestamp=event.timestamp)
+
+
+class ParserExecutionError(RuntimeError):
+    def __init__(self, status: str, phase: str, code: str):
+        super().__init__(code)
+        self.status, self.phase = status, phase
+
+
+def _parser_command() -> list[str]:
+    # Windows venv python.exe is a redirector, not the process that reads files.
+    return [sys._base_executable, '-S', '-u', '-m', 'monarch_security.file_parser_worker', '--worker']
+
+
+def _run_parser_request(request: dict, timeout: float, memory_limit: int) -> dict:
+    global _PARSER_ACTIVE
+    with _PARSER_GUARD:
+        if _FAILED_PARSER_POOLS:
+            raise ParserExecutionError('worker_error', 'launch', 'worker-cleanup-unresolved')
+        if _PARSER_ACTIVE >= 3:
+            raise ParserExecutionError('worker_error', 'launch', 'worker-capacity-unavailable')
+        _PARSER_ACTIVE += 1
+    pool = None
+    future = None
+    try:
+        pool = ProcessWorkerPool(_parser_command(), environment=_worker_environment(),
+                                 cwd=str(Path(__file__).resolve().parents[1]), capacity=1,
+                                 memory_bytes=memory_limit, request_bytes=MAX_REQUEST_BYTES,
+                                 response_bytes=MAX_RESPONSE_BYTES, progress_phases=PARSER_PHASES)
+        future = pool.submit(request, timeout=timeout)
+        while not future.done():
+            pool.tick()
+            if not future.done():
+                time.sleep(0.005)
+        response = future.result()
+        if response.get('ok') is True and future.progress != PARSER_PHASES[-1]:
+            raise WorkerError('worker-progress-incomplete')
+        return response
+    except (WorkerError, OSError) as exc:
+        code = str(exc) if isinstance(exc, WorkerError) else 'worker-launch-failed'
+        status = 'timeout' if code == 'worker-timeout' else (
+            'protocol_error' if any(tag in code for tag in ('frame', 'json', 'envelope', 'progress')) else 'worker_error')
+        raise ParserExecutionError(status, getattr(future, 'progress', 'launch'), code) from exc
+    finally:
+        try:
+            if pool is not None:
+                pool.close()
+        except (WorkerError, OSError) as exc:
+            with _PARSER_GUARD:
+                _FAILED_PARSER_POOLS.append(pool)
+            raise ParserExecutionError('worker_error', getattr(future, 'progress', 'launch'),
+                                       'worker-cleanup-incomplete') from exc
+        finally:
+            with _PARSER_GUARD:
+                _PARSER_ACTIVE -= 1
 
 
 def _failure_event(
@@ -204,7 +226,7 @@ def _failure_event(
 
 def _worker_environment() -> dict[str, str]:
     source_root = str(Path(__file__).resolve().parents[1])
-    python_root = str(Path(sys.executable).resolve().parent)
+    python_root = str(Path(sys._base_executable).resolve().parent)
     system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
     environment = {
         "MONARCH_SECURITY_FILE_PARSER_WORKER": "1",
@@ -223,12 +245,8 @@ def _worker_environment() -> dict[str, str]:
     return environment
 
 
-def _worker_main() -> int:
+def _process_request(request: dict, progress) -> dict:
     try:
-        raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
-        if len(raw) > MAX_REQUEST_BYTES:
-            raise ValueError("file parser request exceeds its size budget")
-        request = json.loads(raw.decode("utf-8"))
         if not isinstance(request, dict) or set(request) != {
             "schema",
             "path",
@@ -236,7 +254,7 @@ def _worker_main() -> int:
             "config",
         }:
             raise ValueError("file parser request shape is invalid")
-        if request.get("schema") != PROTOCOL_SCHEMA:
+        if type(request.get('schema')) is not int or request['schema'] != PROTOCOL_SCHEMA:
             raise ValueError("file parser request schema is invalid")
         path = request.get("path")
         config_payload = request.get("config")
@@ -249,17 +267,31 @@ def _worker_main() -> int:
             "parser_memory_limit_bytes",
         }:
             raise ValueError("file parser config shape is invalid")
+        for field, maximum in (('max_full_hash_bytes', 4 * 1024**3), ('entropy_sample_bytes', 16 * 1024**2)):
+            value = config_payload[field]
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise ValueError('file parser config bound is invalid')
+        budget = config_payload['parser_timeout_seconds']
+        if type(budget) not in (int, float) or not math.isfinite(budget) or not MIN_TIMEOUT_SECONDS <= budget <= MAX_TIMEOUT_SECONDS:
+            raise ValueError('file parser timeout is invalid')
+        requested_memory = request['memory_limit_bytes']
+        if (type(requested_memory) is not int or not MIN_MEMORY_LIMIT_BYTES <= requested_memory <= MAX_MEMORY_LIMIT_BYTES
+                or type(config_payload['parser_memory_limit_bytes']) is not int
+                or config_payload['parser_memory_limit_bytes'] != requested_memory):
+            raise ValueError('file parser memory is invalid')
         memory_limit = _bounded_int(
             request.get("memory_limit_bytes"),
             MIN_MEMORY_LIMIT_BYTES,
             MAX_MEMORY_LIMIT_BYTES,
         )
+        progress('request-validated')
         try:
             sandbox = _apply_worker_sandbox(memory_limit)
         except OSError as exc:
             raise RuntimeError(
                 f"file parser sandbox initialization failed: {type(exc).__name__}"
             ) from exc
+        progress('sandbox-ready')
 
         from .config import FileConfig
         from .sensors.files import FileScanner
@@ -274,12 +306,12 @@ def _worker_main() -> int:
             ),
             parser_memory_limit_bytes=memory_limit,
         )
+        progress('inspect-started')
         event = FileScanner(config)._inspect_local(Path(path))
-        _write_response({"schema": PROTOCOL_SCHEMA, "ok": True, "event": event.to_dict(), "sandbox": sandbox})
-        return 0
+        progress('inspect-finished')
+        return {"schema": PROTOCOL_SCHEMA, "ok": True, "event": event.to_dict(), "sandbox": sandbox}
     except OSError as exc:
-        _write_response(
-            {
+        return {
                 "schema": PROTOCOL_SCHEMA,
                 "ok": False,
                 "error_kind": "os",
@@ -287,18 +319,32 @@ def _worker_main() -> int:
                 "errno": exc.errno,
                 "error": _bounded_text(exc),
             }
-        )
-        return 0
     except Exception as exc:
-        _write_response(
-            {
+        return {
                 "schema": PROTOCOL_SCHEMA,
                 "ok": False,
                 "error_kind": "internal",
                 "error": f"{type(exc).__name__}: {_bounded_text(exc)}",
             }
-        )
+
+
+def _worker_main() -> int:
+    try:
+        raw = sys.stdin.buffer.readline(MAX_REQUEST_BYTES + 1)
+        message = decode_frame(raw, MAX_REQUEST_BYTES)
+        if (set(message) != {'schema', 'id', 'payload'} or type(message['schema']) is not int
+                or message['schema'] != 1 or type(message['id']) is not int
+                or message['id'] != 1 or not isinstance(message['payload'], dict)):
+            return 2
+        def progress(phase):
+            _write_response({'schema': 1, 'id': message['id'], 'phase': phase})
+        response = _process_request(message['payload'], progress)
+        _write_response({'schema': 1, 'id': message['id'], 'payload': response})
+        # Wait at the gate until the parent closes/reaps this one-request job.
+        sys.stdin.buffer.read(1)
         return 0
+    except (WorkerError, OSError):
+        return 2
 
 
 def _apply_worker_sandbox(memory_limit: int) -> dict[str, Any]:
@@ -426,9 +472,8 @@ def _lower_windows_integrity() -> None:
 
 
 def _write_response(payload: dict[str, Any]) -> None:
-    serialized = json.dumps(payload, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":"))
-    sys.stdout.write(serialized)
-    sys.stdout.flush()
+    sys.stdout.buffer.write(encode_frame(payload, MAX_RESPONSE_BYTES))
+    sys.stdout.buffer.flush()
 
 
 def _bounded_text(value: object, limit: int = 512) -> str:

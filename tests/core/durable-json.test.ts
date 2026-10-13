@@ -50,7 +50,7 @@ describe('synchronous durable JSON', () => {
       })).toThrow(DurableJsonSyncError);
 
       expect(attempts).toBe(3);
-      expect(delays).toEqual([8, 16]);
+      expect(delays).toEqual([15, 30]);
       expect(readDurableJson(filePath)).toEqual({ revision: 1 });
       expect(await readdir(root)).toEqual(['state.json']);
     } finally {

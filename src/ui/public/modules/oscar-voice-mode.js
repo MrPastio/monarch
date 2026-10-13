@@ -1,7 +1,10 @@
+import { reducedUiMotion } from './ui-motion.js';
 import {
+  executeSimplifiedVoiceCommand,
   executeVoiceAgentTask,
   prepareVoiceTranscription,
 } from './api.js';
+import { readOscarVoicePreferences, readVoiceInputPreferences } from './oscar-voice-settings.js';
 import { createOscarSpeechController } from './oscar-speech.js';
 import { attachVoiceInput } from './voice-input.js';
 import {
@@ -26,11 +29,11 @@ import {
 
 const PHASE_COPY = Object.freeze({
   idle: ['Готов', 'Oscar рядом', 'Возвращаю микрофон'],
-  entering: ['Пробуждаюсь', 'Oscar рядом', 'Подключаю локальный микрофон'],
+  entering: ['Пробуждаюсь', 'Oscar рядом', 'Подключаю микрофон'],
   listening: ['Слушаю', 'Говори', 'Закончу запись автоматически после короткой паузы'],
-  recognizing: ['Распознаю локально', 'Слышу тебя', 'Перевожу звук в текст'],
-  routing: ['Передаю задачу', 'Понял запрос', 'Создаю общий Agent Task'],
-  thinking: ['Выполняю задачу', 'Oscar работает', 'Действия проходят через Kernel'],
+  recognizing: ['Распознаю речь', 'Слышу тебя', 'Перевожу звук в текст'],
+  routing: ['Сверяю команду', 'Понял запрос', 'Готовлю действие'],
+  thinking: ['Выполняю задачу', 'Oscar работает', 'Можно остановить в любой момент'],
   speaking: ['Отвечаю', 'Оскар говорит', 'Нажми круг, чтобы прервать ответ'],
   error: ['Не получилось', 'Нужна ещё попытка', 'Проверь микрофон и повтори'],
 });
@@ -41,6 +44,7 @@ const VISUAL_STATE_ACCESSIBLE_LABELS = Object.freeze({
   speaking: 'Оскар отвечает. Нажми, чтобы остановить ответ и говорить дальше',
   paused: 'Голосовой индикатор Оскар: пауза',
 });
+const WAKE_ACKNOWLEDGEMENTS = Object.freeze(['Слушаю.', 'Да?', 'Я здесь.']);
 
 const VOICE_SPEECH_FALLBACK_COPY = Object.freeze({
   'neural-tts-runtime-missing': 'Qwen TTS не установлен',
@@ -93,13 +97,15 @@ export function initOscarVoiceMode(root = document) {
   const transcript = root.querySelector('#oscar-voice-mode-transcript');
   const thinking = root.querySelector('#oscar-voice-mode-thinking');
   const live = root.querySelector('#oscar-voice-mode-live');
-  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+  const reducedMotion = reducedUiMotion;
   const pickThinkingPhrase = createVoiceThinkingPhrasePicker();
   let isOpen = false;
   let micMuted = false;
   let turnId = 0;
   let openTimer = 0;
   let restartTimer = 0;
+  let inactivityTimer = 0;
+  let resultCloseTimer = 0;
   let thinkingTimer = 0;
   let lastFocus = null;
   let analyserCleanup = () => {};
@@ -110,6 +116,9 @@ export function initOscarVoiceMode(root = document) {
   let expectingSpeech = false;
   let activeTurnController = null;
   let speechWarmupFailure = null;
+  let pendingTargetChoices = [];
+  let wakeAcknowledgementIndex = 0;
+  let closeAfterSpeech = false;
 
   const orbRenderer = createOrganicVoiceOrbRenderer({
     canvas: orbCanvas,
@@ -157,10 +166,15 @@ export function initOscarVoiceMode(root = document) {
         setPhase('error', {
           detail: speechState.error || 'Не удалось озвучить ответ',
         });
-        scheduleListening(2200);
+        if (surface.dataset.lane === 'simplified') scheduleTerminalClose(1000);
+        else scheduleListening(2200);
         return;
       }
-      if (speechState.status === 'idle' && previous === 'speaking' && !expectingSpeech) {
+      if (speechState.status === 'idle' && previous === 'speaking' && closeAfterSpeech) {
+        closeAfterSpeech = false;
+        speechLevelCleanup();
+        scheduleTerminalClose(180);
+      } else if (speechState.status === 'idle' && previous === 'speaking' && !expectingSpeech) {
         speechLevelCleanup();
         const fallbackNotice = describeVoiceSpeechFallback(speechState.playback);
         surface.dataset.speechFallback = String(Boolean(fallbackNotice));
@@ -200,7 +214,8 @@ export function initOscarVoiceMode(root = document) {
         setPhase('recognizing');
       } else if (captureState.state === 'error') {
         setPhase('error', { detail: captureState.title || 'Голос не распознан' });
-        scheduleListening(2200);
+        if (surface.dataset.lane === 'simplified') scheduleTerminalClose(1200);
+        else scheduleListening(2200);
       }
     },
   });
@@ -211,33 +226,58 @@ export function initOscarVoiceMode(root = document) {
   muteButton?.addEventListener('click', toggleMute);
   surface.addEventListener('keydown', trapDialogKeydown);
 
-  function open() {
+  function open(options = {}) {
     if (isOpen) return;
     abortActiveTurn();
     isOpen = true;
     micMuted = false;
     speechWarmupFailure = null;
+    closeAfterSpeech = false;
     turnId += 1;
     const openingTurn = turnId;
     lastFocus = document.activeElement;
     clearTimers();
+    const simplifiedMode = readVoiceInputPreferences().simplifiedModeEnabled !== false;
+    const initialTranscript = String(options?.transcript || '').trim().slice(0, 500);
+    if (options?.source === 'background-wake' && options?.acknowledged !== true) {
+      acknowledgeWake();
+    }
     surface.hidden = false;
+    surface.dataset.lane = simplifiedMode ? 'simplified' : 'agent';
+    surface.dataset.activation = String(options?.source || 'manual').slice(0, 40);
+    surface.setAttribute('aria-modal', simplifiedMode ? 'false' : 'true');
     keepSurfaceAtOrigin();
     surface.dataset.mic = 'live';
     surface.dataset.voiceActivity = 'waiting';
     orbRenderer?.start();
     resetVoiceLevel();
-    document.body.classList.add('voice-mode-open');
+    document.body.classList.toggle('voice-mode-open', !simplifiedMode);
+    window.dispatchEvent(new CustomEvent('monarch:voice-mode-open', { detail: { simplifiedMode } }));
     syncMuteControl();
-    setPhase('entering', { detail: 'Подготавливаю локальное распознавание и голос' });
-    live.textContent = 'Голосовой режим открыт. Запускаю локальное распознавание.';
+    setPhase(simplifiedMode ? initialTranscript ? 'routing' : 'listening' : 'entering', {
+      kicker: simplifiedMode ? 'Упрощённый режим' : undefined,
+      title: simplifiedMode ? initialTranscript ? 'Выполняю локально' : 'Слушаю' : undefined,
+      detail: simplifiedMode ? 'Быстрые команды без ожидания ответа модели' : 'Подготавливаю локальное распознавание и голос',
+    });
+    live.textContent = simplifiedMode
+      ? 'Простой режим готов. Основные команды выполняются напрямую.'
+      : 'Полный голосовой режим открыт. Он крайне нестабилен. Запускаю локальное распознавание.';
     closeButton?.focus({ preventScroll: true });
     // Streaming STT is a transport and warms independently from the common
     // Agent Runtime decision model and the substantially heavier Qwen TTS.
-    void prepareVoiceTranscription().catch(() => {
-      // Direct MediaRecorder transcription remains the truthful fallback.
-    });
-    openTimer = window.setTimeout(startListening, reducedMotion?.matches ? 40 : 140);
+    if (!simplifiedMode) {
+      void prepareVoiceTranscription().catch(() => {
+        // Direct MediaRecorder transcription remains the truthful fallback.
+      });
+    }
+    if (initialTranscript) {
+      openTimer = window.setTimeout(
+        () => void handleTranscript(initialTranscript),
+        simplifiedMode ? 0 : reducedMotion?.matches ? 40 : 140,
+      );
+    } else {
+      openTimer = window.setTimeout(startListening, simplifiedMode ? 40 : reducedMotion?.matches ? 40 : 140);
+    }
 
     const recordSpeechWarmup = ({ warmup } = {}) => {
       if (!isOpen || openingTurn !== turnId) return;
@@ -256,21 +296,26 @@ export function initOscarVoiceMode(root = document) {
         live.textContent = `Qwen TTS не готов: ${lastError}. Продолжаю слушать, но аварийная Windows-озвучка явно отмечена.`;
       }
     };
-    void warmVoiceModeSpeech(speech).then(recordSpeechWarmup, (error) => {
-      recordSpeechWarmup({
-        warmup: {
-          status: 'failed',
-          ok: false,
-          error: 'speech-warmup-ipc-failed',
-          summary: error instanceof Error ? error.message : String(error || 'Qwen TTS warmup failed.'),
-        },
+    if (simplifiedMode) {
+      surface.dataset.speechWarmup = 'system';
+    } else {
+      void warmVoiceModeSpeech(speech).then(recordSpeechWarmup, (error) => {
+        recordSpeechWarmup({
+          warmup: {
+            status: 'failed',
+            ok: false,
+            error: 'speech-warmup-ipc-failed',
+            summary: error instanceof Error ? error.message : String(error || 'Qwen TTS warmup failed.'),
+          },
+        });
       });
-    });
+    }
   }
 
   function close() {
     if (!isOpen) return;
     isOpen = false;
+    closeAfterSpeech = false;
     turnId += 1;
     abortActiveTurn();
     clearTimers();
@@ -286,6 +331,8 @@ export function initOscarVoiceMode(root = document) {
     orbRenderer?.stop();
     surface.classList.add('is-closing');
     document.body.classList.remove('voice-mode-open');
+    window.dispatchEvent(new CustomEvent('monarch:voice-mode-closed'));
+    syncDesktopVoiceOverlay({ visible: false, phase: 'closed' });
     window.setTimeout(() => {
       surface.hidden = true;
       surface.classList.remove('is-closing');
@@ -356,6 +403,7 @@ export function initOscarVoiceMode(root = document) {
       return;
     }
     setPhase('listening', speechWarmupFailureCopy());
+    scheduleSimplifiedInactivityClose();
     surface.dataset.voiceActivity = 'waiting';
     capture.start();
   }
@@ -370,8 +418,9 @@ export function initOscarVoiceMode(root = document) {
   }
 
   async function handleTranscript(spokenText) {
-    const text = String(spokenText || '').trim();
+    let text = String(spokenText || '').trim();
     if (!isOpen || !text) return;
+    clearInactivityTimer();
     analyserCleanup();
     resetVoiceLevel();
     abortActiveTurn();
@@ -387,37 +436,157 @@ export function initOscarVoiceMode(root = document) {
         if (!micMuted) scheduleListening(300);
         return;
       }
-      surface.dataset.lane = 'agent';
-      setPhase('thinking');
-      showThinkingPhrase();
-      const result = await executeVoiceAgentTask(text, controller.signal);
+      if (surface.dataset.lane === 'simplified' && isVoiceDismissText(text)) {
+        transcript.textContent = 'Голосовой режим завершён';
+        syncDesktopVoiceOverlay({
+          visible: true,
+          phase: 'result',
+          kicker: 'Готово',
+          title: 'Голосовой сеанс завершён',
+          text: 'До связи.',
+        });
+        window.setTimeout(close, 420);
+        return;
+      }
+      if (surface.dataset.lane === 'simplified' && pendingTargetChoices.length > 0) {
+        const followUp = resolvePendingVoiceChoiceText(text, pendingTargetChoices);
+        pendingTargetChoices = [];
+        if (!followUp) {
+          transcript.textContent = 'Выбор отменён';
+          setPhase('idle', { title: 'Хорошо', detail: 'Скажи другую команду' });
+          scheduleListening(320);
+          return;
+        }
+        text = followUp;
+        transcript.textContent = text;
+      }
+      const simplifiedMode = readVoiceInputPreferences().simplifiedModeEnabled !== false;
+      surface.dataset.lane = simplifiedMode ? 'simplified' : 'agent';
+      const immediateFeedback = simplifiedMode ? describeSimplifiedVoiceStart(text) : null;
+      if (immediateFeedback) {
+        setPhase('routing', immediateFeedback);
+        if (immediateFeedback.spokenText) speakWakeAcknowledgement(immediateFeedback.spokenText);
+      } else {
+        setPhase('thinking');
+        if (!simplifiedMode) showThinkingPhrase();
+      }
+      const result = simplifiedMode
+        ? await executeSimplifiedVoiceCommand(text, controller.signal, {
+            deviceLocation: await resolveSimplifiedWeatherDeviceLocation(text, controller.signal),
+          })
+        : await executeVoiceAgentTask(text, controller.signal);
       clearThinkingTimer();
       if (!isOpen || currentTurn !== turnId) return;
+      if (simplifiedMode && result.status === 'unsupported') {
+        // Not a quick command: ask it in the chat, exactly as if it were typed there.
+        const sent = sendTranscriptToChat(text);
+        transcript.textContent = sent ? text : 'Команда не входит в быстрый набор';
+        setPhase(sent ? 'routing' : 'error', sent ? {
+          kicker: 'Спрашиваю в чате',
+          title: 'Ответ появится в чате',
+          detail: 'Это не быстрая команда, поэтому вопрос ушёл Оскару обычным сообщением.',
+        } : {
+          kicker: 'Не быстрая команда',
+          title: 'Спроси это в чате',
+          detail: 'Голосом сейчас работают быстрые команды: громкость, приложения, погода, курс валют.',
+        });
+        scheduleTerminalClose(sent ? 1400 : 2200);
+        return;
+      }
+      if (simplifiedMode && result.status === 'consent-required') {
+        transcript.textContent = 'Сетевые карточки выключены';
+        setPhase('error', {
+          kicker: 'Нужно разрешение',
+          title: 'Включи карточки в настройках Voice',
+          detail: result.message || 'Monarch не отправляет город, координаты или запрос без явного согласия.',
+        });
+        scheduleTerminalClose(2200);
+        return;
+      }
+      if (simplifiedMode && result.status === 'location-required') {
+        transcript.textContent = 'Для погоды не задано местоположение';
+        setPhase('error', {
+          kicker: 'Нужно местоположение',
+          title: 'Выбери город или геопозицию',
+          detail: result.message || 'Это настраивается в разделе Voice.',
+        });
+        scheduleTerminalClose(2200);
+        return;
+      }
+      if (simplifiedMode && result.status === 'approval-required') {
+        transcript.textContent = 'Действие требует точного подтверждения';
+        setPhase('error', { detail: 'Открой action-card в Oscar — голосом разрешать действие нельзя' });
+        scheduleTerminalClose(1800);
+        return;
+      }
       if (!result.ok || !result.text) {
-        setPhase('error', { detail: readableVoiceError(result.message || result.error) });
-        scheduleListening(2600);
+        const candidates = Array.isArray(result.output?.candidates)
+          ? result.output.candidates.map((candidate) => candidate?.name).filter(Boolean).slice(0, 3)
+          : [];
+        if (simplifiedMode && candidates.length > 1) {
+          pendingTargetChoices = candidates;
+          const choicePrompt = `Что открыть: ${candidates.join(' или ')}? Скажи название или номер.`;
+          transcript.textContent = choicePrompt;
+          setPhase('error', {
+            kicker: 'Нужен выбор',
+            title: 'Нашёл несколько вариантов',
+            detail: choicePrompt,
+          });
+          expectingSpeech = true;
+          const promptResult = speech.toggle({
+            messageId: `voice-choice-${currentTurn}`,
+            text: choicePrompt,
+            latencyMode: 'instant',
+          });
+          if (!promptResult?.ok) {
+            expectingSpeech = false;
+            scheduleListening(800);
+          }
+          return;
+        }
+        setPhase('error', {
+          detail: candidates.length
+            ? `Нужен точный выбор: ${candidates.join(', ')}`
+            : readableVoiceError(result.message || result.error),
+        });
+        if (simplifiedMode) scheduleTerminalClose(1800);
+        else scheduleListening(2600);
         return;
       }
 
       transcript.textContent = compactVisibleAnswer(result.text);
+      syncDesktopVoiceOverlay({
+        visible: true,
+        phase: 'result',
+        kicker: result.card && typeof result.card === 'object' ? 'Актуальные данные' : 'Готово',
+        title: result.card && typeof result.card === 'object'
+          ? result.card.title
+          : result.performed === true ? 'Действие выполнено' : 'Ответ готов',
+        text: transcript.textContent,
+        ...(result.card && typeof result.card === 'object' ? { card: result.card } : {}),
+      });
       thinking.hidden = true;
       expectingSpeech = true;
+      closeAfterSpeech = simplifiedMode;
       speechEnvelope = createVoiceSpeechEnvelope(result.text);
       const speechResult = speech.toggle({
         messageId: `voice-turn-${currentTurn}`,
         text: result.text,
+        latencyMode: simplifiedMode ? 'instant' : 'natural',
       });
       if (!speechResult?.ok) {
         expectingSpeech = false;
         setPhase('error', { detail: 'Ответ готов, но локальная озвучка недоступна' });
-        scheduleListening(2400);
+        if (simplifiedMode) scheduleTerminalClose(1200);
+        else scheduleListening(2400);
       }
     } catch (error) {
       clearThinkingTimer();
       if (controller.signal.aborted || isAbortError(error)) return;
       if (!isOpen || currentTurn !== turnId) return;
       setPhase('error', { detail: readableVoiceError(error) });
-      scheduleListening(2600);
+      if (surface.dataset.lane === 'simplified') scheduleTerminalClose(1800);
+      else scheduleListening(2600);
     } finally {
       if (activeTurnController === controller) {
         activeTurnController = null;
@@ -444,6 +613,75 @@ export function initOscarVoiceMode(root = document) {
     captureForm.setAttribute('aria-busy', String(['recognizing', 'routing', 'thinking', 'speaking'].includes(safePhase)));
     if (safePhase !== 'thinking') thinking.hidden = true;
     keepSurfaceAtOrigin();
+    syncDesktopVoiceOverlay({
+      visible: true,
+      phase: safePhase,
+      lane: surface.dataset.lane || 'simplified',
+      kicker: overrides.kicker || copy[0],
+      title: overrides.title || copy[1],
+      detail: overrides.detail || copy[2],
+      text: safePhase === 'error'
+        ? overrides.detail || copy[2]
+        : transcript?.textContent || '',
+    });
+  }
+
+  /** Put the phrase in the chat composer and send it, as typing it would. */
+  function sendTranscriptToChat(value) {
+    const input = document.querySelector('#oscar-input');
+    const form = document.querySelector('#oscar-composer');
+    const phrase = String(value || '').trim();
+    if (!phrase || !input || !form || typeof form.requestSubmit !== 'function') return false;
+    input.value = phrase;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    window.dispatchEvent(new CustomEvent('monarch:navigate', { detail: { view: 'oscar-section' } }));
+    form.requestSubmit();
+    return true;
+  }
+
+  function acknowledgeWake() {
+    const phrase = WAKE_ACKNOWLEDGEMENTS[wakeAcknowledgementIndex % WAKE_ACKNOWLEDGEMENTS.length];
+    wakeAcknowledgementIndex += 1;
+    syncDesktopVoiceOverlay({
+      visible: true,
+      phase: 'listening',
+      lane: 'simplified',
+      kicker: 'Оскар',
+      title: phrase.replace(/[.?]+$/u, ''),
+      detail: 'Готов слушать команду',
+      text: '',
+    });
+    speakWakeAcknowledgement(phrase);
+    return phrase;
+  }
+
+  function speakWakeAcknowledgement(text) {
+    const synthesis = window.speechSynthesis;
+    const Utterance = window.SpeechSynthesisUtterance;
+    if (synthesis && typeof Utterance === 'function' && typeof synthesis.speak === 'function') {
+      try {
+        const utterance = new Utterance(text);
+        const preferences = readOscarVoicePreferences();
+        const voices = typeof synthesis.getVoices === 'function' ? synthesis.getVoices() : [];
+        utterance.lang = 'ru-RU';
+        utterance.voice = voices.find((voice) => voice.lang?.toLowerCase?.().startsWith('ru')) || null;
+        utterance.rate = Math.max(0.8, Math.min(1.35, Number(preferences.speed || 100) / 100 * 1.08));
+        utterance.pitch = Math.max(0.75, Math.min(1.25, 1 + Number(preferences.pitch || 0) * 0.08));
+        utterance.volume = Math.max(0.2, Math.min(1, Number(preferences.volume || 100) / 100));
+        synthesis.cancel?.();
+        synthesis.speak(utterance);
+        return;
+      } catch {
+        // Desktop SAPI below is the bounded fallback when Chromium TTS is unavailable.
+      }
+    }
+    const preferences = readOscarVoicePreferences();
+    void window.monarchDesktop?.speakText?.({
+      text,
+      language: 'ru-RU',
+      ...preferences,
+      latencyMode: 'instant',
+    }).catch?.(() => undefined);
   }
 
   function keepSurfaceAtOrigin() {
@@ -498,6 +736,43 @@ export function initOscarVoiceMode(root = document) {
     openTimer = 0;
     clearRestartTimer();
     clearThinkingTimer();
+    clearInactivityTimer();
+    clearTerminalCloseTimer();
+  }
+
+  function scheduleTerminalClose(delay = 1200) {
+    clearTerminalCloseTimer();
+    resultCloseTimer = window.setTimeout(() => {
+      resultCloseTimer = 0;
+      close();
+    }, delay);
+  }
+
+  function clearTerminalCloseTimer() {
+    if (resultCloseTimer) window.clearTimeout(resultCloseTimer);
+    resultCloseTimer = 0;
+  }
+
+  function scheduleSimplifiedInactivityClose() {
+    if (surface.dataset.lane !== 'simplified' || inactivityTimer) return;
+    inactivityTimer = window.setTimeout(() => {
+      inactivityTimer = 0;
+      if (isOpen && surface.dataset.lane === 'simplified' && surface.dataset.phase === 'listening') close();
+    }, 24_000);
+  }
+
+  function clearInactivityTimer() {
+    if (inactivityTimer) window.clearTimeout(inactivityTimer);
+    inactivityTimer = 0;
+  }
+
+  function syncDesktopVoiceOverlay(payload) {
+    const bridge = window.monarchDesktop;
+    if (typeof bridge?.updateVoiceOverlay !== 'function') return;
+    // The overlay window has no access to the preferences; it follows the main window's look.
+    const root = document.documentElement;
+    const look = { design: root.dataset.design === 'classic' ? 'classic' : 'pp', theme: root.dataset.theme === 'dark' ? 'dark' : 'light' };
+    void bridge.updateVoiceOverlay({ ...payload, ...look }).catch(() => undefined);
   }
 
   function syncMuteControl() {
@@ -589,7 +864,7 @@ export function initOscarVoiceMode(root = document) {
           kicker: 'Слышу речь',
           detail: 'Продолжай · закончу после короткой паузы',
         });
-        if (transcript) transcript.textContent = 'Слышу тебя — говори свободно';
+        if (transcript) transcript.textContent = '';
       } else if (activity.type === 'speech-end' || activity.type === 'max-duration') {
         surface.dataset.voiceActivity = 'ending';
         if (live) live.textContent = activity.type === 'max-duration'
@@ -599,9 +874,15 @@ export function initOscarVoiceMode(root = document) {
         return;
       } else if (activity.type === 'no-speech') {
         surface.dataset.voiceActivity = 'waiting';
+        if (surface.dataset.lane === 'simplified') {
+          detector.reset(readClockMs());
+          setPhase('listening', { detail: 'Жду команду · микрофон остаётся подключён' });
+          if (transcript) transcript.textContent = '';
+          return;
+        }
         capture?.cancelSilently();
         setPhase('listening', { detail: 'Жду голос · запись начнётся автоматически' });
-        if (transcript) transcript.textContent = 'Начинай говорить — нажимать ничего не нужно';
+        if (transcript) transcript.textContent = '';
         scheduleListening(140);
         return;
       }
@@ -704,6 +985,7 @@ export function initOscarVoiceMode(root = document) {
 
   return {
     open,
+    acknowledgeWake,
     close,
     toggleMute,
     isOpen: () => isOpen,
@@ -1258,6 +1540,56 @@ function compactVisibleAnswer(value) {
   return clean.length > 260 ? `${clean.slice(0, 257).trimEnd()}…` : clean;
 }
 
+export function describeSimplifiedVoiceStart(value) {
+  const text = String(value || '').trim();
+  if (/(?:^|\s)(?:открой|запусти|open|launch)\s+/iu.test(text)) {
+    return {
+      kicker: 'Локальная команда',
+      title: 'Открываю',
+      detail: 'Точное приложение выбирается из готового каталога Windows',
+      spokenText: 'Открываю.',
+    };
+  }
+  if (/(?:громкост|звук|яркост|volume|brightness)/iu.test(text)) {
+    return {
+      kicker: 'Локальная команда',
+      title: 'Выполняю',
+      detail: 'Выполняю команду напрямую',
+      spokenText: '',
+    };
+  }
+  return null;
+}
+
+async function resolveSimplifiedWeatherDeviceLocation(text, signal) {
+  const preferences = readVoiceInputPreferences();
+  if (!/(?:погод|прогноз|weather|forecast)/iu.test(String(text || ''))
+    || preferences.informationProvidersEnabled !== true
+    || preferences.weatherLocationMode !== 'device'
+    || !navigator.geolocation
+    || signal?.aborted) return undefined;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener?.('abort', abort);
+      resolve(value);
+    };
+    const abort = () => finish(undefined);
+    signal?.addEventListener?.('abort', abort, { once: true });
+    navigator.geolocation.getCurrentPosition(
+      (position) => finish({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracyMeters: position.coords.accuracy,
+      }),
+      () => finish(undefined),
+      { enableHighAccuracy: false, maximumAge: 15 * 60_000, timeout: 2_500 },
+    );
+  });
+}
+
 export function isWakeOnlyVoiceText(value) {
   const normalized = String(value || '')
     .trim()
@@ -1265,6 +1597,37 @@ export function isWakeOnlyVoiceText(value) {
     .replace(/[.,!?;:]+$/gu, '')
     .trim();
   return normalized === 'оскар' || normalized === 'oscar';
+}
+
+export function isVoiceDismissText(value) {
+  const normalized = String(value || '')
+    .trim()
+    .toLocaleLowerCase('ru-RU')
+    .replace(/[.,!?;:]+$/gu, '')
+    .trim();
+  return /^(?:стоп|отбой|хватит|закройся|заверши(?:\s+голосовой\s+режим)?|stop|dismiss)$/iu.test(normalized);
+}
+
+export function resolvePendingVoiceChoiceText(value, candidates = []) {
+  const text = String(value || '').replace(/\s+/gu, ' ').trim().slice(0, 180);
+  const choices = Array.isArray(candidates)
+    ? candidates.map((entry) => String(entry || '').trim()).filter(Boolean).slice(0, 3)
+    : [];
+  if (!text || choices.length === 0) return '';
+  const normalized = text.toLocaleLowerCase('ru-RU').replace(/[.,!?;:]+$/gu, '').trim();
+  if (/^(?:отмена|неважно|не надо|не нужно|cancel)$/iu.test(normalized)) return '';
+  const ordinal = /^(?:перв(?:ый|ое)|один|1)$/iu.test(normalized)
+    ? 0
+    : /^(?:втор(?:ой|ое)|два|2)$/iu.test(normalized)
+      ? 1
+      : /^(?:трет(?:ий|ье)|три|3)$/iu.test(normalized)
+        ? 2
+        : -1;
+  if (ordinal >= 0 && choices[ordinal]) return `открой ${choices[ordinal]}`;
+  if (/^(?:открой|запусти|включи|покажи|найди|сделай|установи|закрой|выключи)(?=$|\s)/iu.test(normalized)) {
+    return text;
+  }
+  return `открой ${text}`;
 }
 
 export function readableVoiceError(value) {

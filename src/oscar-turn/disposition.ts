@@ -2,8 +2,9 @@ import { classifyOscarRequestDisposition, resolveOscarFunctionInvocation } from 
 import type { OscarTurnRequestSnapshot } from './types';
 import { looksLikeImageGenerationRequest } from '../image-generation';
 import { parseLeadingOscarSkillInvocation } from './skill-invocation';
+import { isOscarCapabilitiesOrIdentityRequest, isOscarResponseOnlyRequest } from '../core/intent-classifier';
 
-export type OscarServerDispositionLane = 'answer' | 'agent' | 'clarify' | 'memory';
+export type OscarServerDispositionLane = 'answer' | 'agent' | 'clarify' | 'memory' | 'reminder';
 
 export interface OscarServerDisposition {
   lane: OscarServerDispositionLane;
@@ -14,13 +15,49 @@ export interface OscarServerDisposition {
 }
 
 export interface OscarStructuredDispositionProvider {
-  classify(input: { text: string; history?: OscarTurnRequestSnapshot['history'] }): Promise<OscarServerDisposition>;
+  classify(input: { text: string; history?: OscarTurnRequestSnapshot['history']; requestedModel?: string | undefined; signal?: AbortSignal | undefined }): Promise<OscarServerDisposition>;
+  /** Whether a good answer needs fresh public data. Asked only when the person
+   * has switched Internet on; it grants nothing, it only avoids searching for
+   * a greeting or a question the model can answer from what it knows. */
+  needsWeb?(input: { text: string; history?: OscarTurnRequestSnapshot['history']; requestedModel?: string | undefined; signal?: AbortSignal | undefined }): Promise<boolean>;
+}
+
+/** A request that needs public sources and also asks for something to be
+ * done with them: the host searches, the agent acts on the result. */
+export function researchThenActDisposition(classified: Pick<OscarServerDisposition, 'confidence'>, requiresExternalResearch = false): OscarServerDisposition {
+  return {
+    lane: 'agent',
+    kind: 'research_then_act',
+    confidence: classified.confidence,
+    reason: 'The request needs public sources and an action on them: Monarch searches, the agent acts through Kernel.',
+    requiresExternalResearch,
+  };
+}
+
+/** Needing sources does not answer whether an action is also asked for — a
+ * missing file path used to be read as "no action at all", so "найди новости
+ * и отправь их в Telegram" lost the sending. The model decides; only its clear
+ * "agent" makes it a task, and its doubt or failure keeps the sourced answer. */
+async function researchOrTask(
+  text: string,
+  provider: OscarStructuredDispositionProvider | undefined,
+  options: { history?: OscarTurnRequestSnapshot['history']; requestedModel?: string | undefined; signal?: AbortSignal | undefined },
+  research: OscarServerDisposition,
+): Promise<OscarServerDisposition> {
+  if (!provider) return research;
+  try {
+    const classified = await provider.classify({ text, history: options.history, requestedModel: options.requestedModel, signal: options.signal });
+    return classified.lane === 'agent' ? researchThenActDisposition(classified, research.requiresExternalResearch === true) : research;
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    return research;
+  }
 }
 
 export async function classifyOscarServerDisposition(
   textInput: string,
   provider?: OscarStructuredDispositionProvider,
-  options: { externalResearch?: boolean; history?: OscarTurnRequestSnapshot['history'] } = {},
+  options: { externalResearch?: boolean; history?: OscarTurnRequestSnapshot['history']; requestedModel?: string | undefined; signal?: AbortSignal | undefined } = {},
 ): Promise<OscarServerDisposition> {
   const originalText = String(textInput || '').replace(/\s+/g, ' ').trim();
   const skillInvocation = parseLeadingOscarSkillInvocation(originalText);
@@ -65,84 +102,87 @@ export async function classifyOscarServerDisposition(
   }
   const localTarget = deterministic.hasLocalEffectTarget;
   if (deterministic.requiresExternalResearch) {
-    return {
+    return researchOrTask(originalText, provider, options, {
       lane: 'answer',
       kind: 'external_research',
       confidence: Math.max(deterministic.confidence, 0.9),
       reason: 'The request requires a current external-source answer and no local system effect.',
       requiresExternalResearch: true,
-    };
+    });
   }
-  if (deterministic.mode === 'agent') {
-    return {
-      lane: 'agent',
-      kind: deterministic.kind,
-      confidence: deterministic.confidence,
-      reason: deterministic.reason,
-      requiresExternalResearch: false,
-    };
+  if (isOscarResponseOnlyRequest(text) || isOscarCapabilitiesOrIdentityRequest(text)) {
+    return { lane: 'answer', kind: deterministic.kind, confidence: deterministic.confidence,
+      reason: 'Host-owned discussion, prohibition or supplied-material boundary excludes execution.',
+      requiresExternalResearch: false };
   }
   if (options.externalResearch === true && !localTarget) {
-    return {
+    return researchOrTask(originalText, provider, options, {
       lane: 'answer',
       kind: 'external_research',
       confidence: 0.9,
       reason: 'An explicitly consented external research request has no local operational target.',
       requiresExternalResearch: false,
-    };
+    });
   }
-  if (['code', 'text_generation', 'file_generation'].includes(deterministic.kind)) {
-    return {
-      lane: 'answer',
-      kind: deterministic.kind,
-      confidence: Math.max(deterministic.confidence, 0.86),
-      reason: 'The request asks for response content and has no canonical local-effect target.',
-      requiresExternalResearch: false,
-    };
-  }
-  if (isObviousInformationalRequest(text)) {
-    return {
-      lane: 'answer',
-      kind: deterministic.kind,
-      confidence: Math.max(deterministic.confidence, 0.8),
-      reason: 'The request is explicitly informational and requires no local effect.',
-      requiresExternalResearch: false,
-    };
-  }
-  const imperative = hasImperativeShape(text);
-  if (localTarget && imperative) {
-    return {
-      lane: 'agent',
-      kind: /(?:файл|папк|каталог|директор|диск|drive|file|folder|directory|path)/iu.test(text)
-        ? 'file_operation'
-        : 'tool_use',
-      confidence: 0.78,
-      reason: 'A local target plus imperative shape fails closed to Agent Runtime.',
-      requiresExternalResearch: false,
-    };
-  }
-  if (provider && (localTarget || imperative)) {
+  // For ordinary language the selected model owns only the answer/agent surface
+  // decision. Host regexes may enforce typed safety exclusions above, but they
+  // must not act as activation phrases for execution.
+  if (provider) {
     try {
-      const classified = await provider.classify({ text, history: options.history });
-      if (['answer', 'agent', 'clarify'].includes(classified.lane)) return classified;
-    } catch {
-      if (localTarget || imperative) {
+      const classified = await provider.classify({
+        text: originalText,
+        history: options.history,
+        requestedModel: options.requestedModel,
+        signal: options.signal,
+      });
+      // Clarification parks the Turn in waiting-for-user and replaces the reply
+      // with a policy question, so it needs the same host corroboration the
+      // provider-failure branch below already requires: some operational signal
+      // in the request itself, or in the operational thread it continues — a
+      // bare "делай" clarifies the search proposed one message earlier.
+      // Ordinary conversation with no such signal anywhere is answered instead
+      // of stalled. Narrowing clarify to answer never opens execution authority.
+      if (classified.lane === 'clarify' && !hasOperationalSignal(deterministic, localTarget, options.history)) {
         return {
-          lane: 'agent',
-          kind: localTarget ? 'file_operation' : 'tool_use',
-          confidence: 0.55,
-          reason: 'Structured disposition runtime failed; operational ambiguity fails closed to Agent Runtime.',
+          lane: 'answer',
+          kind: deterministic.kind,
+          confidence: deterministic.confidence,
+          reason: 'The model asked to clarify an operation the request never names; without a host-visible local effect target the Turn stays answer-only.',
           requiresExternalResearch: false,
         };
       }
+      if (['answer', 'agent', 'clarify'].includes(classified.lane)) {
+        return { ...classified, requiresExternalResearch: classified.requiresExternalResearch ?? false };
+      }
+    } catch (error) {
+      if (options.signal?.aborted || /^astra-max-native:[a-z0-9-]{1,80}$/u.test(String((error as Error)?.message))) throw error;
+      if (deterministic.mode === 'agent' || localTarget) {
+        return {
+          lane: 'clarify',
+          kind: localTarget ? 'file_operation' : 'tool_use',
+          confidence: 0.55,
+          reason: 'Structured disposition runtime failed; unresolved intent requires clarification before execution.',
+          requiresExternalResearch: false,
+        };
+      }
+      return {
+        lane: 'answer',
+        kind: deterministic.kind,
+        confidence: deterministic.confidence,
+        reason: 'Semantic disposition is unavailable; host fallback remains answer-only without opening execution.',
+        requiresExternalResearch: false,
+      };
     }
   }
-  if (imperative && !localTarget) {
+  // A missing semantic provider can never turn words into execution authority.
+  // Deterministic parsing remains useful only to explain why clarification is
+  // needed; explicit typed endpoints and visible tool mentions are handled above.
+  if (deterministic.mode === 'agent' || localTarget) {
     return {
       lane: 'clarify',
       kind: deterministic.kind,
       confidence: 0.5,
-      reason: 'The requested operation has no canonical target yet.',
+      reason: 'Semantic disposition is unavailable; no executor was selected from request wording.',
       requiresExternalResearch: false,
     };
   }
@@ -150,7 +190,7 @@ export async function classifyOscarServerDisposition(
     lane: 'answer',
     kind: deterministic.kind,
     confidence: deterministic.confidence,
-    reason: deterministic.reason,
+    reason: 'No semantic disposition provider is available; model-free fallback stays answer-only.',
     requiresExternalResearch: false,
   };
 }
@@ -193,7 +233,6 @@ function assistantRequestedMaterial(text: string): boolean {
   return /(?:^|\s)(?:скидывай|скинь|присылай|пришли|можешь\s+прислать|отправь|отправляй|вставь|вставляй|покажи|давай(?:\s+(?:сюда|список|его|материал\p{L}*))?|send(?:\s+it(?:\s+over)?)?|paste|share|show\s+me|drop\s+it|go\s+ahead)(?:\s|[,.!?]|$)/iu.test(text)
     || /(?:готов\p{L}*\s+(?:посмотреть|изучить|проверить|прочитать)|ready\s+to\s+(?:review|look|inspect|read))/iu.test(text);
 }
-
 export function extractExplicitMemoryText(value: string): string | null {
   const text = String(value || '').trim();
   const match = text.match(
@@ -209,12 +248,20 @@ export function isNonAuthoritativeConfirmationText(value: string): boolean {
     || /^(?:confirm|confirmed|i\s+confirm)[.!]?$/iu.test(text);
 }
 
-function isObviousInformationalRequest(text: string): boolean {
-  return /^(?:кто|что|где|когда|почему|как|сколько|какой|какая|какие|расскажи|объясни|поясни|who|what|where|when|why|how|tell|explain)(?:\s|$)/iu.test(text)
-    || /\?$/.test(text)
-    || /^(?:привет|здравствуй|hello|hi|hey)(?:\s|$)/iu.test(text);
-}
-
-function hasImperativeShape(text: string): boolean {
-  return /(?:^|[.!?]\s*|,\s*)(?:(?:ты\s+)?(?:можешь|сможешь)|could\s+you|can\s+you|would\s+you)?\s*(?:проведи|проверь|просканируй|проаудируй|сделай|выполни|создай|измени|удали|открой|запусти|установи|перемести|скопируй|прочитай|найди|сохрани|очисти|изучи|исследуй|проанализируй|разбери|audit|scan|inspect|study|analyze|review|investigate|do|run|execute|create|change|delete|open|launch|install|move|copy|read|find|save|clean)(?:\s|$)/iu.test(text);
+/** Host-visible evidence that this request, or the operational thread it
+ * continues, is about work on the machine. Only a bounded recent window counts:
+ * clarification is a follow-up to a live operational exchange, not a property a
+ * conversation keeps forever after one file question. */
+function hasOperationalSignal(
+  deterministic: ReturnType<typeof classifyOscarRequestDisposition>,
+  localTarget: boolean,
+  history: OscarTurnRequestSnapshot['history'],
+): boolean {
+  if (deterministic.mode === 'agent' || localTarget) return true;
+  return (Array.isArray(history) ? history.slice(-4) : []).some((message) => {
+    const content = String(message?.content || '').replace(/\s+/g, ' ').trim();
+    if (!content) return false;
+    const entry = classifyOscarRequestDisposition(content);
+    return entry.mode === 'agent' || entry.hasLocalEffectTarget;
+  });
 }

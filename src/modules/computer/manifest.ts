@@ -1,5 +1,10 @@
 import type { MonarchAgentCapabilityMetadataInput, MonarchModuleManifest } from '../../core';
 
+export const COMPUTER_WINDOW_KEY_VALUES = ['enter', 'escape', 'tab', 'backspace', 'delete', 'space', 'left', 'right', 'up', 'down',
+  'home', 'end', 'pageup', 'pagedown', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12',
+  'a', 'c', 'f', 'l', 'n', 'o', 'p', 'r', 's', 't', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+  'add', 'subtract', 'multiply', 'divide', 'decimal'] as const;
+
 function observationAgent(effectKind: string, description: string): MonarchAgentCapabilityMetadataInput {
   return {
     tags: ['windows', 'computer-use', 'observation', 'uia', 'screenshot'],
@@ -249,12 +254,7 @@ export const computerManifest: MonarchModuleManifest = {
         required: ['verified', 'windows', 'observedAt'],
         additionalProperties: true,
       },
-      routing: {
-        aliases: ['list windows', 'find open window', 'покажи открытые окна', 'найди окно программы'],
-        keywords: ['window', 'windows', 'open apps', 'окно', 'окна', 'приложение'],
-        examples: ['найди открытое окно Блокнота'],
-        intentKinds: ['device-control', 'multimodal'],
-      },
+
     },
     {
       id: 'computer.window.observe',
@@ -267,6 +267,13 @@ export const computerManifest: MonarchModuleManifest = {
         type: 'object',
         properties: {
           windowRef: exactWindowInput.windowRef,
+          selectionBinding: {
+            type: 'object',
+            description: 'Optional host-selected PID/process-incarnation/title binding checked by the native helper before and after capture. No fallback to a different window.',
+            properties: { processId: { type: 'integer', minimum: 1, maximum: 2147483647 },
+              processInstanceId: { type: 'string', pattern: '^process:[a-f0-9]{64}$' }, title: { type: 'string', minLength: 1, maxLength: 4096 } },
+            required: ['processId', 'processInstanceId', 'title'], additionalProperties: false,
+          },
           captureNonce: {
             type: 'string',
             minLength: 1,
@@ -291,12 +298,7 @@ export const computerManifest: MonarchModuleManifest = {
         required: ['verified', 'observationId', 'windowRef', 'observedAt', 'window', 'screenshot', 'elements'],
         additionalProperties: true,
       },
-      routing: {
-        aliases: ['observe window', 'take window screenshot', 'посмотри на окно', 'сделай скрин окна'],
-        keywords: ['observe', 'screenshot', 'screen', 'window', 'посмотри', 'скрин', 'экран', 'окно'],
-        examples: ['посмотри что сейчас в окне Блокнота'],
-        intentKinds: ['device-control', 'multimodal'],
-      },
+
     },
     {
       id: 'computer.window.analyze',
@@ -327,12 +329,7 @@ export const computerManifest: MonarchModuleManifest = {
         required: ['verified', 'observationId', 'windowRef', 'summary', 'visibleText', 'targets'],
         additionalProperties: true,
       },
-      routing: {
-        aliases: ['analyze screenshot', 'find visual target', 'проанализируй скрин', 'найди на экране'],
-        keywords: ['analyze', 'vision', 'visual', 'screenshot', 'анализ', 'найди', 'скрин', 'экран'],
-        examples: ['найди на свежем скриншоте кнопку продолжить'],
-        intentKinds: ['device-control', 'multimodal'],
-      },
+
     },
     {
       id: 'computer.window.verify-text',
@@ -363,12 +360,7 @@ export const computerManifest: MonarchModuleManifest = {
         required: ['verified', 'matched', 'observationId', 'windowRef', 'expectedText'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['verify window text', 'check visible text', 'проверь текст в окне'],
-        keywords: ['verify', 'text', 'visible', 'window', 'проверь', 'текст', 'окно'],
-        examples: ['проверь, что в наблюдаемом окне появился точный результат'],
-        intentKinds: ['device-control', 'multimodal'],
-      },
+
     },
     {
       id: 'computer.window.click',
@@ -392,12 +384,7 @@ export const computerManifest: MonarchModuleManifest = {
         additionalProperties: false,
       },
       outputSchema: actionOutputSchema,
-      routing: {
-        aliases: ['click window element', 'click screen coordinate', 'нажми в окне', 'кликни'],
-        keywords: ['click', 'button', 'cursor', 'нажми', 'клик', 'курсор', 'кнопка'],
-        examples: ['нажми кнопку Сохранить в наблюдаемом окне'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'computer.window.close',
@@ -413,37 +400,28 @@ export const computerManifest: MonarchModuleManifest = {
         additionalProperties: false,
       },
       outputSchema: closeActionOutputSchema,
-      routing: {
-        aliases: ['close window', 'quit app window', 'закрой окно', 'закрой приложение'],
-        keywords: ['close', 'quit', 'exit', 'window', 'закрой', 'закрыть', 'окно', 'приложение'],
-        examples: ['закрой наблюдаемое окно Logitech G HUB'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'computer.window.type',
       moduleId: 'computer',
       title: 'Type text into one observed UI element',
-      description: 'Focus one exact non-password UI Automation element from the latest observation and type bounded Unicode text through real Windows keyboard input.',
+      description: 'Insert exact Unicode at the current caret/selection using foreground keyboard input, or explicitly replace one writable UIA Value. No insert/replace fallback; whitespace is preserved.',
       risk: 'device-control',
-      agent: actionAgent('window-text-input', 'Focuses one observed non-password element and types the exact supplied text.', 'manual'),
+      agent: actionAgent('window-text-input', 'Insert at current selection (default), or explicitly replace an exact writable UIA value with readback; never switch semantics after approval.', 'manual'),
       inputSchema: {
         type: 'object',
         properties: {
           ...exactWindowInput,
           elementId: { type: 'string', minLength: 2, maxLength: 100 },
-          text: { type: 'string', minLength: 1, maxLength: 4000 },
+          text: { type: 'string', minLength: 0, maxLength: 4000 },
+          textMode: { type: 'string', enum: ['insert', 'replace'] },
         },
         required: ['windowRef', 'observationId', 'elementId', 'text'],
         additionalProperties: false,
       },
       outputSchema: actionOutputSchema,
-      routing: {
-        aliases: ['type in window', 'enter text', 'введи текст', 'напечатай'],
-        keywords: ['type', 'text', 'input', 'введи', 'напечатай', 'текст', 'поле'],
-        examples: ['введи текст в наблюдаемое поле редактора'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'computer.window.key',
@@ -458,7 +436,7 @@ export const computerManifest: MonarchModuleManifest = {
           ...exactWindowInput,
           key: {
             type: 'string',
-            enum: ['enter', 'escape', 'tab', 'backspace', 'delete', 'space', 'left', 'right', 'up', 'down', 'home', 'end', 'pageup', 'pagedown', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12', 'a', 'c', 'f', 'l', 'n', 'o', 'p', 'r', 's', 't', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'add', 'subtract', 'multiply', 'divide', 'decimal'],
+            enum: [...COMPUTER_WINDOW_KEY_VALUES],
           },
           modifiers: {
             type: 'array',
@@ -471,12 +449,7 @@ export const computerManifest: MonarchModuleManifest = {
         additionalProperties: false,
       },
       outputSchema: actionOutputSchema,
-      routing: {
-        aliases: ['press key', 'keyboard shortcut', 'нажми клавишу', 'сочетание клавиш'],
-        keywords: ['key', 'keyboard', 'shortcut', 'клавиша', 'клавиатура', 'сочетание'],
-        examples: ['нажми Ctrl+S в наблюдаемом окне'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'computer.window.scroll',
@@ -499,12 +472,7 @@ export const computerManifest: MonarchModuleManifest = {
         additionalProperties: false,
       },
       outputSchema: actionOutputSchema,
-      routing: {
-        aliases: ['scroll window', 'scroll down', 'прокрути окно', 'листай'],
-        keywords: ['scroll', 'wheel', 'прокрути', 'листай', 'колесо'],
-        examples: ['прокрути наблюдаемое окно вниз'],
-        intentKinds: ['device-control'],
-      },
+
     },
   ],
 };

@@ -6,9 +6,10 @@ import subprocess
 
 from monarch_security.config import PostureConfig
 from monarch_security.events import SecurityEvent
+from monarch_security.observation import ObservedSensor, ObservationUnavailable, parse_query_json
 
 
-class PostureSensor:
+class PostureSensor(ObservedSensor):
     def __init__(
         self,
         config: PostureConfig,
@@ -29,6 +30,7 @@ class PostureSensor:
         return {item["key"]: item["signature"] for item in self.snapshot()}
 
     def snapshot(self) -> list[dict[str, Any]]:
+        self.begin_observation()
         self.last_error = None
         parsed, error = _run_powershell_json(_posture_snapshot_command(), timeout=60)
         if error:
@@ -36,17 +38,39 @@ class PostureSensor:
             return []
         if isinstance(parsed, dict):
             parsed = [parsed]
-        items = [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+        if not isinstance(parsed, list) or any(not isinstance(item, dict) or item.get('kind') not in {'firewall_profile', 'defender_status'} for item in parsed):
+            raise ObservationUnavailable('posture-query-invalid')
+        items = parsed
+        if not any(item.get('kind') == 'firewall_profile' for item in items):
+            raise ObservationUnavailable('firewall-query-unavailable')
+        if not any(item.get('kind') == 'defender_status' for item in items):
+            self.limit_observation('defender-query-unavailable')
+        profile_names = {str(item.get('subject') or item.get('name') or '').lower()
+                         for item in items if item['kind'] == 'firewall_profile'}
+        if profile_names != {'domain', 'private', 'public'}:
+            self.limit_observation('firewall-profiles-incomplete')
+        for item in items:
+            required = ('enabled',) if item['kind'] == 'firewall_profile' else (
+                'antivirus_enabled', 'real_time_protection_enabled', 'behavior_monitor_enabled',
+                'ioav_protection_enabled', 'antispyware_enabled')
+            for field in required:
+                if field not in item:
+                    self.limit_observation('posture-fields-unavailable')
+                elif type(item[field]) is not bool:
+                    raise ObservationUnavailable('posture-query-invalid')
         return [_with_signature(item) for item in items]
 
     def poll(self) -> list[SecurityEvent]:
         snapshot = self.snapshot()
+        if self.last_error:
+            raise ObservationUnavailable('posture-query-unavailable')
         changed = [
             item
             for item in snapshot
             if self._signatures.get(str(item["key"])) != str(item["signature"])
         ]
-        self._signatures = {str(item["key"]): str(item["signature"]) for item in snapshot}
+        current = {str(item["key"]): str(item["signature"]) for item in snapshot}
+        self._signatures = current if self.observation['status'] == 'complete' else {**self._signatures, **current}
 
         if self._first_poll and not self.include_existing:
             self._first_poll = False
@@ -68,13 +92,15 @@ class PostureSensor:
 
 def _firewall_command() -> str:
     return r"""
-Get-NetFirewallProfile -ErrorAction SilentlyContinue |
+Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop |
 ForEach-Object {
+  $enabled = [string]$_.Enabled
+  if ($enabled -notin @('True', 'False')) { throw 'firewall-status-unavailable' }
   [pscustomobject]@{
     kind = 'firewall_profile'
     subject = $_.Name
     name = $_.Name
-    enabled = [bool]$_.Enabled
+    enabled = $enabled -eq 'True'
     default_inbound_action = [string]$_.DefaultInboundAction
     default_outbound_action = [string]$_.DefaultOutboundAction
   }
@@ -85,7 +111,10 @@ ForEach-Object {
 def _defender_command() -> str:
     return r"""
 if (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue) {
-  $s = Get-MpComputerStatus
+  $s = Get-MpComputerStatus -ErrorAction Stop
+  foreach ($field in @('AntivirusEnabled','RealTimeProtectionEnabled','BehaviorMonitorEnabled','IoavProtectionEnabled','AntispywareEnabled')) {
+    if ($null -eq $s.$field) { throw 'defender-status-unavailable' }
+  }
   [pscustomobject]@{
     kind = 'defender_status'
     subject = 'Microsoft Defender'
@@ -103,7 +132,7 @@ if (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue) {
 
 def _posture_snapshot_command() -> str:
     return (
-        "& {\n"
+        "$ErrorActionPreference = 'Stop'; & {\n"
         + _firewall_command()
         + "\n"
         + _defender_command()
@@ -140,9 +169,9 @@ def _run_powershell_json(command: str, timeout: int = 30) -> tuple[Any, str | No
     if not output:
         return [], None
     try:
-        return json.loads(output), None
-    except json.JSONDecodeError as exc:
-        return None, f"posture PowerShell returned invalid JSON: {exc}"
+        return parse_query_json(output), None
+    except ObservationUnavailable:
+        return None, 'posture-query-json-invalid'
 
 
 def _with_signature(item: dict[str, Any]) -> dict[str, Any]:

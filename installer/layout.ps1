@@ -169,6 +169,21 @@ function Initialize-MonarchInstallLayout {
     throw "Version root must stay inside $versionsRoot."
   }
 
+  # An app update must not enumerate/copy the owner's secrets again. Only the
+  # initial layout creation may perform the legacy backup. Validate existing
+  # metadata before any mutation; a damaged layout is not a fresh install.
+  $existingLayout = $null
+  $layoutPath = Join-Path $install "install-layout.json"
+  if (Test-Path -LiteralPath $layoutPath) {
+    $existingLayout = Get-Content -LiteralPath $layoutPath -Raw | ConvertFrom-Json
+    if ([int]$existingLayout.schemaVersion -ne 1 -or
+        -not ([System.IO.Path]::GetFullPath([string]$existingLayout.installRoot).TrimEnd('\')).Equals(
+          $install, [StringComparison]::OrdinalIgnoreCase
+        )) {
+      throw "Existing install layout does not belong to this installation."
+    }
+  }
+
   $payload = if ($PayloadRoot) {
     [System.IO.Path]::GetFullPath($PayloadRoot).TrimEnd('\')
   } else {
@@ -247,9 +262,14 @@ function Initialize-MonarchInstallLayout {
     Assert-MonarchWritableDirectory -Path $writablePath
   }
 
-  $legacySecretBackup = Copy-MonarchLegacySecretsForMigration `
-    -LegacyRoot (Join-Path $install "secrets") `
-    -MigrationRoot (Join-Path $configRoot "migration\secrets")
+  $legacySecretBackup = $null
+  if ($null -eq $existingLayout) {
+    $legacySecretBackup = Copy-MonarchLegacySecretsForMigration `
+      -LegacyRoot (Join-Path $install "secrets") `
+      -MigrationRoot (Join-Path $configRoot "migration\secrets")
+  } elseif ($null -ne $existingLayout.PSObject.Properties['legacySecretMigration']) {
+    $legacySecretBackup = $existingLayout.legacySecretMigration
+  }
 
   $layout = [ordered]@{
     schemaVersion = 1

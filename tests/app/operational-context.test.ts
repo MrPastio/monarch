@@ -21,7 +21,6 @@ describe('MonarchApplication Turn continuation', () => {
     const coordinator = new OscarTurnCoordinator({
       persistentStore,
       volatileStore: new InMemoryOscarTurnStore(),
-      agentRuntime: null,
       dispositionProvider: { classify },
       answerExecutor: async () => answerStream(),
       persistMessage: async () => undefined,
@@ -30,7 +29,6 @@ describe('MonarchApplication Turn continuation', () => {
       workspaceRoot: root,
       enabledModules: [],
       enableLocalSystemRouter: false,
-      enableAgentRuntimeV2: false,
       oscarTurnCoordinator: coordinator,
     });
     const context = {
@@ -65,7 +63,10 @@ describe('MonarchApplication Turn continuation', () => {
       expect(completed.execution, JSON.stringify(completed, null, 2)).toMatchObject({ ok: true, output: { turnId: 'oscar_turn_waiting_exact' } });
       await expect(persistentStore.listTurns()).resolves.toHaveLength(1);
       expect(Object.prototype.hasOwnProperty.call(app, 'operationalContexts')).toBe(false);
-      expect(classify).not.toHaveBeenCalled();
+      expect(classify).toHaveBeenCalledOnce();
+      expect(classify).toHaveBeenCalledWith(expect.objectContaining({
+        text: 'Нужна дополнительная информация. Уточнение пользователя 1: Как это работает?',
+      }));
     } finally {
       await app.stop();
     }

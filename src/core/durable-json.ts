@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { decodeStoreBytes, encodeStoreText, storeProtection } from './store-protection';
 import {
   closeSync,
   existsSync,
@@ -31,16 +32,36 @@ export interface SyncWindowsRenameRetryOptions {
   sleep?: (milliseconds: number) => void;
 }
 
-export interface WriteDurableJsonOptions extends SyncWindowsRenameRetryOptions {
+export interface DurableJsonSensitivity {
+  /** Personal data under Monarch Security storage protection (see DurableJsonFile). */
+  sensitive?: { storeId: string };
+}
+
+export interface WriteDurableJsonOptions extends SyncWindowsRenameRetryOptions, DurableJsonSensitivity {
   processId?: number;
 }
 
-export function readDurableJson<T>(filePathInput: string): T | null {
+/** Session-only protection: sensitive documents of this process, never on disk. */
+const sessionDocuments = new Map<string, string>();
+
+export function readDurableJson<T>(filePathInput: string, options: DurableJsonSensitivity = {}): T | null {
   const filePath = normalizePath(filePathInput);
+  const sensitive = options.sensitive;
+  if (sensitive && storeProtection().mode === 'session') {
+    const stored = sessionDocuments.get(filePath);
+    return stored === undefined ? null : JSON.parse(stored) as T;
+  }
   let raw: string;
+  let needsSealing = false;
   try {
     if (!existsSync(filePath)) return null;
-    raw = readFileSync(filePath, 'utf8');
+    if (sensitive) {
+      const decoded = decodeStoreBytes(readFileSync(filePath), sensitive.storeId, path.basename(filePath));
+      raw = decoded.text;
+      needsSealing = decoded.needsSealing;
+    } else {
+      raw = readFileSync(filePath, 'utf8');
+    }
   } catch (error) {
     if (errorCode(error) === 'ENOENT') return null;
     throw new DurableJsonSyncError(
@@ -50,8 +71,9 @@ export function readDurableJson<T>(filePathInput: string): T | null {
       { cause: error },
     );
   }
+  let parsed: T;
   try {
-    return JSON.parse(raw) as T;
+    parsed = JSON.parse(raw) as T;
   } catch (error) {
     throw new DurableJsonSyncError(
       'invalid-json',
@@ -60,6 +82,11 @@ export function readDurableJson<T>(filePathInput: string): T | null {
       { cause: error },
     );
   }
+  if (needsSealing) {
+    // A plain file from an earlier version: rewritten sealed at once.
+    try { writeDurableJson(filePath, parsed, sensitive ? { sensitive } : {}); } catch { /* the next write seals it */ }
+  }
+  return parsed;
 }
 
 export function tryReadDurableJson<T>(filePath: string): T | null {
@@ -81,6 +108,10 @@ export function writeDurableJson(
     const json = JSON.stringify(value, null, 2);
     if (typeof json !== 'string') throw new TypeError('value is not JSON serializable');
     serialized = `${json}\n`;
+    if (options.sensitive && storeProtection().mode === 'session') {
+      sessionDocuments.set(filePath, serialized);
+      return;
+    }
   } catch (error) {
     throw new DurableJsonSyncError(
       'serialize-failed',
@@ -97,9 +128,12 @@ export function writeDurableJson(
   );
   let descriptor: number | undefined;
   try {
-    mkdirSync(directory, { recursive: true });
+    if (path.parse(directory).root !== directory) mkdirSync(directory, { recursive: true }); // Windows: EPERM on a drive root.
     descriptor = openSync(temporaryPath, 'wx', 0o600);
-    writeFileSync(descriptor, serialized, 'utf8');
+    const content = options.sensitive
+      ? encodeStoreText(serialized, options.sensitive.storeId, path.basename(filePath))
+      : serialized;
+    writeFileSync(descriptor, content);
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
@@ -136,8 +170,10 @@ export function renameWithWindowsRetrySync(
   target: string,
   options: SyncWindowsRenameRetryOptions = {},
 ): void {
-  const attempts = normalizePositive(options.attempts, 8);
-  const baseDelayMs = normalizePositive(options.baseDelayMs, 8);
+  // ~0.7 s, blocking: a scanner holding the fresh file outlived the former
+  // 224 ms; the async variant waits longer because it does not block.
+  const attempts = normalizePositive(options.attempts, 10);
+  const baseDelayMs = normalizePositive(options.baseDelayMs, 15);
   const renameFile = options.renameFile || renameSync;
   const sleep = options.sleep || sleepSync;
   for (let attempt = 0; attempt < attempts; attempt += 1) {

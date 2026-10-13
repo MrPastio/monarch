@@ -27,15 +27,15 @@ const SUPER_FAST_MODEL_IDS = new Set(['qwen2.5-0.5b-instruct', 'qwen3-1.7b-instr
 const KNOWN_MODELS = {
   'monarch-auto': ['Auto', 'Monarch выберет локальную модель под запрос.'],
   'monarch-fast': ['Fast', 'Быстрые ответы и лёгкие интеграции.'],
-  'monarch-balanced': ['Balanced', 'Основной профиль качества и скорости.'],
-  'monarch-deep': ['Pro', 'Совместимый alias для Qwen3.8 27B Pro.'],
-  'monarch-extra': ['Pro', 'Совместимый alias для Qwen3.8 27B Pro.'],
+  'monarch-balanced': ['Balanced', 'Баланс скорости и подробности ответа.'],
+  'monarch-deep': ['Pro', 'Для сложных вопросов и работы с кодом.'],
+  'monarch-extra': ['Pro', 'Для сложных вопросов и работы с кодом.'],
   'qwen2.5-0.5b-instruct': ['Qwen2.5 0.5B', 'Super Fast: самый лёгкий локальный Qwen для коротких ответов.'],
-  'qwen3-1.7b-instruct': ['Qwen3 1.7B', 'Super Fast: быстрый Qwen3 без вывода thinking trace.'],
+  'qwen3-1.7b-instruct': ['Qwen3 1.7B', 'Быстрые короткие ответы.'],
 };
 const KNOWN_TTS_MODELS = {
-  'qwen3-tts-0.6b-base': ['Qwen3-TTS 0.6B Base', 'Voice clone через встроенные голоса Oscar, Oscar Clear и Aurora.'],
-  'qwen3-tts-0.6b-custom': ['Qwen3-TTS 0.6B CustomVoice', 'Встроенные Qwen timbres с естественной стилевой инструкцией.'],
+  'qwen3-tts-0.6b-base': ['Qwen3-TTS 0.6B Base', 'Озвучка голосами Oscar, Oscar Clear и Aurora.'],
+  'qwen3-tts-0.6b-custom': ['Qwen3-TTS 0.6B CustomVoice', 'Готовые голоса — опиши, как должен звучать ответ.'],
   'qwen3-tts-1.7b-voice-design': ['Qwen3-TTS 1.7B Voice Design', 'Крупная модель для проектирования голоса по описанию.'],
 };
 
@@ -72,7 +72,7 @@ export function renderSharingPane() {
   const root = document.querySelector('#sharing-page-root');
   if (!root) return;
   if (!ui.loaded) {
-    root.innerHTML = '<div class="sharing-loading-state">Проверяю локальный API…</div>';
+    root.innerHTML = '<div class="sharing-loading-state">Проверяю подключение для приложений…</div>';
     return;
   }
 
@@ -103,8 +103,8 @@ export function renderSharingPane() {
     </nav>
     <section class="sharing-status-card ${connected ? 'is-online' : 'is-offline'}" aria-label="Состояние Monarch Sharing">
       <div class="sharing-status-copy">
-        <span class="sharing-status-line"><i aria-hidden="true"></i>${connected ? 'API работает' : 'API не запущен'}</span>
-        <h3>${connected ? 'Можно подключать приложение' : 'Запусти локальный сервис в один клик'}</h3>
+        <span class="sharing-status-line"><i aria-hidden="true"></i>${connected ? 'Подключение работает' : 'Подключение выключено'}</span>
+        <h3>${connected ? 'Можно подключать приложение' : 'Подключи свои приложения к Оскару'}</h3>
         <p>${escapeHtml(statusDetail)}</p>
         <div class="sharing-trust-line">
           <span>127.0.0.1</span>
@@ -114,7 +114,7 @@ export function renderSharingPane() {
       <div class="sharing-status-actions">
         ${connected ? '' : `
           <button class="claude-primary-btn" type="button" data-sharing-action="start" ${ui.starting ? 'disabled' : ''}>
-            ${ui.starting ? 'Запускаю…' : 'Запустить API'}
+            ${ui.starting ? 'Запускаю…' : 'Включить подключение'}
           </button>
         `}
         <button class="claude-ghost-btn" type="button" data-sharing-action="refresh" ${ui.busy || ui.starting ? 'disabled' : ''}>
@@ -135,7 +135,7 @@ export function renderSharingPane() {
         </header>
 
         <div class="sharing-field-list">
-          ${renderCopyField('Адрес API', connection.baseUrl, 'base-url', 'Скопировать адрес')}
+          ${renderCopyField('Адрес подключения', connection.baseUrl, 'base-url', 'Скопировать адрес')}
           <div class="sharing-field-row">
             <div class="sharing-field-copy">
               <span>Ключ API</span>
@@ -420,7 +420,7 @@ function renderModelOptions(modelOptions) {
   const superFast = modelOptions.filter((modelId) => SUPER_FAST_MODEL_IDS.has(modelId));
   const monarch = modelOptions.filter((modelId) => !SUPER_FAST_MODEL_IDS.has(modelId));
   return [
-    monarch.length ? `<optgroup label="Monarch profiles">${renderModelOptionList(monarch)}</optgroup>` : '',
+    monarch.length ? `<optgroup label="Профили Monarch">${renderModelOptionList(monarch)}</optgroup>` : '',
     superFast.length ? `<optgroup label="Super Fast — Qwen">${renderModelOptionList(superFast)}</optgroup>` : '',
   ].join('');
 }

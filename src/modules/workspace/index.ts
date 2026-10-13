@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { appendFile, copyFile, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, copyFile, lstat, mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -9,34 +9,33 @@ import type {
   MonarchExecutionRequest,
   MonarchExecutionControl,
   MonarchExecutionResult,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
-  MonarchRouteDecision,
 } from '../../core';
 import {
-  buildWorkspaceFileArguments,
   defaultLocalReadOnlyRoots,
   evaluateFilesystemAccess,
-  extractWorkspaceObjectName,
+  ensureWritableParentDirectory,
   immutableMonarchSafeRoots,
   isWritableKnownFolder,
   normalizeKnownFolderBasename,
-  parseKnownFolderFileRequest,
-  permissionModeForRisk,
   resolveKnownUserFolder,
-  readOperationalContext,
   type MonarchFilesystemAccessResult,
   type MonarchFilesystemOperation,
   type MonarchFilesystemPolicyOptions,
 } from '../../core';
 import { workspaceManifest } from './manifest';
 import { runWorkspaceStorageAudit } from './storage-audit';
+import { renameWithWindowsRetry } from '../../core/durable-json-file';
 
 const DEFAULT_READ_BYTES = 128 * 1024;
 const MAX_READ_BYTES = 512 * 1024;
+const LINE_COUNT_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_SEARCH_FILE_BYTES = 256 * 1024;
+const SEARCH_FILE_BUDGET = 20_000;
+const SEARCH_BYTE_BUDGET = 64 * 1024 * 1024;
+const SEARCH_TIME_BUDGET_MS = 12_000;
 const MAX_WRITE_BYTES = 512 * 1024;
 const MAX_COPY_BYTES = 32 * 1024 * 1024;
 const MAX_COPY_ENTRIES = 2_000;
@@ -191,6 +190,10 @@ public sealed class MonarchRecycleAncestorFence : IDisposable
 
 export interface WorkspaceModuleOptions {
   workspaceRoot?: string;
+  /** Immutable host-resolved policy snapshot, never capability/model input.
+   * Omit to retain Windows folder discovery; isolated hosts pass [] so file
+   * operations do not synchronously probe HKCU or launch a discovery helper. */
+  localReadOnlyRoots?: readonly string[];
   trashPath?: (
     targetPath: string,
     isDirectory: boolean,
@@ -271,20 +274,6 @@ const UNSUPPORTED_DOCUMENT_EXTENSIONS = new Set([
   '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp', '.rtf',
 ]);
 
-export function parseWorkspaceStorageAuditRequest(textInput: string): Record<string, unknown> | null {
-  const text = String(textInput || '').trim();
-  if (!/(?:audit|scan|check|inspect|analy[sz]e|review|провер|проанализ|анализ|аудит|скан).{0,80}(?:storage(?:\s+usage)?|disk(?:\s+usage)?|drive|folders?|directories|хранилищ|использован\p{L}*\s+(?:диск|хранилищ)|диск|папк|каталог|директор)/iu.test(text)) {
-    return null;
-  }
-  return {
-    root: extractPath(text) || extractDriveRoot(text),
-    topN: 20,
-    maxDepth: 64,
-    maxEntries: 500_000,
-    maxWallTimeMs: 120_000,
-  };
-}
-
 type WorkspaceTraversalPolicyGuard = (
   candidatePath: string,
   requiresRealPathCheck?: boolean
@@ -305,11 +294,18 @@ export class WorkspaceModule implements MonarchModule {
   private readonly workspaceRoot: string;
   private readonly trashPath: NonNullable<WorkspaceModuleOptions['trashPath']>;
   private readonly beforeMutation: NonNullable<WorkspaceModuleOptions['beforeMutation']>;
+  private readonly localReadOnlyRoots: string[] | undefined;
+  private ownerRedZoneRootsProvider: () => readonly string[] = () => [];
 
   constructor(options: WorkspaceModuleOptions = {}) {
     this.workspaceRoot = path.resolve(options.workspaceRoot || process.cwd());
     this.trashPath = options.trashPath || trashWorkspacePath;
     this.beforeMutation = options.beforeMutation || (() => undefined);
+    this.localReadOnlyRoots = options.localReadOnlyRoots === undefined ? undefined : [...options.localReadOnlyRoots];
+  }
+
+  setOwnerRedZoneRootsProvider(provider: () => readonly string[]): void {
+    this.ownerRedZoneRootsProvider = provider;
   }
 
   async activate(context: MonarchKernelContext): Promise<void> {
@@ -326,124 +322,6 @@ export class WorkspaceModule implements MonarchModule {
     };
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.trim();
-    const lower = text.toLowerCase();
-    const explicitCapability = parseExplicitWorkspaceCapability(text);
-    if (explicitCapability) {
-      return this.route(intent, explicitCapability.capabilityId, 1, explicitCapability.input);
-    }
-    const operationalContext = readOperationalContext(intent.context);
-    const pendingAction = operationalContext?.pendingAction;
-    if (
-      pendingAction?.capabilityId === 'workspace.files.write'
-      && pendingAction.missingInput.includes('content')
-      && !/(?:создай|создать|сделай|запиши|сохрани|удали|найди|create|write|save|delete|find)/i.test(text)
-    ) {
-      return this.route(intent, 'workspace.files.write', 0.99, {
-        ...pendingAction.input,
-        content: text,
-      });
-    }
-    if (isWorkspaceRootRequest(lower)) {
-      return this.route(intent, 'workspace.root.get', 1, {});
-    }
-    const storageAudit = parseWorkspaceStorageAuditRequest(text);
-    if (storageAudit) {
-      return this.route(intent, 'workspace.storage.audit', 0.99, storageAudit);
-    }
-
-    const standalonePath = extractStandalonePath(text);
-    if (standalonePath) {
-      const capabilityId = looksLikeTextFilePath(standalonePath)
-        ? 'workspace.files.read'
-        : 'workspace.files.list';
-      return this.route(intent, capabilityId, 0.99, { path: standalonePath });
-    }
-
-    const detectedPath = extractPath(text) || extractKnownLocation(text);
-    const fileArguments = buildWorkspaceFileArguments(text);
-    const contextualDirectory = /(?:в\s+этой\s+папке|in\s+this\s+(?:folder|directory))/i.test(text)
-      ? operationalContext?.lastDirectoryPath || ''
-      : '';
-    const contextualFilePath = contextualDirectory
-      ? path.join(contextualDirectory, fileArguments.path || (/текстов[а-яё]*\s+(?:файл|документ)|text\s+file/i.test(text) ? 'note.txt' : ''))
-      : '';
-    if (isOpenEndedBuildRequest(text)) {
-      return null;
-    }
-
-    const knownFolderWrite = parseKnownFolderFileRequest(text);
-    if (knownFolderWrite) {
-      return this.route(intent, 'workspace.known-folder.write', 0.99, knownFolderWrite);
-    }
-
-    if (/(delete|remove|удали|сотри|стереть).{0,20}(?:file|файл)/i.test(lower) || /^(удали|сотри|стереть) файл/i.test(lower)) {
-      const permanent = /(?:permanent(?:ly)?|irreversible|without\s+recycle|безвозврат|навсегда|мимо\s+корзин)/i.test(lower);
-      return this.route(intent, permanent ? 'workspace.files.delete' : 'workspace.files.trash', 0.96, {
-        path: extractPath(text),
-      });
-    }
-    if (/(?:mkdir|create).{0,24}(?:folder|directory)|(?:создай|создать|сделай|сделать).{0,24}(?:папку|директорию)/i.test(lower)) {
-      return this.route(intent, 'workspace.files.mkdir', 0.96, extractDirectoryInput(text));
-    }
-    if (/(?:append|add).{0,24}(?:file)|(?:допиши|добавь).{0,24}(?:файл)/i.test(lower)) {
-      return this.route(intent, 'workspace.files.append', 0.95, {
-        path: extractPath(text),
-        content: extractFileContent(text),
-      });
-    }
-    if (/(?:copy|duplicate|скопируй|дублируй).{0,28}(?:file|folder|directory|файл|папк|директор)/i.test(lower)) {
-      return this.route(intent, 'workspace.files.copy', 0.95, extractTransferInput(text));
-    }
-    if (/(?:move|rename|перемести|переименуй).{0,28}(?:file|folder|directory|файл|папк|директор)/i.test(lower)) {
-      return this.route(intent, 'workspace.files.move', 0.95, extractTransferInput(text));
-    }
-    if (/(replace|замени|заменить).{0,48}(?:file|файл|файле)/i.test(lower) || /^(замени|заменить) в файле/i.test(lower)) {
-      const replaceInput = extractReplaceInput(text);
-      return this.route(intent, 'workspace.files.replace', 0.94, replaceInput);
-    }
-    if (/(write|create|save|overwrite|replace|запиши|записать|создай|создать|сделай|сохранить|сохрани|перезапиши|замени).{0,40}(?:file|файл|документ)/i.test(lower) || /^(запиши|создай|сделай|сохрани|перезапиши|замени) файл/i.test(lower) || (fileArguments.path && fileArguments.content !== '')) {
-      return this.route(intent, 'workspace.files.write', 0.93, {
-        path: contextualFilePath || fileArguments.path || extractPath(text),
-        ...((fileArguments.content || extractFileContent(text)) !== ''
-          ? { content: fileArguments.content || extractFileContent(text) }
-          : {}),
-        overwrite: fileArguments.overwrite,
-      });
-    }
-    if (
-      /(search|find|grep|найди|поиск|ищи).{0,20}(?:files?|файлах?|project|проекте?)/i.test(lower)
-      || /^(найди|поиск|ищи) в файлах/i.test(lower)
-      || /^(найди|поиск|ищи)\s+.+\s+в\s+проекте/i.test(lower)
-    ) {
-      return this.route(intent, 'workspace.files.search', 0.94, {
-        query: extractSearchQuery(text),
-        path: extractPath(text) || '.',
-      });
-    }
-    if (isWorkspaceListRequest(lower) || (detectedPath && /^(?:что\s+(?:лежит|находится)|что\s+внутри)/i.test(lower))) {
-      const entryType = detectRequestedEntryType(lower);
-      const extension = detectRequestedExtension(lower);
-      return this.route(intent, 'workspace.files.list', 0.96, {
-        path: detectedPath || '.',
-        recursive: /recursive|recursively|рекурсив|во\s+всех\s+подпапк|вложенн/i.test(lower),
-        limit: 100,
-        ...(entryType ? { entryType } : {}),
-        ...(extension ? { extension } : {}),
-      });
-    }
-    const readPath = detectedPath;
-    if (
-      /(read|show|open|прочитай|прочитать|открой|содержимое).{0,20}(?:file|файл)/i.test(lower)
-      || /^(прочитай|прочитать|открой|покажи) файл/i.test(lower)
-      || (readPath && /(?:^|\s)(?:read|show|open|прочитай|прочитать|открой|покажи)\s+/i.test(lower))
-    ) {
-      return this.route(intent, 'workspace.files.read', 0.96, { path: readPath });
-    }
-
-    return null;
-  }
 
   async executeCapability(
     request: MonarchExecutionRequest,
@@ -503,24 +381,6 @@ export class WorkspaceModule implements MonarchModule {
     };
   }
 
-  private route(
-    intent: MonarchIntent,
-    capabilityId: string,
-    confidence: number,
-    input: Record<string, unknown>
-  ): MonarchRouteDecision {
-    const capability = this.manifest.capabilities.find((entry) => entry.id === capabilityId);
-    return {
-      intentId: intent.id,
-      targetModuleId: this.manifest.id,
-      capabilityId,
-      confidence,
-      reason: 'Workspace file operation detected.',
-      permissionMode: permissionModeForRisk(capability?.risk),
-      input,
-    };
-  }
-
   private async readFileCapability(input: unknown, context: MonarchKernelContext): Promise<MonarchExecutionResult> {
     const evaluation = this.evaluate(readStringInput(input, 'path'), 'read', context);
     if (!evaluation.allowed) {
@@ -542,22 +402,35 @@ export class WorkspaceModule implements MonarchModule {
     }
 
     const maxBytes = normalizeLimit(readNumberInput(input, 'maxBytes', DEFAULT_READ_BYTES), 1, MAX_READ_BYTES);
-    if (fileStat.size > maxBytes) {
+    // Without an explicit offset the exact-read contract holds: the whole file or
+    // `file-too-large`. With one, a large file is read as a window: exact size,
+    // line count and where to continue, so an agent can read on by offset.
+    const windowed = typeof (input as { offset?: unknown } | null)?.offset === 'number';
+    if (!windowed && fileStat.size > maxBytes) {
       return {
         ok: false,
-        summary: `File is too large to read safely (${fileStat.size} bytes, limit ${maxBytes}).`,
+        summary: `File is too large to read at once (${fileStat.size} bytes, limit ${maxBytes}); read it in parts with offset 0 and maxBytes, then continue from nextOffset.`,
         error: 'file-too-large',
         metadata: { evaluation, sizeBytes: fileStat.size, maxBytes },
       };
     }
-
-    const content = await readFile(evaluation.resolvedPath, 'utf8');
+    const offset = Math.max(0, Math.min(fileStat.size, Math.trunc(readNumberInput(input, 'offset', 0))));
+    const whole = offset === 0 && fileStat.size <= maxBytes;
+    const buffer = whole ? await readFile(evaluation.resolvedPath) : await readFileWindow(evaluation.resolvedPath, offset, maxBytes);
+    const content = decodeUtf8Window(buffer, !whole);
+    const end = offset + buffer.length;
+    const lineCount = fileStat.size <= LINE_COUNT_MAX_BYTES ? await countFileLines(evaluation.resolvedPath) : undefined;
+    const truncated = end < fileStat.size;
     return {
       ok: true,
-      summary: `Read file ${evaluation.resolvedPath}.`,
+      summary: truncated
+        ? `Read bytes ${offset}-${end} of ${fileStat.size} from ${evaluation.resolvedPath}; continue with offset ${end}.`
+        : `Read file ${evaluation.resolvedPath} (${fileStat.size} bytes${lineCount === undefined ? '' : `, ${lineCount} lines`}).`,
       output: {
         path: evaluation.resolvedPath,
         sizeBytes: fileStat.size,
+        ...(lineCount === undefined ? {} : { lineCount }),
+        ...(whole ? {} : { offset, nextOffset: truncated ? end : null, truncated }),
         content,
       },
     };
@@ -586,22 +459,29 @@ export class WorkspaceModule implements MonarchModule {
     const limit = normalizeLimit(readNumberInput(input, 'limit', 100), 1, 500);
     const entryType = normalizeEntryType(readStringInput(input, 'entryType'));
     const extension = normalizeExtension(readStringInput(input, 'extension'));
-    const entries = await collectFileEntries(evaluation.resolvedPath, {
+    const nameContains = normalizeNameContains(readStringInput(input, 'nameContains'));
+    const collected = await collectFileEntries(evaluation.resolvedPath, {
       root: evaluation.resolvedPath,
       rootStat,
       recursive,
-      limit,
+      limit: limit + 1,
       policyGuard: this.createTraversalPolicyGuard('list', context),
       ...(entryType ? { entryType } : {}),
       ...(extension ? { extension } : {}),
+      ...(nameContains ? { nameContains } : {}),
     });
 
+    const entries = collected.slice(0, limit);
     return {
       ok: true,
       summary: `Listed ${entries.length} workspace entries.`,
       output: {
         root: evaluation.resolvedPath,
         entries,
+        recursive,
+        entryType: entryType || null,
+        extension: extension || null,
+        truncated: collected.length > limit,
       },
     };
   }
@@ -635,32 +515,51 @@ export class WorkspaceModule implements MonarchModule {
     }
 
     const limit = normalizeLimit(readNumberInput(input, 'limit', 25), 1, 100);
-    const entries = await collectFileEntries(evaluation.resolvedPath, {
-      root: evaluation.resolvedPath,
-      rootStat,
-      recursive: true,
-      limit: 1000,
-      policyGuard: this.createTraversalPolicyGuard('search', context),
-    });
     const matches: Array<{ path: string; line: number; preview: string }> = [];
     const needle = query.toLowerCase();
-
-    for (const entry of entries) {
-      if (matches.length >= limit || entry.type !== 'file' || isLikelyBinary(entry.path)) {
-        continue;
+    // A whole-project search used to list only the first 1000 entries (folders
+    // included) and read those: on a real repository it never reached source
+    // folders two levels down and reported "0 matches" for code that exists.
+    // Walk files only, skip generated/dependency trees, and bound by work done;
+    // an incomplete scan says so instead of reading as "not found".
+    const scan = { files: 0, bytes: 0, truncated: false };
+    const deadline = Date.now() + SEARCH_TIME_BUDGET_MS;
+    if (rootStat.isFile()) {
+      if (!isLikelyBinary(evaluation.resolvedPath) && rootStat.size <= MAX_SEARCH_FILE_BYTES) {
+        const content = await readFile(evaluation.resolvedPath, 'utf8').catch(() => '');
+        scan.files = 1; scan.bytes = content.length;
+        appendTextMatches(content, needle, evaluation.resolvedPath, limit, matches);
       }
-      if ((entry.sizeBytes || 0) > MAX_SEARCH_FILE_BYTES) {
-        continue;
+    } else {
+      const guard = this.createTraversalPolicyGuard('search', context);
+      const queue = [evaluation.resolvedPath];
+      for (let index = 0; index < queue.length && matches.length < limit; index++) {
+        if (scan.files >= SEARCH_FILE_BUDGET || scan.bytes >= SEARCH_BYTE_BUDGET || Date.now() > deadline) { scan.truncated = true; break; }
+        const children = await readdir(queue[index]!, { withFileTypes: true }).catch(() => []);
+        for (const child of children) {
+          if (matches.length >= limit) break;
+          const childPath = path.join(queue[index]!, child.name);
+          if (await guard(childPath, child.isDirectory() || child.isSymbolicLink())) continue;
+          if (child.isDirectory()) {
+            if (!shouldSkipDirectory(child.name) && !shouldSkipSearchDirectory(child.name)) queue.push(childPath);
+            continue;
+          }
+          if (!child.isFile() || isLikelyBinary(childPath)) continue;
+          if (scan.files >= SEARCH_FILE_BUDGET || scan.bytes >= SEARCH_BYTE_BUDGET || Date.now() > deadline) { scan.truncated = true; break; }
+          const size = (await stat(childPath).catch(() => undefined))?.size ?? 0;
+          if (size > MAX_SEARCH_FILE_BYTES) continue;
+          const content = await readFile(childPath, 'utf8').catch(() => '');
+          scan.files++; scan.bytes += size;
+          appendTextMatches(content, needle, childPath, limit, matches);
+        }
       }
-
-      const content = await readFile(entry.path, 'utf8').catch(() => '');
-      appendTextMatches(content, needle, entry.path, limit, matches);
     }
 
     return {
       ok: true,
-      summary: `Found ${matches.length} file matches.`,
-      output: { query, root: evaluation.resolvedPath, matches },
+      summary: `Found ${matches.length} file matches in ${scan.files} scanned files`
+        + (scan.truncated ? '; the scan stopped at its budget before covering the whole tree, so narrow the path to search the rest.' : '.'),
+      output: { query, root: evaluation.resolvedPath, matches, scannedFiles: scan.files, truncated: scan.truncated },
     };
   }
 
@@ -924,7 +823,6 @@ export class WorkspaceModule implements MonarchModule {
       knownFolder,
       basename,
       createParent: false,
-      exclusiveCreate: true,
     });
   }
 
@@ -937,7 +835,6 @@ export class WorkspaceModule implements MonarchModule {
       knownFolder?: 'desktop' | 'downloads';
       basename?: string;
       createParent?: boolean;
-      exclusiveCreate?: boolean;
     } = {},
   ): Promise<MonarchExecutionResult> {
 
@@ -975,16 +872,18 @@ export class WorkspaceModule implements MonarchModule {
       await this.beforeMutation('write', [evaluation.resolvedPath], signal);
       signal?.throwIfAborted();
       if (options.createParent !== false) {
-        await mkdir(path.dirname(evaluation.resolvedPath), { recursive: true });
+        await ensureWritableParentDirectory(evaluation.resolvedPath);
       }
       signal?.throwIfAborted();
       await writeFile(evaluation.resolvedPath, content, {
         encoding: 'utf8',
         signal,
-        ...(options.exclusiveCreate && !overwrite ? { flag: 'wx' } : {}),
+        // The preflight stat is not an exclusive-create guarantee: another
+        // process may create the name before this open. Preserve its bytes.
+        flag: overwrite ? 'w' : 'wx',
       });
     } catch (error) {
-      if (options.exclusiveCreate && filesystemNodeErrorCode(error) === 'EEXIST') {
+      if (!overwrite && filesystemNodeErrorCode(error) === 'EEXIST') {
         return {
           ok: false,
           summary: `File already exists: ${evaluation.resolvedPath}`,
@@ -1029,6 +928,7 @@ export class WorkspaceModule implements MonarchModule {
         bytes,
         verified: true,
         readbackSha256: createHash('sha256').update(readback).digest('hex'),
+        createdExclusively: !overwrite,
         cancellationObservedAfterDispatch: signal?.aborted === true,
       },
     };
@@ -1235,7 +1135,7 @@ export class WorkspaceModule implements MonarchModule {
       signal?.throwIfAborted();
       await this.beforeMutation('append', [evaluation.resolvedPath], signal);
       signal?.throwIfAborted();
-      await mkdir(path.dirname(evaluation.resolvedPath), { recursive: true });
+      await ensureWritableParentDirectory(evaluation.resolvedPath);
       signal?.throwIfAborted();
       await appendFile(evaluation.resolvedPath, content, 'utf8');
     } catch (error) {
@@ -1401,9 +1301,9 @@ export class WorkspaceModule implements MonarchModule {
       signal?.throwIfAborted();
       await this.beforeMutation('move', [source.resolvedPath, target.resolvedPath], signal);
       signal?.throwIfAborted();
-      await mkdir(path.dirname(target.resolvedPath), { recursive: true });
+      await ensureWritableParentDirectory(target.resolvedPath);
       signal?.throwIfAborted();
-      await rename(source.resolvedPath, target.resolvedPath);
+      await renameWithWindowsRetry(source.resolvedPath, target.resolvedPath);
     } catch (error) {
       return filesystemMutationFailure('move', source.resolvedPath, error, target.resolvedPath);
     }
@@ -1598,7 +1498,7 @@ export class WorkspaceModule implements MonarchModule {
   ): MonarchFilesystemPolicyOptions & { fallbackRoot: string; allowRoot?: boolean } {
     const ownerUnrestricted = (context as MonarchKernelContext & { ownerUnrestrictedExecution?: boolean })
       .ownerUnrestrictedExecution === true;
-    const localReadOnlyRoots = defaultLocalReadOnlyRoots();
+    const localReadOnlyRoots = this.localReadOnlyRoots ?? defaultLocalReadOnlyRoots();
     const options: MonarchFilesystemPolicyOptions & { fallbackRoot: string; allowRoot?: boolean } = {
       workspaceRoot: this.workspaceRoot,
       sandboxRoot: this.workspaceRoot,
@@ -1608,12 +1508,15 @@ export class WorkspaceModule implements MonarchModule {
       createDirectoryRoots: ownerUnrestricted ? [] : localReadOnlyRoots,
       allowFullDiskAccess: ownerUnrestricted
         || context.getPermissionProfile().sandboxMode === 'danger-full-access',
+      redZoneRoots: [...this.ownerRedZoneRootsProvider()],
       ...(ownerUnrestricted ? {
         includeDefaultRedZones: false,
         protectWorkspaceInternals: false,
-        redZoneRoots: immutableMonarchSafeRoots(this.workspaceRoot),
       } : {}),
     };
+    if (ownerUnrestricted) {
+      options.redZoneRoots = [...immutableMonarchSafeRoots(this.workspaceRoot), ...this.ownerRedZoneRootsProvider()];
+    }
     if (overrides.allowRoot !== undefined) {
       options.allowRoot = overrides.allowRoot;
     }
@@ -1894,6 +1797,7 @@ async function collectFileEntries(
     limit: number;
     entryType?: FileEntry['type'];
     extension?: string;
+    nameContains?: string;
     policyGuard?: WorkspaceTraversalPolicyGuard;
   }
 ): Promise<FileEntry[]> {
@@ -1963,6 +1867,11 @@ function toFileEntry(
   return entry;
 }
 
+/** Dependency, build and tool-state trees: never what a person means by "in the project". */
+function shouldSkipSearchDirectory(name: string): boolean {
+  return name.startsWith('.') || ['dist', 'build', 'out', 'coverage', '__pycache__', 'target', 'venv', 'site-packages'].includes(name);
+}
+
 function shouldSkipDirectory(name: string): boolean {
   return name === 'node_modules'
     || name === '.git'
@@ -2012,276 +1921,24 @@ function blockedResult(summary: string, evaluation: unknown): MonarchExecutionRe
   };
 }
 
-function parseExplicitWorkspaceCapability(
-  text: string
-): { capabilityId: string; input: Record<string, unknown> } | null {
-  const trimmed = text.trim().replace(/^```(?:json)?\s*|\s*```$/gi, '');
-  if (!trimmed.startsWith('{')) return null;
-
-  let payload: unknown;
-  try {
-    payload = JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
-  if (!payload || typeof payload !== 'object') return null;
-  const record = payload as Record<string, unknown>;
-  const capabilityId = readFirstString(record, ['capability', 'capabilityId', 'name']);
-  const rawInput = record.parameters ?? record.arguments ?? record.input ?? {};
-  if (!isRecord(rawInput) || !WORKSPACE_CAPABILITY_IDS.has(capabilityId)) return null;
-
-  const input: Record<string, unknown> = {};
-  const allowedKeys = WORKSPACE_CAPABILITY_INPUTS[capabilityId] || [];
-  for (const key of allowedKeys) {
-    const value = readAliasedInputValue(rawInput, key);
-    if (value !== undefined) input[key] = value;
-  }
-  if (capabilityId === 'workspace.files.list' && typeof input.path !== 'string') input.path = '.';
-  return { capabilityId, input };
-}
-
-const WORKSPACE_INPUT_ALIASES: Record<string, readonly string[]> = {
-  maxBytes: ['max_bytes'],
-  maxBytesPerFile: ['max_bytes_per_file'],
-  maxTotalContentBytes: ['max_total_content_bytes'],
-  maxEntries: ['max_entries'],
-  pageSize: ['page_size'],
-  knownFolder: ['known_folder'],
-  entryType: ['entry_type'],
-  ensureUnique: ['ensure_unique'],
-  targetPath: ['target_path'],
-  oldText: ['old_text'],
-  newText: ['new_text'],
-};
-
-const WORKSPACE_CAPABILITY_INPUTS: Record<string, readonly string[]> = {
-  'workspace.root.get': [],
-  'workspace.storage.audit': ['root', 'topN', 'maxDepth', 'maxEntries', 'maxWallTimeMs'],
-  'workspace.files.read': ['path', 'maxBytes'],
-  'workspace.files.list': ['path', 'recursive', 'limit', 'entryType', 'extension'],
-  'workspace.files.inspect-batch': [
-    'path', 'knownFolder', 'cursor', 'recursive', 'pageSize', 'maxBytesPerFile', 'maxTotalContentBytes', 'maxEntries',
-  ],
-  'workspace.known-folder.resolve': ['knownFolder'],
-  'workspace.files.search': ['query', 'path', 'limit'],
-  'workspace.files.write': ['path', 'content', 'overwrite'],
-  'workspace.known-folder.write': ['knownFolder', 'basename', 'content', 'overwrite'],
-  'workspace.files.append': ['path', 'content'],
-  'workspace.files.mkdir': ['path', 'ensureUnique'],
-  'workspace.files.copy': ['path', 'targetPath'],
-  'workspace.files.move': ['path', 'targetPath'],
-  'workspace.files.replace': ['path', 'oldText', 'newText'],
-  'workspace.files.trash': ['path'],
-  'workspace.files.delete': ['path'],
-};
-const WORKSPACE_CAPABILITY_IDS = new Set(Object.keys(WORKSPACE_CAPABILITY_INPUTS));
-
-function readAliasedInputValue(record: Record<string, unknown>, key: string): unknown {
-  if (record[key] !== undefined) return record[key];
-  for (const alias of WORKSPACE_INPUT_ALIASES[key] || []) {
-    if (record[alias] !== undefined) return record[alias];
-  }
-  return undefined;
-}
-
-function readFirstString(record: Record<string, unknown>, keys: readonly string[]): string {
-  for (const key of keys) {
-    if (typeof record[key] === 'string') return record[key].trim();
-  }
-  return '';
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function extractStandalonePath(text: string): string {
-  const value = text.trim().replace(/^(?:["'`])|(?:["'`])$/g, '');
-  if (!value || /[\r\n\0]/.test(value)) return '';
-  return /^(?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[\\/])/.test(value)
-    || /^[A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_. -]+)+$/.test(value)
-    ? value
-    : '';
-}
-
-export function isWorkspaceRootRequest(text: string): boolean {
-  const workspace = '(?:workspace|рабоч[^\\s]*\\s+пространств[^\\s]*|корнев[^\\s]*\\s+(?:каталог|папк|директор))';
-  const location = '(?:путь|адрес|расположен[^\\s]*|находится|location|path|located)';
-  return new RegExp(`(?:где|какой|укажи|покажи|назови|дай|where|what).{0,80}${location}.{0,80}${workspace}`, 'i').test(text)
-    || new RegExp(`${workspace}.{0,80}${location}`, 'i').test(text);
-}
-
-function isWorkspaceListRequest(text: string): boolean {
-  const action = '(?:list|show|view|inspect|browse|покажи|выведи|перечисли|посмотри|просмотри|показать|посмотреть|просмотреть)';
-  const target = '(?:files?|folders?|director(?:y|ies)|файлы?|папк\\w*|директор\\w*|содержим\\w*|названи\\w*)';
-  return new RegExp(`${action}.{0,80}${target}`, 'i').test(text)
-    || new RegExp(`${target}.{0,48}${action}`, 'i').test(text)
-    || /\b(?:folder|directory)\s+contents\b|(?:содержим|содержание)\s+(?:папк|директор)/i.test(text);
-}
-
-function detectRequestedEntryType(text: string): FileEntry['type'] | '' {
-  const hasFile = /\bfiles?\b|файл/i.test(text);
-  const hasDirectory = /\bfolders?\b|\bdirector(?:y|ies)\b|папк|директор/i.test(text);
-  if (hasDirectory && !hasFile) return 'directory';
-  if (hasFile && !hasDirectory) return 'file';
-  return '';
-}
-
-function detectRequestedExtension(text: string): string {
-  const dotted = text.match(/(?:^|[^\w.])\.([a-z0-9]{1,12})\b/i)?.[1];
-  if (dotted) return `.${dotted.toLowerCase()}`;
-  const language = text.match(/\b(java|py|js|jsx|ts|tsx|md|txt|json|yaml|yml|toml|css|html)\s+файл/i)?.[1];
-  return language ? `.${language.toLowerCase()}` : '';
-}
-
-function extractKnownLocation(text: string): string {
-  if (/\bdesktop\b|рабоч[^\s]*\s+стол|(?:^|\s)на\s+стол(?:е)?(?:$|[\s,.;!?])/i.test(text)) return resolveKnownUserFolder('desktop');
-  if (/\bdownloads?\b|загрузк/i.test(text)) return resolveKnownUserFolder('downloads');
-  return '';
-}
-
-function extractDirectoryInput(text: string): { path: string; ensureUnique?: boolean } {
-  const knownLocation = extractKnownLocation(text);
-  const rawExtractedPath = extractPath(text);
-  const extractedPath = isGeneratedNamePlaceholder(rawExtractedPath) ? '' : rawExtractedPath;
-  const directoryName = extractWorkspaceObjectName(text) || extractDirectoryName(text) || extractDescribedDirectoryName(text);
-  const wantsUniqueDefault = wantsUnnamedNewDirectory(text) && !directoryName;
-
-  if (knownLocation) {
-    const relativeName = directoryName || (!looksLikePath(extractedPath) ? extractedPath : '');
-    const targetName = relativeName || defaultNewDirectoryName(text);
-    return {
-      path: joinKnownLocation(knownLocation, targetName),
-      ...(wantsUniqueDefault ? { ensureUnique: true } : {}),
-    };
-  }
-
-  return {
-    path: extractedPath || directoryName || (wantsUniqueDefault ? defaultNewDirectoryName(text) : ''),
-    ...(wantsUniqueDefault ? { ensureUnique: true } : {}),
-  };
-}
-
-function extractDirectoryName(text: string): string {
-  const match = text.match(
-    /(?:folder|directory|папку|директорию)\s+(?:named\s+|called\s+|с\s+именем\s+)?(["'`].+?["'`]|[^\s,;]+)/i
-  );
-  const value = match?.[1]?.trim().replace(/^["'`]|["'`]$/g, '') || '';
-  return value && !looksLikePath(value) && !isGenericLocationToken(value) && !isGeneratedNamePlaceholder(value) ? value : '';
-}
-
-function extractDescribedDirectoryName(text: string): string {
-  const english = text.match(/\b(?:create|make|mkdir)\s+((?:(?!new\s+)[a-z][a-z0-9_-]*\s+){1,3})(?:folder|directory)\b/i)?.[1];
-  if (english) {
-    const normalized = normalizeFolderNameWords(english, 'en');
-    if (normalized) return normalized;
-  }
-
-  const russian = text.match(/(?:^|\s)(?:создай|создать|сделай|сделать)\s+((?:(?!нов[а-яё]*\s+)[а-яё-]+\s+){1,3})(?:папку|директорию)(?:$|[\s,.;!?])/i)?.[1];
-  if (russian) {
-    const normalized = normalizeFolderNameWords(russian, 'ru');
-    if (normalized) return normalized;
-  }
-
-  return '';
-}
-
-function normalizeFolderNameWords(value: string, language: 'en' | 'ru'): string {
-  const words = value
-    .trim()
-    .replace(/[.,;:]+$/g, '')
-    .split(/\s+/)
-    .map((word) => word.trim())
-    .filter(Boolean)
-    .filter((word) => !isGenericDirectoryDescriptor(word));
-  if (words.length === 0) return '';
-  const normalized = language === 'ru'
-    ? words.map(normalizeRussianFolderDescriptor)
-    : words.map((word) => word.toLowerCase());
-  return [...normalized, language === 'ru' ? 'папка' : 'folder']
-    .map((word, index) => language === 'en' || index === 0 ? capitalizeWord(word) : word)
-    .join(' ');
-}
-
-function normalizeRussianFolderDescriptor(word: string): string {
-  const lower = word.toLowerCase();
-  if (lower.endsWith('ую')) return `${lower.slice(0, -2)}ая`;
-  if (lower.endsWith('юю')) return `${lower.slice(0, -2)}яя`;
-  return lower;
-}
-
-function isGenericDirectoryDescriptor(word: string): boolean {
-  return /^(?:new|empty|blank|name|title|названи[ея]?|имя|нов[а-яё]*|пуст[а-яё]*|обычн[а-яё]*)$/i.test(word);
-}
-
-function isGeneratedNamePlaceholder(value: string): boolean {
-  const normalized = value.trim().replace(/[.,;:!?]+$/g, '').toLowerCase();
-  return /^(?:name|title|названи[ея]?|имя)$/i.test(normalized);
-}
-
-function capitalizeWord(word: string): string {
-  return word ? `${word.charAt(0).toUpperCase()}${word.slice(1)}` : '';
-}
-
-function wantsUnnamedNewDirectory(text: string): boolean {
-  return /\bnew\s+folder\b|(?:invent|choose|generate)\s+(?:a\s+)?name|нов[а-яё]*\s+папк|(?:названи[ея]?|имя).{0,32}придум|придумай\s+сам/i.test(text);
-}
-
-function defaultNewDirectoryName(text: string): string {
-  return /[а-яё]/i.test(text) ? 'Новая папка' : 'New Folder';
-}
-
-function joinKnownLocation(root: string, child: string): string {
-  const trimmed = child.trim().replace(/^["'`]|["'`]$/g, '').replace(/[.,;:]+$/g, '');
-  if (!trimmed || path.isAbsolute(trimmed)) return trimmed || root;
-  return path.join(root, trimmed);
-}
-
-function extractPath(text: string): string {
-  const cleaned = text.replace(/\b(?:in\s+files?|в\s+файлах?|in\s+project|в\s+проекте)\b/gi, ' ');
-  const objectMatch = cleaned.match(/(?:^|\s)(?:file|folder|directory|path|файл|файла|папку|директорию|путь)\s+(?:named\s+|called\s+|с\s+именем\s+)?(["'`].+?["'`]|[^\s,;]+)/i);
-  if (objectMatch?.[1]) {
-    const matchedPath = objectMatch[1].trim().replace(/^["'`]|["'`]$/g, '');
-    if (!isGenericLocationToken(matchedPath)) return matchedPath;
-  }
-  const quotedPaths = Array.from(text.matchAll(/["'`](.+?)["'`]/g))
-    .map((match) => match[1]?.trim() || '')
-    .filter(looksLikePath);
-  if (quotedPaths[0]) return quotedPaths[0];
-
-  const locationMatch = cleaned.match(/(?:^|\s)(?:in|from|inside|to|в|из|по)\s+([^\s,;]+)/i);
-  if (locationMatch?.[1] && looksLikePath(locationMatch[1])) {
-    return locationMatch[1].trim();
-  }
-  const directRead = cleaned.match(/(?:^|\s)(?:read|show|open|view|прочитай|прочитать|открой|покажи|посмотри|просмотри)\s+([^\s,;]+)/i);
-  const candidate = directRead?.[1]?.trim() || '';
-  return looksLikePath(candidate) ? candidate : '';
-}
-
-function extractDriveRoot(text: string): string {
-  const explicit = text.match(/(?:^|\s)([A-Za-z]):[\\/]?(?:\s|$)/u)?.[1]
-    || text.match(/(?:drive|диск(?:е|а|у|ом)?)\s+([A-Za-z])\b/iu)?.[1];
-  return explicit ? `${explicit.toUpperCase()}:\\` : '';
-}
-
-function extractFileContent(text: string): string {
-  const quoted = Array.from(text.matchAll(/["'`](.+?)["'`]/g)).map((match) => match[1]?.trim() || '');
-  if (quoted.length >= 2) {
-    return quoted[1] || '';
-  }
-
-  const match = text.match(/(?:with\s+text|with\s+content|content|с\s+текстом|с\s+содержимым|текстом)\s*[:\-]?\s*(.+)$/i);
-  return match?.[1]?.trim().replace(/^["'`]|["'`]$/g, '') || '';
+function normalizeNameContains(value: string): string {
+  const normalized = String(value || '').trim();
+  return normalized && normalized.length <= 80 ? normalized : '';
 }
 
 function matchesEntryFilters(
   entryPath: string,
   entryType: FileEntry['type'],
-  options: { entryType?: FileEntry['type']; extension?: string }
+  options: { entryType?: FileEntry['type']; extension?: string; nameContains?: string }
 ): boolean {
   if (options.entryType && options.entryType !== entryType) return false;
   if (options.extension && (entryType !== 'file' || path.extname(entryPath).toLowerCase() !== options.extension)) {
     return false;
+  }
+  if (options.nameContains) {
+    const needle = options.nameContains.toLocaleLowerCase();
+    const name = path.basename(entryPath).toLocaleLowerCase();
+    if (!name.includes(needle)) return false;
   }
   return true;
 }
@@ -2318,7 +1975,7 @@ async function copyWorkspaceTree(
     if (!info.isFile()) throw new Error(`Unsupported filesystem entry: ${currentSource}`);
     bytes += info.size;
     if (bytes > MAX_COPY_BYTES) throw new Error(`Copy exceeds ${MAX_COPY_BYTES} bytes.`);
-    await mkdir(path.dirname(currentTarget), { recursive: true });
+    await ensureWritableParentDirectory(currentTarget);
     options.signal?.throwIfAborted();
     await copyFile(currentSource, currentTarget);
     const [sourceReadback, targetReadback] = await Promise.all([
@@ -2443,50 +2100,6 @@ function sameWorkspacePathIdentity(
     && expected.modifiedMs === actual.modifiedMs;
 }
 
-function extractTransferInput(text: string): { path: string; targetPath: string } {
-  const quoted = Array.from(text.matchAll(/["'`](.+?)["'`]/g)).map((match) => match[1]?.trim() || '');
-  if (quoted.length >= 2) return { path: quoted[0] || '', targetPath: quoted[1] || '' };
-  const match = text.match(/(?:copy|duplicate|move|rename|скопируй|дублируй|перемести|переименуй)\s+(?:file|folder|directory|файл|папку|директорию)?\s*([^\s,;]+)\s+(?:to|into|в|на)\s+([^\s,;]+)/i);
-  return { path: match?.[1]?.trim() || extractPath(text), targetPath: match?.[2]?.trim() || '' };
-}
-
-function extractReplaceInput(text: string): { path: string; oldText: string; newText: string } {
-  const quoted = Array.from(text.matchAll(/["'`](.+?)["'`]/g)).map((match) => match[1]?.trim() || '');
-  let pathValue = extractPathAfterFileKeyword(text);
-  let oldText = '';
-  let newText = '';
-
-  if (quoted.length >= 3 && pathValue === quoted[0]) {
-    oldText = quoted[1] || '';
-    newText = quoted[2] || '';
-  } else if (quoted.length >= 2) {
-    oldText = quoted[quoted.length - 2] || '';
-    newText = quoted[quoted.length - 1] || '';
-  }
-  if (!pathValue && quoted.length >= 3) {
-    pathValue = quoted[0] || '';
-  }
-
-  return { path: pathValue, oldText, newText };
-}
-
-function extractPathAfterFileKeyword(text: string): string {
-  const match = text.match(/(?:file|файл(?:е|а)?)\s+(["'`].+?["'`]|[^\s,;]+)/i);
-  return match?.[1]?.trim().replace(/^["'`]|["'`]$/g, '') || '';
-}
-
-function extractSearchQuery(text: string): string {
-  const quoted = text.match(/["'`](.+?)["'`]/);
-  if (quoted?.[1]) {
-    return quoted[1].trim();
-  }
-  return text
-    .replace(/(?:^|\s)(?:search|find|grep|поиск|найди|ищи).{0,20}(?:files?|файлах?)\s*(for|чтобы)?\s*/i, '')
-    .replace(/^(?:search|find|grep|поиск|найди|ищи)\s+/i, '')
-    .replace(/\s+(?:in\s+project|в\s+проекте)\s*$/i, '')
-    .trim();
-}
-
 function readStringInput(input: unknown, key: string): string {
   if (!input || typeof input !== 'object') {
     return '';
@@ -2587,32 +2200,6 @@ function countOccurrences(text: string, needle: string): number {
   return count;
 }
 
-function looksLikePath(value: string): boolean {
-  return /[\\/]/.test(value) || /\.[A-Za-z0-9]{1,12}$/.test(value);
-}
-
-function looksLikeTextFilePath(value: string): boolean {
-  return /\.(?:css|csv|html?|ini|js|json|jsx|log|md|ps1|py|sh|sql|toml|ts|tsx|txt|xml|ya?ml)$/i.test(value);
-}
-
-function isGenericLocationToken(value: string): boolean {
-  return /^(project|workspace|desktop|downloads?|on|at|to|from|inside|in|проект|проекте|пространств\w*|рабоч\w*|стол\w*|загрузк\w*|files?|файлы?|файлах?|with|content|text|с|со|в|во|на|из|по|текстом|содержимым)$/i.test(value);
-}
-
-function isOpenEndedBuildRequest(text: string): boolean {
-  const asksToBuild = /(?:создай|создать|сделай|сделать|собери|собрать|реализуй|реализовать|напиши|build|create|make|implement|generate)/i.test(text);
-  if (!asksToBuild) return false;
-  const buildSubject = /(?:калькулятор|calculator|приложен\w*|app\b|application|сайт|website|страниц\w*|game|игр\w*|dashboard|дашборд|интерфейс|ui\b)/i.test(text);
-  const buildQualifier = /(?:рабоч\w*|работающ\w*|графическ\w*|визуальн\w*|интерактивн\w*|functional|working|graphical|interactive|with\s+ui|gui\b)/i.test(text);
-  return buildSubject && buildQualifier && !isExplicitWorkspaceBatch(text);
-}
-
-function isExplicitWorkspaceBatch(text: string): boolean {
-  return /(?:с\s+текстом|с\s+содержимым|with\s+(?:text|content)|content\s*:)/i.test(text)
-    || /(?:структур\w*|дерево|скелет|structure|scaffold).{0,80}(?:[\\/]|├|└|\.\w{1,12})/i.test(text)
-    || /(?:^|\n)\s*(?:[-*]|\d+[.)])\s+[^:\n]+\.\w{1,12}\s*:/i.test(text);
-}
-
 async function nextAvailableDirectoryPath(basePath: string): Promise<string> {
   if (!(await stat(basePath).catch(() => undefined))) return basePath;
   for (let index = 2; index < 1000; index += 1) {
@@ -2644,3 +2231,37 @@ export const workspaceModulePackage: MonarchModulePackage = {
       : {},
   ),
 };
+
+async function readFileWindow(filePath: string, offset: number, length: number): Promise<Buffer> {
+  const handle = await open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, offset);
+    return buffer.subarray(0, bytesRead);
+  } finally { await handle.close(); }
+}
+
+/** A window cut on byte offsets may split a UTF-8 sequence at either edge; drop
+ * the partial characters instead of emitting replacement glyphs. */
+function decodeUtf8Window(buffer: Buffer, window: boolean): string {
+  if (!window) return buffer.toString('utf8');
+  let start = 0;
+  while (start < buffer.length && start < 3 && (buffer[start]! & 0xc0) === 0x80) start++;
+  let end = buffer.length;
+  for (let back = 1; back <= 3 && end - back >= start; back++) {
+    const byte = buffer[end - back]!;
+    if ((byte & 0xc0) === 0x80) continue;
+    const need = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
+    if (need > back) end -= back;
+    break;
+  }
+  return buffer.subarray(start, end).toString('utf8');
+}
+
+async function countFileLines(filePath: string): Promise<number> {
+  const data = await readFile(filePath);
+  if (!data.length) return 0;
+  let lines = 1;
+  for (const byte of data) if (byte === 0x0a) lines++;
+  return data[data.length - 1] === 0x0a ? lines - 1 : lines;
+}

@@ -1,3 +1,4 @@
+import { reducedUiMotion } from './ui-motion.js';
 import { acknowledgeModelOnboardingWelcome } from './api.js';
 import { state } from './state.js';
 
@@ -47,7 +48,7 @@ export function renderModelSetupWelcome() {
   document.body.classList.add('model-setup-welcome-open');
   window.requestAnimationFrame(() => elements.root?.classList.add('is-running'));
 
-  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+  const reducedMotion = reducedUiMotion.matches === true;
   const brandDuration = reducedMotion ? 260 : MODEL_WELCOME_BRAND_MS;
   finishTimer = window.setTimeout(finishWelcome, brandDuration + MODEL_WELCOME_MESSAGE_MS);
   elements.root.focus({ preventScroll: true });
@@ -68,7 +69,7 @@ function finishWelcome() {
     const onboardingRequired = state.data?.components?.schemaVersion === 2
       && state.data.components.onboarding?.required === true;
     if (!onboardingRequired) elements.shell?.removeAttribute('inert');
-  }, window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ? 80 : 520);
+  }, reducedUiMotion.matches ? 80 : 520);
 }
 
 function readLocalReceipt() {

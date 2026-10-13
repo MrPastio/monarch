@@ -1,39 +1,56 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { AgentTaskStoreCorruptionError } from '../../src/agent';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MonarchApplication } from '../../src/app/application';
 
 describe('MonarchApplication startup rollback', () => {
-  it('stops the kernel when the agent runtime task store is corrupt', async () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('cannot resurrect Agent Runtime V2 through the product environment', () => {
+    vi.stubEnv('MONARCH_AGENT_RUNTIME_V2', '1');
+    const app = new MonarchApplication({ workspaceRoot: os.tmpdir() });
+    expect('agentRuntime' in app).toBe(false);
+    expect('incognitoAgentRuntime' in app).toBe(false);
+    expect('createAgentTask' in app).toBe(false);
+  });
+
+  it('does not read or execute corrupt retired V2 task state during startup', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-app-startup-'));
     const storePath = path.join(root, 'runtime', 'agent', 'tasks.v2.json');
     await mkdir(path.dirname(storePath), { recursive: true });
     await writeFile(storePath, '{"broken":', 'utf8');
-    const app = new MonarchApplication({
-      workspaceRoot: root,
-      enableAgentRuntimeV2: true,
-    });
+    const app = new MonarchApplication({ workspaceRoot: root });
 
     try {
-      let startupError: unknown;
-      try {
-        await app.start();
-      } catch (error) {
-        startupError = error;
-      }
-
-      expect(startupError).toBeInstanceOf(AgentTaskStoreCorruptionError);
-      expect(startupError).toMatchObject({ filePath: path.resolve(storePath) });
-      expect(app.isStarted).toBe(false);
-      const modules = app.runtime.kernel.getSnapshot().modules;
-      expect(modules.length).toBeGreaterThan(0);
-      expect(modules.filter((module) => module.status === 'active')).toEqual([]);
+      await expect(app.start()).resolves.toBeUndefined();
+      expect(app.isStarted).toBe(true);
+      expect('agentRuntime' in app).toBe(false);
     } finally {
-      if (app.runtime.kernel.getSnapshot().modules.some((module) => module.status === 'active')) {
-        await app.runtime.kernel.stop();
-      }
+      await app.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('releases every owner on stop even when an earlier one throws', async () => {
+    // A throwing coordinator stop used to skip the Astra pilot, so its journal
+    // stayed open (EBUSY on cleanup) for the rest of the process.
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-app-stop-'));
+    const app = new MonarchApplication({ workspaceRoot: root });
+    try {
+      await app.start();
+      const internals = app as unknown as { oscarTurnCoordinator: { stop: () => Promise<void> };
+        astraProductPilot: { stop: () => Promise<void> } | null; runtime: { kernel: { stop: () => Promise<void> } } };
+      const failure = new Error('synthetic-coordinator-stop');
+      internals.oscarTurnCoordinator.stop = async () => { throw failure; };
+      const pilotStop = vi.fn(async () => undefined);
+      internals.astraProductPilot = { stop: pilotStop };
+      const kernelStop = vi.spyOn(internals.runtime.kernel, 'stop');
+      await expect(app.stop()).rejects.toBe(failure);
+      expect(pilotStop).toHaveBeenCalledOnce();
+      expect(kernelStop).toHaveBeenCalledOnce();
+      expect(app.isStarted).toBe(false);
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });

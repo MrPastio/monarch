@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { resolveSafeStorageRoot } from '../../desktop/electron/safe-storage-path.mjs';
+import { resolveSafeMainStorageRoot, resolveSafeStorageRoot } from '../../desktop/electron/safe-storage-path.mjs';
 
 describe('Monarch Safe storage location', () => {
   it('stores the real vault in MonarchData on the Monarch drive', () => {
@@ -14,5 +14,13 @@ describe('Monarch Safe storage location', () => {
       workspaceRoot: 'E:\\Monarch',
       qaUserDataRoot: 'C:\\Temp\\monarch-safe-entry-qa',
     })).toBe(path.win32.normalize('C:\\Temp\\monarch-safe-entry-qa\\safe-v1'));
+  });
+
+  it('prioritizes the isolated QA profile over an installed configuration root', () => {
+    expect(resolveSafeMainStorageRoot({
+      workspaceRoot: 'E:\\Monarch',
+      qaUserDataRoot: 'E:\\MonarchArtifacts\\safe-qa-profile',
+      installedConfigRoot: 'E:\\MonarchData',
+    })).toBe(path.win32.normalize('E:\\MonarchArtifacts\\safe-qa-profile\\safe-v1'));
   });
 });

@@ -7,9 +7,10 @@ import json
 import os
 import time
 import contextlib
+import tempfile
 
 from .events import utc_now
-from .integrity import INTEGRITY_FIELD, get_or_create_key, sign_payload, verify_payload
+from .integrity import INTEGRITY_FIELD, get_or_create_key, read_existing_key, sign_payload, verify_payload
 
 
 class FileLock:
@@ -74,40 +75,22 @@ class FileLock:
 
 
 def _pid_is_running(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-            if not process:
-                return False
-            try:
-                exit_code = ctypes.c_ulong()
-                return bool(ctypes.windll.kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code))) \
-                    and exit_code.value == 259
-            finally:
-                ctypes.windll.kernel32.CloseHandle(process)
-        except (AttributeError, OSError):
-            return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+    # Unknown/access-denied is not proof of an orphaned signed-store writer.
+    from .process_identity import probe_process
+    return probe_process(pid).state != "dead"
 
 
 class StateStore:
-    def __init__(self, path: Path, integrity_key_path: Path | None = None) -> None:
+    def __init__(self, path: Path, integrity_key_path: Path | None = None, *, require_existing_key: bool = False) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._integrity_key = (
-            get_or_create_key(integrity_key_path) if integrity_key_path is not None else None
+            (read_existing_key(integrity_key_path) if require_existing_key else get_or_create_key(integrity_key_path))
+            if integrity_key_path is not None else None
         )
         existed = self.path.exists()
         self.data = self._load()
-        self._dirty = not existed or "load_error" in self.data or "integrity_error" in self.data
+        self._dirty = not existed
 
     @contextlib.contextmanager
     def lock(self):
@@ -115,9 +98,12 @@ class StateStore:
         with FileLock(self.path):
             existed = self.path.exists()
             self.data = self._load()
-            self._dirty = not existed or "load_error" in self.data or "integrity_error" in self.data
+            self._dirty = not existed
+            before = copy.deepcopy(self.data)
             yield
-            self.save()
+            if self.data != before:
+                self._dirty = True
+            self.save_if_dirty()
 
 
     def get_list(self, key: str) -> list[str]:
@@ -188,14 +174,20 @@ class StateStore:
         return True
 
     def save(self) -> None:
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        # Never turn an unreadable/untrusted store into a freshly signed reset.
+        # Recovery must be explicit; this store contains trust and approvals.
+        if self.data.get("load_error") or self.data.get("integrity_error"):
+            raise RuntimeError("security-state-recovery-required")
         data = dict(self.data)
         data.pop("integrity_error", None)
         if self._integrity_key is not None:
             data[INTEGRITY_FIELD] = sign_payload(data, self._integrity_key, "state-store")
         payload = json.dumps(data, ensure_ascii=True, indent=2, sort_keys=True)
-        temporary.write_text(payload + "\n", encoding="utf-8")
-        temporary.replace(self.path)
+        durable_replace(self.path, (payload + "\n").encode("utf-8"))
+        # A separately flushed copy permits checked recovery after storage loss.
+        # Never load it automatically: an older copy could restore a consumed
+        # approval or undo a later pause. Both copies carry the same HMAC.
+        durable_replace(self.path.with_suffix(self.path.suffix + ".backup"), (payload + "\n").encode("utf-8"))
         self.data = data
         self._dirty = False
 
@@ -203,11 +195,11 @@ class StateStore:
         if not self.path.exists():
             return self._fresh_state()
         try:
-            parsed = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            parsed = json.loads(read_shared_text(self.path))
+        except (OSError, UnicodeError, json.JSONDecodeError):
             return self._fresh_state(load_error=True)
         if not isinstance(parsed, dict):
-            return self._fresh_state()
+            return self._fresh_state(load_error=True)
         if self._integrity_key is not None and INTEGRITY_FIELD in parsed:
             ok, reason = verify_payload(parsed, self._integrity_key, "state-store")
             if not ok:
@@ -218,3 +210,119 @@ class StateStore:
 
     def _fresh_state(self, **extra: Any) -> dict[str, Any]:
         return {"created_at": utc_now(), "schema": 1, **extra}
+
+
+# os.replace (MoveFileEx) cannot replace a file another process has open, so a
+# status poll could silently discard a pause or disable. On Windows the store
+# is replaced with POSIX rename semantics, which succeed while readers hold the
+# file with FILE_SHARE_DELETE; every signed-state reader opens it that way. A
+# process outside Monarch (Defender, indexer) may still hold it briefly.
+_REPLACE_RETRY_SECONDS = 2.0
+
+
+def _kernel32():
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                     wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return kernel32
+
+
+def _open_handle(kernel32, path: Path, access: int):
+    import ctypes
+    from ctypes import wintypes
+
+    share_all, open_existing, normal = 0x7, 3, 0x80
+    handle = kernel32.CreateFileW(str(path), access, share_all, None, open_existing, normal, None)
+    if handle == wintypes.HANDLE(-1).value:
+        error = ctypes.get_last_error()
+        raise ctypes.WinError(error)
+    return handle
+
+
+def read_shared_text(path: Path) -> str:
+    """Read UTF-8 text without blocking a concurrent atomic replace of ``path``."""
+    if os.name != "nt":
+        return path.read_text(encoding="utf-8")
+    import msvcrt
+
+    kernel32 = _kernel32()
+    handle = _open_handle(kernel32, path, 0x80000000)
+    try:
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    except OSError:
+        kernel32.CloseHandle(handle)
+        raise
+    with os.fdopen(descriptor, "rb") as stream:
+        return stream.read().decode("utf-8")
+
+
+def _posix_replace(temporary: Path, path: Path) -> bool:
+    """Replace via FileRenameInfoEx; False when the volume does not support it."""
+    import ctypes
+    from ctypes import wintypes
+
+    class RenameInfo(ctypes.Structure):
+        _fields_ = [("Flags", wintypes.DWORD), ("RootDirectory", wintypes.HANDLE),
+                    ("FileNameLength", wintypes.DWORD), ("FileName", wintypes.WCHAR * 1)]
+
+    target = os.path.abspath(path)
+    size = ctypes.sizeof(RenameInfo) + len(target) * ctypes.sizeof(wintypes.WCHAR)
+    buffer = ctypes.create_string_buffer(size)
+    info = RenameInfo.from_buffer(buffer)
+    info.Flags = 0x1 | 0x2  # REPLACE_IF_EXISTS | POSIX_SEMANTICS
+    info.FileNameLength = len(target) * ctypes.sizeof(wintypes.WCHAR)
+    ctypes.memmove(ctypes.addressof(info) + RenameInfo.FileName.offset, target,
+                   info.FileNameLength)
+    kernel32 = _kernel32()
+    handle = _open_handle(kernel32, temporary, 0x00010000)  # DELETE
+    try:
+        if kernel32.SetFileInformationByHandle(handle, 22, buffer, size):  # FileRenameInfoEx
+            return True
+        error = ctypes.get_last_error()
+    finally:
+        kernel32.CloseHandle(handle)
+    if error in {1, 87, 50}:  # invalid function/parameter, not supported: FAT, old Windows
+        return False
+    raise ctypes.WinError(error)
+
+
+def _replace(temporary: Path, path: Path) -> None:
+    deadline = time.monotonic() + _REPLACE_RETRY_SECONDS
+    delay = 0.01
+    while True:
+        try:
+            if os.name != "nt" or not _posix_replace(temporary, path):
+                os.replace(temporary, path)
+            return
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
+
+
+def durable_replace(path: Path, payload: bytes) -> None:
+    """Flush file data before publishing a new name; preserve target on failure."""
+    descriptor, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _replace(temporary, path)
+        if os.name != "nt":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)

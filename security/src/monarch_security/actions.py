@@ -13,12 +13,16 @@ import secrets
 import subprocess
 import sys
 import time
+import threading
+from contextlib import contextmanager
+from functools import wraps
 from multiprocessing.connection import Client, Listener
 
 from .events import utc_now
 from .incidents import Incident, IncidentStore, ResponseProposal
 from .integrity import (
     GENESIS_HASH,
+    _current_user_sid,
     INTEGRITY_FIELD,
     audit_record_integrity,
     get_or_create_key,
@@ -32,8 +36,10 @@ from .responses import (
     StoredProposal,
     _is_expired,
     _validate_network_scope,
+    _validate_against_incident,
 )
 from .state import FileLock, StateStore
+from .runtime_lock import RuntimeLock, RuntimeBusyError
 
 
 ACTION_STATES = {"pending", "active", "rolled_back", "failed"}
@@ -66,6 +72,14 @@ class ResponseActionError(RuntimeError):
 
 class ResponseGrantError(ResponseActionError):
     pass
+
+
+def _serialized_response(method):
+    @wraps(method)
+    def serialized(self, *args, **kwargs):
+        with self.operation():
+            return method(self, *args, **kwargs)
+    return serialized
 
 
 @dataclass(frozen=True)
@@ -158,10 +172,7 @@ class ResponseActionStore:
             with self.path.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n")
                 handle.flush()
-                try:
-                    os.fsync(handle.fileno())
-                except OSError:
-                    pass
+                os.fsync(handle.fileno())
             latest[action.action_id] = action
             self._latest = latest
             self._last_hash = record[INTEGRITY_FIELD]["record_hash"]
@@ -171,6 +182,13 @@ class ResponseActionStore:
 
     def list_latest(self) -> list[ResponseActionRecord]:
         return sorted(self._latest.values(), key=lambda item: item.updated_at, reverse=True)
+
+    def refresh(self) -> None:
+        with FileLock(self.path):
+            self._latest, self._last_hash = self._read_all()
+
+    def has_grant(self, grant_id: str) -> bool:
+        return any(item.grant_id == grant_id for item in self._latest.values())
 
     def _read_all(self) -> tuple[dict[str, ResponseActionRecord], str]:
         if not self.path.exists():
@@ -242,7 +260,7 @@ class ResponseApprovalBroker:
             action_expires_at=proposal_expiry.isoformat(),
         )
         try:
-            self.proposals.append(StoredProposal(
+            self.proposals.transition(stored, StoredProposal(
                 proposal=proposal,
                 status="approved",
                 status_reason=f"One-time grant {grant.grant_id} issued after Security PIN verification",
@@ -266,11 +284,31 @@ class FirewallContainmentService:
     ) -> None:
         self.actions = actions
         self.state = state
+        self.integrity_key_path = integrity_key_path
+        self._operation_local = threading.local()
         self._key = get_or_create_key(integrity_key_path)
         self.command_runner = command_runner or _run_powershell
         self.require_elevated = require_elevated
         self.now_fn = now_fn or (lambda: datetime.now(timezone.utc))
 
+    @contextmanager
+    def operation(self):
+        """Hold exact OS ownership across durable reservation, effects and cleanup."""
+        if getattr(self._operation_local, "held", False):
+            yield
+            return
+        try:
+            with RuntimeLock(self.actions.path.with_suffix(self.actions.path.suffix + ".executor")):
+                self.actions.refresh()
+                self._operation_local.held = True
+                try:
+                    yield
+                finally:
+                    self._operation_local.held = False
+        except RuntimeBusyError as exc:
+            raise ResponseActionError("Response executor operation is busy") from exc
+
+    @_serialized_response
     def apply_verified_grant(self, grant: ResponseGrant) -> ResponseActionRecord:
         if self.require_elevated and not _is_elevated():
             raise ResponseActionError("Firewall response executor requires an elevated Windows service context")
@@ -284,11 +322,17 @@ class FirewallContainmentService:
         if grant.action != "block_network":
             raise ResponseGrantError("Response grant action is not allowlisted")
         _validate_network_scope(grant.scope)
-        consumed = self.state.get_dict("consumed_response_grants")
-        if grant.grant_id in consumed:
+        # The signed action ledger is the durable reservation for new grants.
+        # Read legacy replay state fresh; never overwrite unrelated controller state.
+        with FileLock(self.state.path):
+            fresh = StateStore(self.state.path, self.integrity_key_path, require_existing_key=True)
+            if fresh.data.get("load_error") or fresh.data.get("integrity_error"):
+                raise ResponseGrantError("Response replay state requires verified recovery")
+            consumed = fresh.data.get("consumed_response_grants", {})
+            if not isinstance(consumed, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in consumed.items()):
+                raise ResponseGrantError("Response replay state is invalid")
+        if grant.grant_id in consumed or self.actions.has_grant(grant.grant_id):
             raise ResponseGrantError("Response grant replay rejected")
-        consumed[grant.grant_id] = now.isoformat()
-        self.state.set_dict("consumed_response_grants", _prune_consumed(consumed, now))
 
         action_id = secrets.token_hex(16)
         rule_name = f"MonarchSecurity-{action_id}"
@@ -308,11 +352,18 @@ class FirewallContainmentService:
         try:
             self.command_runner(_firewall_add_args(rule_name, grant.scope, grant.action_expires_at))
         except Exception as exc:
+            # A timed-out child may have installed the rule before it was killed.
+            # Do not mark the action terminal until removal is confirmed.
+            cleanup_error = ""
+            try:
+                self.command_runner(_firewall_remove_args(rule_name))
+            except Exception as cleanup_exc:
+                cleanup_error = f"; cleanup pending: {type(cleanup_exc).__name__}"
             failed = ResponseActionRecord(**{
                 **pending.__dict__,
-                "status": "failed",
+                "status": "pending" if cleanup_error else "failed",
                 "updated_at": utc_now(),
-                "reason": f"{type(exc).__name__}: {exc}",
+                "reason": f"Containment apply failed: {type(exc).__name__}{cleanup_error}",
             })
             self.actions.append(failed)
             raise ResponseActionError("Firewall containment failed") from exc
@@ -325,6 +376,7 @@ class FirewallContainmentService:
         self.actions.append(active)
         return active
 
+    @_serialized_response
     def reconcile(self) -> list[ResponseActionRecord]:
         if self.require_elevated and not _is_elevated():
             raise ResponseActionError("Firewall response executor requires an elevated Windows service context")
@@ -332,7 +384,7 @@ class FirewallContainmentService:
         rolled_back: list[ResponseActionRecord] = []
         for current in self.actions.list_latest():
             expiry = _parse_datetime(current.expires_at)
-            should_remove = current.status == "pending" or (
+            should_remove = current.status in {"pending", "failed"} or (
                 current.status == "active" and (expiry is None or expiry <= now)
             )
             if not should_remove:
@@ -348,20 +400,21 @@ class FirewallContainmentService:
             except Exception as exc:
                 rolled = ResponseActionRecord(**{
                     **current.__dict__,
-                    "status": "failed",
+                    "status": "pending",
                     "updated_at": utc_now(),
-                    "reason": f"Rollback failed: {type(exc).__name__}: {exc}",
+                    "reason": f"Rollback cleanup pending: {type(exc).__name__}",
                 })
             self.actions.append(rolled)
             rolled_back.append(rolled)
         return rolled_back
 
+    @_serialized_response
     def rollback_all(self) -> list[ResponseActionRecord]:
         if self.require_elevated and not _is_elevated():
             raise ResponseActionError("Firewall response executor requires an elevated Windows service context")
         rolled_back: list[ResponseActionRecord] = []
         for current in self.actions.list_latest():
-            if current.status not in {"pending", "active"}:
+            if current.status not in {"pending", "active", "failed"}:
                 continue
             try:
                 self.command_runner(_firewall_remove_args(current.rule_name))
@@ -374,20 +427,21 @@ class FirewallContainmentService:
             except Exception as exc:
                 rolled = ResponseActionRecord(**{
                     **current.__dict__,
-                    "status": "failed",
+                    "status": "pending",
                     "updated_at": utc_now(),
-                    "reason": f"Shutdown rollback failed: {type(exc).__name__}: {exc}",
+                    "reason": f"Shutdown cleanup pending: {type(exc).__name__}",
                 })
             self.actions.append(rolled)
             rolled_back.append(rolled)
         return rolled_back
 
+    @_serialized_response
     def rollback_incident(self, incident_id: str, reason: str = "Incident containment released") -> list[ResponseActionRecord]:
         if self.require_elevated and not _is_elevated():
             raise ResponseActionError("Firewall response executor requires an elevated Windows service context")
         rolled_back: list[ResponseActionRecord] = []
         for current in self.actions.list_latest():
-            if current.incident_id != incident_id or current.status not in {"pending", "active"}:
+            if current.incident_id != incident_id or current.status not in {"pending", "active", "failed"}:
                 continue
             try:
                 self.command_runner(_firewall_remove_args(current.rule_name))
@@ -396,8 +450,8 @@ class FirewallContainmentService:
                 })
             except Exception as exc:
                 rolled = ResponseActionRecord(**{
-                    **current.__dict__, "status": "failed", "updated_at": utc_now(),
-                    "reason": f"Incident rollback failed: {type(exc).__name__}: {exc}",
+                    **current.__dict__, "status": "pending", "updated_at": utc_now(),
+                    "reason": f"Incident cleanup pending: {type(exc).__name__}",
                 })
             self.actions.append(rolled)
             rolled_back.append(rolled)
@@ -411,6 +465,7 @@ def write_service_heartbeat(path: Path, integrity_key_path: Path, payload: dict[
         "pid": os.getpid(),
         "updated_at": time.time(),
         "active_actions": max(0, int(payload.get("active_actions") or 0)),
+        "pending_actions": max(0, int(payload.get("pending_actions") or 0)),
         "last_applied": max(0, int(payload.get("last_applied") or 0)),
         "last_rejected": max(0, int(payload.get("last_rejected") or 0)),
     }
@@ -462,6 +517,10 @@ class PrivilegedResponseBroker:
         self.incidents = incidents
 
     def execute(self, request: dict[str, Any]) -> dict[str, Any]:
+        with self.firewall.operation():
+            return self._execute(request)
+
+    def _execute(self, request: dict[str, Any]) -> dict[str, Any]:
         operation = str(request.get("operation") or "")
         if operation == "approve_apply":
             if set(request) != {"operation", "proposal_id", "pin"}:
@@ -471,6 +530,11 @@ class PrivilegedResponseBroker:
             if not proposal_id or len(proposal_id) > 128 or len(pin) != 6 or not pin.isdigit():
                 raise ResponseActionError("Response executor request is invalid")
             grant = self.approval.authorize(proposal_id, pin)
+            stored = self.approval.proposals.get(grant.proposal_id)
+            incident = self.incidents.get(grant.incident_id)
+            if stored is None or incident is None or incident.status not in {"open", "acknowledged", "contained"}:
+                raise ResponseActionError("Response execution requires an active incident")
+            _validate_against_incident(stored.proposal, incident)
             action = self.firewall.apply_verified_grant(grant)
             return {"ok": True, "executed": True, "grant_id": grant.grant_id, "action": action.to_dict()}
         if operation == "emergency_contain":
@@ -480,6 +544,15 @@ class PrivilegedResponseBroker:
             scope = _network_scope_from_incident(incident)
             if scope is None:
                 return {"ok": True, "executed": False, "reason": "Emergency incident has no exact network endpoint"}
+            for current in self.firewall.actions.list_latest():
+                if current.incident_id != incident.incident_id or current.status == "rolled_back":
+                    continue
+                if current.status in {"pending", "failed"}:
+                    raise ResponseActionError("Emergency containment cleanup remains pending")
+                expiry = _parse_datetime(current.expires_at)
+                if current.scope == scope and expiry is not None and expiry > self.firewall.now_fn():
+                    return {"ok": True, "executed": False, "action_id": current.action_id,
+                            "expires_at": current.expires_at, "reason": "Emergency containment already active"}
             grant = _emergency_grant(incident, scope, ttl_seconds=120)
             action = self.firewall.apply_verified_grant(grant)
             return {
@@ -498,6 +571,8 @@ class PrivilegedResponseBroker:
             if not verification.ok:
                 raise ResponseActionError(verification.reason)
             rolled = self.firewall.rollback_incident(incident.incident_id)
+            if any(item.status != "rolled_back" for item in rolled):
+                raise ResponseActionError("Emergency containment cleanup remains pending")
             if decision == "release":
                 return {"ok": True, "released": True, "executed": bool(rolled), "reason": "Emergency containment released"}
             scope = _network_scope_from_incident(incident)
@@ -532,7 +607,7 @@ def serve_response_pipe(broker: PrivilegedResponseBroker, *, max_requests: int =
     if os.name != "nt":
         raise ResponseActionError("Response executor named pipe is Windows-only")
     handled = 0
-    with Listener(RESPONSE_EXECUTOR_PIPE, family="AF_PIPE", authkey=RESPONSE_EXECUTOR_AUTH) as listener:
+    with _SecuredPipeListener(RESPONSE_EXECUTOR_PIPE, RESPONSE_EXECUTOR_AUTH, response_pipe_sddl()) as listener:
         while max_requests <= 0 or handled < max_requests:
             connection = listener.accept()
             try:
@@ -548,6 +623,93 @@ def serve_response_pipe(broker: PrivilegedResponseBroker, *, max_requests: int =
             connection.send_bytes(json.dumps(result, ensure_ascii=True, sort_keys=True).encode("utf-8"))
             connection.close()
             handled += 1
+
+
+def response_pipe_sddl(user_sid: str | None = None) -> str:
+    """Pipe DACL for the elevated executor.
+
+    The elevated token's default DACL grants write only to SYSTEM and
+    Administrators, so the non-elevated Security host could not connect.
+    Grant read/write to exactly the signed-in user who owns the executor task;
+    Everyone/Anonymous get nothing.
+    """
+    sid = user_sid or _current_user_sid()
+    if not re.fullmatch(r"S-1-5-21(-\d+){4}", sid):
+        raise ResponseActionError("Response executor pipe owner SID is not a local user account")
+    return f"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;{sid})"
+
+
+class _SecuredPipeListener(Listener):
+    """multiprocessing Listener whose pipe instances carry an explicit DACL."""
+
+    def __init__(self, address: str, authkey: bytes, sddl: str) -> None:
+        from multiprocessing.connection import PipeListener  # Windows-only symbol
+
+        security = _PipeSecurityAttributes(sddl)
+
+        class _Handles(PipeListener):
+            def _new_handle(self, first: bool = False):  # type: ignore[override]
+                import _winapi
+                from multiprocessing.connection import BUFSIZE
+
+                flags = _winapi.PIPE_ACCESS_DUPLEX | _winapi.FILE_FLAG_OVERLAPPED
+                if first:
+                    flags |= _winapi.FILE_FLAG_FIRST_PIPE_INSTANCE
+                return _winapi.CreateNamedPipe(
+                    self._address, flags,
+                    _winapi.PIPE_TYPE_MESSAGE | _winapi.PIPE_READMODE_MESSAGE
+                    | _winapi.PIPE_WAIT | _PIPE_REJECT_REMOTE_CLIENTS,
+                    _winapi.PIPE_UNLIMITED_INSTANCES, BUFSIZE, BUFSIZE,
+                    _winapi.NMPWAIT_WAIT_FOREVER, security.address,
+                )
+
+        self._security = security
+        try:
+            self._listener = _Handles(address)
+        except BaseException:
+            security.free()
+            raise
+        self._authkey = authkey
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            self._security.free()
+
+
+_PIPE_REJECT_REMOTE_CLIENTS = 0x00000008
+
+
+class _PipeSecurityAttributes:
+    def __init__(self, sddl: str) -> None:
+        from ctypes import wintypes
+
+        class SECURITY_ATTRIBUTES(ctypes.Structure):
+            _fields_ = [
+                ("nLength", wintypes.DWORD),
+                ("lpSecurityDescriptor", ctypes.c_void_p),
+                ("bInheritHandle", wintypes.BOOL),
+            ]
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        convert = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+        convert.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+        convert.restype = wintypes.BOOL
+        descriptor = ctypes.c_void_p()
+        if not convert(sddl, 1, ctypes.byref(descriptor), None):
+            raise ResponseActionError(f"Response executor pipe descriptor failed: {ctypes.get_last_error()}")
+        self._descriptor = descriptor
+        self._attributes = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), descriptor, False)
+        self.address = ctypes.addressof(self._attributes)
+
+    def free(self) -> None:
+        if self._descriptor:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+            kernel32.LocalFree.restype = ctypes.c_void_p
+            kernel32.LocalFree(self._descriptor)
+            self._descriptor = ctypes.c_void_p()
 
 
 def request_response_execution(proposal_id: str, pin: str) -> dict[str, Any]:
@@ -649,7 +811,7 @@ def install_response_executor_task(
         environment=_response_executor_environment(),
     )
     encoded_launch = base64.b64encode(launch_script.encode("utf-16le")).decode("ascii")
-    arguments = f"-NoProfile -NonInteractive -EncodedCommand {encoded_launch}"
+    arguments = f"-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {encoded_launch}"
     powershell_path = _windows_powershell_path()
     command = (
         "$ErrorActionPreference='Stop';"
@@ -764,14 +926,21 @@ $launchPayload=([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{la
 $trusted=@('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
 $writeMask=[Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
 $checked=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-function Assert-MonarchRuntimePath([IO.FileSystemInfo]$item) {{
-  if (-not $checked.Add($item.FullName)) {{ return }}
+$ancestorMask=[Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+$inheritOnly=[Security.AccessControl.PropagationFlags]::InheritOnly
+function Assert-MonarchRuntimePath([IO.FileSystemInfo]$item, [bool]$ancestor) {{
+  $key="$ancestor|$($item.FullName)"
+  if (-not $checked.Add($key)) {{ return }}
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{ throw "Runtime path is a reparse point: $($item.FullName)" }}
   $sections=[Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
   try {{ $acl=$item.GetAccessControl($sections); $owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value }} catch {{ throw "Runtime ACL cannot be read: $($item.FullName)" }}
   if ($trusted -notcontains $owner) {{ throw "Runtime owner is not trusted: $($item.FullName)" }}
+  $mask=if ($ancestor) {{ $ancestorMask }} else {{ $writeMask }}
+  # A volume root cannot be deleted or renamed, so Delete on it cannot displace the runtime.
+  if ($ancestor -and $null -eq $item.Parent) {{ $mask=$mask -band (-bnot [Security.AccessControl.FileSystemRights]::Delete) }}
   foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {{
-    if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or (($rule.FileSystemRights -band $writeMask) -eq 0)) {{ continue }}
+    if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or (($rule.FileSystemRights -band $mask) -eq 0)) {{ continue }}
+    if (($rule.PropagationFlags -band $inheritOnly) -ne 0) {{ continue }}
     $sid=$rule.IdentityReference.Value
     if ($trusted -notcontains $sid) {{ throw "Runtime path grants write-like access outside trusted principals: $($item.FullName)" }}
   }}
@@ -786,12 +955,12 @@ $rootIndex=0
 foreach ($rootValue in $roots) {{
   $root=[IO.Path]::GetFullPath([string]$rootValue)
   $rootItem=Get-Item -LiteralPath $root -Force
-  $cursor=$rootItem
-  while ($null -ne $cursor) {{ Assert-MonarchRuntimePath $cursor; $cursor=$cursor.Parent }}
+  $cursor=if ($rootItem.PSIsContainer) {{ $rootItem.Parent }} else {{ $rootItem.Directory }}
+  while ($null -ne $cursor) {{ Assert-MonarchRuntimePath $cursor $true; $cursor=$cursor.Parent }}
   $items=@($rootItem)
   if ($rootItem.PSIsContainer) {{ $items+=@(Get-ChildItem -LiteralPath $root -Recurse -Force) }}
   foreach ($item in $items) {{
-    Assert-MonarchRuntimePath $item
+    Assert-MonarchRuntimePath $item $false
     if (-not $item.PSIsContainer) {{
       $relative=if ($rootItem.PSIsContainer) {{ $item.FullName.Substring($root.TrimEnd('\\').Length).TrimStart('\\').Replace('\\','/') }} else {{ $item.Name }}
       $hash=Get-MonarchRuntimeSha256 $item.FullName
@@ -815,7 +984,7 @@ if ({launch}) {{
   $pythonDirectory=[IO.Path]::GetDirectoryName([string]$launchPayload.python)
   $env:PATH="$pythonDirectory;$env:SystemRoot\\System32;$env:SystemRoot;$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0"
   Set-Location -LiteralPath "$env:SystemRoot\\System32"
-  $env:MONARCH_RESPONSE_IMPORT_ROOTS=($launchPayload.import_roots|ConvertTo-Json -Compress)
+  $env:MONARCH_RESPONSE_IMPORT_ROOTS=(ConvertTo-Json -InputObject @($launchPayload.import_roots) -Compress)
   $bootstrap="import json,os,sys;roots=json.loads(os.environ.pop('MONARCH_RESPONSE_IMPORT_ROOTS'));sys.path[:0]=roots;from monarch_security.cli import main;raise SystemExit(main())"
   & ([string]$launchPayload.python) '-I' '-P' '-B' '-c' $bootstrap '--config' ([string]$launchPayload.config) 'response-service-run' '--confirm-service-action' '--poll-seconds' '5'
   if ($LASTEXITCODE -ne 0) {{ throw "Response executor exited with code $LASTEXITCODE" }}
@@ -971,14 +1140,19 @@ def _run_powershell(arguments: list[str]) -> None:
             "$ErrorActionPreference='Stop';"
             f"$ruleName='{name}';$taskName='{task_name}';"
             "try {"
+            f"$at=[DateTimeOffset]::Parse('{expires_at}').LocalDateTime;"
+            "if ($at -le (Get-Date)) { throw 'Containment expired before installation' };"
+            f"$a=New-ScheduledTaskAction -Execute '{powershell_path}' -Argument '-NoProfile -NonInteractive -EncodedCommand {encoded_rollback}';"
+            "$t=New-ScheduledTaskTrigger -Once -At $at;"
+            "Register-ScheduledTask -TaskName $taskName -Action $a -Trigger $t -User 'SYSTEM' -RunLevel Highest -Force | Out-Null;"
+            # Register recovery before changing the firewall, including when
+            # this PowerShell process is terminated by the caller's timeout.
+            "if ($at -le (Get-Date)) { throw 'Containment expired during installation' };"
             "New-NetFirewallRule "
             f"-Name $ruleName -DisplayName $ruleName -Group 'Monarch Security' "
             f"-Direction '{direction}' -Action Block -Protocol '{protocol}' "
             f"-RemoteAddress '{address}' -RemotePort {int(port)} -Profile Any | Out-Null;"
-            f"$at=[DateTimeOffset]::Parse('{expires_at}').LocalDateTime;"
-            f"$a=New-ScheduledTaskAction -Execute '{powershell_path}' -Argument '-NoProfile -NonInteractive -EncodedCommand {encoded_rollback}';"
-            "$t=New-ScheduledTaskTrigger -Once -At $at;"
-            "Register-ScheduledTask -TaskName $taskName -Action $a -Trigger $t -User 'SYSTEM' -RunLevel Highest -Force | Out-Null"
+            "if ($at -le (Get-Date)) { throw 'Containment expired during firewall update' }"
             "} catch {"
             "Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule;"
             "Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue;"
@@ -1036,13 +1210,3 @@ def _parse_datetime(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
-
-
-def _prune_consumed(values: dict[str, str], now: datetime) -> dict[str, str]:
-    cutoff = now - timedelta(days=7)
-    pruned: dict[str, str] = {}
-    for key, value in values.items():
-        parsed = _parse_datetime(value)
-        if parsed is not None and parsed >= cutoff:
-            pruned[str(key)[:128]] = parsed.isoformat()
-    return pruned

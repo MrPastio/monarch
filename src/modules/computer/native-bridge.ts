@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { renameWithWindowsRetry } from '../../core/durable-json-file';
 
 const MAX_NATIVE_OUTPUT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_NATIVE_TIMEOUT_MS = 30_000;
@@ -28,6 +29,8 @@ export interface ComputerWindowBounds {
 export interface ComputerWindowSummary {
   windowRef: string;
   processId: number;
+  /** Native hash of PID + process creation time. PID alone is reusable. */
+  processInstanceId: string;
   processName: string;
   title: string;
   bounds: ComputerWindowBounds;
@@ -69,6 +72,21 @@ export interface ComputerNativeObservation {
   focusedElementId: string | null;
   elements: ComputerElementSnapshot[];
   truncated: boolean;
+  /** Present only after the native helper checked this selection around capture.
+   * A PID/title binding is not a process-start identity or an atomic UI snapshot. */
+  selectionBinding?: ComputerWindowSelectionBinding;
+}
+
+export interface ComputerWindowSelectionBinding { processId: number; processInstanceId: string; title: string }
+export function validateComputerWindowSelection(value: unknown): Readonly<ComputerWindowSelectionBinding> {
+  const input = value as Partial<ComputerWindowSelectionBinding> | null;
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+    || Object.keys(input).length !== 3 || !Object.hasOwn(input, 'processId') || !Object.hasOwn(input, 'processInstanceId') || !Object.hasOwn(input, 'title')
+    || !Number.isSafeInteger(input.processId) || input.processId! < 1 || input.processId! > 2147483647
+    || typeof input.processInstanceId !== 'string' || !/^process:[a-f0-9]{64}$/u.test(input.processInstanceId)
+    || typeof input.title !== 'string' || input.title.length < 1 || input.title.length > 4096)
+    throw new ComputerUseNativeError('window-selection-binding-invalid', 'Exact selected process incarnation and title are required.');
+  return Object.freeze({ processId: input.processId!, processInstanceId: input.processInstanceId, title: input.title });
 }
 
 export interface ComputerNativeActionTarget {
@@ -84,13 +102,14 @@ export interface ComputerNativeActionTarget {
 export type ComputerNativeAction =
   | { kind: 'click'; target?: ComputerNativeActionTarget; x?: number; y?: number; button: 'left' | 'right' | 'middle'; clicks: 1 | 2 }
   | { kind: 'close' }
-  | { kind: 'type'; target: ComputerNativeActionTarget; text: string }
+  | { kind: 'type'; target: ComputerNativeActionTarget; text: string; textMode?: 'insert' | 'replace' }
   | { kind: 'key'; key: string; modifiers: string[] }
   | { kind: 'scroll'; target?: ComputerNativeActionTarget; x?: number; y?: number; deltaY: number };
 
 export interface ComputerNativeActionRequest {
   windowRef: string;
   expectedProcessId: number;
+  expectedProcessInstanceId: string;
   expectedTitle: string;
   expectedBounds: ComputerWindowBounds;
   expectedStateFingerprint: string;
@@ -106,6 +125,7 @@ export interface ComputerNativeActionRequest {
 export interface ComputerNativeActionReceipt {
   dispatchedAt: string;
   actionKind: string;
+  textVerification?: { textMode: 'insert' | 'replace'; textSha256: string; valueVerifiedAfterDispatch: boolean };
   foregroundVerified: boolean;
   exactTargetVerified?: boolean;
   dispatchMode?: 'windows-input' | 'uia-semantic' | 'windows-message';
@@ -146,10 +166,21 @@ export interface ComputerNativeActionReceipt {
   after?: ComputerNativeObservation;
 }
 
+/** Frozen semantics, not whitespace-normalizing identifiers. Insert sends Unicode
+ * at the current caret/selection; replace sets one exact UIA Value. No fallback. */
+export function validateComputerTextInput(text: unknown, mode: unknown): { text: string; textMode: 'insert' | 'replace' } {
+  const textMode = mode === undefined ? 'insert' : mode;
+  if (!['insert', 'replace'].includes(String(textMode)) || typeof textMode !== 'string'
+    || typeof text !== 'string' || text.length > 4000 || (textMode === 'insert' && text.length === 0)
+    || text.includes('\u0000') || Buffer.from(text, 'utf8').toString('utf8') !== text)
+    throw new ComputerUseNativeError('computer-text-input-invalid', 'Exact Unicode text and insert/replace semantics are required.');
+  return { text, textMode: textMode as 'insert' | 'replace' };
+}
+
 export interface ComputerNativeProvider {
   status(): Promise<Record<string, unknown>>;
   listWindows(limit: number, signal?: AbortSignal): Promise<ComputerWindowSummary[]>;
-  observe(windowRef: string, screenshotPath: string, signal?: AbortSignal): Promise<ComputerNativeObservation>;
+  observe(windowRef: string, screenshotPath: string, signal?: AbortSignal, selection?: Readonly<ComputerWindowSelectionBinding>): Promise<ComputerNativeObservation>;
   act(request: ComputerNativeActionRequest, signal?: AbortSignal): Promise<ComputerNativeActionReceipt>;
   startCursorSession?(controlStatePath: string): Promise<Record<string, unknown>>;
   stopCursorSession?(): Promise<void>;
@@ -169,11 +200,12 @@ interface NativeEnvelope<T> {
   ok?: boolean;
   error?: string;
   message?: string;
+  actionDispatchState?: 'not-dispatched' | 'may-have-dispatched';
   result?: T;
 }
 
 export class ComputerUseNativeError extends Error {
-  constructor(readonly code: string, message: string) {
+  constructor(readonly code: string, message: string, readonly actionDispatchState?: 'not-dispatched' | 'may-have-dispatched') {
     super(message);
     this.name = 'ComputerUseNativeError';
   }
@@ -263,15 +295,25 @@ export class ComputerUseNativeBridge implements ComputerNativeProvider {
     return this.invoke<ComputerWindowSummary[]>({ command: 'list-windows', limit: clamp(limit, 1, 100) }, signal);
   }
 
+  /** Exact-handle metadata preflight for owned/native fixtures and recovery.
+   * It does not enumerate windows, capture pixels or grant action authority. */
+  async inspectWindow(windowRef: string, signal?: AbortSignal): Promise<ComputerWindowSummary> {
+    if (typeof windowRef !== 'string' || !/^hwnd:[0-9a-fA-F]{1,16}$/u.test(windowRef))
+      throw new ComputerUseNativeError('window-ref-invalid', 'Exact native window reference is required.');
+    return this.invoke<ComputerWindowSummary>({ command: 'inspect-window', windowRef }, signal);
+  }
+
   async observe(
     windowRef: string,
     screenshotPath: string,
     signal?: AbortSignal,
+    selection?: Readonly<ComputerWindowSelectionBinding>,
   ): Promise<ComputerNativeObservation> {
     return this.invoke<ComputerNativeObservation>({
       command: 'observe',
       windowRef,
       screenshotPath: path.resolve(screenshotPath),
+      ...(selection === undefined ? {} : { selectionBinding: validateComputerWindowSelection(selection) }),
     }, signal);
   }
 
@@ -338,6 +380,14 @@ export class ComputerUseNativeBridge implements ComputerNativeProvider {
     }, 500);
     this.cursorSessionHeartbeat.unref();
     child.once('close', () => {
+      if (this.cursorSession === child) {
+        this.cursorSession = null;
+        this.clearCursorSessionHeartbeat();
+      }
+    });
+    // A host binary that cannot start emits 'error' and never 'close'; with no
+    // listener that ended the server. The readiness wait reports it.
+    child.on('error', () => {
       if (this.cursorSession === child) {
         this.cursorSession = null;
         this.clearCursorSessionHeartbeat();
@@ -451,6 +501,8 @@ export class ComputerUseNativeBridge implements ComputerNativeProvider {
         throw new ComputerUseNativeError(
           safeNativeCode(envelope.error),
           String(envelope.message || envelope.error || 'Computer Use provider rejected the request.').slice(0, 1_000),
+          envelope.ok === false && payload.command === 'act' && ['not-dispatched', 'may-have-dispatched'].includes(String(envelope.actionDispatchState))
+            ? envelope.actionDispatchState : undefined,
         );
       }
       return envelope.result;
@@ -512,7 +564,7 @@ export class ComputerUseNativeBridge implements ComputerNativeProvider {
       try {
         await copyFile(this.prebuiltBinaryPath, temporaryBinary);
         await rm(this.binaryPath, { force: true }).catch(() => undefined);
-        await rename(temporaryBinary, this.binaryPath);
+        await renameWithWindowsRetry(temporaryBinary, this.binaryPath);
         await writeFile(sourceMarkerPath, `${compiledSourceHash}\n`, 'utf8');
         await writeFile(binaryMarkerPath, `${prebuiltBinaryMarker.trim()}\n`, 'utf8');
       } finally {
@@ -575,7 +627,7 @@ export class ComputerUseNativeBridge implements ComputerNativeProvider {
       await rm(compilationRoot, { recursive: true, force: true }).catch(() => undefined);
     }
     await rm(this.binaryPath, { force: true }).catch(() => undefined);
-    await rename(temporaryBinary, this.binaryPath);
+    await renameWithWindowsRetry(temporaryBinary, this.binaryPath);
     await writeFile(sourceMarkerPath, `${compiledSourceHash}\n`, 'utf8');
     await writeFile(binaryMarkerPath, `${await fileSha256(this.binaryPath)}\n`, 'utf8');
   }

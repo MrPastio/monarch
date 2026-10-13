@@ -245,6 +245,9 @@ export class SherpaVoiceSttRuntime {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: process.env,
       });
+      // EPIPE on a worker that already exited is reported by its exit handling;
+      // an unlistened stream 'error' would end the whole process.
+      child.stdin?.on('error', () => undefined);
     } catch (error) {
       throw runtimeMissing(error);
     }

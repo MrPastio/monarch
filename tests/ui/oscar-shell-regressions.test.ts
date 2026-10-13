@@ -16,18 +16,42 @@ const voiceModeSource = readSource('src/ui/public/modules/oscar-voice-mode.js');
 const chatSource = readSource('src/ui/public/modules/chat-pane.js');
 const coderSource = readSource('src/ui/public/modules/coder-pane.js');
 const coderStyles = readSource('src/ui/public/coder.css');
+const modeSwitchStyles = readSource('src/ui/public/oscar-mode-switch.css');
+const coderViewSource = readSource('src/ui/public/modules/coder-view.js');
 const contextMeterSource = readSource('src/ui/public/modules/oscar-context-meter.js');
 const historyReconciliationSource = readSource('src/ui/public/modules/oscar-history-reconciliation.js');
 const modelManagerSource = readSource('src/ui/public/modules/model-manager.js');
 const computerUseControlSource = readSource('src/ui/public/modules/computer-use-control.js');
 const oscarFunctionsSource = readSource('src/ui/public/modules/oscar-functions.js');
+const securityPaneSource = readSource('src/ui/public/modules/security-pane.js');
+const securityStyles = readSource('src/ui/public/security-center.css');
 const uiRefreshStyles = readSource('src/ui/public/ui-refresh.css');
+const menuStyles = readSource('src/ui/public/composer-menus.css');
+const maxSetupSource = readSource('src/ui/public/modules/astra-max-setup.js');
+const astraNativeSource = readSource('src/ui/public/modules/oscar-astra-native.js');
 
 describe('Oscar live shell regressions', () => {
+  it('branches explicitly to isolated Astra before installing legacy submit, Safe or voice effects', () => {
+    const init = oscarSource.slice(oscarSource.indexOf('export function initOscarPane('));
+    const branch = init.indexOf("return import('./oscar-astra-composer.js')");
+    expect(branch).toBeGreaterThan(0);
+    for (const legacy of ['createOscarSpeechController(', 'refreshSafeChatStatus()', "addEventListener('submit'"])
+      expect(branch).toBeLessThan(init.indexOf(legacy));
+    expect(init).toContain("oscarPaneOwner = 'astra'");
+    expect(init).toContain("if (oscarPaneOwner === 'astra') throw Error(");
+    expect(appSource).toContain('await initOscarPane(render, { nativeAstra: astraBridge, maxMode: astraMaxMode });');
+    expect(appSource).toContain("astraBridge.surface === 'composer'");
+  });
   it('exposes Computer Use as an explicit + and @ function with three permission presets', () => {
     const plusMenuStart = indexSource.indexOf('id="oscar-composer-menu-popover"');
     const plusMenu = indexSource.slice(plusMenuStart, indexSource.indexOf('</details>', plusMenuStart));
     expect(plusMenu).toContain('id="oscar-computer-use-toggle"');
+    // Direct Access is the base mode, not a menu option.
+    expect(plusMenu).not.toContain('oscar-direct-access');
+    expect(appSource).toContain('initOscarPlusMenu()');
+    expect(styles).toContain('oscarPlusMenuIn');
+    expect(styles).toContain('oscarPlusMenuOut');
+    expect(plusMenu).toContain('<div class="omenu-segment">');
     expect(plusMenu).toContain('data-computer-use-permission="ask"');
     expect(plusMenu).toContain('data-computer-use-permission="guard"');
     expect(plusMenu).toContain('data-computer-use-permission="full"');
@@ -38,6 +62,35 @@ describe('Oscar live shell regressions', () => {
     expect(computerUseControlSource).toContain("ask: 'guided'");
     expect(computerUseControlSource).toContain("guard: 'workspace-autonomous'");
     expect(computerUseControlSource).toContain("full: 'full-local'");
+  });
+
+  it('has no Direct Access toggle and keeps the explicit no-stop-brakes Security warning', () => {
+    // Direct Access is the base execution mode of Desktop/Coder. A control that
+    // looked like it switched it off would promise something Kernel ignores.
+    expect(indexSource).not.toContain('oscar-direct-access');
+    expect(indexSource).not.toContain('security-owner-override');
+    expect(styles).not.toContain('oscar-direct-access');
+    expect(appSource).not.toContain('initOscarDirectAccess');
+    expect(securityPaneSource).not.toContain('owner-override');
+    expect(indexSource).toContain('id="security-agent-off-warning"');
+    expect(indexSource).toContain('Без стоп-кранов');
+    expect(securityPaneSource).toContain("securityModelConfirmation?.value !== 'off'");
+    expect(securityStyles).toContain('.security-agent-off-warning');
+  });
+
+  it('renders generic Astra V3 Security approvals as exact critical action cards', () => {
+    expect(oscarSource).toContain("data.approvalKind === 'capability-action'");
+    expect(oscarSource).toContain('Monarch Security приостановил потенциально опасное действие.');
+    expect(oscarSource).toContain('describeOscarAstraCapabilityApproval(data)');
+    expect(oscarSource).toContain("label: 'Подтвердить действие'");
+    expect(utilsSource).toContain("message.action?.critical ? ' is-critical' : ''");
+    expect(utilsSource).toContain('MONARCH SECURITY · КРИТИЧЕСКОЕ ДЕЙСТВИЕ');
+    expect(utilsSource).toContain('message.action.warning');
+    expect(utilsSource).toContain('data-oscar-astra-decision="reject">Отклонить</button>');
+    expect(utilsSource).toContain('Срок подтверждения истёк. Действие не выполнялось; его всё ещё можно отклонить.');
+    expect(settingsStyles).toContain('.oscar-action-card.is-critical');
+    expect(settingsStyles).toContain('.oscar-action-preview');
+    expect(securityStyles).toContain('backdrop-filter: blur(18px) saturate(118%);');
   });
 
   it('shows the persistent Stop surface only while Computer Use is enabled', () => {
@@ -78,7 +131,7 @@ describe('Oscar live shell regressions', () => {
 
   it('anchors the skill picker to its left-side trigger and keeps the skill icon legible', () => {
     expect(styles).toMatch(/\.oscar-skill-picker\{[^}]*right:auto;left:12px;/);
-    expect(styles).toContain('.skill-picker-action .composer-menu-icon img');
+    expect(menuStyles).toContain('.omenu .omenu-row-icon img');
     expect(styles).toContain('.oscar-selected-skill > img');
     expect(styles).toMatch(/@media \(max-width: 620px\)[\s\S]*?\.oscar-skill-picker\{right:auto;left:-1px;/);
   });
@@ -92,10 +145,12 @@ describe('Oscar live shell regressions', () => {
     expect(apiSource).toContain('export function fetchOscarTurnByClientRequestId');
     expect(apiSource).toContain('export function createOscarDataEgressConsent');
     expect(apiSource).toContain('export async function fetchOscarRequestDisposition');
-    expect(oscarSource).toContain('const created = await createOscarTurn({');
-    expect(oscarSource).toContain('const disposition = await fetchOscarRequestDisposition(text, history, { signal: submissionSignal });');
+    expect(oscarSource).toContain(': await createOscarTurn({');
+    expect(oscarSource).toContain('await createOscarAstraTurn(oscarNativeAstra.request(');
+    expect(oscarSource).toContain('const disposition = await fetchOscarRequestDisposition(text, history, { signal: submissionSignal, webAllowed,');
     expect(oscarSource).toContain('externalResearchRequired = disposition?.requiresExternalResearch === true;');
-    expect(oscarSource).toContain('if (externalResearchRequired) webSearch = true;');
+    // Internet on is permission: search only when the request needs fresh data.
+    expect(oscarSource).toContain('webSearch = webAllowed && (externalResearchRequired || disposition?.wantsWeb === true);');
     expect(oscarSource).toContain('await consumeOscarTurn({');
     expect(oscarSource).not.toContain('await shouldUseOscarAgentRuntime(text, attachments)');
     expect(oscarSource).not.toContain('Older/degraded runtimes must fall back to chat');
@@ -106,7 +161,7 @@ describe('Oscar live shell regressions', () => {
     expect(oscarSource).toContain("case 'approval.required'");
     expect(oscarSource).toContain("case 'agent.progress'");
     expect(oscarSource).toContain("payload.label || 'Agent выполняет задачу'");
-    expect(oscarSource).toContain("'Запуск · Задача'");
+    expect(oscarSource).toContain("'Работает'");
     expect(oscarSource).toContain("case 'answer.replace'");
     expect(oscarSource).toContain('if (delta) content += delta;');
     expect(oscarSource).not.toContain("String(payload.content || '').trim()");
@@ -116,6 +171,10 @@ describe('Oscar live shell regressions', () => {
     expect(oscarSource).not.toContain("formatOscarModelLabel(message.model_tier) || 'история'");
     expect(oscarSource).toContain('error: isHydratedOscarFailure(message.outcome)');
     expect(oscarSource).toContain("case 'user.input.required'");
+    expect(oscarSource).toContain("case 'runtime.waiting'");
+    expect(oscarSource).toContain('settleOscarRuntimeWait(messageId, action, appRenderCallback)');
+    expect(oscarSource).toContain("['waiting-for-user', 'waiting-for-approval', 'waiting-for-runtime']");
+    expect(oscarSource).toContain("|| task.status === 'waiting-for-runtime'");
     expect(oscarSource).toContain("case 'non-authoritative-confirmation'");
     expect(oscarSource).not.toContain('activeOscarAgentTaskStreamController');
     expect(oscarSource).toContain('streamController?.abort()');
@@ -131,14 +190,11 @@ describe('Oscar live shell regressions', () => {
     expect(oscarSource).toContain('let activeOscarApprovalSettlement = null;');
     expect(oscarSource).toContain('if (!approvalTurnId) {');
     expect(oscarSource).toContain('conversationId = await ensureActiveConversation({ signal: submissionSignal });');
-    expect(oscarSource).toContain('settleOscarRouteConsent(\'deny\', { immediate: true });');
     expect(oscarSource).toContain('await cancelOscarSubmissionWithDeadline(');
     expect(oscarSource).toContain('submission.controller.abort(');
     expect(oscarSource).toContain('void denyUnusedOscarDataEgressConsent(submission);');
     expect(oscarSource).toContain('const OSCAR_DATA_EGRESS_CLEANUP_TIMEOUT_MS = 3_000;');
     expect(oscarSource).toContain("cleanupController.abort(new DOMException('Oscar data-egress cleanup timed out.', 'TimeoutError'));");
-    expect(oscarSource).toContain("signal?.addEventListener('abort', onAbort, { once: true });");
-    expect(oscarSource).toContain("active.signal?.removeEventListener('abort', active.onAbort);");
     expect(oscarSource).toContain('clientRequestId,\n      inputMessageId: userMessage.id,\n      signal: submissionSignal,');
     expect(oscarSource).toContain('if (isOscarTurnCancellationConfirmed(cancelled)) {');
     expect(oscarSource).toContain('} else if (isOscarTurnTerminal(cancelled)) {');
@@ -162,6 +218,8 @@ describe('Oscar live shell regressions', () => {
     expect(utilsSource).toContain('data-agent-approval-id');
     expect(utilsSource).toContain('&& message.action?.oscarTurnId;');
     expect(utilsSource).toContain('data-oscar-arm-action');
+    expect(utilsSource).toContain('data-oscar-runtime-action="resume"');
+    expect(utilsSource).toContain('data-oscar-runtime-action="cancel"');
     expect(styles).toContain('.claude-secondary-btn');
   });
 
@@ -278,22 +336,46 @@ describe('Oscar live shell regressions', () => {
     expect(settingsSource).toContain("readLocalSettings('memory')");
     expect(oscarSource).toContain("writeLocalSettings('memory.create'");
     expect(oscarSource).not.toContain("capability: 'oscar.memory.manage'");
-    expect(utilsSource).toContain("const title = memory ? 'Из памяти'");
+    expect(utilsSource).toContain('data-source-open-memory');
     expect(settingsStyles).toContain('.source-chip.is-memory');
     expect(settingsStyles).toContain('.memory-cross-chat-card');
   });
 
-  it('renders scoped Personality V2 as three editable profiles with a real runtime preview', () => {
-    expect(indexSource).toContain('id="personality-scope-select"');
+  it('lets an owner review and forget what Oscar captured automatically from past turns', () => {
+    // The explicit "Долговременная память" list already had full CRUD; the
+    // automatic side (episodes/capsules Memory V4 captures on its own) had
+    // none -- no way to see or delete what a chat left behind after it was
+    // deleted, only to be told a reply used it.
+    expect(indexSource).toContain('id="memory-derived-list"');
+    expect(indexSource).toContain('id="memory-derived-forget-all"');
+    expect(settingsSource).toContain("runCapability('oscar', 'oscar.memory.derived.manage', { action: 'list' }");
+    expect(settingsSource).toContain("action: 'forget_episode'");
+    expect(settingsSource).toContain("action: 'forget_capsule'");
+    expect(settingsSource).toContain("action: 'forget_all'");
+    expect(settingsSource).toContain('async function loadDerivedMemory');
+  });
+
+  it('makes the "Учтена память"/"Из памяти" chip a real control instead of a dead label', () => {
+    // Regression: this chip used to be a plain <span> with only a tooltip --
+    // clickable nowhere, so an owner could never see or manage what got recalled.
+    expect(utilsSource).toContain('<button type="button" class="source-chip is-memory" data-source-open-memory');
+    expect(utilsSource).not.toMatch(/<span class="source-chip is-memory">Учтена память<\/span>/);
+    expect(oscarSource).toContain("event.target.closest('[data-source-open-memory]')");
+    expect(oscarSource).toContain('function openMemorySettingsFromSource');
+    expect(oscarSource).toContain('data-scroll-target="settings-section"][data-settings-open="memory"]');
+  });
+
+  it('renders the answer style as one form of three-position choices with a real preview', () => {
+    expect(indexSource).toContain('data-settings-panel="style"');
     expect(indexSource).toContain('id="personality-enabled"');
-    expect(indexSource).toContain('id="personality-profile-list"');
+    expect(indexSource).toContain('data-style-dimension="brevity" data-style-value="85"');
+    expect(indexSource).toContain('id="style-rules"');
     expect(indexSource).toContain('id="personality-preview-button"');
-    expect(indexSource).not.toContain('id="profile-adaptive-summary"');
-    expect(settingsSource).toContain("writeLocalSettings('personality.profile.create'");
-    expect(settingsSource).toContain("writeLocalSettings('personality.scope.copy'");
+    // The old three-variant generator is gone from the page.
+    expect(indexSource).not.toContain('id="personality-profile-list"');
+    expect(indexSource).not.toContain('id="personality-generate"');
+    expect(settingsSource).toContain("writeLocalSettings('personality.style.set'");
     expect(apiSource).toContain('export async function previewPersonality');
-    expect(styles).toContain('.personality-profile-card.is-selected');
-    expect(styles).toContain('backdrop-filter:blur(18px)');
   });
 
   it('resets document feeds and transient overlays when the user changes views', () => {
@@ -303,57 +385,62 @@ describe('Oscar live shell regressions', () => {
     expect(appSource).toContain('closeComposerOptions();');
   });
 
-  it('consolidates composer tools under plus and reveals model choice only through Intelligence', () => {
+  it('keeps attachments under plus and model, depth, MAX and Internet in the composer itself', () => {
     const plusMenuStart = indexSource.indexOf('id="oscar-composer-menu-popover"');
     const plusMenu = indexSource.slice(plusMenuStart, indexSource.indexOf('</details>', plusMenuStart));
     const intelligenceStart = indexSource.indexOf('id="oscar-model-popover"');
     const intelligencePanel = indexSource.slice(intelligenceStart, indexSource.indexOf('id="oscar-voice-input"', intelligenceStart));
     expect(indexSource).toContain('id="oscar-composer-menu"');
     expect(indexSource).toContain('data-oscar-attach-photo');
-    expect(indexSource).toContain('id="oscar-intelligence-toggle"');
-    expect(indexSource).toContain('id="oscar-intelligence-scale"');
-    expect(indexSource).toContain('id="oscar-intelligence-range" type="range"');
-    expect(indexSource).toContain('oscar-intelligence-range-shell');
-    expect(indexSource).toContain('oscar-intelligence-pro-aura');
-    expect(intelligencePanel).toContain('Быстрее');
-    expect(intelligencePanel).toContain('Умнее');
-    expect(intelligencePanel).toContain('oscar-intelligence-head');
-    expect(intelligencePanel).toContain('oscar-intelligence-auto-copy');
+    // Owner UX rule: no switch in the + menu hides the model chip or Internet.
+    expect(indexSource).not.toContain('id="oscar-intelligence-toggle"');
+    expect(plusMenu).not.toContain('id="oscar-web-toggle"');
+    expect(plusMenu).not.toContain('id="oscar-context-meter-toggle"');
+    expect(indexSource).toContain('class="composer-web-chip" type="button" id="oscar-web-toggle"');
+    expect(indexSource).toContain('<div class="custom-dropdown oscar-inline-model" id="oscar-model-dropdown-container">');
+    // Attachments are tiles; tools are rows; autonomy is one segmented choice.
+    expect(plusMenu).toContain('class="omenu-tiles" id="oscar-composer-attachments"');
+    expect(plusMenu).toContain('class="omenu-list" id="oscar-composer-tools"');
+    expect(astraNativeSource).toContain("'#oscar-composer-attachments' : '#oscar-composer-tools'");
+    // Model menu: where Oscar works (this computer or MAX), then that side's list.
+    expect(intelligencePanel).toContain('data-oscar-source="local"');
+    expect(intelligencePanel).toContain('data-oscar-source="max" data-astra-max-open');
+    expect(intelligencePanel).toContain('data-panel="local"');
+    expect(intelligencePanel).toContain('data-panel="max"');
+    expect(intelligencePanel).toContain('data-max-choices');
+    expect(intelligencePanel).toContain('data-effort="high"');
+    expect(intelligencePanel).toContain('data-value="none"');
     expect(intelligencePanel).toContain('data-value="gemma4-fast"');
     expect(intelligencePanel).toContain('data-value="gemma4-balanced"');
     expect(intelligencePanel).toContain('data-value="qwen3.8-27b-pro"');
-    expect(intelligencePanel).toContain('Быстро · базово');
-    expect(intelligencePanel).toContain('Быстро · умнее');
-    expect(intelligencePanel).toContain('Медленно · умнее');
-    expect(intelligencePanel).toContain('role="tooltip"');
     expect(intelligencePanel).not.toContain('data-value="gemma4-deepthinking"');
     expect(intelligencePanel).not.toContain('data-value="gemma4-31b"');
     expect(intelligencePanel).not.toContain('id="oscar-reasoning-dropdown-container"');
-    expect(intelligencePanel).not.toContain('>Усилие<');
+    expect(intelligencePanel).not.toContain('type="range"');
     expect(indexSource).not.toContain('id="reasoning-dropdown-container"');
     expect(appSource).not.toContain('deepThinking');
-    expect(oscarSource).toContain('resolveModelReasoningEffort(requestedModel)');
+    expect(oscarSource).toContain('resolveModelReasoningEffort(requestedModel, state.oscar.reasoningEffort)');
+    expect(oscarSource).toContain("outcome === 'waiting-for-runtime'");
+    expect(oscarSource).toContain("setMascotState('idle', { detail: 'Задача ждёт восстановления модели или инструмента' })");
     expect(chatSource).toContain('resolveModelReasoningEffort(modelOverride)');
-    expect(intelligencePanel).toContain('id="oscar-research-dropdown-container"');
-    expect(plusMenu).not.toContain('id="oscar-research-dropdown-container"');
+    expect(intelligencePanel).toContain('id="oscar-research-control"');
+    expect(intelligencePanel).toContain('id="oscar-effort-control"');
+    expect(plusMenu).not.toContain('id="oscar-research-control"');
     expect(indexSource.indexOf('id="oscar-model-dropdown-container"'))
       .toBeLessThan(indexSource.indexOf('id="oscar-voice-input"'));
-    expect(appSource).toContain("modelContainer.hidden = !intelligenceEnabled");
     expect(appSource).toContain('!popover.contains(activePopover)');
     expect(appSource).toContain("item.closest('.dropdown-popover') !== popover");
-    expect(appSource).toContain("event.target.closest('#oscar-intelligence-range')");
-    expect(appSource).toContain("nextSelection === 'none' && currentSelection === 'none'");
-    expect(appSource).toContain('resolveOscarManualModelSelection(state.oscar.lastManualModelSelection)');
-    expect(appSource).toContain('state.oscar.lastManualModelSelection = modelSelection');
-    expect(styles).toContain('transition: --intelligence-progress 440ms');
-    expect(styles).toContain('.oscar-intelligence-slider[data-power="3"] .oscar-intelligence-pro-aura');
-    expect(styles).toContain('animation: oscar-model-pro-rail-flow 6s linear infinite');
-    expect(styles).toContain('100% { background-position: 82px 50%, -118px 50%, 0 50%; }');
+    // Choosing a model is a choice, not a toggle: Auto stays Auto, the menu closes.
+    expect(appSource).not.toContain('lastManualModelSelection');
+    expect(appSource).toContain('closeDropdown(oscarModelPopover);');
     expect(styles).toContain('.oscar-inline-model > .mode-chip[data-model-power="max"]');
     expect(appSource).toContain("modelButton.dataset.modelPower = modelValue === 'qwen3.8-27b-pro' ? 'max' : 'standard'");
-    expect(styles).toContain('@media (prefers-reduced-motion: reduce)');
-    expect(appSource).toContain("closest('.oscar-intelligence-range-shell')?.style.setProperty('--intelligence-progress'");
-    expect(styles).toContain('#oscar-composer.intelligence-enabled .composer-input-row');
+    // One owner for the height when the side changes; reduced motion respected.
+    expect(maxSetupSource).toContain("stage.animate([{ height: from + 'px' }, { height: to + 'px' }]");
+    expect(maxSetupSource).toContain('reducedUiMotion.matches !== true');
+    expect(menuStyles).toContain('#oscar-model-popover[data-source="max"] .omenu-source-thumb { transform: translateX(100%); }');
+    expect(menuStyles).toContain('@media (prefers-reduced-motion: reduce)');
+    expect(styles).toContain('#oscar-composer.context-meter-enabled .composer-input-row');
   });
 
   it('renders an actionable RAM warning through the stylesheet used by the live shell', () => {
@@ -368,8 +455,8 @@ describe('Oscar live shell regressions', () => {
     expect(styles).toContain('@media (max-width:760px) { .ram-pressure-warning { grid-template-columns:1fr; }');
   });
 
-  it('shows a truthful optional context-window meter in the composer', () => {
-    expect(indexSource).toContain('id="oscar-context-meter-toggle"');
+  it('shows a truthful context-window meter in the composer', () => {
+    expect(indexSource).not.toContain('id="oscar-context-meter-toggle"');
     expect(indexSource).toContain('id="oscar-context-meter" role="progressbar"');
     expect(indexSource).toContain('data-context-meter-percent');
     expect(oscarSource).toContain("readOscarModelStatus(state.oscar)?.last_context_window");
@@ -378,22 +465,20 @@ describe('Oscar live shell regressions', () => {
     expect(contextMeterSource).toContain('contextWindow?.input_tokens');
     expect(contextMeterSource).toContain('contextWindow?.context_tokens');
     expect(appSource).toContain("meter.setAttribute('aria-valuenow', String(percent))");
-    expect(appSource).toContain('preferences.contextMeterVisible !== false');
     expect(styles).toContain('.oscar-context-tooltip');
   });
 
   it('keeps the Chat and Coder mode switch explicit and animates its active indicator', () => {
     expect(indexSource).toContain('data-active-mode="chat"');
     expect(indexSource).toContain('id="chat-mode-coder" type="button" role="tab" aria-selected="false">Coder</button>');
+    expect(indexSource).toContain('href="/oscar-mode-switch.css"');
     expect(coderSource).toContain("setAttribute('data-active-mode', active ? 'coder' : 'chat')");
     expect(coderSource).toContain("dispatchEvent(new Event('monarch:mascot-surface-changed'))");
-    expect(coderStyles).toContain('.chat-mode-switch::before');
-    expect(coderStyles).toMatch(/\.chat-mode-switch::before\s*\{[^}]*box-sizing:\s*border-box;/s);
-    expect(coderStyles).toContain('--chat-mode-indicator-x: 100%');
-    expect(coderStyles).toContain('transform .42s cubic-bezier(.22, 1, .36, 1)');
-    expect(coderStyles).toContain('.chat-mode-switch::before,');
+    expect(modeSwitchStyles).toMatch(/\.chat-mode-switch::before\s*\{[^}]*box-sizing:\s*border-box;/s);
+    expect(modeSwitchStyles).toContain('.chat-mode-switch[data-active-mode="coder"] { --chat-mode-indicator-x: 100%; }');
+    expect(modeSwitchStyles).toContain('transform .42s cubic-bezier(.22, 1, .36, 1)');
+    expect(modeSwitchStyles).toContain('#oscar-section.coder-mode-active .chat-mode-switch { justify-self: end; }');
     expect(coderStyles).toMatch(/#oscar-section\.coder-mode-active \.oscar-topbar\s*\{[^}]*display:\s*grid !important;[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) auto;[^}]*z-index:\s*40;[^}]*visibility:\s*visible;/s);
-    expect(coderStyles).toContain('#oscar-section.coder-mode-active .chat-mode-switch { justify-self: end; }');
     expect(coderStyles).toContain('.app-shell.coder-workspace-active #inspector');
     expect(appSource).toContain("const coderActive = shell?.classList.contains('coder-workspace-active') === true;");
     expect(appSource).toContain("const surfaceVisible = !coderActive && (emptyHome || (dialogActive && !isCollapsed));");
@@ -434,9 +519,9 @@ describe('Oscar live shell regressions', () => {
   });
 
   it('offers explicit research control and renders animated high-level research progress', () => {
-    expect(indexSource).toContain('id="oscar-research-dropdown-btn"');
-    expect(indexSource).toContain('data-value="deep"');
-    expect(appSource).toContain("state.oscar.researchMode = oscarResearchDropdownItem.getAttribute('data-value') || 'auto'");
+    expect(indexSource).toContain('id="oscar-research-control"');
+    expect(indexSource).toContain('data-research="deep"');
+    expect(appSource).toContain("state.oscar.researchMode = oscarResearchChoice.getAttribute('data-research') || 'auto'");
     expect(oscarSource).toContain("let researchMode = ['auto', 'off', 'deep'].includes(state.oscar.researchMode)");
     expect(oscarSource).toContain('const proposal = await createOscarDataEgressConsent(consentRequest, {');
     expect(oscarSource).toContain('clientRequestId: submissionState.dataEgressConsentClientRequestId,');
@@ -448,7 +533,6 @@ describe('Oscar live shell regressions', () => {
 
   it('replaces generic thinking dots with the Monarch-adapted ThinkingOrb states', () => {
     expect(utilsSource).toContain('renderMonarchThinkingOrb(status.visualPhase, status.motion)');
-    expect(utilsSource).toContain("renderMonarchThinkingOrb(webSearch ? 'search' : 'route')");
     expect(utilsSource).not.toContain('class="oscar-thinking-dots"');
     expect(styles).toContain('MIT-derived motion primitive: @illuma-ai/icons ThinkingOrb 2.7.0');
     expect(styles).toContain('.monarch-thinking-orb[data-orb-phase="research-search"]');
@@ -464,26 +548,21 @@ describe('Oscar live shell regressions', () => {
     expect(styles).toMatch(/\.oscar-thinking-only\s*\{[^}]*display:\s*inline-grid;[^}]*align-items:\s*center;/s);
   });
 
-  it('keeps research confirmation in the answer card and morphs it into visible stages', () => {
-    expect(oscarSource).toContain('messageId: pendingMessage.id');
-    expect(oscarSource).toContain("deepResearch: researchMode === 'deep'");
-    expect(oscarSource).toContain('presentation: proposal?.presentation || {}');
-    expect(oscarSource).toContain("pending.routeConsent = {");
-    expect(oscarSource).toContain("? 'Начать исследование'");
-    expect(oscarSource).toContain("? 'Искать в интернете'");
-    expect(oscarSource).toContain("settleOscarRouteConsent(routeDecisionButton.getAttribute('data-oscar-route-decision')");
-    expect(oscarSource).toContain('animateOscarConsentExpansion(messageId, fromRect)');
-    expect(oscarSource).not.toContain("overlay.className = 'oscar-route-consent'");
-    expect(oscarSource).not.toContain('document.body.appendChild(overlay)');
-    expect(styles).toContain('.oscar-message.assistant.route-consent');
-    expect(styles).toContain('.oscar-research-timeline');
-    expect(styles).toContain('@keyframes oscarConsentFallbackIn');
+  it('treats the Internet switch as the consent and asks no second question', () => {
+    // Owner decision 2026-09-23: the globe is the consent. The per-turn egress
+    // record is still created and granted, bound to this exact request.
+    expect(oscarSource).toContain("if (!continuation && webAllowed && (webSearch || researchMode === 'deep')) {");
+    expect(oscarSource).toContain("await decideOscarDataEgressConsent(consent.id, 'grant', consent.canonicalBindingHash, { signal: submissionSignal });");
+    expect(oscarSource).not.toContain('requestOscarRouteConsent');
+    expect(utilsSource).not.toContain('data-oscar-route-decision');
+    expect(styles).not.toContain('.oscar-inline-consent');
+    expect(readSource('src/ui/public/oscar-research.css')).toContain('.oscar-research-trace');
   });
 
   it('pins the fullscreen Voice surface after focus and phase changes', () => {
     expect(voiceModeSource).toContain('keepSurfaceAtOrigin();');
     expect(voiceModeSource).toContain('surface.scrollTop = 0;');
-    expect(styles).toMatch(/\.oscar-voice-mode\s*\{[^}]*height:\s*100dvh;[^}]*max-height:\s*100dvh;/s);
+    expect(styles).toMatch(/\.oscar-voice-mode\s*\{[^}]*height:\s*calc\(100dvh - var\(--desktop-titlebar-height, 0px\)\);[^}]*max-height:\s*calc\(100dvh - var\(--desktop-titlebar-height, 0px\)\);/s);
   });
 
   it('makes persisted density and inspector preferences affect the active stylesheet', () => {
@@ -501,6 +580,11 @@ describe('Oscar live shell regressions', () => {
   it('restores the exact durable Desktop Turn after renderer reload without creating a successor', () => {
     expect(oscarSource).toContain("const OSCAR_ACTIVE_SESSION_KEY = 'monarch.oscar.active-session.v1'");
     expect(oscarSource).toContain('rememberActiveOscarSession({ conversationId, turnId, clientRequestId, text })');
+    expect(oscarSource).toContain('window.localStorage.setItem(OSCAR_ACTIVE_SESSION_KEY');
+    expect(oscarSource).toContain('readStoredOscarSession(window.sessionStorage)');
+    expect(oscarSource).toContain('|| readStoredOscarSession(window.localStorage)');
+    expect(oscarSource).toContain('window.localStorage.removeItem(OSCAR_ACTIVE_SESSION_KEY)');
+    expect(oscarSource).toContain('// raw user text stays session-only and is recovered from the Turn Store.');
     expect(oscarSource).toContain('fetchOscarTurnByClientRequestId(saved.clientRequestId');
     expect(oscarSource).toContain('? await fetchOscarTurn(saved.turnId)');
     expect(oscarSource).toContain('await consumeOscarTurn({');
@@ -509,6 +593,17 @@ describe('Oscar live shell regressions', () => {
     const restoreEnd = oscarSource.indexOf('async function openOscarConversation', restoreStart);
     expect(restoreStart).toBeGreaterThan(-1);
     expect(oscarSource.slice(restoreStart, restoreEnd)).not.toContain('createOscarTurn(');
+  });
+
+  it('never clears busy state while the current assistant message is still pending', () => {
+    expect(oscarSource).toContain('async function settlePendingOscarTurnFromDurableState');
+    const submitStart = oscarSource.indexOf('async function submitOscarMessage');
+    const submitEnd = oscarSource.indexOf('async function executeOscarCapabilityAction', submitStart);
+    const submitSource = oscarSource.slice(submitStart, submitEnd);
+    expect(submitSource).toContain('if (oscarPendingMessageExists(pendingMessage.id))');
+    expect(submitSource.indexOf('await settlePendingOscarTurnFromDurableState'))
+      .toBeLessThan(submitSource.lastIndexOf('setOscarBusy(false)'));
+    expect(submitSource).toContain('Oscar завершил обработку без отображаемого результата');
   });
 
   it('keeps history rename and delete actions explicitly named', () => {
@@ -537,104 +632,54 @@ describe('Oscar live shell regressions', () => {
     expect(styles).toContain('.conversation-item.is-encrypted');
   });
 
-  it('moves terminal Coder journals into the same Safe chat boundary', () => {
-    expect(indexSource).toContain('id="coder-safe-encrypt"');
-    expect(indexSource).toContain('id="coder-safe-chat-select"');
+  it('moves finished Coder conversations into the same Safe chat boundary', () => {
     expect(coderSource).toContain("kind: 'coder'");
     expect(coderSource).toContain('await bridge.writeSafeChat');
     expect(coderSource).toContain('await deleteCoderRun(run.id)');
     expect(coderSource).toContain("await bridge.deleteSafeChat(run.id, 'coder')");
-    expect(coderSource).toContain('if (coderState.runEncrypted) coderState.run = null');
-    expect(coderStyles).toContain('.coder-workspace-actions .coder-safe-button.is-active');
+    expect(coderSource).toContain("if (stored?.verified !== true) throw new Error('Safe не подтвердил запись разговора.')");
+    expect(coderViewSource).toContain('data-cdr="safe-move"');
   });
 
-  it('releases the idle neural voice model before a desktop Coder run starts', () => {
+  it('releases the idle neural voice model before a local Coder task starts', () => {
+    const release = coderSource.indexOf('await window.monarchDesktop.releaseSpeechOutput()');
     expect(coderSource).toContain("typeof window.monarchDesktop?.releaseSpeechOutput === 'function'");
-    expect(coderSource).toContain('await window.monarchDesktop.releaseSpeechOutput()');
-    expect(coderSource.indexOf('await window.monarchDesktop.releaseSpeechOutput()'))
-      .toBeLessThan(coderSource.indexOf('await startCoderRun(prompt, projectId, coderState.model)'));
+    expect(release).toBeGreaterThan(-1);
+    expect(release).toBeLessThan(coderSource.indexOf('payload = await startCoderRun('));
   });
 
   it('releases the idle neural voice model before a desktop Oscar model route starts', () => {
     expect(oscarSource).toContain('oscarSpeechController?.releaseForInference');
     expect(oscarSource).toContain('await oscarSpeechController.releaseForInference()');
     expect(oscarSource.indexOf('await oscarSpeechController.releaseForInference()'))
-      .toBeLessThan(oscarSource.indexOf('const created = await createOscarTurn({'));
+      .toBeLessThan(oscarSource.indexOf('const created = astraContinuation'));
     expect(oscarSource).not.toContain('oscarSpeechController.prewarm()');
     expect(oscarSource).not.toContain('oscarSpeechController?.restoreAfterInference()');
   });
 
-  it('keeps the exact Coder launch folder visible and separates model switching from failures', () => {
-    expect(indexSource).toContain('id="coder-run-project-root"');
-    expect(coderSource).toContain("run.projectRoot || coderState.snapshot?.project?.root || ''");
-    expect(coderSource).toContain('`Папка запуска · ${projectRoot}`');
-    expect(coderSource).toContain("renderRunProjectRoot('');");
-    expect(coderSource).toContain("tone: 'switching'");
-    expect(coderSource).toContain("tone: 'failure'");
-    expect(coderSource).toContain("failed: 'Нужна проверка'");
-    expect(coderSource).toContain('presentCoderFailureDetail(detail)');
-    expect(coderSource).toContain('Локальный backend не ответил. Повтори сессию после его перезапуска.');
-    expect(styles).toContain('.coder-event[data-tone="switching"]');
-    expect(styles).toContain('.coder-event[data-tone="failure"]');
+  it('continues conversations on their own model and follows runs live instead of polling', () => {
+    expect(coderSource).toContain('request.sessionId || undefined');
+    expect(coderSource).toContain('function adoptSessionModel()');
+    expect(coderSource).toContain('streamCoderRun(runId, { signal: controller.signal })');
+    expect(coderSource).not.toContain('setTimeout(poll');
+    expect(apiSource).toContain('/stream`');
+    expect(coderSource).toContain("if (!(error instanceof TypeError)) throw error;");
   });
 
-  it('keeps the Coder session recoverable and every workspace panel reachable on mobile', () => {
-    const startIndex = coderSource.indexOf('await startCoderRun(prompt, projectId, coderState.model)');
-    const clearDraftIndex = coderSource.indexOf("elements.input.value = '';", startIndex);
-    expect(startIndex).toBeGreaterThan(-1);
-    expect(clearDraftIndex).toBeGreaterThan(startIndex);
-    expect(coderSource).toContain('coderState.pollFailures >= 4');
-    expect(coderSource).toContain("elements.runRetry.textContent = 'Обновить состояние'");
-    expect(coderSource).toContain("button.setAttribute('role', 'treeitem')");
-    expect(coderSource).toContain("button.setAttribute('aria-expanded'");
-    expect(indexSource).toContain('id="coder-mobile-project"');
-    expect(indexSource).toContain('id="coder-mobile-result"');
-    expect(indexSource).toContain('id="coder-run-summary"');
-    expect(coderStyles).toContain('.coder-explorer.is-drawer-open');
-    expect(coderStyles).toContain('.coder-context-panel.is-drawer-open');
-    expect(coderStyles).toContain('.app-shell.coder-workspace-active #inspector');
+  it('keeps exact approvals, questions and Stop inside the active conversation', () => {
+    expect(coderSource).toContain('await armAgentTaskApproval(run.agentTaskId, approval.id, binding)');
+    expect(coderSource).toContain('canonicalProposalHash: String(approval.canonicalProposalHash');
+    expect(coderSource).toContain('await submitCoderReply(runId, question.id, question.digest, reply)');
+    expect(coderSource).toContain('new TextEncoder().encode(reply).byteLength > 4096');
+    expect(coderSource).toContain("ui.stop.disabled = Boolean(active?.cancelled) || state.stopping === active?.id;");
   });
 
-  it('renders durable Code history as a searchable cross-project workspace instead of a select placeholder', () => {
-    expect(indexSource).not.toContain('id="coder-run-select"');
-    expect(indexSource).toContain('id="coder-history-drawer"');
-    expect(indexSource).toContain('id="coder-history-search"');
-    expect(indexSource).toContain('id="coder-history-project"');
-    expect(indexSource).toContain('data-coder-history-status="completed"');
-    expect(indexSource).toContain('Требуют внимания');
-    expect(coderSource).toContain('await Promise.all([fetchCoderOverview(), fetchCoderRuns()])');
-    expect(coderSource).toContain('createHistoryRunCard(run)');
-    expect(coderSource).toContain('run.summary?.lastAssistantSummary');
-    expect(coderSource).toContain('archivedProjects.push');
-    expect(coderSource).toContain('await activateHistoryProject(run.projectId)');
-    expect(coderSource).toContain('buildHistoryContinuationPrompt(run)');
-    expect(coderSource).toContain('await deleteCoderRun(run.id)');
-    expect(coderStyles).toContain('.coder-history-drawer');
-    expect(coderStyles).toContain('.coder-history-item[data-active="true"]');
-  });
-
-  it('keeps the empty Code composer in a stable task-first stage when the run summary is hidden', () => {
-    expect(coderStyles).toMatch(/\.coder-agent-stage\s*\{[^}]*grid-template-rows:\s*auto auto auto auto minmax\(92px,\s*1fr\) auto;/s);
-    expect(indexSource).toContain('id="coder-progress"');
-    expect(coderSource).toContain('renderRunProgress(run)');
-    expect(coderStyles).toContain('.coder-run-summary[hidden] { display: none; }');
-    expect(coderStyles).toContain('.coder-composer[hidden] { display: none; }');
-    expect(coderSource).toContain('renderComposerVisibility(run)');
-  });
-
-  it('keeps failures, model switches and terminal lifecycle visible without flooding the primary Code journal', () => {
-    expect(coderSource).toContain("event?.kind === 'assistant'");
-    expect(coderSource).toContain("presentation.tone === 'failure'");
-    expect(coderSource).toContain("presentation.tone === 'switching'");
-    expect(coderSource).toContain("/^Task\\s+(completed|failed|cancelled|interrupted)$/i");
-    expect(coderSource).toContain("!['coder.files.read', 'coder.files.list'].includes(capability)");
-  });
-
-  it('locks repeated stop requests while active Coder inference is being cancelled', () => {
-    expect(coderSource).toContain('coderState.cancelBusy || coderState.run.cancelled');
-    expect(coderSource).toContain("elements.cancel.textContent = cancellationRequested ? 'Останавливаю…' : 'Остановить'");
-    expect(coderSource).toContain("title: 'Останавливаю модель'");
-    expect(coderStyles).toContain('.coder-composer button:disabled');
+  it('lays out conversations, thread and review with reduced motion and a narrow fallback', () => {
+    expect(coderStyles).toContain('container-type: inline-size');
+    expect(coderStyles).toContain('@container (max-width: 640px)');
+    expect(coderStyles).toContain('prefers-reduced-motion: reduce');
+    expect(coderStyles).toContain('html:root[data-design="pp"]');
+    expect(coderSource).toContain('const overlayReview = width < 980;');
   });
 
   it('keeps large conversation histories searchable without a second backend request', () => {

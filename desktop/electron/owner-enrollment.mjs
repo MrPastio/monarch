@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   MONARCH_OWNER_PUBLIC_KEYS,
@@ -8,6 +8,7 @@ import {
   restrictOwnerAuthorityAcl,
   validateOwnerEntitlement,
 } from './owner-authority.mjs';
+import { renameWithRetry } from './windows-rename.mjs';
 
 const DEVICE_REQUEST_FILE = 'device-request.json';
 const ENTITLEMENT_FILE = 'owner-entitlement.json';
@@ -188,15 +189,15 @@ export async function importOwnerEntitlement({
   try {
     await writeFile(temporaryPath, normalizedBytes, { flag: 'wx', mode: 0o600 });
     if (existingBytes) {
-      await rename(paths.entitlementPath, backupPath);
+      await renameWithRetry(paths.entitlementPath, backupPath);
       movedExisting = true;
     }
-    await rename(temporaryPath, paths.entitlementPath);
+    await renameWithRetry(temporaryPath, paths.entitlementPath);
     installedNew = true;
     if (!await restrictAcl(paths.authorityRoot)) throw new Error('acl');
   } catch {
     if (installedNew) await rm(paths.entitlementPath, { force: true }).catch(() => undefined);
-    if (movedExisting) await rename(backupPath, paths.entitlementPath).catch(() => undefined);
+    if (movedExisting) await renameWithRetry(backupPath, paths.entitlementPath).catch(() => undefined);
     await rm(temporaryPath, { force: true }).catch(() => undefined);
     return { ok: false, diagnostic: installedNew ? 'owner-authority-acl-failed' : 'owner-entitlement-install-failed' };
   }

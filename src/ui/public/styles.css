@@ -2139,6 +2139,8 @@ body[data-theme="dark"] .claude-composer {
 .memory-item-footer span { margin-right: auto; color: var(--muted-2); font-size: 10px; }
 .memory-item-footer button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 11px; }
 .memory-item-footer .danger-link { color: var(--danger); }
+.memory-derived-library .memory-subheading .danger-link.claude-ghost-btn { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
+.memory-derived-text { margin: 0; color: var(--text); font-size: 12px; line-height: 1.5; white-space: pre-line; }
 
 .setting-note {
   margin: -2px 0 10px;
@@ -2637,6 +2639,7 @@ body[data-theme="dark"] .claude-composer {
 
 .settings-field textarea,
 .settings-field select,
+.settings-field input,
 .memory-settings-item textarea,
 .memory-item-controls select {
   width: 100%;
@@ -2663,8 +2666,14 @@ body[data-theme="dark"] .claude-composer {
   padding: 6px 9px;
 }
 
+.settings-field input {
+  min-height: 40px;
+  padding: 8px 11px;
+}
+
 .settings-field textarea:focus,
 .settings-field select:focus,
+.settings-field input:focus,
 .memory-settings-item textarea:focus,
 .memory-item-controls select:focus {
   border-color: var(--border-strong);
@@ -3779,6 +3788,52 @@ body[data-theme="dark"] .claude-composer {
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
   border-radius: 10px;
   background: color-mix(in srgb, var(--surface-inset) 86%, var(--accent) 14%);
+  backdrop-filter: blur(18px) saturate(118%);
+}
+
+.oscar-action-card.is-critical {
+  position: relative;
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--theme-amber-ink, #ffbd35) 58%, var(--border));
+  background:
+    radial-gradient(circle at 0 0, color-mix(in srgb, var(--theme-amber-ink, #ffbd35) 18%, transparent), transparent 54%),
+    linear-gradient(145deg, color-mix(in srgb, var(--surface-inset) 88%, #000 12%), color-mix(in srgb, var(--surface) 88%, var(--accent) 12%));
+  box-shadow: inset 0 1px rgba(255, 255, 255, .07), 0 14px 34px rgba(0, 0, 0, .2);
+}
+
+.oscar-action-card.is-critical::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: linear-gradient(180deg, var(--theme-amber-ink, #ffd45b), var(--accent));
+}
+
+.oscar-action-card .oscar-action-kicker {
+  color: var(--theme-amber-ink, #ffd45b);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: .08em;
+}
+
+.oscar-action-card .oscar-action-warning {
+  max-width: 720px;
+  color: var(--text);
+}
+
+.oscar-action-preview {
+  max-width: min(760px, 70vw);
+  max-height: 220px;
+  margin: 5px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--theme-amber-ink, #ffd45b) 18%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-inset) 90%, #000 10%);
+  color: var(--text-soft);
+  font: 10px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .oscar-action-card > div {
@@ -4335,6 +4390,21 @@ body[data-theme="dark"] .claude-composer {
   color: color-mix(in srgb, var(--text) 88%, var(--accent));
   box-shadow: inset 0 1px 0 color-mix(in srgb, white 8%, transparent), 0 6px 18px color-mix(in srgb, var(--accent) 8%, transparent);
   backdrop-filter: blur(14px) saturate(125%);
+  /* This chip is a real control now (opens Settings → Память), not a label. */
+  font: inherit;
+  cursor: pointer;
+  transition: transform 140ms ease-out, box-shadow 140ms ease-out;
+}
+
+.source-chip.is-memory:hover,
+.source-chip.is-memory:focus-visible {
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 8%, transparent), 0 10px 22px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.source-chip.is-memory:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 2px;
 }
 
 .audit-output,

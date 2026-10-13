@@ -1,14 +1,12 @@
 import type {
   MonarchExecutionRequest,
   MonarchExecutionResult,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
-  MonarchRouteDecision,
   MonarchSearchScope,
 } from '../../core';
-import { classifyIntentText, permissionModeForRisk } from '../../core';
+import { classifyIntentText } from '../../core';
 import { knowledgeManifest } from './manifest';
 
 export type MonarchKnowledgePolicy = 'local_only' | 'web_optional' | 'web_required';
@@ -38,24 +36,6 @@ export class KnowledgeModule implements MonarchModule {
     };
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.trim();
-    const classification = classifyIntentText(text);
-    const explicitPolicyQuestion = /\b(?:knowledge policy|web policy|need (?:the )?web|should (?:i|we|you) search|use (?:the )?web)\b/i.test(text);
-    if (!explicitPolicyQuestion && classification.kind !== 'search') {
-      return null;
-    }
-
-    return {
-      intentId: intent.id,
-      targetModuleId: this.manifest.id,
-      capabilityId: 'knowledge.policy.evaluate',
-      confidence: 0.74,
-      reason: 'Knowledge/web policy evaluation request detected.',
-      permissionMode: permissionModeForRisk('read'),
-      input: { text },
-    };
-  }
 
   async executeCapability(request: MonarchExecutionRequest): Promise<MonarchExecutionResult> {
     if (request.capabilityId !== 'knowledge.policy.evaluate') {

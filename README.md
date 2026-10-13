@@ -1,14 +1,26 @@
 # Monarch
 
-Monarch задуман как локальная AI-экосистема, а не просто приложение-ассистент.
+**Monarch 0.3 Preview** — твой личный AI-помощник для Windows. Оскар отвечает на вопросы, делает задачи на компьютере прямо в чате, напоминает о делах, пишет код в режиме Coder и защищает компьютер. Модели работают на твоём компьютере; облако (MAX) подключается, только если ты сам этого захочешь. Monarch бесплатный и полностью твой.
 
-**Стадия продукта:** `Beta`. Suite `Monarch Modules` и дочерний модуль
-`Monarch Studio` находятся в стадии `Alpha`: основные пути уже работают, но их
-контракты и расширенный функционал ещё могут меняться до стабилизации.
+**Скачать:** [официальный сайт](https://monarch-site-sigma.vercel.app/ru) · [все версии](https://github.com/MrPastio/monarch-releases/releases)
 
-Направление проекта: расширяемая архитектура из маленького системного ядра, роутеров, инструментов, локальных модельных рантаймов, памяти, интерфейсов и независимых доменных блоков. Каждый блок может вырасти в полноценную подсистему, но при этом говорить с остальным Monarch через единый контракт.
+## Что умеет 0.3 Preview
 
-Текущий статус: публичная `Beta` с TypeScript control plane, Electron shell, Oscar FastAPI/model runtime, Monarch Security, Safe, Coder, Voice, Sharing, Telegram, promoted suite `Monarch Modules`, alpha-версией `Monarch Studio` и единым capability execution pipeline.
+- Делает задачи на компьютере прямо в обычном чате — по шагам, с подтверждениями и итогом.
+- Напоминает: «напомни через 20 минут проверить духовку» — и приходит уведомление Windows.
+- Сам скачивает всё нужное: модели для чата, Coder, распознавание речи, поиск по памяти — кнопкой в настройках.
+- Работает локально или через MAX — облачные сервисы, которые ты подключаешь сам.
+- Coder пишет и правит код в твоих проектах и показывает, что именно изменилось.
+- Хранит историю, память и вложения зашифрованными; секреты — в отдельном Monarch Safe.
+- Четыре языка интерфейса: русский, українська, English, български.
+
+Это Preview: что-то может работать неидеально. Сообщения об ошибках помогают сделать Monarch лучше.
+
+---
+
+## Для разработчиков
+
+Monarch задуман как локальная AI-экосистема, а не просто приложение-ассистент: маленькое системное ядро, модули с manifest, capabilities, permissions, events и тестами, локальные модельные рантаймы, память, интерфейсы и независимые доменные блоки, которые говорят друг с другом через единый контракт.
 
 ## Установка На Windows
 
@@ -62,7 +74,7 @@ Monarch не должен быть “одним агентом со множе�
 - `docs/` - архитектурные заметки и правила роста.
 - `src/core/` - системное ядро: contracts, event bus, registries, permission gate, router mesh, execution engine.
 - `src/app/` - единый слой программы: `MonarchApplication`, HTTP API, system-профиль агента.
-- `src/modules/` - 19 доменных и системных пакетов: `assistant`, `workspace`, `artifacts`, `knowledge`, `profile`, `memory`, `astra`, `diagnostics`, `plugins`, `models`, `oscar`, `security`, `safe`, `sharing`, `voice`, `telegram`, `device`, `custom-tools`, `coder`.
+- `src/modules/` - доменных и системных пакетов: `assistant`, `workspace`, `artifacts`, `knowledge`, `profile`, `memory`, `astra`, `diagnostics`, `plugins`, `models`, `oscar`, `security`, `safe`, `sharing`, `voice`, `telegram`, `device`, `custom-tools`, `coder`.
 - `src/modules/catalog.ts` - каталог встроенных module packages.
 - `src/bootstrap.ts` - сборка kernel/runtime с выбранными модулями.
 - `src/main.ts` - главный entrypoint: `serve`, `status`, `intent`, `system`.

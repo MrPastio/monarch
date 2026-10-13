@@ -388,7 +388,17 @@ function assertRiskFloor(
   capabilityId: string,
 ): void {
   const floor = legacyAgentCapabilityDefaults(risk);
-  assertRankAtLeast(idempotency, floor.idempotency, IDEMPOTENCY_VALUES, 'agent.idempotency', capabilityId);
+  const nonMutatingNetworkRead = risk === 'network'
+    && profile.mutation === 'none'
+    && !profile.financialImpact
+    && !profile.identityImpact
+    && !profile.securityImpact;
+  // `network` remains the permission/disclosure class, but it does not imply a
+  // remote mutation. Explicitly non-mutating service reads can therefore carry
+  // an idempotent retry contract while retaining every network risk floor.
+  if (!nonMutatingNetworkRead) {
+    assertRankAtLeast(idempotency, floor.idempotency, IDEMPOTENCY_VALUES, 'agent.idempotency', capabilityId);
+  }
   assertRankAtLeast(profile.mutation, floor.effectProfile.mutation, MUTATION_VALUES, 'agent.effectProfile.mutation', capabilityId);
   // `delete` is the permission/risk class for any action that removes the
   // original object, including an exact move/rename and recoverable Recycle

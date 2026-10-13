@@ -95,6 +95,33 @@ describe('VoiceSttRuntime', () => {
     }
   });
 
+  it('cancels an active one-shot transcription and restarts the worker cleanly', async () => {
+    const worker = await writeFakeWorker();
+    const audioRoot = await mkdtemp(path.join(os.tmpdir(), 'monarch-voice-stt-cancel-'));
+    cleanupPaths.push(audioRoot);
+    const audioPath = path.join(audioRoot, 'voice.ogg');
+    await writeFile(audioPath, 'voice-data', 'utf8');
+    const runtime = new VoiceSttRuntime({
+      workspaceRoot: process.cwd(), executable: process.execPath,
+      workerScriptPath: worker.scriptPath, audioRoot, requestTimeoutMs: 10_000,
+    });
+    const controller = new AbortController();
+    try {
+      const pending = runtime.transcribe({ audioPath, language: 'bg-BG' }, controller.signal);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const started = Date.now();
+      controller.abort(new Error('owner stopped'));
+      await expect(pending).rejects.toMatchObject({ code: 'voice-stt-cancelled' });
+      expect(Date.now() - started).toBeLessThan(1_000);
+
+      await expect(runtime.transcribe({ audioPath, language: 'ru-RU' })).resolves.toMatchObject({
+        text: 'локальный текст 1', engine: 'vosk',
+      });
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
   it('drains an in-flight warmup before shutting the worker down', async () => {
     const worker = await writeFakeWorker();
     const runtime = new VoiceSttRuntime({
@@ -140,6 +167,28 @@ describe('VoiceSttRuntime', () => {
       await runtime.shutdown();
     }
   });
+
+  it('binds only an existing absolute isolated Python package root into the worker', async () => {
+    const worker = await writeFakeWorker();
+    const pythonPath = await mkdtemp(path.join(os.tmpdir(), 'monarch-voice-python-path-'));
+    cleanupPaths.push(pythonPath);
+    const previous = process.env.MONARCH_STT_PYTHONPATH;
+    process.env.MONARCH_STT_PYTHONPATH = pythonPath;
+    try {
+      const runtime = new VoiceSttRuntime({
+        workspaceRoot: process.cwd(), executable: process.execPath,
+        workerScriptPath: worker.scriptPath, requestTimeoutMs: 2_000,
+      });
+      try {
+        await expect(runtime.prepare('ru-RU')).resolves.toMatchObject({ status: 'ready' });
+      } finally {
+        await runtime.shutdown();
+      }
+    } finally {
+      if (previous === undefined) delete process.env.MONARCH_STT_PYTHONPATH;
+      else process.env.MONARCH_STT_PYTHONPATH = previous;
+    }
+  });
 });
 
 async function writeFakeWorker(): Promise<{ scriptPath: string }> {
@@ -149,12 +198,28 @@ async function writeFakeWorker(): Promise<{ scriptPath: string }> {
   const scriptPath = path.join(tempDir, 'fake-worker.cjs');
   await writeFile(scriptPath, `
 const readline = require('node:readline');
+const path = require('node:path');
 const lines = readline.createInterface({ input: process.stdin });
 let warm = false;
 let turns = 0;
 lines.on('line', (line) => {
   const request = JSON.parse(line);
   if (request.type === 'shutdown') process.exit(0);
+  const isolatedPythonPath = String(process.env.MONARCH_STT_PYTHONPATH || '');
+  if (isolatedPythonPath && process.env.PYTHONPATH !== isolatedPythonPath) {
+    console.log(JSON.stringify({ id: request.id, type: 'error',
+      code: 'voice-stt-runtime-path-denied', message: 'python path was not isolated' }));
+    return;
+  }
+  if (request.type === 'transcribe') {
+    const audioRoot = String(process.env.MONARCH_VOICE_AUDIO_ROOT || '');
+    const relative = path.relative(path.resolve(audioRoot), path.resolve(request.audioPath || ''));
+    if (!path.isAbsolute(audioRoot) || relative === '..' || relative.startsWith('..' + path.sep)) {
+      console.log(JSON.stringify({ id: request.id, type: 'error',
+        code: 'voice-stt-audio-path-denied', message: 'audio root was not bound' }));
+      return;
+    }
+  }
   if (request.type === 'prepare') {
     const loadMs = warm ? 0 : 120;
     const wasWarm = warm;
@@ -206,6 +271,7 @@ lines.on('line', (line) => {
     }));
     return;
   }
+  if (request.language === 'bg-BG') return;
   warm = true;
   turns += 1;
   console.log(JSON.stringify({

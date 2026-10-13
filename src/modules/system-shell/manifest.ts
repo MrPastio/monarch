@@ -51,18 +51,14 @@ export const systemShellManifest: MonarchModuleManifest = {
       }],
       examples: [{ goal: 'Run an exact command when no narrower registered capability exists.' }],
     },
-    routing: {
-      aliases: ['run shell command', 'terminal fallback', 'выполни команду в терминале'],
-      keywords: ['shell', 'terminal', 'command', 'execute', 'process', 'терминал', 'команда', 'выполни'],
-      examples: ['Выполни Get-Date через powershell.exe'],
-      intentKinds: ['system.execute', 'terminal'],
-    },
+
     inputSchema: {
       type: 'object',
       properties: {
         executable: { type: 'string', minLength: 1, maxLength: 1024 },
         args: { type: 'array', maxItems: 128, items: { type: 'string', maxLength: 8192 } },
-        cwd: { type: 'string', minLength: 1, maxLength: 2048 },
+        cwd: { type: 'string', minLength: 1, maxLength: 2048,
+          description: "Working directory. '.' is the workspace root; a relative path resolves under it; an absolute path is used as is. A drive or filesystem root is rejected." },
         timeoutMs: { type: 'integer', minimum: 100, maximum: 600000 },
         networkPosture: { type: 'string', enum: ['offline', 'inherit', 'allowed'] },
         maxOutputBytes: { type: 'integer', minimum: 1024, maximum: 1048576 },

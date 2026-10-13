@@ -44,7 +44,13 @@ def test_runtime_accepts_only_hash_bound_personality_payload() -> None:
 
     assert parsed is not None
     assert parsed["profileId"] == "personality-direct"
-    assert "Пиши кратко и плотно." in render_personality_context(parsed, "ru")
+    assert "Отвечай коротко и плотно, без вступлений и повторов." in render_personality_context(parsed, "ru")
+    # The usual (middle) position of a choice adds nothing to the prompt.
+    neutral = {**parsed, "dimensions": {key: 50 for key in parsed["dimensions"]}, "customRules": [], "addressForm": "neutral"}
+    assert "коротко" not in render_personality_context(neutral, "ru")
+    assert "Объясняй простыми словами" in render_personality_context(
+        {**parsed, "dimensions": {**parsed["dimensions"], "technicalDepth": 15}}, "ru"
+    )
     assert "Обращайся к пользователю на «ты»." in render_personality_context(parsed, "ru")
 
     tampered = {**payload, "dimensions": {**payload["dimensions"], "directness": 1}}

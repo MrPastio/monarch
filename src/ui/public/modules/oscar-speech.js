@@ -150,7 +150,7 @@ export function createOscarSpeechController({
     return stopped;
   };
 
-  const toggle = ({ messageId, text }) => {
+  const toggle = ({ messageId, text, latencyMode = 'natural' }) => {
     const id = String(messageId || '');
     if (state.status === 'speaking' && state.messageId === id) {
       stop();
@@ -175,7 +175,12 @@ export function createOscarSpeechController({
         engine: 'neural',
         playback: normalizeSpeechPlaybackResult({ status: 'speaking', engine: 'qwen3-tts-pending' }),
       });
-      Promise.resolve(desktop.speakText({ text: normalized, language, ...preferences }))
+      Promise.resolve(desktop.speakText({
+        text: normalized,
+        language,
+        ...preferences,
+        latencyMode: latencyMode === 'fast' ? 'fast' : 'natural',
+      }))
         .then((result) => {
           if (currentRun !== runId) return;
           const playback = normalizeSpeechPlaybackResult(result);

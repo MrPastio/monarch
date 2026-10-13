@@ -20,6 +20,10 @@ afterEach(async () => {
 });
 
 describe('ImageGenerationService', () => {
+  it('does not classify an exact file literal as a provider command', () => {
+    expect(looksLikeImageGenerationRequest('Создай файл notes.txt с текстом: "Памятка: /image кот"')).toBe(false);
+    expect(looksLikeImageGenerationRequest('Создай картинку с текстом: "Привет"')).toBe(true);
+  });
   it('blocks cloud generation before the current two-part provider consent', async () => {
     const service = await createService();
     const context = await service.readContext();

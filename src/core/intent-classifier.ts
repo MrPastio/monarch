@@ -243,7 +243,7 @@ function detectMetaIntentKind(text: string): MonarchIntentKind | null {
   ) {
     return 'capabilities_question';
   }
-  if (/(какие модели доступны|какие модели используешь|какой runtime активен|покажи статус моделей|model status|available models|which models)/i.test(text)) {
+  if (/(какие модели доступны|какие модели используешь|какой runtime активен|покажи статус моделей|какая\s+(?:ты|у\s+тебя)\s+модель|model status|available models|which models|what\s+model\s+are\s+you)/i.test(text)) {
     return 'model_status_question';
   }
   return null;
@@ -279,8 +279,9 @@ function isExplicitWebSearch(text: string): boolean {
 }
 
 /**
- * Chooses only Oscar's execution surface. Capability selection remains
- * model-driven inside Agent Runtime; ordinary answers stay on the chat path.
+ * Produces bounded heuristic metadata for compatibility, UI hints and
+ * fail-closed recovery. The production Oscar coordinator must not use this
+ * result as execution admission: ordinary answer/agent routing is semantic.
  */
 export function classifyOscarRequestDisposition(text: string): OscarRequestDisposition {
   const normalizedDispositionText = stripOperationalPrelude(normalizeText(text).toLowerCase());
@@ -338,6 +339,52 @@ export function classifyOscarRequestDisposition(text: string): OscarRequestDispo
   };
 }
 
+/** Host-owned exclusions apply before consulting a semantic routing model. */
+/** Greetings, thanks and small talk. A small routing model reading a history
+ * full of agent tasks sent "привет" to the agent, which then started a task.
+ * Excludes execution only; it never opens the agent lane. */
+export function isOscarSmallTalk(value: string): boolean {
+  const text = normalizeText(value).toLowerCase().replace(/[!?.,…)(:;\s]+/gu, ' ').trim();
+  if (!text || text.length > 40) return false;
+  return /^(?:(?:привет|приветик|здравствуй(?:те)?|здарова|хай|добр(?:ое|ый|ой)\s+(?:утро|день|вечер|ночи)|спасибо|спс|благодарю|ок|окей|ok|okay|понял|понятно|ясно|хорошо|отлично|круто|супер|класс|пока|до\s+свидания|как\s+дела|как\s+ты|что\s+нового|hi|hello|hey|thanks|thank\s+you|bye|good\s+(?:morning|evening|night))(?:\s+(?:oscar|оскар|бро|друг))?\s*)+$/u.test(text);
+}
+
+export function isOscarResponseOnlyRequest(value: string): boolean {
+  const text = stripOperationalPrelude(normalizeText(value).toLowerCase());
+  return isOscarSmallTalk(value)
+    || looksLikeExplicitNonActionRequest(text)
+    || looksLikeSuppliedMaterial(text)
+    || looksLikeResponseOnlyMaterialReview(text)
+    || isOscarCapabilitiesOrIdentityRequest(value);
+}
+
+/** Direct Access skips the semantic model and sends everything else straight to
+ * the agent lane, so it alone needs the content-generation exclusion: "Напиши
+ * рассказ" produces the answer itself and names no local target. Ordinary routing
+ * must not use this — there the selected model decides, without phrase rules. */
+export function isOscarDirectAccessAnswerOnlyRequest(value: string): boolean {
+  return isOscarResponseOnlyRequest(value)
+    || looksLikeContentGenerationWithoutLocalEffect(stripOperationalPrelude(normalizeText(value).toLowerCase()));
+}
+
+/** Identity and capability questions never admit Agent execution. */
+export function isOscarCapabilitiesOrIdentityRequest(value: string): boolean {
+  const text = stripOperationalPrelude(normalizeText(value).toLowerCase());
+  if (!text) return false;
+  if (looksLikeKnownFolderInventoryRequest(value) || hasConcreteFilesystemTarget(text)) return false;
+  return /(кто ты|кто такой\s+(?:oscar|оскар)|расскажи о себе|представься|who are you|what are you)/i.test(text)
+    || /(что такое\s+monarch|расскажи (?:про|о)\s+monarch|что за проект\s+monarch|what is monarch)/i.test(text)
+    || /(что ты умеешь|какие у тебя возможност|какие capabilities доступны|какие инструменты доступны|какими инструментами.+можешь|what can you do|available capabilities|available actions)/i.test(text)
+    || /(какие модели доступны|какие модели используешь|какой runtime активен|покажи статус моделей|какая\s+(?:ты|у\s+тебя)\s+модель|model status|available models|which models|what\s+model\s+are\s+you)/i.test(text)
+    // "ты умеешь создавать файлы?" asks what Oscar is, not for a file. The
+    // concrete-target guard above already took any phrasing that names one,
+    // so what is left here has nothing to execute against.
+    // \b is ASCII-only and never fires next to a Cyrillic letter, so the
+    // boundary has to be spelled out.
+    || /(?:^|[^\p{L}])(?:ты\s+)?умеешь(?:[^\p{L}]|$)/iu.test(text)
+    || /\bare you able to\b/i.test(text);
+}
+
 const RU_OPERATION_WORDS = [
   'открой', 'открыть', 'запусти', 'запустить', 'создай', 'создать',
   'проведи', 'провести', 'проверь', 'проверить', 'просканируй', 'просканировать',
@@ -363,11 +410,7 @@ const EN_OPERATION_WORDS = [
 
 const OPERATION_WORDS = [...RU_OPERATION_WORDS, ...EN_OPERATION_WORDS];
 
-/**
- * This detector only decides whether Oscar needs the Agent surface. It never
- * chooses a capability or constructs action arguments; that remains an LLM
- * decision inside Agent Runtime.
- */
+/** Heuristic signal only. It never grants or activates Agent execution. */
 function looksLikeDirectOperationalRequest(value: string): boolean {
   const text = stripOperationalPrelude(normalizeText(value).toLowerCase());
   if (!text || looksLikeExplicitNonActionRequest(text)) return false;
@@ -377,6 +420,14 @@ function looksLikeDirectOperationalRequest(value: string): boolean {
   if (looksLikeOperationalChecklist(text)) return true;
 
   if (looksLikeKnownFolderOrganizationRequest(text)) return true;
+
+  // Listing is an observation of an existing local target. Keep generic
+  // requests for lists (ideas, examples, explanations) on the answer surface.
+  if (looksLikeKnownFolderInventoryRequest(value)) return true;
+  if (hasConcreteFilesystemTarget(text) && /^(?:(?:можешь|сможешь|can\s+you|could\s+you)\s+)?(?:перечисли(?:ть)?|выведи|покажи|посмотри|сравни(?:ть)?|list|show|browse|compare)(?:\s|$)/iu.test(text)) return true;
+  // Live observation is work even without a mutation or filesystem pathname.
+  // Select no screen/window here: the execution owner must resolve/ask for it.
+  if (/^(?:(?:можешь|сможешь|can\s+you|could\s+you)\s+)?(?:посмотри|посмотреть|покажи|проверь|осмотри|inspect|check|look\s+at)\s+(?:на\s+)?(?:(?:мой|мо[её]|текущ\p{L}*|выбранн\p{L}*|my|the|current|selected)\s+)?(?:экран|окно|screen|window)(?:[^\p{L}]|$)/iu.test(text)) return true;
 
   const directQuestion = text.match(
     /(?:^|[.!?]\s*|,\s*)(?:(?:ты\s+)?(?:можешь|сможешь)|could\s+you|can\s+you|would\s+you)\s+([\s\S]+)$/iu,
@@ -410,18 +461,20 @@ function looksLikeDirectOperationalRequest(value: string): boolean {
 function looksLikeExplicitNonActionRequest(value: string): boolean {
   const text = stripOperationalPrelude(normalizeText(value).toLowerCase());
   if (!text) return false;
+  if (looksLikeKnownFolderInventoryRequest(value)) return false;
   if (
-    /^(?:как|почему|что\s+(?:произойд[её]т|будет)|объясни|поясни|расскажи|я\s+не\s+(?:просил|прошу)|how|why|what\s+(?:happens|would|will)|explain|tell\s+me\s+(?:how|what)|i\s+(?:did\s+not|didn't|do\s+not|don't)\s+ask)\b/iu.test(text)
+    /^(?:как|почему|что\s+(?:произойд[её]т|будет)|объясни|поясни|расскажи|я\s+не\s+(?:просил|прошу)|how|why|what\s+(?:happens|would|will)|explain|tell\s+me\s+(?:how|what)|i\s+(?:did\s+not|didn't|do\s+not|don't)\s+ask)(?=\s|[,.:;!?]|$)/iu.test(text)
   ) {
     return true;
   }
-  if (/^(?:не\s+\p{L}+|do\s+not\s+\w+|don't\s+\w+)\b/iu.test(text)) {
+  if (/^(?:не\s+(?:открыва|запуска|создава|дела|выполня|проверя|сканиру|аудиру|дописыва|копиру|переименовыва|перемеща|удаля|очища|став|чита|ища|сохраня|записыва|заменя|закрыва|устанавлива|перечисля|показыва|выводи|просматрива|рассказыва|описыва|называ)\p{L}*|(?:do\s+not|don't)\s+(?:open|launch|start|run|execute|install|create|write|append|make|copy|rename|move|delete|remove|read|inspect|find|set|close|empty|save|replace|list|show|browse|describe))(?=\s|[,.:;!?]|$)/iu.test(text)) {
     return !/(?:,\s*(?:а|но)\s+|;\s*(?:instead|but)\s+).{0,40}\b(?:открой|запусти|создай|open|launch|create|run)\b/iu.test(text);
   }
   return false;
 }
 
 function looksLikeResponseOnlyMaterialReview(text: string): boolean {
+  if (/^(?:проверь|посмотри|изучи|проанализируй|разбери|оцени|review|inspect|analy[sz]e|check)\s+(?:этот|данный|следующий|this|the\s+following)\s+(?:текст|материал|лог|вывод|ответ|сообщение|text|material|log|output|answer|message)\s*:/iu.test(text)) return true;
   if (!text || hasConcreteFilesystemTarget(text) || hasExplicitLocalReviewScope(text)) return false;
   const reviewLead = /^(?:(?:просто|только|пожалуйста|just|only|please)\s+)*(?:проверь|посмотри|просмотри|изучи|проанализируй|разбери|оцени|прочитай|сверь|review|inspect|study|analy[sz]e|check|read|look\s+(?:at|over))(?:\s*,?\s*(?:пожалуйста|please)\s*,?)?\s+/iu;
   const subject = text.replace(reviewLead, '');
@@ -587,6 +640,12 @@ function belongsToSameOperationLexemeFamily(candidate: string, word: string): bo
   return candidate.slice(0, 2) === word.slice(0, 2);
 }
 
+/** A second clause that turns produced content into local work: running it, saving it,
+ * installing it, or doing it in the terminal. Asking for the text of a command is not
+ * one of these — only a verb that acts on the result is. */
+const CONTENT_WITH_FOLLOW_THROUGH =
+  /(?:^|[^\p{L}])(?:запусти(?:ть)?|выполни(?:ть)?|прогони|исполни(?:ть)?|установи(?:ть)?|сохрани(?:ть)?|запиши(?:\s+в)?|примени(?:ть)?|закоммить|задепло)(?:[^\p{L}]|$)|(?:^|[^\p{L}])(?:через|в|во)\s+(?:терминал\p{L}*|консол\p{L}*|командн\p{L}*\s+строк\p{L}*|powershell|cmd|shell)(?:[^\p{L}]|$)|(?:^|[^A-Za-z])(?:run|execute|install|save|apply|deploy|commit)\s+(?:it|them|this|that|the\s+\p{L}{1,32})(?:[^A-Za-z]|$)|(?:^|[^A-Za-z])(?:in|via|using)\s+(?:the\s+)?(?:terminal|shell|console|powershell|cmd)(?:[^A-Za-z]|$)/iu;
+
 function looksLikeContentGenerationWithoutLocalEffect(text: string): boolean {
   const directContentVerb = /^(?:напиши|составь|сгенерируй|придумай|write|draft|compose|generate)(?:\s|$)/iu.test(text);
   const buildContentVerb = /^(?:создай|сделай|собери|реализуй|create|make|build|implement)(?:\s|$)/iu.test(text);
@@ -594,11 +653,21 @@ function looksLikeContentGenerationWithoutLocalEffect(text: string): boolean {
     return false;
   }
   if (hasConcreteFilesystemTarget(text)) return false;
-  if (/(?:\b(?:в|into)\s+(?:проект|репозитор|workspace|файл|file)\b|\b(?:inside|within)\s+(?:the\s+)?(?:project|repo(?:sitory)?|workspace)\b)/iu.test(text)) {
+  // "Напиши скрипт и запусти его" is one request with two halves, and the second
+  // half is work. Producing the text and stopping there answers half of it, so a
+  // follow-through clause takes the whole request off the answer surface.
+  if (CONTENT_WITH_FOLLOW_THROUGH.test(text)) return false;
+  // \b is ASCII-only and never fires next to a Cyrillic letter, so "в проект" has to
+  // spell its boundaries out; written with \b this guard could never match a Russian
+  // placement at all, and the request read as pure answer content.
+  if (/(?:(?:^|[^\p{L}])(?:в|into)\s+(?:проект|репозитор|workspace|файл|file)|(?:^|[^\p{L}])(?:inside|within)\s+(?:the\s+)?(?:project|repo(?:sitory)?|workspace)(?:[^\p{L}]|$))/iu.test(text)) {
     return false;
   }
   if (directContentVerb) {
-    return !/\b(?:проект|репозитор|workspace|project|repo(?:sitory)?)\b/iu.test(text);
+    // Naming a project only means local work when the request also names something
+    // that lives in it. "Придумай имя для проекта" produces a word, not a change.
+    return !(/(?:^|[^\p{L}])(?:проект|репозитор|workspace|project|repo(?:sitory)?)/iu.test(text)
+      && /(?:файл|папк|каталог|код|тест|модул|скрипт|конфиг|коммит|ветк|сборк|(?:^|[^A-Za-z])(?:file|folder|code|test|module|script|config|commit|branch|build)(?:[^A-Za-z]|$))/iu.test(text));
   }
   // `create/make/build` can describe either an answer artifact or a real local
   // mutation. Treat it as answer content only when the requested artifact is
@@ -636,12 +705,29 @@ function isSingleEditApart(left: string, right: string): boolean {
 }
 
 function hasConcreteFilesystemTarget(value: string): boolean {
-  return /(?:[a-z]:[\\/]|\\\\|\/[\w.-]+|(?:диск|drive)\s+[a-z](?::)?\b|[\w ()-]+\.(?:txt|json|md|html|csv|log|tmp|yaml|yml|toml|ini)\b|(?:код|исходник|проект|репозитор|workspace)\p{L}*\s+(?:monarch|текущ\p{L}*|эт\p{L}*|мо\p{L}*)|\b(?:monarch|current|this|my)\s+(?:codebase|source|code|project|repo(?:sitory)?|workspace)\b)/iu.test(value)
-    || hasKnownLocalFilesystemTarget(value);
+  return /(?:[a-z]:[\\/]|\\\\|\/[\w.-]+|(?:диск(?:е|а|у|ом)?|drive)\s+[a-z](?::)?\b|[\w ()-]+\.(?:txt|json|md|html|csv|log|tmp|yaml|yml|toml|ini)\b|(?:код|исходник|проект|репозитор|workspace)\p{L}*\s+(?:monarch|текущ\p{L}*|эт\p{L}*|мо\p{L}*)|\b(?:monarch|current|this|my)\s+(?:codebase|source|code|project|repo(?:sitory)?|workspace)\b)/iu.test(value)
+    || hasKnownLocalFilesystemTarget(value)
+    // Local object references need execution/clarification even without a full
+    // path. Names such as `report` must not turn folder creation into prose.
+    || /^(?:(?:можешь|сможешь|can\s+you|could\s+you)\s+)?(?:создай|создать|сделай|create|make)\s+(?:(?:новую|новый|новое|a|new|a\s+new)\s+)?(?:папк\p{L}*|каталог|folder|directory)(?:[^\p{L}]|$)/iu.test(value.trim())
+    || /(?:выбранн\p{L}*|прикрепл[её]нн\p{L}*|selected|attached)\s+(?:файл\p{L}*|files?)(?:[^\p{L}]|$)/iu.test(value);
 }
 
 function hasKnownLocalFilesystemTarget(value: string): boolean {
   return /(?:\bdownloads?\b|(?:^|[^\p{L}])загрузк(?:и|ах|ам|ами|ок)(?:[^\p{L}]|$)|\bdesktop\b|рабоч\p{L}*\s+стол\p{L}*)/iu.test(value);
+}
+
+/** Local inventory of a known folder, drive or path. How-to and negation stay chat.
+ * This is a target shape, not a Desktop-only script. */
+export function looksLikeKnownFolderInventoryRequest(value: string): boolean {
+  const text = stripOperationalPrelude(normalizeText(value).toLowerCase());
+  if (!text || !hasConcreteFilesystemTarget(text)) return false;
+  if (/^(?:как(?:\s|$)|почему|не\s+|объясни|поясни|how(?:\s+to)?|do\s+not|don't|explain|tell\s+me\s+how)/iu.test(text)) return false;
+  if (/(?:^|\s)(?:как|how(?:\s+to)?)\s+(?:перечисли|list|show|browse)/iu.test(text)) return false;
+  if (/(?:аудит|audit|по\s+размеру|самые\s+больш|largest|biggest)/iu.test(text)) return false;
+  return /(?:^|[^\p{L}])(?:перечисли|покажи|выведи|посмотри|просмотри|расскажи|опиши|скажи|назови|list|show|browse|tell(?:\s+me)?|describe)(?=$|[^\p{L}])/iu.test(text)
+    || /(?:что\s+(?:у\s+меня\s+)?(?:есть\s+)?(?:на|в)|what's\s+(?:on|in)|what\s+is\s+(?:on|in)|what'?s\s+(?:on|in))/iu.test(text)
+    || /(?:какие|какой|какая|какое|which|what)\s+.{0,60}(?:папк|файл|folder|file|директор)/iu.test(text);
 }
 
 function isBareExternalLookup(text: string): boolean {
@@ -665,9 +751,17 @@ function isExternalComparativeResearch(text: string): boolean {
   return ranking.test(text) && externalSubject.test(text);
 }
 
+function hasLiveWeatherSignal(text: string): boolean {
+  // Conversational weather questions often contain neither "weather" nor "forecast".
+  const nonWeather = /треуголь|угол|геометр|кипен|духов|холодиль|комнат|квартир|процессор|видеокарт|температур\w*\s+тел|triangle|angle|oven|fridge|cpu|gpu|body\s+temperature/i;
+  if (nonWeather.test(text)) return false;
+  return /(?:сколько\s+градус|какая\s+температур|тепло\s+ли|холодно\s+ли|ид[её]т\s+ли\s+(?:дождь|снег)).{0,70}(?:\sв\s|\sна\s+улице|\sсейчас|\sсегодня)|(?:сейчас|сегодня|завтра|на\s+улице).{0,70}(?:градус|температур|тепло|холодно|дождь|снег)|\b(?:temperature\s+in|how\s+(?:hot|cold)\s+is\s+it|is\s+it\s+(?:raining|snowing))\b/i.test(text);
+}
+
 function hasFreshnessSignal(text: string): boolean {
   const temporal = /\b(?:latest|current|today|recent|newest|now|this\s+(?:week|month|year))\b|актуальн|свеж|последн|сегодня|сейчас|на\s+данный\s+момент|в\s+этом\s+(?:году|месяце|неделе)/i;
   const definitional = /^\s*(?:что\s+такое|что\s+означает|что\s+значит|объясни|поясни|what\s+is|what\s+does|explain)\b/i;
+  if (hasLiveWeatherSignal(text)) return true;
   if (definitional.test(text) && !temporal.test(text)) return false;
   const directSubject = /\b(?:news|weather|forecast|exchange rate|standings|sports?\s+score)\b|новост|погод|прогноз\s+погод|курс\s+(?:валют|доллар|евро|гривн|рубл)|турнирн\w*\s+таблиц|сч[её]т\s+матч|результат\w*\s+матч/i;
   const liveValue = /\b(?:price|quote)\b.{0,32}\b(?:btc|bitcoin|eth|ethereum|stock|share|product|gas|oil|gold)\b|\b(?:btc|bitcoin|eth|ethereum|stock|share|product|gas|oil|gold)\b.{0,32}\b(?:price|quote)\b|цен[аы].{0,32}(?:btc|bitcoin|биткоин|ethereum|эфир|акци|товар|бензин|нефт|золот)|(?:btc|bitcoin|биткоин|ethereum|эфир|акци|товар|бензин|нефт|золот).{0,32}цен[аы]/i;

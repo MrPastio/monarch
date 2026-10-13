@@ -28,7 +28,7 @@ const OSCAR_CHAT_INPUT_PROPERTIES = {
   max_new_tokens: { type: 'number' },
   temperature: { type: 'number' },
   top_p: { type: 'number' },
-  execution_authority: { type: 'string', enum: ['none', 'agent-controller'] },
+  execution_authority: { type: 'string', enum: ['none'] },
   persistence_owner: { type: 'string', enum: ['backend', 'coordinator'] },
   turn_id: { type: 'string' },
   client_message_id: { type: 'string' },
@@ -89,12 +89,7 @@ export const oscarManifest: MonarchModuleManifest = {
         properties: {},
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['oscar status', 'oscar health', 'статус oscar', 'статус оскар'],
-        keywords: ['oscar', 'status', 'health', 'model', 'memory', 'оскар', 'статус', 'здоровье', 'модель', 'память'],
-        examples: ['show Oscar status', 'покажи статус Oscar'],
-        intentKinds: ['oscar.read', 'oscar.status'],
-      },
+
     },
     {
       id: 'oscar.backend.start',
@@ -107,12 +102,7 @@ export const oscarManifest: MonarchModuleManifest = {
         properties: {},
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['start oscar backend', 'start oscar runtime', 'запусти backend oscar', 'запусти оскар'],
-        keywords: ['oscar', 'backend', 'runtime', 'start', 'launch', 'оскар', 'запусти', 'включи'],
-        examples: ['start Oscar backend', 'запусти backend Oscar'],
-        intentKinds: ['oscar.backend.start', 'runtime.start'],
-      },
+
     },
     {
       id: 'oscar.model.unload',
@@ -125,12 +115,7 @@ export const oscarManifest: MonarchModuleManifest = {
         properties: {},
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['oscar unload', 'unload oscar model', 'stop oscar model', 'free oscar memory'],
-        keywords: ['oscar', 'unload', 'free', 'memory', 'model', 'stop'],
-        examples: ['unload Oscar model', 'free Oscar memory'],
-        intentKinds: ['oscar.model.unload', 'runtime.stop'],
-      },
+
     },
     {
       id: 'oscar.generation.cancel',
@@ -143,12 +128,7 @@ export const oscarManifest: MonarchModuleManifest = {
         properties: {},
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['cancel oscar generation', 'abort oscar response', 'отмени генерацию oscar', 'сбрось очередь oscar'],
-        keywords: ['oscar', 'cancel', 'abort', 'generation', 'queue', 'оскар', 'отмени', 'прерви', 'очередь'],
-        examples: ['cancel Oscar generation', 'отмени генерацию Oscar'],
-        intentKinds: ['oscar.generation.cancel', 'runtime.cancel'],
-      },
+
     },
     {
       id: 'oscar.backend.stop',
@@ -161,12 +141,7 @@ export const oscarManifest: MonarchModuleManifest = {
         properties: {},
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['stop oscar backend', 'stop oscar runtime', 'kill oscar process'],
-        keywords: ['oscar', 'backend', 'runtime', 'process', 'stop', 'kill'],
-        examples: ['stop Oscar backend', 'free all Oscar process memory'],
-        intentKinds: ['oscar.backend.stop', 'runtime.stop'],
-      },
+
     },
     {
       id: 'oscar.chat.local',
@@ -175,12 +150,7 @@ export const oscarManifest: MonarchModuleManifest = {
       description: 'Send a chat request to Oscar-compatible local chat without enabling web search.',
       risk: 'read',
       inputSchema: createOscarChatInputSchema(),
-      routing: {
-        aliases: ['ask oscar', 'oscar chat', 'спроси oscar', 'спроси оскар', 'чат oscar'],
-        keywords: ['oscar', 'chat', 'ask', 'answer', 'assistant', 'gemma', 'оскар', 'чат', 'спроси', 'ответ', 'гемма'],
-        examples: ['ask Oscar to summarize this', 'спроси Oscar без веб поиска', 'ask Oscar in Gemma Mode'],
-        intentKinds: ['oscar.chat', 'chat.local'],
-      },
+
     },
     {
       id: 'oscar.chat.route',
@@ -197,11 +167,7 @@ export const oscarManifest: MonarchModuleManifest = {
       description: 'Send a chat request to Oscar-compatible local chat and stream the response.',
       risk: 'read',
       inputSchema: createOscarChatInputSchema({ webSearch: true }),
-      routing: {
-        aliases: ['stream oscar chat'],
-        keywords: ['oscar', 'stream', 'chat', 'gemma'],
-        intentKinds: ['oscar.chat.stream'],
-      },
+
     },
     {
       id: 'oscar.chat.web',
@@ -210,12 +176,7 @@ export const oscarManifest: MonarchModuleManifest = {
       description: 'Send a chat request to Oscar-compatible local chat with web search enabled.',
       risk: 'network',
       inputSchema: createOscarChatInputSchema(),
-      routing: {
-        aliases: ['ask oscar with web', 'oscar web chat', 'спроси oscar с вебом', 'oscar web search'],
-        keywords: ['oscar', 'chat', 'web', 'search', 'internet', 'оскар', 'чат', 'веб', 'поиск', 'интернет'],
-        examples: ['ask Oscar with web search', 'спроси Oscar с веб поиском'],
-        intentKinds: ['oscar.chat', 'web.search'],
-      },
+
     },
     {
       id: 'oscar.conversations.manage',
@@ -240,6 +201,8 @@ export const oscarManifest: MonarchModuleManifest = {
           provenance: { type: 'object' },
           outcome: { type: 'string' },
           integrity_warning: { type: 'string' },
+          include_archived: { type: 'boolean' },
+          limit: { type: 'number', minimum: 1, maximum: 200 },
           message_limit: { type: 'number', minimum: 1, maximum: 200 },
           before: { type: 'number', minimum: 1 },
           title: { type: 'string' },
@@ -248,12 +211,7 @@ export const oscarManifest: MonarchModuleManifest = {
         required: ['action'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['chat history', 'conversation history', 'история чатов'],
-        keywords: ['oscar', 'history', 'conversation', 'chat', 'история', 'чат', 'диалог'],
-        examples: ['show Oscar chat history', 'покажи историю чатов Oscar'],
-        intentKinds: ['oscar.history', 'conversation.manage'],
-      },
+
     },
     {
       id: 'oscar.memory.manage',
@@ -281,12 +239,24 @@ export const oscarManifest: MonarchModuleManifest = {
         required: ['action'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['manage oscar memory', 'memory settings', 'управление памятью'],
-        keywords: ['oscar', 'memory', 'remember', 'forget', 'память', 'запомни', 'забудь'],
-        examples: ['manage Oscar memories', 'открой управление памятью Oscar'],
-        intentKinds: ['oscar.memory', 'memory.manage'],
+
+    },
+    {
+      id: 'oscar.memory.derived.manage',
+      moduleId: 'oscar',
+      title: 'Manage automatically captured Oscar memory',
+      description: 'List or forget the episodes and topic capsules Memory V4 captured on its own from past chat turns.',
+      risk: 'none',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['list', 'forget_episode', 'forget_capsule', 'forget_all'] },
+          id: { type: 'string' },
+        },
+        required: ['action'],
+        additionalProperties: false,
       },
+
     },
     {
       id: 'oscar.memory.search',
@@ -303,12 +273,7 @@ export const oscarManifest: MonarchModuleManifest = {
         required: ['query'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['search oscar memory', 'oscar memory', 'найди в памяти oscar', 'память оскар'],
-        keywords: ['oscar', 'memory', 'search', 'recall', 'оскар', 'память', 'найди', 'вспомни'],
-        examples: ['search Oscar memory for Monarch', 'найди в памяти Oscar Monarch'],
-        intentKinds: ['oscar.memory', 'memory.search'],
-      },
+
     },
     {
       id: 'oscar.search.ingest',
@@ -326,12 +291,7 @@ export const oscarManifest: MonarchModuleManifest = {
         required: ['query'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['oscar search', 'oscar web ingest', 'поиск oscar', 'веб поиск оскар'],
-        keywords: ['oscar', 'web', 'search', 'ingest', 'internet', 'оскар', 'веб', 'поиск', 'индексация'],
-        examples: ['Oscar search latest local AI news', 'запусти поиск Oscar'],
-        intentKinds: ['oscar.search', 'web.search'],
-      },
+
     },
   ],
 };

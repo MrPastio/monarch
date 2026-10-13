@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import json
 import subprocess
 from typing import Any
 
 from monarch_security.events import SecurityEvent
+from monarch_security.observation import ObservedSensor, ObservationUnavailable, parse_query_json
 
 
-class DeviceSensor:
+class DeviceSensor(ObservedSensor):
     def __init__(
         self,
         include_existing: bool = False,
@@ -23,11 +23,12 @@ class DeviceSensor:
         return set(self._seen)
 
     def snapshot(self) -> list[dict[str, Any]]:
+        self.begin_observation()
         self.last_error = None
         command = (
             "$OutputEncoding = [Console]::OutputEncoding = "
             "[System.Text.UTF8Encoding]::new($false);\n"
-            "Get-PnpDevice -PresentOnly | "
+            "$ErrorActionPreference = 'Stop'; Get-PnpDevice -PresentOnly -ErrorAction Stop | "
             "Select-Object Class,FriendlyName,InstanceId,Status | "
             "ConvertTo-Json -Compress"
         )
@@ -59,22 +60,24 @@ class DeviceSensor:
             return []
 
         try:
-            parsed = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            self.last_error = f"Get-PnpDevice returned invalid JSON: {exc}"
-            return []
+            parsed = parse_query_json(completed.stdout)
+        except ObservationUnavailable:
+            self.last_error = 'device-query-invalid'
+            raise
         if isinstance(parsed, dict):
             parsed = [parsed]
         if not isinstance(parsed, list):
-            return []
+            raise ObservationUnavailable('device-query-invalid')
 
         devices: list[dict[str, Any]] = []
         for item in parsed:
             if not isinstance(item, dict):
-                continue
-            instance_id = str(item.get("InstanceId") or "")
-            if not instance_id:
-                continue
+                raise ObservationUnavailable('device-query-invalid')
+            instance_id = item.get('InstanceId')
+            if not isinstance(instance_id, str) or not instance_id.strip():
+                raise ObservationUnavailable('device-query-invalid')
+            if any(not isinstance(item.get(field), str) or not item[field] for field in ('Class', 'Status')):
+                self.limit_observation('device-details-unavailable')
             devices.append(
                 {
                     "class": item.get("Class"),
@@ -87,6 +90,8 @@ class DeviceSensor:
 
     def poll(self) -> list[SecurityEvent]:
         snapshot = self.snapshot()
+        if self.last_error:
+            raise ObservationUnavailable('device-query-unavailable')
         current = {str(item["instance_id"]) for item in snapshot}
         new_items = [item for item in snapshot if str(item["instance_id"]) not in self._seen]
         self._seen = current

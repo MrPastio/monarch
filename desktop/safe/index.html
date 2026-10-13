@@ -7,6 +7,8 @@
     <title>Monarch Safe</title>
     <link rel="stylesheet" href="./safe.css">
     <script type="module" src="./safe.js"></script>
+    <link rel="stylesheet" href="../../src/ui/public/ui-controls.css">
+    <link rel="stylesheet" href="./safe-pp.css">
   </head>
   <body>
     <main id="safe-app" aria-live="polite">
@@ -99,15 +101,22 @@
 
         <div class="safe-workspace">
           <header class="safe-toolbar">
-            <label class="search-control"><span class="sr-only">Поиск</span><input id="safe-search" type="search" placeholder="Поиск" autocomplete="off"></label>
-            <label><span class="sr-only">Тип</span><select id="type-filter"><option value="all">Все типы</option><option value="text">Текст и код</option><option value="image">Изображения</option><option value="media">Аудио и видео</option><option value="pdf">PDF</option><option value="archive">Архивы Safe</option><option value="binary">Другие файлы</option></select></label>
-            <label><span class="sr-only">Сортировка</span><select id="sort-order"><option value="updated-desc">Сначала новые</option><option value="name-asc">По имени</option><option value="size-desc">По размеру</option><option value="type-asc">По типу</option></select></label>
-            <span class="toolbar-spacer"></span>
+            <div class="workspace-heading"><div><h1 id="workspace-title">Все файлы</h1><span id="file-results" role="status"></span></div><div class="creation-actions">
             <button id="new-folder" type="button">Новая папка</button>
             <button id="new-file" type="button">Новый файл</button>
-            <button id="import-files" type="button">Импорт</button>
+            <button id="import-files" class="primary-action compact" type="button">Импорт</button>
+            </div></div>
+            <div class="file-filters">
+            <label class="search-control"><span class="sr-only">Поиск файлов по имени</span><input id="safe-search" type="search" placeholder="Найти файл…" autocomplete="off"></label>
+            <label><span class="sr-only">Тип</span><select id="type-filter"><option value="all">Все типы</option><option value="text">Текст и код</option><option value="image">Изображения</option><option value="media">Аудио и видео</option><option value="pdf">PDF</option><option value="archive">Архивы Safe</option><option value="binary">Другие файлы</option></select></label>
+            <label><span class="sr-only">Сортировка</span><select id="sort-order"><option value="updated-desc">Сначала новые</option><option value="name-asc">По имени</option><option value="size-desc">По размеру</option><option value="type-asc">По типу</option></select></label>
+            <button id="reset-filters" type="button" hidden>Сбросить фильтры</button>
+            </div>
+            <div id="selection-bar" class="selection-bar" hidden><span id="selection-summary" role="status"></span><button id="clear-selection" type="button">Снять выбор</button><span class="toolbar-spacer"></span>
+            <button id="export-selected" type="button" disabled>Экспорт</button>
             <button id="archive-files" type="button">Сжать</button>
             <button id="delete-selected" class="danger-button compact-danger" type="button" disabled>Удалить выбранное</button>
+            </div>
             <input id="file-input" type="file" multiple hidden>
           </header>
 
@@ -125,7 +134,7 @@
             <aside class="editor-region" id="editor-region">
               <div id="editor-empty" class="editor-empty"><strong>Выбери файл</strong><span>Просмотр и редактирование работают внутри изолированного окна Safe.</span></div>
               <div id="editor-active" hidden>
-                <header class="editor-header"><span id="editor-file-name">—</span><button id="delete-file" type="button" class="danger-button">Удалить</button></header>
+                <header class="editor-header"><button id="close-editor" type="button" aria-label="Закрыть файл и вернуться к списку" title="Вернуться к списку">←</button><span id="editor-file-name">—</span><button id="export-file" type="button">Экспортировать</button><button id="delete-file" type="button" class="danger-button">Удалить</button></header>
                 <div class="editor-tabs" role="tablist"><button type="button" data-editor-tab="edit" aria-selected="true">Редактор</button><button type="button" data-editor-tab="preview" aria-selected="false">Просмотр</button><button id="extract-archive" type="button" hidden>Распаковать</button><button id="save-file" class="save-button" type="button">Сохранить</button></div>
                 <div id="edit-pane" class="edit-pane"><textarea id="text-editor" spellcheck="false"></textarea><textarea id="hex-editor" spellcheck="false" hidden></textarea><div id="binary-summary" class="binary-summary" hidden></div></div>
                 <div id="preview-pane" class="preview-pane" hidden></div>
@@ -152,6 +161,14 @@
     <dialog id="confirm-dialog">
       <form method="dialog" id="confirm-form"><h2 id="confirm-title">Подтверждение</h2><p id="confirm-copy"></p><menu><button value="cancel">Отмена</button><button id="confirm-action" value="default" class="danger-button">Удалить</button></menu></form>
     </dialog>
+    <dialog id="export-dialog" class="export-dialog">
+      <form method="dialog" id="export-form">
+        <header><h2>Экспорт из Safe</h2><button id="export-close" type="button" aria-label="Закрыть">×</button></header>
+        <p id="export-description"></p>
+        <p class="export-warning">Экспортированная копия будет расшифрована. Выбери место хранения, которому доверяешь.</p>
+        <menu><button value="cancel">Отмена</button><button id="export-confirm" value="default" class="primary-action compact">Выбрать место</button></menu>
+      </form>
+    </dialog>
     <dialog id="safe-settings-dialog" class="safe-settings-dialog">
       <form method="dialog" id="safe-settings-form">
         <header><div><p class="dialog-kicker">Monarch Safe</p><h2>Настройки безопасности</h2></div><button id="safe-settings-close" type="button" aria-label="Закрыть">×</button></header>
@@ -165,6 +182,7 @@
         <label class="policy-toggle"><input id="safe-clear-clipboard" type="checkbox"><span><strong>Очищать буфер при блокировке</strong><small>Полезно, если копирование из Safe разрешено.</small></span></label>
         <section id="safe-policy-assessment" class="safe-policy-assessment" data-level="strong"><strong>Сильный профиль</strong><ul id="safe-policy-warnings"></ul></section>
         <label class="settings-pin"><span>Текущий PIN для подтверждения</span><input id="safe-settings-pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="12" autocomplete="off" required></label>
+        <small id="settings-pin-warning">Ошибки PIN здесь и при входе используют общий лимит. Третья ошибка уничтожает ключи Safe.</small>
         <p id="safe-settings-error" class="auth-error" role="alert"></p>
         <menu><button id="safe-settings-cancel" type="button">Отмена</button><button class="primary-action compact" type="submit">Подтвердить и сохранить</button></menu>
       </form>

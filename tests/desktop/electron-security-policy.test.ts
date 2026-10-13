@@ -34,7 +34,8 @@ describe('Electron security policy', () => {
     expect(shouldAllowDesktopPermission(base)).toBe(true);
     expect(shouldAllowDesktopPermission({ ...base, mediaTypes: ['video'] })).toBe(false);
     expect(shouldAllowDesktopPermission({ ...base, mediaTypes: ['audio', 'video'] })).toBe(false);
-    expect(shouldAllowDesktopPermission({ ...base, permission: 'geolocation' })).toBe(false);
+    expect(shouldAllowDesktopPermission({ ...base, permission: 'geolocation' })).toBe(true);
+    expect(shouldAllowDesktopPermission({ ...base, permission: 'geolocation', isMainFrame: false })).toBe(false);
     expect(shouldAllowDesktopPermission({ ...base, requestingUrl: 'https://example.com/' })).toBe(false);
     expect(shouldAllowDesktopPermission({ ...base, isMainFrame: false })).toBe(false);
     expect(shouldAllowDesktopPermission({ ...base, isMainWebContents: false })).toBe(false);

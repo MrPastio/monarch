@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from oscar_agent.config import Settings
+from oscar_agent.context_settings import ContextSettingsStore
 from oscar_agent.workspace import WorkspaceService
 
 
@@ -363,3 +364,117 @@ def test_workspace_batch_api_stop_on_error(monkeypatch, tmp_path: Path) -> None:
     assert len(body["results"]) == 1
     assert body["results"][0]["error"] == "kernel-execution-required"
     assert not (workspace.root / "artifacts" / "generated" / "after.md").exists()
+
+
+def test_memory_episodes_api_lists_and_forgets(monkeypatch, tmp_path: Path) -> None:
+    import oscar_agent.main as main
+    from oscar_agent.memory import MemoryStore
+    from oscar_agent.memory_v4 import MemoryV4Service
+
+    settings = make_settings(tmp_path)
+    memory = MemoryStore(settings)
+    ContextSettingsStore(settings)  # creates memory_items with its scope columns
+    memory_v4 = MemoryV4Service(settings)
+    monkeypatch.setattr(main, "memory", memory)
+    monkeypatch.setattr(main, "memory_v4", memory_v4)
+    monkeypatch.setattr(main.settings, "disable_api_token", True)
+
+    memory.append_conversation_message(
+        "api-chat", "user", "Расскажи про ультрамариновый режим",
+        client_message_id="user_1", turn_id="turn-1",
+    )
+    memory.append_conversation_message(
+        "api-chat", "assistant", "Ультрамариновый режим включается в настройках.",
+        client_message_id="assistant_1", turn_id="turn-1", outcome="answered",
+    )
+    memory_v4.index_turn(conversation_id="api-chat", turn_id="turn-1", source="desktop")
+
+    client = TestClient(main.app)
+    try:
+        listed = client.get("/api/memory/episodes", params={"scopeType": "chat"})
+        assert listed.status_code == 200
+        episodes = listed.json()["episodes"]
+        assert len(episodes) == 1
+        episode_id = episodes[0]["id"]
+        assert episodes[0]["conversationId"] == "api-chat"
+
+        missing = client.delete(f"/api/memory/episodes/{episode_id}-missing", params={"scopeType": "chat"})
+        assert missing.status_code == 404
+
+        forgotten = client.delete(f"/api/memory/episodes/{episode_id}", params={"scopeType": "chat"})
+        assert forgotten.status_code == 200
+        assert forgotten.json() == {"ok": True, "deleted": episode_id}
+
+        after = client.get("/api/memory/episodes", params={"scopeType": "chat"})
+        assert after.json()["episodes"] == []
+
+        # Deleting the chat itself must not resurrect anything through recall.
+        assert memory.delete_conversation("api-chat") is True
+    finally:
+        memory_v4.close()
+
+
+def test_memory_episodes_api_rejects_project_id_on_chat_scope(monkeypatch, tmp_path: Path) -> None:
+    import oscar_agent.main as main
+    from oscar_agent.memory import MemoryStore
+    from oscar_agent.memory_v4 import MemoryV4Service
+
+    settings = make_settings(tmp_path)
+    MemoryStore(settings)  # base memory_items table before ContextSettingsStore alters it
+    ContextSettingsStore(settings)
+    memory_v4 = MemoryV4Service(settings)
+    monkeypatch.setattr(main, "memory_v4", memory_v4)
+    monkeypatch.setattr(main.settings, "disable_api_token", True)
+
+    client = TestClient(main.app)
+    try:
+        response = client.get(
+            "/api/memory/episodes", params={"scopeType": "chat", "projectId": "should-not-be-allowed"}
+        )
+        assert response.status_code == 400
+    finally:
+        memory_v4.close()
+
+
+def test_memory_episodes_api_bulk_forget_scoped_to_one_scope(monkeypatch, tmp_path: Path) -> None:
+    import oscar_agent.main as main
+    from oscar_agent.memory import MemoryStore
+    from oscar_agent.memory_v4 import MemoryV4Service
+
+    settings = make_settings(tmp_path)
+    memory = MemoryStore(settings)
+    ContextSettingsStore(settings)  # creates memory_items with its scope columns
+    memory_v4 = MemoryV4Service(settings)
+    monkeypatch.setattr(main, "memory", memory)
+    monkeypatch.setattr(main, "memory_v4", memory_v4)
+    monkeypatch.setattr(main.settings, "disable_api_token", True)
+
+    memory.append_conversation_message(
+        "bulk-chat", "user", "Расскажи про облака",
+        client_message_id="user_1", turn_id="turn-1",
+    )
+    memory.append_conversation_message(
+        "bulk-chat", "assistant", "Облака бывают кучевые.",
+        client_message_id="assistant_1", turn_id="turn-1", outcome="answered",
+    )
+    memory_v4.index_turn(conversation_id="bulk-chat", turn_id="turn-1", source="desktop")
+    memory_v4.index_coder_summary(
+        project_id="project-alpha", run_id="run-1", project_name="Alpha",
+        user_text="Собери ProjectNeedle", assistant_text="ProjectNeedle собран.",
+        structured_summary={"status": "ok"},
+    )
+
+    client = TestClient(main.app)
+    try:
+        response = client.delete("/api/memory/episodes", params={"scopeType": "chat"})
+        assert response.status_code == 200
+        assert response.json() == {"ok": True, "episodes": 1, "capsules": 0}
+
+        chat_after = client.get("/api/memory/episodes", params={"scopeType": "chat"})
+        assert chat_after.json()["episodes"] == []
+        coder_after = client.get(
+            "/api/memory/episodes", params={"scopeType": "coder-project", "projectId": "project-alpha"}
+        )
+        assert len(coder_after.json()["episodes"]) == 1
+    finally:
+        memory_v4.close()

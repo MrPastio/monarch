@@ -38,6 +38,7 @@ class EmergencyRecord:
     native_lock_succeeded: bool
     containment: dict[str, Any]
     reason: str
+    test_mode: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
@@ -59,6 +60,7 @@ class EmergencyRecord:
             native_lock_succeeded=bool(payload.get("native_lock_succeeded", False)),
             containment=dict(payload.get("containment") or {}),
             reason=str(payload.get("reason") or ""),
+            test_mode=bool(payload.get("test_mode", False)),
         )
 
 
@@ -67,11 +69,14 @@ class EmergencyStore:
         self.path = path.resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._key = get_or_create_key(integrity_key_path)
-        self._latest, self._last_hash = self._read_all()
+        self._refresh_from_disk()
 
-    def append(self, item: EmergencyRecord) -> None:
+    def append(self, item: EmergencyRecord, *, expected: EmergencyRecord | None = None) -> bool:
         with FileLock(self.path):
             latest, previous = self._read_all()
+            if expected is not None and latest.get(item.emergency_id) != expected:
+                self._latest, self._last_hash = latest, previous
+                return False
             record: dict[str, Any] = {
                 "kind": "security.emergency",
                 "timestamp": utc_now(),
@@ -88,17 +93,27 @@ class EmergencyStore:
             latest[item.emergency_id] = item
             self._latest = latest
             self._last_hash = record[INTEGRITY_FIELD]["record_hash"]
+            return True
 
     def latest_active(self) -> EmergencyRecord | None:
+        self._refresh_from_disk()
         active = [item for item in self._latest.values() if item.state in ACTIVE_EMERGENCY_STATES]
         return max(active, key=lambda item: item.updated_at) if active else None
 
     def list_latest(self, limit: int = 50) -> list[EmergencyRecord]:
+        self._refresh_from_disk()
         return sorted(self._latest.values(), key=lambda item: item.updated_at, reverse=True)[:max(1, min(500, limit))]
 
     def latest_for_incident(self, incident_id: str) -> EmergencyRecord | None:
+        self._refresh_from_disk()
         items = [item for item in self._latest.values() if item.incident_id == incident_id]
         return max(items, key=lambda item: item.updated_at) if items else None
+
+    def _refresh_from_disk(self) -> None:
+        # CLI decisions and the long-lived protector share the signed journal.
+        # Readers use the writer lock to avoid accepting a partial append.
+        with FileLock(self.path):
+            self._latest, self._last_hash = self._read_all()
 
     def _read_all(self) -> tuple[dict[str, EmergencyRecord], str]:
         if not self.path.exists():
@@ -149,8 +164,10 @@ class EmergencyManager:
         self.now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self.recovery_seconds = max(120, min(1800, int(recovery_seconds)))
 
-    def activate(self, incident_id: str) -> EmergencyRecord:
+    def activate(self, incident_id: str, *, test_mode: bool = False) -> EmergencyRecord:
         incident = self._eligible_incident(incident_id)
+        if test_mode and (not incident.evidence or any(item.source != "emergency_test" for item in incident.evidence)):
+            raise EmergencyError("Manual test requires only labelled synthetic evidence")
         existing = self.status()
         if existing and existing.state in ACTIVE_EMERGENCY_STATES:
             if existing.incident_id == incident_id:
@@ -178,12 +195,25 @@ class EmergencyManager:
             native_lock_succeeded=False,
             containment={},
             reason="Corroborated emergency incident entered response state",
+            test_mode=test_mode,
         )
         self.store.append(activating)
         try:
             containment = self.contain_fn(incident.incident_id)
         except Exception as exc:
             containment = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        if test_mode and (containment.get("ok") is not True or containment.get("executed") is not True):
+            failed = EmergencyRecord(**{
+                **activating.__dict__,
+                "state": "failed",
+                "updated_at": utc_now(),
+                "native_lock_requested": False,
+                "containment": _bounded_result(containment),
+                "reason": "Manual test stopped: network isolation was not applied",
+            })
+            if not self.store.append(failed, expected=activating):
+                raise EmergencyError("Emergency response changed during activation")
+            return failed
         if pin_configured:
             try:
                 lock_succeeded = bool(self.lock_fn())
@@ -209,7 +239,8 @@ class EmergencyManager:
                 ),
             }
         )
-        self.store.append(awaiting)
+        if not self.store.append(awaiting, expected=activating):
+            raise EmergencyError("Emergency response changed during activation")
         return awaiting
 
     def status(self) -> EmergencyRecord | None:
@@ -224,7 +255,8 @@ class EmergencyManager:
                 "updated_at": utc_now(),
                 "reason": "Emergency recovery TTL expired; fail-open release applied",
             })
-            self.store.append(expired)
+            if not self.store.append(expired, expected=active):
+                return self.status()
             return expired
         return active
 
@@ -259,12 +291,12 @@ class EmergencyManager:
             "updated_at": now.isoformat(),
             "containment": _bounded_result(result),
             "reason": (
-                "User took control; emergency containment released"
-                if decision == "release"
-                else "User confirmed continued time-bounded Security containment"
+                ("Manual Security PIN test completed" if current.test_mode else "User took control; emergency containment released")
+                if decision == "release" else "User confirmed continued time-bounded Security containment"
             ),
         })
-        self.store.append(updated)
+        if not self.store.append(updated, expected=current):
+            raise EmergencyError("Emergency response changed during the user decision; refresh its status")
         return updated
 
     def summary(self) -> dict[str, Any]:
@@ -282,6 +314,7 @@ class EmergencyManager:
             "risk_score": current.risk_score,
             "expires_at": current.expires_at,
             "native_lock_succeeded": current.native_lock_succeeded,
+            "test_mode": current.test_mode,
             "containment": current.containment,
             "reason": current.reason,
         }

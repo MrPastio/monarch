@@ -1,0 +1,12 @@
+{
+  "profile": "astra-v3-owned-live-smollm2-cpu-only.v1",
+  "purpose": "Isolated real-tokenizer/inference smoke, NOT a product-model quality benchmark",
+  "repository": "bartowski/SmolLM2-135M-Instruct-GGUF",
+  "revision": "09816acd5d99df7be770d85ea30822623dab342c",
+  "file": "SmolLM2-135M-Instruct-Q4_K_M.gguf",
+  "sha256": "2e8040ceae7815abe0dcb3540b9995eaa1fa0d2ca9e797d0a635ae4433c68c2d",
+  "source": "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/blob/09816acd5d99df7be770d85ea30822623dab342c/SmolLM2-135M-Instruct-Q4_K_M.gguf",
+  "baseModel": "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct",
+  "execution": { "gpuLayers": 0, "contextTokens": 4096, "threads": 4, "maxOutputTokens": 256 },
+  "scope": "Only exact marked D-backed .test-tmp child; no product/user/Safe/model-store reads; network only public pinned asset download before inference"
+}

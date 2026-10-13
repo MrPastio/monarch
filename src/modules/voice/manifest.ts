@@ -23,12 +23,7 @@ export const voiceManifest: MonarchModuleManifest = {
       title: 'Voice status',
       description: 'Show configured voice bridge commands and running state.',
       risk: 'read',
-      routing: {
-        aliases: ['voice status', 'speech status'],
-        keywords: ['voice', 'speech', 'stt', 'tts', 'microphone', 'status'],
-        examples: ['show voice status'],
-        intentKinds: ['voice.read'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {},
@@ -41,12 +36,7 @@ export const voiceManifest: MonarchModuleManifest = {
       title: 'Prepare local voice transcription',
       description: 'Warm the local streaming STT transport without loading a separate conversational model.',
       risk: 'read',
-      routing: {
-        aliases: ['prepare voice transcription', 'warm voice stt'],
-        keywords: ['voice', 'prepare', 'warm', 'stt', 'local'],
-        examples: ['prepare local voice transcription'],
-        intentKinds: ['voice.read'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {},
@@ -59,12 +49,7 @@ export const voiceManifest: MonarchModuleManifest = {
       title: 'Transcribe recorded audio',
       description: 'Transcribe a short recorded audio clip through a configured local one-shot STT command.',
       risk: 'read',
-      routing: {
-        aliases: ['transcribe audio', 'voice input', 'speech to text'],
-        keywords: ['voice', 'speech', 'stt', 'microphone', 'transcribe', 'dictation'],
-        examples: ['transcribe this voice input'],
-        intentKinds: ['voice.read'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -83,12 +68,7 @@ export const voiceManifest: MonarchModuleManifest = {
       title: 'Start direct PCM transcription',
       description: 'Open a bounded local streaming STT session without persisting raw audio.',
       risk: 'read',
-      routing: {
-        aliases: ['start streaming transcription'],
-        keywords: ['voice', 'stt', 'pcm', 'stream'],
-        examples: ['start local PCM transcription'],
-        intentKinds: ['voice.read'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -105,12 +85,7 @@ export const voiceManifest: MonarchModuleManifest = {
       title: 'Push direct PCM audio',
       description: 'Decode one ordered, bounded PCM16 batch in the resident local STT worker.',
       risk: 'read',
-      routing: {
-        aliases: ['push streaming audio'],
-        keywords: ['voice', 'stt', 'pcm', 'batch'],
-        examples: ['decode next PCM batch'],
-        intentKinds: ['voice.read'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -128,12 +103,7 @@ export const voiceManifest: MonarchModuleManifest = {
       title: 'Finish direct PCM transcription',
       description: 'Finalize the resident local STT stream and return its transcript and latency telemetry.',
       risk: 'read',
-      routing: {
-        aliases: ['finish streaming transcription'],
-        keywords: ['voice', 'stt', 'pcm', 'final'],
-        examples: ['finish local PCM transcription'],
-        intentKinds: ['voice.read'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -150,12 +120,7 @@ export const voiceManifest: MonarchModuleManifest = {
       title: 'Cancel direct PCM transcription',
       description: 'Release a local streaming STT session without retaining raw PCM or a transcript.',
       risk: 'read',
-      routing: {
-        aliases: ['cancel streaming transcription'],
-        keywords: ['voice', 'stt', 'pcm', 'cancel'],
-        examples: ['cancel local PCM transcription'],
-        intentKinds: ['voice.read'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -171,12 +136,7 @@ export const voiceManifest: MonarchModuleManifest = {
       title: 'Start voice bridge',
       description: 'Start a configured STT or TTS bridge process.',
       risk: 'execute',
-      routing: {
-        aliases: ['start voice bridge', 'start stt', 'start tts'],
-        keywords: ['start', 'voice', 'bridge', 'stt', 'tts'],
-        examples: ['start stt bridge'],
-        intentKinds: ['voice.start'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -192,12 +152,7 @@ export const voiceManifest: MonarchModuleManifest = {
       title: 'Stop voice bridge',
       description: 'Stop a managed STT or TTS bridge process.',
       risk: 'execute',
-      routing: {
-        aliases: ['stop voice bridge', 'stop stt', 'stop tts'],
-        keywords: ['stop', 'voice', 'bridge', 'stt', 'tts'],
-        examples: ['stop stt bridge'],
-        intentKinds: ['voice.stop'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {

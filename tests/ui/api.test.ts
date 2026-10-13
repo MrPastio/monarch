@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  controlTelegram,
   executeConfirmedCapabilityStream,
   executeCapabilityStream,
+  executeSimplifiedVoiceCommand,
   executeVoiceAgentTask,
   executeVoiceModeAction,
   executeVoiceModeDeviceAction,
@@ -12,6 +14,7 @@ import {
   fetchOscarAttachment,
   fetchOscarRequestDisposition,
   fetchOscarTurnByClientRequestId,
+  fetchAgentTask,
   fetchCoderRuns,
   formatMonarchHttpError,
   installModels,
@@ -19,6 +22,8 @@ import {
   acknowledgeModelOnboardingWelcome,
   prepareVoiceTranscription,
   resolveAgentTaskApproval,
+  repeatAgentTask,
+  submitCoderReply,
   submitAgentActionJob,
   streamOscarTurn,
   streamAgentTask,
@@ -99,6 +104,34 @@ function stubVoiceAgentOutcome(outcome: 'answered' | 'answered:source-grounded',
 }
 
 describe('static UI API errors', () => {
+  it('preserves quoted ordinary file content and desktop identity in the actual UI transport', async () => {
+    vi.stubGlobal('window', { monarchDesktop: { getMutationAttestation: async () => 'literal-desktop' } });
+    const text = 'Создай файл "Новый отчёт.txt" с текстом: "  @Computer Use\r\n🟠  "';
+    const transport = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      expect(body.text).toBe(text);
+      expect(body).not.toHaveProperty('astra');
+      expect(body.clientRequestId).toBe('literal_request');
+      expect(new Headers(init.headers).get('x-monarch-desktop-attestation')).toBe('literal-desktop');
+      return new Response(JSON.stringify({ version: 1, turn: { id: 'literal_turn' } }), {
+        status: 202, headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', transport);
+    await createOscarTurn({ conversationId: 'literal_conversation', text }, {
+      clientRequestId: 'literal_request', inputMessageId: 'literal_message',
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it('attests read-only Agent task requests for the private Desktop runtime', async () => {
+    vi.stubGlobal('window', { monarchDesktop: { getMutationAttestation: vi.fn(async () => 'desktop-task-read') } });
+    const request = vi.fn(async () => new Response(JSON.stringify({ ok: true, checkpoint: {} }), { status: 200 }));
+    vi.stubGlobal('fetch', request);
+    await fetchAgentTask('private_task');
+    expect(request).toHaveBeenCalledWith('/api/agent/tasks/private_task', expect.objectContaining({
+      method: 'GET', headers: expect.objectContaining({ 'X-Monarch-Desktop-Attestation': 'desktop-task-read' }),
+    }));
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -144,6 +177,8 @@ describe('static UI API errors', () => {
 
   it('keeps actionable client-side validation messages', () => {
     expect(formatMonarchHttpError(400, { message: 'Intent text is required.' })).toBe('Intent text is required.');
+    expect(formatMonarchHttpError(401, { error: 'invalid-api-token', message: 'Sensitive Monarch API reads require a valid UI session token.' }))
+      .toContain('перезапускает');
     expect(formatMonarchHttpError(401)).toContain('Нет доступа');
     expect(formatMonarchHttpError(403, {
       error: 'turn-source-mismatch',
@@ -312,6 +347,29 @@ describe('static UI API errors', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/coder/runs', expect.objectContaining({ method: 'GET' }));
   });
 
+  it('sends only the exact pending Coder question binding and literal reply text', async () => {
+    vi.stubGlobal('window', {
+      monarchDesktop: { getMutationAttestation: vi.fn(async () => 'desktop-attestation-coder-reply') },
+    });
+    const reply = '  Используй result.md\nи продолжай.  ';
+    const digest = `sha256:${'d'.repeat(64)}`;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe('/api/coder/runs/coder_run_1/reply');
+      expect(init?.method).toBe('POST');
+      expect(new Headers(init?.headers).get('x-monarch-desktop-attestation')).toBe('desktop-attestation-coder-reply');
+      expect(JSON.parse(String(init?.body))).toEqual({
+        questionId: 'agent_question_1', questionDigest: digest, text: reply,
+      });
+      return new Response(JSON.stringify({ ok: true, run: { id: 'coder_run_1' } }), {
+        status: 202, headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(submitCoderReply('coder_run_1', 'agent_question_1', digest, reply))
+      .resolves.toMatchObject({ run: { id: 'coder_run_1' } });
+  });
+
   it('reads a persisted image through its exact conversation binding', async () => {
     vi.stubGlobal('window', {
       monarchDesktop: { getMutationAttestation: vi.fn(async () => 'desktop-attestation-attachment') },
@@ -452,6 +510,26 @@ describe('static UI API errors', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('sends Telegram admin actions only through the dedicated attested control route', async () => {
+    vi.stubGlobal('window', {
+      monarchDesktop: { getMutationAttestation: vi.fn(async () => 'telegram-desktop-attestation') },
+    });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      result: { ok: true, summary: 'paused', output: { remotePaused: true } },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(controlTelegram('pause')).resolves.toMatchObject({
+      ok: true,
+      output: { remotePaused: true },
+    });
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(fetchMock).toHaveBeenCalledWith('/api/telegram/control', expect.objectContaining({ method: 'POST' }));
+    expect(JSON.parse(String(request.body))).toEqual({ schemaVersion: 1, action: 'pause' });
+    expect(new Headers(request.headers).get('X-Monarch-Desktop-Attestation')).toBe('telegram-desktop-attestation');
+  });
+
   it('routes recorded audio to the local voice transcription capability', async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,
@@ -524,6 +602,38 @@ describe('static UI API errors', () => {
       input: {},
       requestedBy: 'ui:voice-mode',
       includeState: false,
+    });
+  });
+
+  it('sends Simplified Voice to its attested low-latency endpoint', async () => {
+    vi.stubGlobal('window', {
+      monarchDesktop: { getMutationAttestation: vi.fn(async () => 'desktop-attestation-fixture') },
+    });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        result: { schemaVersion: 1, ok: true, mode: 'simplified', status: 'completed', text: 'Сейчас 12:00.' },
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(executeSimplifiedVoiceCommand('Оскар, который час', undefined, {
+      deviceLocation: { latitude: 50.45, longitude: 30.52, accuracyMeters: 120 },
+    })).resolves.toMatchObject({
+      mode: 'simplified',
+      status: 'completed',
+      text: 'Сейчас 12:00.',
+    });
+    expect(fetchMock).toHaveBeenCalledWith('/api/voice/simplified', expect.objectContaining({
+      method: 'POST',
+      headers: expect.objectContaining({ 'X-Monarch-Desktop-Attestation': 'desktop-attestation-fixture' }),
+    }));
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      text: 'Оскар, который час',
+      deviceLocation: { latitude: 50.45, longitude: 30.52, accuracyMeters: 120 },
     });
   });
 
@@ -666,6 +776,7 @@ describe('static UI API errors', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const opening = streamAgentTask('task-1', 4, { signal: controller.signal });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
     controller.abort();
 
     await expect(opening).rejects.toMatchObject({ name: 'AbortError' });
@@ -689,6 +800,7 @@ describe('static UI API errors', () => {
 
     await expect(createAgentTask('Открой калькулятор', {
       source: 'desktop',
+      model: 'qwen3-coder-30b-a3b-instruct',
       autoStart: false,
     })).resolves.toMatchObject({ task: { id: 'task-attested' } });
 
@@ -698,6 +810,17 @@ describe('static UI API errors', () => {
       'X-Monarch-Desktop-Attestation': 'desktop-attestation-fixture',
     });
     expect(String(init.body)).not.toContain('desktop-attestation-fixture');
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      model: 'qwen3-coder-30b-a3b-instruct',
+      autoStart: false,
+    });
+
+    await repeatAgentTask('task-attested', { model: 'max-gpt-oss-120b' });
+    const repeatInit = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(JSON.parse(String(repeatInit.body))).toMatchObject({
+      model: 'max-gpt-oss-120b',
+      autoStart: true,
+    });
   });
 
   it('refreshes an expired Desktop attestation once before retrying the exact Turn cancellation', async () => {

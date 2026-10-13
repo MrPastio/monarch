@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 import anyio
+from pydantic import ValidationError
 from starlette.concurrency import iterate_in_threadpool
 
 
@@ -22,9 +23,11 @@ from fastapi import FastAPI, Query, Header, HTTPException, status, Depends, Requ
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from . import secure_db
 from .environment import EnvironmentScanner
 from .language import detect_requested_language, detect_user_language, has_reliable_language_sample
 from .config import get_settings
+from .astra_local_service import create_owned_astra_local_service
 from .hardware import get_hardware_info
 from .inference_coordinator import (
     InferenceCoordinator,
@@ -33,9 +36,6 @@ from .inference_coordinator import (
 )
 from .memory import (
     ActionLinkedConversationError,
-    ClientMessageConflictError,
-    ConversationMessagePrerequisiteError,
-    ConversationMessageSupersededError,
     ImmutableConversationMessageError,
     MemoryStore,
     detect_memory_note,
@@ -48,10 +48,22 @@ from .context_settings import (
     SettingsRequestConflict,
     SettingsRevisionConflict,
 )
+from .conversation_messages import append_conversation_message
 from .memory_v4 import MemoryV4Service
 from .meta_templates import detect_meta_intent
 from .model_quality import ModelQualityLedger, assess_model_answer
-from .model_runtime import ContinuationPrompt, GEMMA_TIER, GenerationCancelled, LocalModelRuntime, merge_capability_context
+from .model_runtime import (
+    ContinuationPrompt,
+    GEMMA_TIER,
+    GenerationCancelled,
+    LocalModelRuntime,
+    ModelTierRecycleRequiredError,
+    RAM_CAUTION_FREE_GB,
+    available_system_ram_gb,
+    local_tier_swap_needs_fresh_process,
+    normalize_gemma4_tier,
+)
+from .residency import ResidencyDecision, plan_residency
 from .research import (
     MAX_DELIBERATION_ROUNDS,
     MAX_DELIBERATION_SECONDS,
@@ -60,14 +72,14 @@ from .research import (
     RESEARCH_PROGRESS_HEARTBEAT_SECONDS,
     ResearchDecision,
     fallback_research_queries,
+    parse_planned_web_queries,
     parse_research_assessment,
     parse_model_research_queries,
     research_answer_instructions,
-    research_finalization_prompt,
     research_planner_prompt,
-    research_reflection_prompt,
-    research_revision_prompt,
+    research_gap_prompt,
     resolve_research_decision,
+    web_query_planner_prompt,
 )
 from .schemas import (
     ChatSkillContext,
@@ -81,6 +93,7 @@ from .schemas import (
     MAX_SEARCH_QUERY_CHARS,
     MAX_WORKSPACE_PATH_CHARS,
     SearchRequest,
+    SearchContextRequest,
     ChatMessage,
     ConversationCreate,
     ConversationMessageCreate,
@@ -89,7 +102,9 @@ from .schemas import (
     MemoryItemCreate,
     MemoryItemUpdate,
     MemoryContextRequestV1,
+    MemoryContextValidityRequestV1,
     MemoryEpisodeIndexRequestV1,
+    SettingsScopeV1,
     SettingsCommandRequestV1,
     SettingsReadRequestV1,
     WorkspaceActionRequest,
@@ -97,8 +112,10 @@ from .schemas import (
     WorkspaceBatchResponse,
     WorkspaceToolResult,
 )
-from .search import WebSearchService, should_auto_search
+from .search import WebSearchService, search_notice, search_state, should_auto_search, warm_page_parsers
 from .router import select_model_tier
+from .custom_models import custom_model_entry, is_custom_tier
+from .gguf_chat import GgufChatError, assert_chat_gguf
 from .sharing import (
     SharingChatRequest,
     SharingSpeechRequest,
@@ -122,6 +139,8 @@ from .workspace import (
 
 
 settings = get_settings()
+# Monarch Security storage protection is settled before any store opens the database.
+settings.db_path = secure_db.prepare(settings.db_path)
 memory = MemoryStore(settings)
 context_settings = ContextSettingsStore(settings)
 memory_v4 = MemoryV4Service(settings)
@@ -134,7 +153,11 @@ inference_lock = asyncio.Lock()
 _backend_recycle_state_lock = threading.Lock()
 _backend_recycle_timer: threading.Timer | None = None
 _backend_recycle_epoch = 0
+_backend_recycle_requested = False
 _active_inference_slots = 0
+_backend_host_generation = "backend_" + os.urandom(16).hex()
+_backend_stop_receipt: dict | None = None
+_last_residency_decision: ResidencyDecision | None = None
 workspace = WorkspaceService(settings)
 environment = EnvironmentScanner(settings)
 
@@ -186,27 +209,35 @@ CONTEXTUAL_GENERIC_TOKEN_PATTERN = re.compile(
 )
 
 
-def cancel_pending_backend_recycle() -> None:
-    global _backend_recycle_timer, _backend_recycle_epoch
+def cancel_pending_backend_recycle(*, preserve_request: bool = False) -> None:
+    global _backend_recycle_timer, _backend_recycle_epoch, _backend_recycle_requested
     with _backend_recycle_state_lock:
         _backend_recycle_epoch += 1
         timer = _backend_recycle_timer
         _backend_recycle_timer = None
+        if not preserve_request:
+            _backend_recycle_requested = False
     if timer is not None:
         timer.cancel()
 
 
 def begin_inference_activity() -> None:
     global _active_inference_slots
-    cancel_pending_backend_recycle()
+    # Pause the timer while a lease is active, but preserve the recycle intent.
+    # Otherwise a chat/agent turn can permanently disarm a required tier swap.
+    cancel_pending_backend_recycle(preserve_request=True)
     with _backend_recycle_state_lock:
         _active_inference_slots += 1
 
 
 def finish_inference_activity() -> None:
     global _active_inference_slots
+    rearm = False
     with _backend_recycle_state_lock:
         _active_inference_slots = max(0, _active_inference_slots - 1)
+        rearm = _active_inference_slots == 0 and _backend_recycle_requested and _backend_recycle_timer is None
+    if rearm:
+        schedule_backend_recycle(0.25)
 
 
 def get_inference_lock() -> asyncio.Lock:
@@ -250,15 +281,57 @@ async def acquire_inference_slot(
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
     memory_v4.start_background()
+    # Off the start path: the first search should not pay the parser import.
+    threading.Thread(target=warm_page_parsers, name="warm-page-parsers", daemon=True).start()
     try:
         yield
     finally:
-        memory_v4.close()
-        sharing_qwen_runtime.unload()
-        model_runtime.unload()
+        # Closing admission is distinct from physical native acknowledgement.
+        # Never free a model (or memory guard) while an Astra/ordinary worker owns it.
+        quiescent = astra_local_service is None or await astra_local_service.wait_closed(timeout_ms=5000)
+        if quiescent:
+            lock = get_inference_lock()
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=5)
+            except asyncio.TimeoutError:
+                quiescent = False
+            else:
+                try:
+                    memory_v4.close()
+                    sharing_qwen_runtime.unload()
+                    model_runtime.unload()
+                finally:
+                    lock.release()
+        if not quiescent:
+            logging.getLogger(__name__).error('Shutdown has active native work; resident resources retained until process exit.')
 
+
+class AccessLogWithoutQuery(logging.Filter):
+    """The access log is a plain file; query strings carry memory and workspace
+    search text, so only the path is written."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str):
+            record.args = (args[0], args[1], args[2].split("?", 1)[0], args[3], args[4])
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(AccessLogWithoutQuery())
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=app_lifespan)
+try:
+    astra_local_service = create_owned_astra_local_service(
+        component_json=os.environ.get('OSCAR_ASTRA_LOCAL_COMPONENT'), api_token=settings.api_token or '',
+        runtime=model_runtime, memory=memory_v4, coordinator=get_inference_coordinator,
+        request_recycle=lambda delay: schedule_backend_recycle(delay))
+except (ValueError, OSError):
+    # A failed optional component must not disable ordinary Oscar. Its routes
+    # stay absent; never log the token, model pathname or supplied configuration.
+    astra_local_service = None
+    logging.getLogger(__name__).warning('Astra local owner configuration unavailable; model routes not mounted.')
+if astra_local_service is not None:
+    app.include_router(astra_local_service.router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -344,10 +417,29 @@ def health(
         "ok": True,
         "app": settings.app_name,
         "authenticated": has_valid_api_token(x_oscar_token, authorization),
+        # The mode only, never the key: the runtime restarts an Oscar started
+        # under other storage protection.
+        "storage_protection": secure_db.protection_mode(),
     }
     if not payload["authenticated"]:
         return payload
 
+    with _backend_recycle_state_lock:
+        lifecycle = {
+            "process_id": os.getpid(),
+            "parent_process_id": os.getppid(),
+            "host_generation": _backend_host_generation,
+            "auto_unload_after_generation": settings.auto_unload_after_generation,
+            "recycle_backend_after_generation": settings.recycle_backend_after_generation,
+            "recycle_scheduled": _backend_recycle_timer is not None,
+            "active_inference_slots": _active_inference_slots,
+            "model_resident_idle_seconds": settings.model_resident_idle_seconds,
+            "residency": (
+                _last_residency_decision.as_diagnostic()
+                if _last_residency_decision is not None
+                else None
+            ),
+        }
     payload.update({
         "mock_model": settings.mock_model,
         "workspace": {
@@ -356,6 +448,7 @@ def health(
         },
         "memory": memory.stats().model_dump(mode="json"),
         "model": model_runtime.status().model_dump(mode="json"),
+        "lifecycle": lifecycle,
     })
     return payload
 
@@ -420,6 +513,7 @@ async def sharing_chat_completions(request: SharingChatRequest, http_request: Re
         runtime=model_runtime,
         acquire_inference_slot=acquire_inference_slot,
         unload_after_generation=unload_after_generation,
+        request_backend_recycle=schedule_backend_recycle,
         qwen_runtime=sharing_qwen_runtime,
     )
 
@@ -464,9 +558,43 @@ async def generation_cancel():
 
 
 @app.post("/api/backend/stop", dependencies=[Depends(verify_token)])
-def backend_stop():
+def backend_stop(
+    x_monarch_stop_correlation: str | None = Header(default=None, alias="X-Monarch-Stop-Correlation"),
+    x_monarch_expected_host_generation: str | None = Header(default=None, alias="X-Monarch-Expected-Host-Generation"),
+    x_monarch_expected_pid: str | None = Header(default=None, alias="X-Monarch-Expected-Pid"),
+):
+    global _backend_stop_receipt
+    correlation = x_monarch_stop_correlation if isinstance(x_monarch_stop_correlation, str) \
+        and re.fullmatch(r"[A-Za-z0-9_-]{16,96}", x_monarch_stop_correlation) else None
+    if correlation is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"code": "stop-correlation-required"})
+    expected_pid = int(x_monarch_expected_pid) if isinstance(x_monarch_expected_pid, str) \
+        and x_monarch_expected_pid.isdigit() else None
+    stale_process = expected_pid != os.getpid() or x_monarch_expected_host_generation != _backend_host_generation
+    if stale_process:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={
+            "code": "backend-stop-stale-process", "staleProcess": True,
+            "expectedHostGeneration": x_monarch_expected_host_generation,
+            "targetPid": expected_pid,
+        })
+    with _backend_recycle_state_lock:
+        active_slots = _active_inference_slots
+        if _backend_stop_receipt is not None:
+            if _backend_stop_receipt["correlation"] == correlation:
+                return dict(_backend_stop_receipt)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={
+                "code": "backend-stop-already-requested", "staleProcess": False,
+                "expectedHostGeneration": _backend_host_generation, "targetPid": os.getpid(),
+            })
+        _backend_stop_receipt = {"ok": True, "stopping": True, "correlation": correlation,
+            "pid": os.getpid(), "hostGeneration": _backend_host_generation,
+            "activeInferenceSlots": active_slots, "tokenSource": "authenticated-header", "staleProcess": False}
+    logging.getLogger(__name__).info(
+        "backend-stop-requested correlation=%s generation=%s pid=%s active_slots=%s token_source=authenticated-header stale_process=false",
+        correlation, _backend_host_generation, os.getpid(), active_slots,
+    )
     threading.Timer(0.25, stop_process_tree).start()
-    return {"ok": True, "stopping": True}
+    return dict(_backend_stop_receipt)
 
 
 @app.get("/api/memory/stats", dependencies=[Depends(verify_token)])
@@ -604,18 +732,86 @@ def memory_episode_index(request: MemoryEpisodeIndexRequestV1):
         ) from exc
 
 
+def _derived_memory_scope(scope_type: str, project_id: str | None) -> dict[str, str | None]:
+    try:
+        return SettingsScopeV1(type=scope_type, projectId=project_id).model_dump(by_alias=True, exclude_none=True)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "memory-scope-invalid", "message": str(exc)},
+        ) from exc
+
+
+@app.get("/api/memory/episodes", dependencies=[Depends(verify_token)])
+def memory_episodes_list(
+    scope_type: Annotated[str, Query(alias="scopeType")] = "chat",
+    project_id: Annotated[str | None, Query(alias="projectId")] = None,
+):
+    """What Memory V4 captured on its own from past turns, for the owner to review.
+
+    Explicit memories already have full CRUD under /api/memory/items; this and
+    the two delete endpoints below are the missing counterpart for episodes
+    and the capsules they compact into, so "Из памяти" is something an owner
+    can open and act on instead of only being told it exists.
+    """
+    return memory_v4.list_derived_memory(_derived_memory_scope(scope_type, project_id))
+
+
+@app.delete("/api/memory/episodes", dependencies=[Depends(verify_token)])
+def memory_episodes_forget_all(
+    scope_type: Annotated[str, Query(alias="scopeType")] = "chat",
+    project_id: Annotated[str | None, Query(alias="projectId")] = None,
+):
+    result = memory_v4.forget_all_derived_memory(_derived_memory_scope(scope_type, project_id))
+    return {"ok": True, **result}
+
+
+@app.delete("/api/memory/episodes/{episode_id}", dependencies=[Depends(verify_token)])
+def memory_episode_forget(
+    episode_id: str,
+    scope_type: Annotated[str, Query(alias="scopeType")] = "chat",
+    project_id: Annotated[str | None, Query(alias="projectId")] = None,
+):
+    episode_id = normalized_resource_id_param(episode_id, "episode_id")
+    if not memory_v4.forget_episode(episode_id, _derived_memory_scope(scope_type, project_id)):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Episode not found")
+    return {"ok": True, "deleted": episode_id}
+
+
+@app.delete("/api/memory/capsules/{capsule_id}", dependencies=[Depends(verify_token)])
+def memory_capsule_forget(
+    capsule_id: str,
+    scope_type: Annotated[str, Query(alias="scopeType")] = "chat",
+    project_id: Annotated[str | None, Query(alias="projectId")] = None,
+):
+    capsule_id = normalized_resource_id_param(capsule_id, "capsule_id")
+    if not memory_v4.forget_capsule(capsule_id, _derived_memory_scope(scope_type, project_id)):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Capsule not found")
+    return {"ok": True, "deleted": capsule_id}
+
+
 @app.post("/api/memory/context", dependencies=[Depends(verify_token)])
 def memory_context(request: MemoryContextRequestV1):
     try:
         return memory_v4.retrieve(
             request.query,
             request.scope.model_dump(by_alias=True, exclude_none=True),
+            exclude_conversation_id=request.exclude_conversation_id,
         )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "memory-context-invalid", "message": str(exc)},
         ) from exc
+
+
+@app.post("/api/memory/context/validity", dependencies=[Depends(verify_token)])
+def memory_context_validity(request: MemoryContextValidityRequestV1):
+    try:
+        return memory_v4.read_context_validity(request.scope.model_dump(by_alias=True, exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail={"code": "memory-context-invalid", "message": str(exc)}) from exc
 
 
 @app.get("/api/conversations", dependencies=[Depends(verify_token)])
@@ -626,12 +822,14 @@ def conversations_list(limit: int = Query(default=60, ge=1, le=200), include_arc
 @app.delete("/api/conversations", dependencies=[Depends(verify_token)])
 def conversations_clear():
     try:
-        return memory.clear_conversations()
+        cleared = memory.clear_conversations()
     except RuntimeError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "conversation-store-busy", "message": str(exc)},
         ) from exc
+    memory_v4.invalidate_cache()
+    return cleared
 
 
 @app.post("/api/conversations", dependencies=[Depends(verify_token)])
@@ -664,6 +862,7 @@ def conversation_update(conversation_id: str, request: ConversationUpdate):
             conversation_id,
             title=request.title,
             archived=request.archived,
+            local_only=request.local_only,
         )
     except KeyError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
@@ -691,55 +890,7 @@ def conversation_message_update(conversation_id: str, message_id: str, request: 
 @app.post("/api/conversations/{conversation_id}/messages", dependencies=[Depends(verify_token)])
 def conversation_message_create(conversation_id: str, request: ConversationMessageCreate):
     conversation_id = normalized_resource_id_param(conversation_id, "conversation_id")
-    try:
-        # TurnCoordinator owns message persistence and may allocate the conversation id
-        # before the legacy conversation API has seen it. MemoryStore creates that
-        # validated conversation atomically with the first durable message.
-        message = memory.append_conversation_message(
-            conversation_id,
-            request.role,
-            request.content,
-            token_count=request.token_count,
-            elapsed_ms=request.elapsed_ms,
-            model_tier=request.model_tier,
-            client_message_id=request.client_message_id,
-            turn_id=request.turn_id,
-            task_id=request.task_id,
-            provenance=request.provenance,
-            outcome=request.outcome,
-            integrity_warning=request.integrity_warning,
-            create_conversation_if_missing=request.create_conversation_if_missing,
-            required_previous_message_id=request.required_previous_message_id,
-            attachments=request.attachments,
-            sources=request.sources,
-        )
-    except ClientMessageConflictError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "client-message-reused", "message": str(exc)},
-        ) from exc
-    except ConversationMessagePrerequisiteError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "conversation-message-prerequisite-pending",
-                "message": str(exc),
-                "retryable": True,
-            },
-        ) from exc
-    except ConversationMessageSupersededError:
-        return {
-            "ok": True,
-            "disposition": "superseded",
-            "message": None,
-            "duplicate": False,
-        }
-    return {
-        "ok": True,
-        "disposition": "duplicate" if message is None else "created",
-        "message": message,
-        "duplicate": message is None,
-    }
+    return append_conversation_message(memory, conversation_id, request)
 
 
 @app.delete("/api/conversations/{conversation_id}", dependencies=[Depends(verify_token)])
@@ -754,7 +905,28 @@ def conversation_delete(conversation_id: str):
         ) from exc
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    memory_v4.invalidate_cache()
     return {"ok": True, "deleted": conversation_id}
+
+
+@app.post("/api/search/context", dependencies=[Depends(verify_token)])
+async def search_context(request: SearchContextRequest, http_request: Request):
+    task = asyncio.create_task(search_service.search_context(request.query, request.deep, request.queries))
+    try:
+        async with asyncio.timeout(75):
+            while not task.done():
+                if await http_request.is_disconnected():
+                    raise HTTPException(status_code=499, detail="search-cancelled")
+                await asyncio.wait({task}, timeout=0.2)
+            sources = task.result()
+            state = search_state([source.origin for source in sources], searched=True)
+            return {"sources": sources, "state": state, "notice": search_notice(state)}
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="search-timeout") from None
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @app.post("/api/search", dependencies=[Depends(verify_token)])
@@ -874,10 +1046,11 @@ def intended_chat_tier(request: ChatRequest) -> tuple[str, str | None]:
     # Perception is a runtime capability, not a promise that every text tier
     # exposes the same native multimodal handler.
     if request.image_attachments:
-        return VISION_CHAT_TIER, None
+        preferred = requested_model if requested_model in {"gemma4-fast", "gemma4-balanced"} else VISION_CHAT_TIER
+        return model_runtime.resolve_vision_tier(preferred), None
     # Gemma Mode is an explicit user/runtime override. It bypasses normal tier
     # scoring, route hint floors, and fallback router selection.
-    if requested_model in EXPLICIT_GEMMA4_TIERS:
+    if requested_model in EXPLICIT_GEMMA4_TIERS or is_custom_tier(requested_model):
         return requested_model, None
     if requested_model in LEGACY_TIER_ALIASES:
         return normalize_chat_tier(requested_model), None
@@ -895,11 +1068,56 @@ def intended_chat_tier(request: ChatRequest) -> tuple[str, str | None]:
         # Keep enough baseline quality for automatic multi-pass synthesis, but
         # do not silently turn every investigation into the Pro profile.
         hinted_tier = max_tier(hinted_tier, "gemma4-balanced")
-    return hinted_tier, python_fallback_tier
+    return prefer_resident_stronger_tier(hinted_tier), python_fallback_tier
+
+
+# Automatic selection may keep a stronger resident Gemma instead of swapping
+# down. Routing escalates to balanced whenever fast is unsure, and the answer
+# then asked for fast again: two process restarts (~25 s) around a two-second
+# reply, measured live on "продолжи Владимирский централ" (2026-09-18). Pro is
+# excluded: it is slow enough that the restart is the cheaper side.
+AUTO_RESIDENT_UPGRADE_TIERS = frozenset({"gemma4-balanced"})
+
+
+def prefer_resident_stronger_tier(tier: str) -> str:
+    if not tier_swap_needs_fresh_process(tier):
+        return tier
+    raw_resident = getattr(model_runtime, "active_tier", None)
+    if not raw_resident:
+        return tier
+    resident = normalize_chat_tier(raw_resident)
+    if resident in AUTO_RESIDENT_UPGRADE_TIERS and TIER_RANK.get(resident, -1) > TIER_RANK.get(normalize_chat_tier(tier), 99):
+        return resident
+    return tier
 
 
 def deep_thinking_confirmation_required(request: ChatRequest, tier: str) -> bool:
     return False
+
+
+TIER_RECYCLE_REQUIRED_CODE = "model-tier-recycle-required"
+TIER_RECYCLE_REQUIRED_MESSAGE = (
+    "Готовлю другую модель. Отправь запрос ещё раз через пару секунд."
+)
+
+
+def tier_swap_needs_fresh_process(tier: str) -> bool:
+    return local_tier_swap_needs_fresh_process(model_runtime, tier)
+
+
+def defer_secondary_generation_for_tier_recycle(tier: str) -> bool:
+    """Keep a post-generation repair from swapping a CUDA resident model.
+
+    The primary chat boundary returns the explicit retryable 503 before it
+    starts work. Secondary language/registry/quality repairs already have a
+    safe primary answer to preserve, so they request the same controlled host
+    recycle and decline the repair instead of loading another tier in-process.
+    """
+    if not tier_swap_needs_fresh_process(tier):
+        return False
+    model_runtime.last_error = TIER_RECYCLE_REQUIRED_CODE
+    schedule_backend_recycle(0.25)
+    return True
 
 
 def resolve_chat_tier(request: ChatRequest) -> tuple[str, str | None]:
@@ -951,6 +1169,8 @@ def normalized_requested_model(request: ChatRequest) -> str:
 
 
 def is_explicit_gemma_override(request: ChatRequest) -> bool:
+    if is_custom_tier(normalized_requested_model(request)):
+        return True
     return normalized_requested_model(request) in (
         GEMMA_TIER, "gemma_low", "gemma_high", "gemma4-fast", "gemma4-balanced",
         "gemma4-deepthinking", "gemma4-31b", "pro", "extra", "qwen3.8-27b-pro", "qwen3-coder-30b-a3b-instruct",
@@ -961,6 +1181,24 @@ def is_explicit_gemma_override(request: ChatRequest) -> bool:
 def is_strict_tier_request(request: ChatRequest) -> bool:
     # A manual text-tier choice must not disable a compatible vision provider.
     return not request.image_attachments and is_explicit_gemma_override(request)
+
+
+def custom_chat_model_failure(request: ChatRequest) -> str | None:
+    tier = normalized_requested_model(request)
+    if not is_custom_tier(tier):
+        return None
+    entry = custom_model_entry(model_runtime.settings.custom_models_dir, tier)
+    if entry is None:
+        return "custom-model-missing"
+    try:
+        assert_chat_gguf(entry.path)
+    except GgufChatError as exc:
+        return exc.code
+    except OSError:
+        return "custom-model-missing"
+    except (ValueError, OverflowError):
+        return "custom-model-format"
+    return None
 
 
 def max_tier(left: str, right: str) -> str:
@@ -975,6 +1213,8 @@ def max_tier(left: str, right: str) -> str:
 
 def normalize_chat_tier(tier: str | None) -> str:
     normalized = str(tier or "").strip().lower()
+    if is_custom_tier(normalized):
+        return normalized
     if normalized in TIER_RANK or normalized in {
         "qwen3-coder-30b-a3b-instruct", "deepseek-coder-v2-lite-instruct",
     }:
@@ -1053,13 +1293,9 @@ def research_decision_for_request(request: ChatRequest) -> ResearchDecision:
 def enforce_incognito_constraints(request: ChatRequest) -> None:
     if not request.incognito:
         return
-    # Incognito is a clean Oscar session: no durable profile/memory reads and
-    # no write capability. Its in-RAM conversation still supports multiple turns.
+    # Incognito is a clean Oscar session with no durable profile/memory reads.
+    # Agent execution is not part of this answer-only backend.
     request.use_memory = False
-    request.capabilities = [
-        capability for capability in request.capabilities
-        if capability.id != "memory.remember"
-    ]
 
 
 def apply_dev_mode_constraints(request: ChatRequest) -> None:
@@ -1073,10 +1309,6 @@ def apply_dev_mode_constraints(request: ChatRequest) -> None:
         request.research_mode = "off"
     if not dev.memory_enabled:
         request.use_memory = False
-        request.capabilities = [
-            capability for capability in request.capabilities
-            if capability.id != "memory.remember"
-        ]
     if not dev.skills_enabled:
         request.skills = []
     if not dev.history_context_enabled:
@@ -1287,13 +1519,7 @@ def complete_conversation(
     *,
     model_tier: str | None = None,
     sources: list | None = None,
-    action_proposals: list[dict] | None = None,
 ) -> None:
-    # A proposal is an execution request, not a terminal assistant answer.
-    # The Monarch Kernel/UI persists the verified result after the action
-    # succeeds, fails, or is declined.
-    if action_proposals:
-        return
     visible_answer = strip_hidden_monarch_commands(answer)
     if not conversation_id or not visible_answer.strip():
         return
@@ -1321,7 +1547,8 @@ def strip_hidden_monarch_commands(answer: str) -> str:
 
 
 def visible_chat_content(request: ChatRequest, answer: str) -> str:
-    return str(answer or "") if is_coder_mode_request(request) else strip_hidden_monarch_commands(answer)
+    del request
+    return strip_hidden_monarch_commands(answer)
 
 
 HIDDEN_CHAT_PROTOCOL_PREFIXES = ("[[MONARCH_ACTION:", "[[MONARCH_COMMAND:")
@@ -1382,157 +1609,29 @@ def filter_hidden_chat_protocol_chunk(state: dict, chunk: str, *, final: bool = 
     return "".join(output)
 
 
-def is_coder_mode_request(request: ChatRequest) -> bool:
-    return any(
-        message.role == "system"
-        and message.content.strip().startswith("<monarch_coder_mode>")
-        and message.content.strip().endswith("</monarch_coder_mode>")
-        for message in request.messages
-    )
-
-
-def coder_mode_metadata(request: ChatRequest) -> dict:
-    for message in request.messages:
-        content = message.content.strip()
-        if message.role != "system" or not (
-            content.startswith("<monarch_coder_mode>")
-            and content.endswith("</monarch_coder_mode>")
-        ):
-            continue
-        payload_text = re.sub(
-            r"^\s*<monarch_coder_mode>\s*|\s*</monarch_coder_mode>\s*$",
-            "",
-            content,
-        )
-        try:
-            payload = json.loads(payload_text)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
-    return {}
-
-
 def expected_request_language(request: ChatRequest) -> str:
-    if is_coder_mode_request(request):
-        candidate = str(coder_mode_metadata(request).get("responseLanguage") or "").strip().lower()
-        if candidate in {"ru", "en", "uk", "bg"}:
-            return candidate
     return expected_response_language(latest_user_text(request))
 
 
-def extract_action_proposals(answer: str, request: ChatRequest) -> tuple[str, list[dict]]:
-    text = str(answer or "")
-    if not is_coder_mode_request(request):
-        return strip_hidden_monarch_commands(text), []
-    matches = list(re.finditer(r"\[\[MONARCH_ACTION:([\s\S]*?)\]\]", text, flags=re.IGNORECASE))
-    visible = strip_hidden_monarch_commands(text)
-    source = "runtime-grammar"
-    if len(matches) == 1:
-        try:
-            payload = json.loads(matches[0].group(1))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return visible, []
-        actions = payload.get("actions") if isinstance(payload, dict) else None
-    elif len(matches) == 0 and is_coder_mode_request(request):
-        visible, actions = extract_native_coder_tool_calls(text)
-        source = "runtime-native-tool-call"
-    else:
-        return visible, []
-    if not isinstance(actions, list) or not 1 <= len(actions) <= 8:
-        return visible, []
-    known = {
-        capability.id
-        for capability in merge_capability_context(
-            request.capabilities,
-            include_defaults=not is_coder_mode_request(request),
-        )
-    }
-    normalized: list[dict] = []
-    for action in actions:
-        if not isinstance(action, dict):
-            return visible, []
-        capability_id = str(action.get("capabilityId") or "").strip()
-        args = action.get("args", {})
-        if capability_id not in known or not isinstance(args, dict):
-            return visible, []
-        args = {key: value for key, value in args.items() if value is not None}
-        proposal = {
-            "version": 1,
-            "capabilityId": capability_id,
-            "args": args,
-            "reason": str(action.get("reason") or "Use the selected Monarch capability.").strip()[:1000],
-            "expectedEffect": str(action.get("expectedEffect") or "Apply the requested action.").strip()[:1000],
-            "provenance": {"source": source, "model": model_runtime.active_tier or "unknown"},
-        }
-        if isinstance(action.get("proposalId"), str) and action["proposalId"].strip():
-            proposal["proposalId"] = action["proposalId"].strip()[:200]
-        if isinstance(action.get("idempotencyKey"), str) and action["idempotencyKey"].strip():
-            proposal["idempotencyKey"] = action["idempotencyKey"].strip()[:240]
-        normalized.append(proposal)
-    return visible, normalized
-
-
-def extract_native_coder_tool_calls(answer: str) -> tuple[str, list[dict] | None]:
-    """Parse model-native calls, never the model-authored tool-output section."""
-    text = str(answer or "")
-    calls_begin = "<｜tool▁calls▁begin｜>"
-    calls_end = "<｜tool▁calls▁end｜>"
-    call_begin = "<｜tool▁call▁begin｜>"
-    call_end = "<｜tool▁call▁end｜>"
-    separator = "<｜tool▁sep｜>"
-    start = text.find(calls_begin)
-    if start < 0:
-        return text.strip(), None
-    visible = text[:start].strip()
-    if text.count(calls_begin) != 1 or text.count(calls_end) != 1:
-        return visible, []
-    end = text.find(calls_end, start + len(calls_begin))
-    if end < 0:
-        return visible, []
-    block = text[start + len(calls_begin):end]
-    pattern = re.compile(
-        re.escape(call_begin)
-        + r"\s*function\s*"
-        + re.escape(separator)
-        + r"\s*(?P<capability>[a-z][a-z0-9._-]{1,127})\s*"
-        + r"```(?:json)?\s*(?P<args>[\s\S]*?)\s*```\s*"
-        + re.escape(call_end),
-        flags=re.IGNORECASE,
-    )
-    matches = list(pattern.finditer(block))
-    if not 1 <= len(matches) <= 8 or pattern.sub("", block).strip():
-        return visible, []
-    actions: list[dict] = []
-    for match in matches:
-        try:
-            args = json.loads(match.group("args"))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return visible, []
-        if not isinstance(args, dict):
-            return visible, []
-        actions.append({
-            "capabilityId": match.group("capability"),
-            "args": args,
-            "reason": "Execute the model-selected Coder capability through Monarch Kernel.",
-            "expectedEffect": "Apply the requested Coder action and return a verified Kernel receipt.",
-        })
-    return visible, actions
-
-
 def run_scheduled_backend_recycle(epoch: int) -> None:
-    global _backend_recycle_timer
+    global _backend_recycle_timer, _backend_recycle_requested
     with _backend_recycle_state_lock:
-        if epoch != _backend_recycle_epoch or _active_inference_slots:
+        if epoch != _backend_recycle_epoch:
+            return
+        if _active_inference_slots:
+            _backend_recycle_timer = None
             return
         _backend_recycle_timer = None
+        _backend_recycle_requested = False
     stop_process_tree()
 
 
 def schedule_backend_recycle(delay_seconds: float = 5.0) -> None:
-    global _backend_recycle_timer, _backend_recycle_epoch
+    global _backend_recycle_timer, _backend_recycle_epoch, _backend_recycle_requested
     with _backend_recycle_state_lock:
         previous_timer = _backend_recycle_timer
         _backend_recycle_epoch += 1
+        _backend_recycle_requested = True
         epoch = _backend_recycle_epoch
         timer = threading.Timer(delay_seconds, lambda: run_scheduled_backend_recycle(epoch))
         timer.daemon = True
@@ -1542,16 +1641,40 @@ def schedule_backend_recycle(delay_seconds: float = 5.0) -> None:
     timer.start()
 
 
-def unload_after_generation(delay_seconds: float = 5.0) -> None:
+def plan_generation_residency(
+    tier: str | None = None,
+    *,
+    agent_session: bool = False,
+) -> ResidencyDecision:
+    """Ask the residency policy how long this generation's model stays loaded."""
+    return plan_residency(
+        configured_idle_seconds=getattr(settings, "model_resident_idle_seconds", 0.0),
+        min_free_ram_gb=getattr(settings, "model_resident_min_free_ram_gb", RAM_CAUTION_FREE_GB),
+        tier=tier or getattr(model_runtime, "active_tier", None),
+        available_ram_gb=available_system_ram_gb(),
+        agent_session=agent_session,
+    )
+
+
+def unload_after_generation(
+    tier: str | None = None,
+    *,
+    agent_session: bool = False,
+) -> None:
+    global _last_residency_decision
     if not settings.auto_unload_after_generation:
         return
     should_recycle = settings.recycle_backend_after_generation and not os.environ.get("PYTEST_CURRENT_TEST")
     if should_recycle:
-        # Let StreamingResponse flush its terminal SSE event before Windows
-        # tears down llama.cpp/CUDA. Closing a large hybrid model in-process can
-        # terminate the native runtime before the final bytes reach the client;
-        # recycling the process releases the same RAM without that race.
-        schedule_backend_recycle(max(5.0, min(float(delay_seconds), 120.0)))
+        # Releasing means exiting: an in-process unload does not return device
+        # memory. How long to wait first is a policy question and belongs to
+        # `residency`, which keeps a warm model across the pause a person takes
+        # between messages instead of making every turn pay a cold load. The
+        # floor still lets StreamingResponse flush its terminal SSE event before
+        # Windows tears down llama.cpp/CUDA.
+        decision = plan_generation_residency(tier, agent_session=agent_session)
+        _last_residency_decision = decision
+        schedule_backend_recycle(decision.delay_seconds)
         return
     try:
         model_runtime.unload()
@@ -1574,9 +1697,8 @@ def build_chat_usage(
             request.reasoning_effort,
             answer,
             request.skills,
-            request.capabilities,
-            request.access,
             request.max_new_tokens,
+            context_profile=request.context_profile,
         )
     except Exception as exc:
         # Usage metadata must never be able to suppress the user-visible answer
@@ -1599,7 +1721,12 @@ def build_chat_usage(
             "usage_error": type(exc).__name__,
         }
     usage["elapsed_ms"] = max(1, round((time.perf_counter() - started_at) * 1000))
+    usage["timing"] = dict(getattr(model_runtime, "last_generation_timing", {}) or {})
     usage["model_tier"] = model_tier or model_runtime.active_tier or "system"
+    if request.image_attachments and model_runtime.last_generation_tier:
+        usage["model_tier"] = model_runtime.last_generation_tier
+    if request.image_attachments and model_runtime.last_generation_failure:
+        usage["failure_code"] = model_runtime.last_generation_failure
     usage["runtime_recovery"] = bool(model_runtime.fallback_active)
     return usage
 
@@ -1684,6 +1811,9 @@ def log_route_debug_trace(
 
 @app.post("/api/chat", dependencies=[Depends(verify_token)])
 async def chat(request: ChatRequest) -> ChatResponse:
+    custom_failure = await asyncio.to_thread(custom_chat_model_failure, request)
+    if custom_failure:
+        raise HTTPException(status_code=422, detail={"code": custom_failure, "message": custom_failure})
     started_at = time.perf_counter()
     apply_dev_mode_constraints(request)
     enforce_incognito_constraints(request)
@@ -1695,9 +1825,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
     if continuation_source:
         apply_explicit_code_continuation(request, continuation_source)
 
-    inference_slot = await acquire_inference_slot(
-        "coder" if is_coder_mode_request(request) else request.inference_lane
-    )
+    inference_slot = await acquire_inference_slot(request.inference_lane)
     if inference_slot is None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -1707,6 +1835,14 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
     tier, python_fallback_tier = resolve_chat_tier(request)
     strict_model = is_strict_tier_request(request)
+
+    if tier_swap_needs_fresh_process(tier):
+        inference_slot.release()
+        schedule_backend_recycle(0.25)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": TIER_RECYCLE_REQUIRED_CODE, "message": TIER_RECYCLE_REQUIRED_MESSAGE},
+        )
 
     ram = model_runtime.ram_assessment(tier)
     if ram.get("ram_warning") == "critical":
@@ -1728,9 +1864,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
     research_confidence = 0.0
     research_stop_reason = "not-started"
     usage: dict = {}
-    generation_completed = False
     generation_failed = False
     generation_stop_reason = "unknown"
+    recycle_required = False
     try:
         try:
             if deep_research_enabled(request):
@@ -1744,8 +1880,22 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     elif event_kind == "sources":
                         sources = payload
                 tier = adopt_deep_research_runtime_tier(tier, strict_model=strict_model)
+                async for event_kind, payload in deep_research_gap_events(
+                    tier, request, sources, research_queries, strict_model=strict_model,
+                ):
+                    if event_kind == "result":
+                        sources = payload["sources"]
+                        research_queries = payload["queries"]
+                        research_rounds = payload["rounds"]
+                        research_confidence = payload["confidence"]
+                        research_stop_reason = payload["stop_reason"]
+                        research_verified = research_rounds > 0
             else:
-                sources = await prepare_sources(request)
+                planned_queries = (
+                    await plan_web_search_queries(request, tier, strict_model=strict_model)
+                    if effective_web_search(request)[0] else []
+                )
+                sources = await prepare_sources(request, planned_queries)
             generation_skills = (
                 research_skill_context(request, research_decision_for_request(request), research_queries)
                 if deep_research_enabled(request)
@@ -1763,8 +1913,6 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 request.top_p,
                 request.image_attachments,
                 generation_skills,
-                request.capabilities,
-                request.access,
                 strict_tier=strict_model,
                 context_profile=request.context_profile,
             )
@@ -1807,8 +1955,6 @@ async def chat(request: ChatRequest) -> ChatResponse:
                         request.temperature,
                         request.top_p,
                         skill_context=generation_skills,
-                        capability_context=request.capabilities,
-                        access_context=request.access,
                         strict_tier=strict_model,
                         continuation_prompt=continuation_prompt,
                         context_profile=request.context_profile,
@@ -1834,26 +1980,6 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 corrected_answer = await maybe_rewrite_answer_language(tier, request, sources, full_answer)
                 if corrected_answer:
                     full_answer = corrected_answer
-                if deep_research_enabled(request):
-                    async for event_kind, payload in deep_research_deliberation_events(
-                        tier,
-                        request,
-                        sources,
-                        full_answer,
-                        research_queries,
-                        strict_model=strict_model,
-                    ):
-                        if event_kind != "result":
-                            continue
-                        full_answer = str(payload.get("answer") or full_answer)
-                        sources = payload.get("sources") or sources
-                        research_queries = payload.get("queries") or research_queries
-                        research_rounds = int(payload.get("rounds") or 0)
-                        research_confidence = float(payload.get("confidence") or 0.0)
-                        research_stop_reason = str(payload.get("stop_reason") or "unknown")
-                        research_verified = bool(payload.get("revised"))
-                        continuation_count += int(payload.get("continuation_count") or 0)
-                regenerated = regenerated or research_verified
                 full_answer, registry_flags, registry_regenerated = await maybe_regenerate_for_registry_grounding(
                     tier,
                     request,
@@ -1874,6 +2000,15 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 honest_answer = replace_unexecuted_tool_promise(request, full_answer)
                 tool_promise_rewritten = honest_answer != full_answer
                 full_answer = honest_answer
+        except ModelTierRecycleRequiredError:
+            model_runtime.last_error = TIER_RECYCLE_REQUIRED_CODE
+            generation_failed = True
+            generation_stop_reason = "error"
+            recycle_required = True
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": TIER_RECYCLE_REQUIRED_CODE, "message": TIER_RECYCLE_REQUIRED_MESSAGE},
+            )
         except Exception as exc:
             logging.exception("Oscar chat failed")
             model_runtime.last_error = str(exc)
@@ -1917,11 +2052,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
             confidence=research_confidence,
             stop_reason=research_stop_reason,
         )
-        generation_completed = True
     finally:
-        if not is_coder_mode_request(request) or not generation_completed:
-            unload_after_generation()
         inference_slot.release()
+        if recycle_required:
+            schedule_backend_recycle(0.25)
+        else:
+            unload_after_generation(tier)
 
     log_route_debug_trace(
         request,
@@ -1932,19 +2068,13 @@ async def chat(request: ChatRequest) -> ChatResponse:
         quality_flags=quality_flags,
         regenerated=regenerated,
     )
-    if is_coder_mode_request(request):
-        visible_answer, action_proposals = extract_action_proposals(full_answer, request)
-    else:
-        visible_answer, action_proposals = strip_hidden_monarch_commands(full_answer), []
-    if is_coder_mode_request(request) and not action_proposals:
-        unload_after_generation()
+    visible_answer = strip_hidden_monarch_commands(full_answer)
     complete_conversation(
         conversation_id,
         visible_answer,
         usage,
         model_tier=tier,
         sources=sources,
-        action_proposals=action_proposals,
     )
     response_ok = bool(
         not generation_failed
@@ -1952,19 +2082,16 @@ async def chat(request: ChatRequest) -> ChatResponse:
         and not usage.get("likely_truncated")
         and generation_stop_reason not in {"cancelled", "error", "content_filter", "tool_calls"}
     )
+    notice = web_search_notice(request, sources)
+    if notice:
+        visible_answer = f"_{notice}_\n\n{visible_answer}"
+        usage["search_notice"] = notice
     return ChatResponse(
         ok=response_ok,
         answer=visible_answer,
-        outcome=(
-            "action-proposed"
-            if action_proposals
-            else "answered:source-grounded"
-            if sources
-            else "answered"
-        ),
+        outcome="answered:source-grounded" if sources else "answered",
         conversation_id=conversation_id,
         sources=sources,
-        action_proposals=action_proposals,
         usage=usage,
     )
 
@@ -1972,6 +2099,11 @@ async def chat(request: ChatRequest) -> ChatResponse:
 @app.post("/api/chat/stream", dependencies=[Depends(verify_token)])
 async def chat_stream(request: ChatRequest, http_request: Request = None):
     async def events() -> AsyncGenerator[str, None]:
+        custom_failure = await asyncio.to_thread(custom_chat_model_failure, request)
+        if custom_failure:
+            yield sse("error", {"code": custom_failure, "message": custom_failure})
+            yield sse("done", {"ok": False, "code": custom_failure})
+            return
         started_at = time.perf_counter()
         apply_dev_mode_constraints(request)
         enforce_incognito_constraints(request)
@@ -1990,9 +2122,7 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
         if get_inference_lock().locked():
             yield sse("status", {"message": "Жду очередь генерации"})
 
-        inference_slot = await acquire_inference_slot(
-            "coder" if is_coder_mode_request(request) else request.inference_lane
-        )
+        inference_slot = await acquire_inference_slot(request.inference_lane)
         if inference_slot is None:
             yield sse("error", {"message": "Очередь генерации занята. Попробуй еще раз через несколько секунд."})
             yield sse("done", {"ok": False})
@@ -2002,6 +2132,15 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
         tier, python_fallback_tier = resolve_chat_tier(request)
         strict_model = is_strict_tier_request(request)
 
+        if tier_swap_needs_fresh_process(tier):
+            inference_slot.release()
+            schedule_backend_recycle(0.25)
+            yield sse("error", {"code": TIER_RECYCLE_REQUIRED_CODE,
+                                "message": TIER_RECYCLE_REQUIRED_MESSAGE})
+            yield sse("done", {"ok": False})
+            return
+
+        recycle_required = False
         try:
             generator = None
             quality_flags: list[str] = []
@@ -2039,6 +2178,18 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                         elif event_kind == "sources":
                             sources = payload
                     tier = adopt_deep_research_runtime_tier(tier, strict_model=strict_model)
+                    async for event_kind, payload in deep_research_gap_events(
+                        tier, request, sources, research_queries, strict_model=strict_model,
+                    ):
+                        if event_kind == "progress":
+                            yield sse("research", payload)
+                        elif event_kind == "result":
+                            sources = payload["sources"]
+                            research_queries = payload["queries"]
+                            research_rounds = payload["rounds"]
+                            research_confidence = payload["confidence"]
+                            research_stop_reason = payload["stop_reason"]
+                            research_verified = research_rounds > 0
                     if model_runtime.generation_cancelled():
                         yield sse("status", {"message": "Исследование остановлено"})
                         yield sse("done", {
@@ -2049,8 +2200,15 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                         return
                 else:
                     yield sse("status", {"message": "Готовлю контекст"})
-                    sources = await prepare_sources(request)
+                    planned_queries: list[str] = []
+                    if effective_web_search(request)[0]:
+                        planned_queries = await plan_web_search_queries(request, tier, strict_model=strict_model)
+                        yield sse("search", {"queries": planned_queries})
+                    sources = await prepare_sources(request, planned_queries)
                 yield sse("sources", {"sources": [source.model_dump(mode="json") for source in sources]})
+                notice = web_search_notice(request, sources)
+                if notice:
+                    yield sse("notice", {"message": notice})
                 if request.skills:
                     yield sse("skills", {
                         "skills": [
@@ -2072,8 +2230,8 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                 if deep_research_enabled(request):
                     yield sse("research", {
                         "stage": "synthesize",
-                        "label": "Синтезирую вывод",
-                        "detail": f"Сопоставляю факты, сценарии и возражения · Tier: {tier}",
+                        "label": "Пишу вывод",
+                        "detail": f"По {len(sources)} источникам",
                         "completed": len(research_queries),
                         "total": len(research_queries),
                     })
@@ -2097,8 +2255,6 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                     request.top_p,
                     request.image_attachments,
                     generation_skills,
-                    request.capabilities,
-                    request.access,
                     strict_tier=strict_model,
                     context_profile=request.context_profile,
                 )
@@ -2106,7 +2262,6 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                 full_answer_pieces = []
                 visible_stream_state = {"buffer": "", "hidden": False}
                 next_disconnect_check = 0.0
-                next_research_heartbeat = time.perf_counter() + RESEARCH_PROGRESS_HEARTBEAT_SECONDS
                 async for token in iterate_in_threadpool(generator):
                     if http_request is not None:
                         now = time.perf_counter()
@@ -2122,33 +2277,17 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                                     complete_conversation(conversation_id, partial_answer, usage, model_tier=tier, sources=sources)
                                 return
                     full_answer_pieces.append(token)
-                    if deep_research_enabled(request):
-                        now = time.perf_counter()
-                        if now >= next_research_heartbeat:
-                            next_research_heartbeat = now + RESEARCH_PROGRESS_HEARTBEAT_SECONDS
-                            yield sse("research", {
-                                "stage": "synthesize",
-                                "label": "Синтезирую черновой вывод",
-                                "detail": "Локальная модель сопоставляет факты, сценарии и возражения",
-                                "completed": len(research_queries),
-                                "total": len(research_queries),
-                            })
-                    else:
-                        visible_token = (
-                            token
-                            if is_coder_mode_request(request)
-                            else filter_hidden_chat_protocol_chunk(visible_stream_state, token)
-                        )
-                        if visible_token:
-                            yield sse("token", {"token": visible_token})
+                    # A research answer is written once and shown as it is
+                    # written, like any other answer.
+                    visible_token = filter_hidden_chat_protocol_chunk(visible_stream_state, token)
+                    if visible_token:
+                        yield sse("token", {"token": visible_token})
 
                 full_answer = "".join(full_answer_pieces)
                 generation_stop_reason = model_runtime.last_generation_stop_reason
                 if model_runtime.generation_cancelled():
                     usage = {"generation_stop_reason": "cancelled", "likely_truncated": False}
                     if full_answer.strip():
-                        if deep_research_enabled(request):
-                            yield sse("replace", {"content": visible_chat_content(request, full_answer)})
                         usage = build_chat_usage(request, sources, full_answer, started_at, model_tier=tier)
                         correct_truncation_signal(usage, full_answer, stop_reason="cancelled")
                         usage["partial"] = True
@@ -2206,8 +2345,6 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                         request.temperature,
                         request.top_p,
                         skill_context=generation_skills,
-                        capability_context=request.capabilities,
-                        access_context=request.access,
                         strict_tier=strict_model,
                         continuation_prompt=continuation_prompt,
                         context_profile=request.context_profile,
@@ -2229,14 +2366,9 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                                     return
                         continuation_pieces.append(token)
                         full_answer_pieces.append(token)
-                        if not deep_research_enabled(request):
-                            visible_token = (
-                                token
-                                if is_coder_mode_request(request)
-                                else filter_hidden_chat_protocol_chunk(visible_stream_state, token)
-                            )
-                            if visible_token:
-                                yield sse("token", {"token": visible_token})
+                        visible_token = filter_hidden_chat_protocol_chunk(visible_stream_state, token)
+                        if visible_token:
+                            yield sse("token", {"token": visible_token})
                     continuation = "".join(continuation_pieces)
                     continuation_stop_reason = model_runtime.last_generation_stop_reason
                     if model_runtime.generation_cancelled():
@@ -2263,59 +2395,15 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                         stop_reason=continuation_stop_reason,
                     )
 
-                if not deep_research_enabled(request) and not is_coder_mode_request(request):
-                    visible_tail = filter_hidden_chat_protocol_chunk(visible_stream_state, "", final=True)
-                    if visible_tail:
-                        yield sse("token", {"token": visible_tail})
+                visible_tail = filter_hidden_chat_protocol_chunk(visible_stream_state, "", final=True)
+                if visible_tail:
+                    yield sse("token", {"token": visible_tail})
 
                 corrected_answer = await maybe_rewrite_answer_language(tier, request, sources, full_answer)
                 if corrected_answer:
                     yield sse("status", {"message": "Исправляю язык ответа"})
-                    if not deep_research_enabled(request):
-                        yield sse("replace", {"content": visible_chat_content(request, corrected_answer)})
+                    yield sse("replace", {"content": visible_chat_content(request, corrected_answer)})
                     full_answer = corrected_answer
-
-                if deep_research_enabled(request):
-                    async for event_kind, payload in deep_research_deliberation_events(
-                        tier,
-                        request,
-                        sources,
-                        full_answer,
-                        research_queries,
-                        strict_model=strict_model,
-                    ):
-                        if event_kind == "progress":
-                            yield sse("research", payload)
-                        elif event_kind == "result":
-                            full_answer = str(payload.get("answer") or full_answer)
-                            sources = payload.get("sources") or sources
-                            research_queries = payload.get("queries") or research_queries
-                            research_rounds = int(payload.get("rounds") or 0)
-                            research_confidence = float(payload.get("confidence") or 0.0)
-                            research_stop_reason = str(payload.get("stop_reason") or "unknown")
-                            research_verified = bool(payload.get("revised"))
-                            continuation_count += int(payload.get("continuation_count") or 0)
-                    regenerated = regenerated or research_verified
-                    yield sse("sources", {"sources": [source.model_dump(mode="json") for source in sources]})
-                    if full_answer.strip():
-                        yield sse("replace", {"content": visible_chat_content(request, full_answer)})
-                    if research_stop_reason == "cancelled":
-                        usage = build_chat_usage(request, sources, full_answer, started_at, model_tier=tier)
-                        correct_truncation_signal(usage, full_answer, stop_reason="cancelled")
-                        usage["partial"] = True
-                        annotate_research_usage(
-                            usage,
-                            request,
-                            research_queries,
-                            sources,
-                            research_verified,
-                            rounds=research_rounds,
-                            confidence=research_confidence,
-                            stop_reason=research_stop_reason,
-                        )
-                        complete_conversation(conversation_id, full_answer, usage, model_tier=tier, sources=sources)
-                        yield sse("done", {"ok": False, "cancelled": True, "partial": True, "usage": usage})
-                        return
 
                 grounded_answer, registry_flags, registry_regenerated = await maybe_regenerate_for_registry_grounding(
                     tier,
@@ -2354,15 +2442,10 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                     yield sse("replace", {"content": visible_chat_content(request, honest_answer)})
                     full_answer = honest_answer
 
-                if is_coder_mode_request(request):
-                    visible_answer, action_proposals = extract_action_proposals(full_answer, request)
-                else:
-                    visible_answer, action_proposals = strip_hidden_monarch_commands(full_answer), []
+                visible_answer = strip_hidden_monarch_commands(full_answer)
                 if visible_answer != full_answer:
                     yield sse("replace", {"content": visible_answer})
                     full_answer = visible_answer
-                if action_proposals:
-                    yield sse("action_proposal", {"proposals": action_proposals})
 
                 record_model_quality_result(
                     tier,
@@ -2429,17 +2512,10 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                     usage,
                     model_tier=tier,
                     sources=sources,
-                    action_proposals=action_proposals,
                 )
                 yield sse("done", {
                     "ok": stream_ok,
-                    "outcome": (
-                        "action-proposed"
-                        if action_proposals
-                        else "answered:source-grounded"
-                        if sources
-                        else "answered"
-                    ),
+                    "outcome": "answered:source-grounded" if sources else "answered",
                     "usage": usage,
                 })
             except asyncio.CancelledError:
@@ -2451,10 +2527,21 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                     usage["partial"] = True
                     complete_conversation(conversation_id, partial_answer, usage, model_tier=tier, sources=sources if "sources" in locals() else [])
                 raise
+            except ModelTierRecycleRequiredError:
+                model_runtime.last_error = TIER_RECYCLE_REQUIRED_CODE
+                recycle_required = True
+                yield sse("error", {
+                    "code": TIER_RECYCLE_REQUIRED_CODE,
+                    "message": TIER_RECYCLE_REQUIRED_MESSAGE,
+                    "retryable": True,
+                })
+                yield sse("done", {"ok": False, "code": TIER_RECYCLE_REQUIRED_CODE})
             except Exception as exc:
                 logging.exception("Oscar chat stream failed")
                 model_runtime.last_error = str(exc)
-                if is_explicit_gemma_override(request):
+                if request.image_attachments:
+                    recovery_answer = render_runtime_recovery_answer(request)
+                elif is_explicit_gemma_override(request):
                     recovery_answer = (
                         "\n\n**Ошибка**: Режим Gemma Mode активен, но выбранная локальная модель "
                         "не завершила генерацию. Проверь установку модели и повтори запрос."
@@ -2471,8 +2558,11 @@ async def chat_stream(request: ChatRequest, http_request: Request = None):
                 complete_conversation(conversation_id, final_answer, usage, model_tier=tier)
                 yield sse("done", {"ok": False, "partial": bool(partial_answer.strip()), "usage": usage})
         finally:
-            unload_after_generation()
             inference_slot.release()
+            if recycle_required:
+                schedule_backend_recycle(0.25)
+            else:
+                unload_after_generation(tier)
 
     return StreamingResponse(events(), media_type="text/event-stream")
 
@@ -2514,8 +2604,6 @@ def should_auto_continue(
     answer: str,
     usage: dict,
     continuation_count: int,
-    *,
-    allow_deep_research: bool = False,
 ) -> bool:
     """Continue any non-empty answer that reached a concrete generation boundary."""
     return bool(
@@ -2523,11 +2611,6 @@ def should_auto_continue(
         and answer.strip()
         and usage.get("likely_truncated")
         and not model_runtime.generation_cancelled()
-        and (
-            not deep_research_enabled(request)
-            or allow_deep_research
-            or is_expansive_generation_task(latest_user_text(request))
-        )
     )
 
 
@@ -2540,23 +2623,6 @@ def automatic_continuation_prompt(request: ChatRequest, answer: str) -> Continua
     # original request, retrieved context, and a generous continuation budget.
     return ContinuationPrompt(
         assistant_tail=answer[-CONTINUATION_TAIL_CHARS:],
-        instruction=instruction,
-    )
-
-
-def automatic_research_continuation_prompt(request: ChatRequest, answer: str) -> ContinuationPrompt:
-    language = expected_request_language(request)
-    instruction = (
-        "Продолжи окончательный исследовательский ответ ровно с оборванного места. "
-        "Не повторяй уже написанное, не добавляй новое вступление и не начинай ответ заново. "
-        "Выведи только продолжение и обязательно закончи вывод полностью."
-        if language == "ru"
-        else
-        "Continue the final research answer from the exact cut point. Do not repeat existing text, "
-        "add a new introduction, or restart the answer. Output only the continuation and finish the conclusion fully."
-    )
-    return ContinuationPrompt(
-        assistant_tail=answer[-RESEARCH_CONTINUATION_TAIL_CHARS:],
         instruction=instruction,
     )
 
@@ -2704,8 +2770,6 @@ def estimate_continuation_usage(
         reasoning_effort or request.reasoning_effort,
         continuation,
         request.skills if skills is None else skills,
-        request.capabilities,
-        request.access,
         request.max_new_tokens,
         continuation_prompt=continuation_prompt,
     )
@@ -3063,6 +3127,14 @@ def refers_to_previous_answer(text: str) -> bool:
 def render_runtime_recovery_answer(request: ChatRequest) -> str:
     latest_user = next((message.content for message in reversed(request.messages) if message.role == "user"), "").strip()
     language = expected_request_language(request) if latest_user else "auto"
+    if request.image_attachments and model_runtime.last_generation_failure == "vision-unavailable":
+        return (
+            "Изображение прикреплено, но локальная модель не смогла его обработать. "
+            "Проверь доступность адаптера Vision в настройках моделей и повтори запрос."
+            if language == "ru" else
+            "The image is attached, but the local model could not process it. "
+            "Check the Vision adapter in model settings and retry."
+        )
     if language == "ru":
         if latest_user:
             return (
@@ -3124,6 +3196,8 @@ async def maybe_rewrite_answer_language(
         ChatMessage(role="assistant", content=full_answer),
         ChatMessage(role="user", content=rewrite_instruction),
     ]
+    if defer_secondary_generation_for_tier_recycle(tier):
+        return None
     try:
         retry_generator = model_runtime.stream_chat(
             tier,
@@ -3135,8 +3209,6 @@ async def maybe_rewrite_answer_language(
             request.top_p,
             request.image_attachments,
             skill_context=request.skills,
-            capability_context=request.capabilities,
-            access_context=request.access,
             strict_tier=is_strict_tier_request(request),
             context_profile=request.context_profile,
         )
@@ -3152,8 +3224,6 @@ async def maybe_rewrite_answer_language(
 
 
 def live_monarch_registry_snapshot(request: ChatRequest) -> dict | None:
-    if is_coder_mode_request(request):
-        return None
     for message in request.messages:
         if message.role != "system" or "<live_monarch_system>" not in message.content:
             continue
@@ -3264,6 +3334,8 @@ async def maybe_regenerate_for_registry_grounding(
         ),
     ]
     retry_tier = tier if is_strict_tier_request(request) else max_tier(tier, "gemma4-balanced")
+    if defer_secondary_generation_for_tier_recycle(retry_tier):
+        return full_answer, flags, False
     try:
         retry_generator = model_runtime.stream_chat(
             retry_tier,
@@ -3275,8 +3347,6 @@ async def maybe_regenerate_for_registry_grounding(
             request.top_p,
             request.image_attachments,
             request.skills,
-            request.capabilities,
-            request.access,
             strict_tier=is_strict_tier_request(request),
             context_profile=request.context_profile,
         )
@@ -3319,6 +3389,8 @@ async def maybe_regenerate_for_quality(
         # separate consent. Retry the current tier with a compact trusted
         # correction instead of returning a known-bad draft.
         retry_tier = current_tier
+    if defer_secondary_generation_for_tier_recycle(retry_tier):
+        return full_answer, quality_flags, False
     try:
         retry_generator = model_runtime.stream_chat(
             retry_tier,
@@ -3330,8 +3402,6 @@ async def maybe_regenerate_for_quality(
             request.top_p,
             request.image_attachments,
             request.skills,
-            request.capabilities,
-            request.access,
             strict_tier=is_strict_tier_request(request),
             trusted_retry_instruction=quality_retry_instruction(expected_lang, quality_flags),
             context_profile=request.context_profile,
@@ -3684,8 +3754,6 @@ async def deep_research_source_events(
             0.1,
             0.85,
             skill_context=[],
-            capability_context=[],
-            access_context=request.access,
             strict_tier=strict_model,
         )
         planner_pieces: list[str] = []
@@ -3717,6 +3785,7 @@ async def deep_research_source_events(
     }
 
     combined_hits = []
+    fresh_by_url: dict[str, str] = {}
     direct_sources: list[ChatSource] = []
     seen_hits: set[str] = set()
     seen_direct_urls: set[str] = set()
@@ -3724,7 +3793,7 @@ async def deep_research_source_events(
     async def search_branch(index: int, query: str):
         try:
             fresh = await search_service.search_and_ingest(
-                query, 3, fetch_pages=True, persist=not zero_retention
+                query, 3, fetch_pages=True, persist=not zero_retention, subject=question
             )
         except Exception:
             logging.exception("Oscar deep-research search branch failed")
@@ -3752,6 +3821,7 @@ async def deep_research_source_events(
             completed_branches += 1
 
             urls = [result.url for result in fresh if result.url]
+            fresh_by_url.update({result.url: result.origin for result in fresh if result.url})
             if urls and not zero_retention:
                 try:
                     hits = memory.search_urls(query, urls, limit=4)
@@ -3777,6 +3847,7 @@ async def deep_research_source_events(
                         title=result.title or result.url,
                         url=result.url,
                         excerpt=excerpt[:420],
+                        origin=result.origin,
                     ))
             yield "progress", {
                 "stage": "read",
@@ -3791,7 +3862,10 @@ async def deep_research_source_events(
                 task.cancel()
         await asyncio.gather(*branch_tasks, return_exceptions=True)
 
-    sources = [] if zero_retention else memory.hits_to_sources(combined_hits[:10])
+    sources = [] if zero_retention else [
+        source.model_copy(update={"origin": fresh_by_url.get(source.url or "", "engine")})
+        for source in memory.hits_to_sources(combined_hits[:10])
+    ]
     used_urls = {str(source.url or "").casefold() for source in sources if source.url}
     for source in direct_sources:
         if len(sources) >= 10:
@@ -3801,6 +3875,8 @@ async def deep_research_source_events(
             continue
         used_urls.add(key)
         sources.append(source)
+    if not sources:
+        sources = saved_page_sources(question, 6)
     sources = [source.model_copy(update={"id": index}) for index, source in enumerate(sources, start=1)]
     yield "progress", {
         "stage": "sources-ready",
@@ -3817,6 +3893,7 @@ async def expand_deep_research_sources(
     sources: list[ChatSource],
     *,
     zero_retention: bool = False,
+    subject: str = "",
 ) -> list[ChatSource]:
     if not queries or len(sources) >= MAX_TOTAL_RESEARCH_SOURCES:
         return sources
@@ -3824,7 +3901,7 @@ async def expand_deep_research_sources(
     async def search_branch(query: str):
         try:
             return query, await search_service.search_and_ingest(
-                query, 3, fetch_pages=True, persist=not zero_retention
+                query, 3, fetch_pages=True, persist=not zero_retention, subject=subject
             )
         except Exception:
             logging.exception("Oscar deliberation follow-up search failed")
@@ -3842,7 +3919,7 @@ async def expand_deep_research_sources(
             if urls and not zero_retention:
                 try:
                     hits = memory.search_urls(query, urls, limit=4)
-                    candidates.extend(memory.hits_to_sources(hits))
+                    candidates.extend(with_origins(memory.hits_to_sources(hits), fresh))
                 except Exception:
                     logging.exception("Oscar deliberation retrieval failed")
             for result in fresh:
@@ -3853,6 +3930,7 @@ async def expand_deep_research_sources(
                         title=result.title or result.url,
                         url=result.url,
                         excerpt=excerpt[:420],
+                        origin=result.origin,
                     ))
     finally:
         for task in tasks:
@@ -3876,36 +3954,27 @@ async def expand_deep_research_sources(
     return [source.model_copy(update={"id": index}) for index, source in enumerate(merged, start=1)]
 
 
-async def deep_research_deliberation_events(
+async def deep_research_gap_events(
     tier: str,
     request: ChatRequest,
     sources: list[ChatSource],
-    answer: str,
     queries: list[str],
     *,
     strict_model: bool,
 ) -> AsyncGenerator[tuple[str, object], None]:
-    current_answer = answer.strip()
+    """Search again for what the found sources do not cover, before the answer.
+
+    The model reads the sources, not a draft: the answer is written once, after
+    the evidence is complete. Drafting and rewriting the whole answer three
+    times kept a local model busy for many minutes behind a hidden draft.
+    """
     current_sources = list(sources)
     all_queries = list(dict.fromkeys(query for query in queries if query.strip()))[:MAX_TOTAL_RESEARCH_QUERIES]
     rounds = 0
     confidence = 0.0
     stop_reason = "not-started"
-    revised = False
-    final_continuation_count = 0
     started_at = time.perf_counter()
-
-    if not deep_research_enabled(request) or not current_answer:
-        yield "result", {
-            "answer": answer,
-            "sources": current_sources,
-            "queries": all_queries,
-            "rounds": rounds,
-            "confidence": confidence,
-            "stop_reason": stop_reason,
-            "revised": revised,
-        }
-        return
+    zero_retention = bool(request.dev_mode and request.dev_mode.zero_retention)
 
     for round_index in range(1, MAX_DELIBERATION_ROUNDS + 1):
         if model_runtime.generation_cancelled():
@@ -3914,54 +3983,40 @@ async def deep_research_deliberation_events(
         if time.perf_counter() - started_at >= MAX_DELIBERATION_SECONDS:
             stop_reason = "time-budget"
             break
-
         rounds = round_index
-        yield "progress", {
+        progress = {
             "stage": "reflect",
-            "label": f"Проверяю полноту · раунд {round_index}/{MAX_DELIBERATION_ROUNDS}",
-            "detail": "Ищу пробелы, противоречия и неподтверждённые выводы",
+            "label": f"Проверяю, хватает ли данных · раунд {round_index}/{MAX_DELIBERATION_ROUNDS}",
+            "detail": f"Источников: {len(current_sources)}",
             "completed": round_index - 1,
             "total": MAX_DELIBERATION_ROUNDS,
         }
+        yield "progress", progress
         try:
             controller = model_runtime.stream_chat(
                 tier,
-                [ChatMessage(
-                    role="user",
-                    content=research_reflection_prompt(
-                        contextual_user_query(request),
-                        current_answer,
-                        round_index,
-                        len(current_sources),
-                    ),
-                )],
+                [ChatMessage(role="user", content=research_gap_prompt(
+                    contextual_user_query(request), all_queries, round_index, len(current_sources),
+                ))],
                 current_sources,
-                "high",
-                768,
+                "medium",
+                640,
                 0.05,
                 0.8,
                 skill_context=[],
-                capability_context=[],
-                access_context=request.access,
                 strict_tier=strict_model,
             )
-            controller_pieces: list[str] = []
+            pieces: list[str] = []
             next_heartbeat = time.perf_counter() + RESEARCH_PROGRESS_HEARTBEAT_SECONDS
             async for piece in iterate_in_threadpool(controller):
-                controller_pieces.append(piece)
+                pieces.append(piece)
                 now = time.perf_counter()
                 if now >= next_heartbeat:
                     next_heartbeat = now + RESEARCH_PROGRESS_HEARTBEAT_SECONDS
-                    yield "progress", {
-                        "stage": "reflect",
-                        "label": f"Проверяю полноту · раунд {round_index}/{MAX_DELIBERATION_ROUNDS}",
-                        "detail": "Контроллер сверяет вывод, источники и оставшиеся пробелы",
-                        "completed": round_index - 1,
-                        "total": MAX_DELIBERATION_ROUNDS,
-                    }
-            assessment = parse_research_assessment("".join(controller_pieces))
+                    yield "progress", progress
+            assessment = parse_research_assessment("".join(pieces))
         except Exception:
-            logging.exception("Oscar deep-research controller pass failed")
+            logging.exception("Oscar deep-research evidence check failed")
             assessment = None
 
         if model_runtime.generation_cancelled():
@@ -3976,7 +4031,7 @@ async def deep_research_deliberation_events(
             yield "progress", {
                 "stage": "decision",
                 "label": "Данных достаточно",
-                "detail": f"Модель завершила самопроверку · уверенность {round(confidence * 100)}%",
+                "detail": f"Уверенность {round(confidence * 100)}%",
                 "completed": round_index,
                 "total": MAX_DELIBERATION_ROUNDS,
             }
@@ -3988,235 +4043,39 @@ async def deep_research_deliberation_events(
             query for query in assessment.queries
             if query.casefold() not in seen_queries
         ][:remaining_query_budget]
-        if followup_queries:
-            yield "progress", {
-                "stage": "search",
-                "label": f"Уточняю найденные пробелы · раунд {round_index}",
-                "detail": f"Дополнительных направлений: {len(followup_queries)}",
-                "completed": round_index - 1,
-                "total": MAX_DELIBERATION_ROUNDS,
-            }
-            previous_source_count = len(current_sources)
-            current_sources = await expand_deep_research_sources(
-                followup_queries,
-                current_sources,
-                zero_retention=bool(request.dev_mode and request.dev_mode.zero_retention),
-            )
-            all_queries.extend(followup_queries)
-            yield "progress", {
-                "stage": "read",
-                "label": "Изучаю дополнительный контекст",
-                "detail": f"Новых источников: {max(0, len(current_sources) - previous_source_count)}",
-                "completed": round_index - 1,
-                "total": MAX_DELIBERATION_ROUNDS,
-            }
-
-        if model_runtime.generation_cancelled():
-            stop_reason = "cancelled"
+        if not followup_queries:
+            stop_reason = "no-new-queries"
             break
         yield "progress", {
-            "stage": "revise",
-            "label": f"Пересобираю вывод · раунд {round_index}",
-            "detail": f"Учитываю пробелы: {len(assessment.gaps)} · источников: {len(current_sources)}",
+            "stage": "search",
+            "label": "Ищу недостающее",
+            "detail": " · ".join(followup_queries),
             "completed": round_index - 1,
             "total": MAX_DELIBERATION_ROUNDS,
         }
-        try:
-            reviser = model_runtime.stream_chat(
-                tier,
-                [ChatMessage(
-                    role="user",
-                    content=research_revision_prompt(
-                        contextual_user_query(request),
-                        current_answer,
-                        assessment,
-                        round_index,
-                    ),
-                )],
-                current_sources,
-                "high",
-                min(request.max_new_tokens, MAX_BASE_GENERATION_TOKENS),
-                0.15,
-                0.9,
-                skill_context=research_skill_context(
-                    request,
-                    research_decision_for_request(request),
-                    all_queries,
-                ),
-                capability_context=[],
-                access_context=request.access,
-                strict_tier=strict_model,
-            )
-            revision_pieces: list[str] = []
-            next_heartbeat = time.perf_counter() + RESEARCH_PROGRESS_HEARTBEAT_SECONDS
-            async for piece in iterate_in_threadpool(reviser):
-                revision_pieces.append(piece)
-                now = time.perf_counter()
-                if now >= next_heartbeat:
-                    next_heartbeat = now + RESEARCH_PROGRESS_HEARTBEAT_SECONDS
-                    yield "progress", {
-                        "stage": "revise",
-                        "label": f"Пересобираю вывод · раунд {round_index}",
-                        "detail": "Модель встраивает дополнительный контекст в новый полный черновик",
-                        "completed": round_index - 1,
-                        "total": MAX_DELIBERATION_ROUNDS,
-                    }
-            revision = "".join(revision_pieces).strip()
-        except Exception:
-            logging.exception("Oscar deep-research revision pass failed")
-            revision = ""
-        if model_runtime.generation_cancelled():
-            stop_reason = "cancelled"
-            break
-        if not revision or model_runtime.fallback_active:
-            stop_reason = "revision-unavailable"
-            break
-        revised = revised or revision != current_answer
-        current_answer = revision
-        stop_reason = "round-limit" if round_index == MAX_DELIBERATION_ROUNDS else "continue"
-
-    if not model_runtime.generation_cancelled() and current_answer and not model_runtime.fallback_active:
+        previous_source_count = len(current_sources)
+        current_sources = await expand_deep_research_sources(
+            followup_queries,
+            current_sources,
+            zero_retention=zero_retention,
+            subject=contextual_user_query(request),
+        )
+        all_queries.extend(followup_queries)
         yield "progress", {
-            "stage": "finalize",
-            "label": "Формирую окончательный вывод",
-            "detail": f"Объединяю результат после {rounds} раундов самопроверки",
-            "completed": rounds,
+            "stage": "read",
+            "label": "Изучаю новые источники",
+            "detail": f"Новых: {max(0, len(current_sources) - previous_source_count)}",
+            "completed": round_index,
             "total": MAX_DELIBERATION_ROUNDS,
         }
-        try:
-            research_skills = research_skill_context(
-                request,
-                research_decision_for_request(request),
-                all_queries,
-            )
-            finalization_messages = [ChatMessage(
-                role="user",
-                content=research_finalization_prompt(
-                    contextual_user_query(request),
-                    current_answer,
-                    rounds,
-                    stop_reason,
-                ),
-            )]
-            model_runtime.last_generation_stop_reason = "unknown"
-            finalizer = model_runtime.stream_chat(
-                tier,
-                finalization_messages,
-                current_sources,
-                "high",
-                min(request.max_new_tokens, MAX_BASE_GENERATION_TOKENS),
-                0.12,
-                0.9,
-                skill_context=research_skills,
-                capability_context=[],
-                access_context=request.access,
-                strict_tier=strict_model,
-            )
-            final_pieces: list[str] = []
-            next_heartbeat = time.perf_counter() + RESEARCH_PROGRESS_HEARTBEAT_SECONDS
-            async for piece in iterate_in_threadpool(finalizer):
-                final_pieces.append(piece)
-                now = time.perf_counter()
-                if now >= next_heartbeat:
-                    next_heartbeat = now + RESEARCH_PROGRESS_HEARTBEAT_SECONDS
-                    yield "progress", {
-                        "stage": "finalize",
-                        "label": "Формирую окончательный вывод",
-                        "detail": "Собираю проверенный ответ без показа внутреннего черновика",
-                        "completed": rounds,
-                        "total": MAX_DELIBERATION_ROUNDS,
-                    }
-            final_answer = "".join(final_pieces).strip()
-            finalization_stop_reason = model_runtime.last_generation_stop_reason
-            if final_answer and not model_runtime.fallback_active:
-                revised = revised or final_answer != current_answer
-                current_answer = final_answer
-                continuation_usage = estimate_continuation_usage(
-                    request,
-                    None,
-                    current_sources,
-                    final_answer,
-                    current_answer,
-                    reasoning_effort="high",
-                    skills=research_skills,
-                    stop_reason=finalization_stop_reason,
-                    base_messages=finalization_messages,
-                )
-                while should_auto_continue(
-                    request,
-                    current_answer,
-                    continuation_usage,
-                    final_continuation_count,
-                    allow_deep_research=True,
-                ):
-                    yield "progress", {
-                        "stage": "finalize",
-                        "label": f"Продолжаю полный вывод · проход {final_continuation_count + 2}",
-                        "detail": "Лимит одного прохода достигнут — продолжаю ровно с места обрыва",
-                        "completed": rounds,
-                        "total": MAX_DELIBERATION_ROUNDS,
-                    }
-                    continuation_prompt = automatic_research_continuation_prompt(request, current_answer)
-                    model_runtime.last_generation_stop_reason = "unknown"
-                    continuation_generator = model_runtime.stream_chat(
-                        tier,
-                        finalization_messages,
-                        [],
-                        "high",
-                        min(request.max_new_tokens, MAX_BASE_GENERATION_TOKENS),
-                        0.12,
-                        0.9,
-                        skill_context=[],
-                        capability_context=[],
-                        access_context=request.access,
-                        strict_tier=strict_model,
-                        continuation_prompt=continuation_prompt,
-                    )
-                    continuation_pieces: list[str] = []
-                    next_heartbeat = time.perf_counter() + RESEARCH_PROGRESS_HEARTBEAT_SECONDS
-                    async for piece in iterate_in_threadpool(continuation_generator):
-                        continuation_pieces.append(piece)
-                        now = time.perf_counter()
-                        if now >= next_heartbeat:
-                            next_heartbeat = now + RESEARCH_PROGRESS_HEARTBEAT_SECONDS
-                            yield "progress", {
-                                "stage": "finalize",
-                                "label": f"Продолжаю полный вывод · проход {final_continuation_count + 2}",
-                                "detail": "Дописываю проверенный ответ без повторов",
-                                "completed": rounds,
-                                "total": MAX_DELIBERATION_ROUNDS,
-                            }
-                    continuation = "".join(continuation_pieces)
-                    continuation_stop_reason = model_runtime.last_generation_stop_reason
-                    if not continuation.strip() or model_runtime.generation_cancelled():
-                        break
-                    current_answer += continuation
-                    final_continuation_count += 1
-                    continuation_usage = estimate_continuation_usage(
-                        request,
-                        continuation_prompt,
-                        [],
-                        continuation,
-                        current_answer,
-                        reasoning_effort="high",
-                        skills=[],
-                        stop_reason=continuation_stop_reason,
-                        base_messages=finalization_messages,
-                    )
-        except Exception:
-            logging.exception("Oscar deep-research finalization pass failed; keeping best draft")
-            if model_runtime.generation_cancelled():
-                stop_reason = "cancelled"
+        stop_reason = "round-limit" if round_index == MAX_DELIBERATION_ROUNDS else "continue"
 
     yield "result", {
-        "answer": current_answer or answer,
         "sources": current_sources,
         "queries": all_queries,
         "rounds": rounds,
         "confidence": confidence,
         "stop_reason": stop_reason,
-        "revised": revised,
-        "continuation_count": final_continuation_count,
     }
 
 
@@ -4242,9 +4101,51 @@ def annotate_research_usage(
     usage["research_stop_reason"] = stop_reason
 
 
-async def prepare_sources(request: ChatRequest):
+async def plan_web_search_queries(request: ChatRequest, tier: str, *, strict_model: bool) -> list[str]:
+    """What to type into the search engine, written by the answering model.
+
+    The request is a message to Oscar ("погода в Варне? и запомни, я там
+    живу"), not a search query; sending it verbatim searched for the whole
+    sentence. The plan is a proposal only: an unusable one falls back to the
+    contextual request, and it grants no action.
+    """
+    fallback = contextual_web_search_query(request)
+    user_indexes = [index for index, message in enumerate(request.messages) if message.role == "user"]
+    if not user_indexes:
+        return [fallback] if fallback else []
+    latest_index = user_indexes[-1]
+    history = [
+        {"role": message.role, "content": message.content}
+        for message in request.messages[:latest_index]
+        if message.role in {"user", "assistant"} and message.content.strip()
+    ]
+    planned_text = ""
+    try:
+        planner = model_runtime.stream_chat(
+            tier,
+            [ChatMessage(role="user", content=web_query_planner_prompt(
+                request.messages[latest_index].content,
+                history,
+                time.strftime("%Y-%m-%d"),
+            ))],
+            [],
+            "low",
+            320,
+            0.1,
+            0.85,
+            skill_context=[],
+            strict_tier=strict_model,
+        )
+        planned_text = "".join([piece async for piece in iterate_in_threadpool(planner)])
+    except Exception:
+        logging.exception("Oscar search query planning failed; searching for the request itself")
+    return parse_planned_web_queries(planned_text, fallback)
+
+
+async def prepare_sources(request: ChatRequest, planned_queries: list[str] | None = None):
     latest_user = next((message.content for message in reversed(request.messages) if message.role == "user"), "")
-    search_query = contextual_web_search_query(request)
+    search_queries = [query for query in (planned_queries or []) if query.strip()] or [contextual_web_search_query(request)]
+    search_query = " ".join(search_queries)
     memory_query = contextual_memory_query(request)
     use_web, _search_reason = effective_web_search(request)
     zero_retention = bool(request.dev_mode and request.dev_mode.zero_retention)
@@ -4265,7 +4166,9 @@ async def prepare_sources(request: ChatRequest):
     if request.use_memory:
         try:
             context = await anyio.to_thread.run_sync(
-                lambda: memory_v4.retrieve(memory_query, {"type": "chat"})
+                lambda: memory_v4.retrieve(
+                    memory_query, {"type": "chat"}, exclude_conversation_id=request.conversation_id,
+                )
             )
             local_sources = memory_context_sources(context)
         except Exception:
@@ -4275,12 +4178,22 @@ async def prepare_sources(request: ChatRequest):
     fresh_results = []
     if use_web:
         try:
-            fresh_results = await search_service.search_and_ingest(
-                search_query,
-                settings.search_top_k,
-                fetch_pages=True,
-                persist=not zero_retention,
-            )
+            per_query = max(2, -(-settings.search_top_k // len(search_queries)))
+            batches = await asyncio.gather(*(
+                search_service.search_and_ingest(
+                    query,
+                    per_query,
+                    fetch_pages=True,
+                    persist=not zero_retention,
+                )
+                for query in search_queries
+            ))
+            seen_urls: set[str] = set()
+            for batch in batches:
+                for result in batch:
+                    if result.url not in seen_urls:
+                        seen_urls.add(result.url)
+                        fresh_results.append(result)
         except Exception:
             logging.exception("Oscar web search failed; continuing without fresh web context")
             model_runtime.last_error = "web search failed; continuing without fresh web context"
@@ -4293,30 +4206,67 @@ async def prepare_sources(request: ChatRequest):
                 title=result.title or result.url,
                 url=result.url,
                 excerpt=str(result.snippet or "")[:900],
+                origin=result.origin,
+                published=iso_day(getattr(result, "published", "")),
             )
             for index, result in enumerate(fresh_results, start=1)
             if result.url and str(result.snippet or "").strip()
         ]
-    elif use_web:
+    elif use_web and fresh_results:
         try:
-            if fresh_results:
-                hits = memory.search_urls(
-                    search_query,
-                    [result.url for result in fresh_results],
-                    limit=settings.retrieval_k,
-                )
-            else:
-                hits = memory.search(
-                    search_query,
-                    limit=settings.retrieval_k,
-                    exclude_sources=["user-note", "system", "file", "assistant", "user", "conversation"],
-                )
-            web_sources = memory.hits_to_sources(hits)
+            hits = memory.search_urls(
+                search_query,
+                [result.url for result in fresh_results],
+                limit=settings.retrieval_k,
+            )
+            web_sources = with_origins(memory.hits_to_sources(hits), fresh_results)
         except Exception:
             logging.exception("Oscar web context lookup failed; continuing without cached source context")
             model_runtime.last_error = "web context lookup failed; continuing without cached source context"
+    if use_web and not web_sources:
+        # The engines found nothing or refused: pages read earlier, with the
+        # date they were saved; the answer opens with a notice saying so.
+        web_sources = saved_page_sources(search_query, settings.retrieval_k)
     merged = [*web_sources, *local_sources]
     return [source.model_copy(update={"id": index}) for index, source in enumerate(merged[:12], start=1)]
+
+
+def with_origins(sources: list[ChatSource], results: list) -> list[ChatSource]:
+    by_url = {result.url: result for result in results if getattr(result, "url", "")}
+    return [
+        source.model_copy(update={
+            "origin": getattr(by_url.get(source.url or ""), "origin", None) or "engine",
+            "published": iso_day(getattr(by_url.get(source.url or ""), "published", "")) or source.published,
+        })
+        for source in sources
+    ]
+
+
+def iso_day(value: object) -> str | None:
+    """YYYY-MM-DD from a search result date, or None when there is none."""
+    text = str(value or "").strip()[:10]
+    return text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else None
+
+
+def saved_page_sources(query: str, limit: int) -> list[ChatSource]:
+    return [
+        ChatSource(
+            id=0,
+            title=result.title,
+            url=result.url,
+            excerpt=result.snippet[:900],
+            origin="saved",
+            saved_at=iso_day(result.saved_at),
+        )
+        for result in search_service.saved_pages(query, limit=limit)
+    ]
+
+
+def web_search_notice(request: ChatRequest, sources: list[ChatSource]) -> str:
+    """The line above an answer whose web search was degraded; empty otherwise."""
+    if not effective_web_search(request)[0]:
+        return ""
+    return search_notice(search_state([source.origin for source in sources if source.origin], searched=True))
 
 
 def memory_context_sources(context: dict) -> list[ChatSource]:

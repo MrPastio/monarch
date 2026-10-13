@@ -107,7 +107,12 @@ export function normalizeActionProposal(
   }));
   // The model cannot mint a fresh key to repeat the same exact action. The
   // canonical action itself is the idempotency identity for this user task.
-  const idempotencyKey = `action:${sha256(stableStringify(actionIdentity))}`;
+  // A read has no effect to protect, and replaying it answers with the past:
+  // live, an agent listed its project folder again after writing a file and
+  // could only have received the first listing. Each read proposal is its own
+  // action; effectful repeats keep the task-wide identity above.
+  const idempotencyKey = `action:${sha256(stableStringify(riskVector.effect === 'read'
+    ? { ...actionIdentity, readProposalId: proposalId } : actionIdentity))}`;
 
   return {
     version: 1,

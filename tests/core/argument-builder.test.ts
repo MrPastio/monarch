@@ -3,6 +3,7 @@ import {
   buildWorkspaceFileArguments,
   classifyIntentText,
   extractWorkspaceObjectName,
+  parseExactWorkspaceFileReads,
   parseExactWorkspaceFileWrites,
 } from '../../src/core';
 
@@ -68,6 +69,28 @@ describe('workspace argument builder', () => {
     expect(parseExactWorkspaceFileWrites(
       'Не создавай runtime/negated-ru.txt с точным текстом НЕЛЬЗЯ.',
     )).toEqual([]);
+  });
+
+  it('compiles only explicit multi-file read paths in request order', () => {
+    expect(parseExactWorkspaceFileReads(
+      'Прочитай E:\\Monarch\\package.json и E:\\Monarch\\tsconfig.json, затем сравни их.',
+    )).toEqual([
+      { path: 'E:\\Monarch\\package.json' },
+      { path: 'E:\\Monarch\\tsconfig.json' },
+    ]);
+    expect(parseExactWorkspaceFileReads('Read E:\\Monarch\\package.json and E:\\Monarch\\package.json.')).toEqual([]);
+    expect(parseExactWorkspaceFileReads('Explain E:\\Monarch\\package.json and E:\\Monarch\\tsconfig.json.')).toEqual([]);
+  });
+
+  it('does not treat a later exact write target as an input file to read', () => {
+    const request = 'Read E:\\Monarch\\package.json and E:\\Monarch\\tsconfig.json, then create E:\\Agent-QA\\summary.txt with exact text READY.';
+    expect(parseExactWorkspaceFileReads(request)).toEqual([
+      { path: 'E:\\Monarch\\package.json' },
+      { path: 'E:\\Monarch\\tsconfig.json' },
+    ]);
+    expect(parseExactWorkspaceFileWrites(request)).toEqual([{
+      path: 'E:\\Agent-QA\\summary.txt', content: 'READY', overwrite: false,
+    }]);
   });
 
   it('classifies a complete atomic write as a tool operation', () => {

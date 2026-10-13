@@ -79,12 +79,7 @@ export const deviceManifest: MonarchModuleManifest = {
         properties: { kind: { type: 'string', enum: ['time', 'date'] } },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['current time', 'current date', 'который час', 'сколько времени', 'какая сегодня дата'],
-        keywords: ['time', 'date', 'clock', 'время', 'дата', 'час'],
-        examples: ['Оскар, скажи, сколько сейчас времени'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'device.volume.get',
@@ -101,12 +96,7 @@ export const deviceManifest: MonarchModuleManifest = {
         verificationDescription: 'The device helper must return an authoritative verified volume state.',
       }),
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      routing: {
-        aliases: ['current volume', 'какая громкость', 'уровень звука'],
-        keywords: ['volume', 'sound', 'громкость', 'звук'],
-        examples: ['какая сейчас громкость'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'device.volume.set',
@@ -132,12 +122,7 @@ export const deviceManifest: MonarchModuleManifest = {
         required: ['action'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['set volume', 'change volume', 'установи громкость', 'выключи звук'],
-        keywords: ['volume', 'sound', 'mute', 'громкость', 'звук'],
-        examples: ['установи громкость на 50 процентов'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'device.brightness.get',
@@ -154,12 +139,7 @@ export const deviceManifest: MonarchModuleManifest = {
         verificationDescription: 'WMI must return a bounded verified brightness value.',
       }),
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      routing: {
-        aliases: ['read brightness', 'current brightness', 'какая яркость'],
-        keywords: ['brightness', 'display', 'яркость', 'экран'],
-        examples: ['какая сейчас яркость экрана'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'device.brightness.set',
@@ -185,12 +165,7 @@ export const deviceManifest: MonarchModuleManifest = {
         required: ['operation'],
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['set brightness', 'change brightness', 'установи яркость'],
-        keywords: ['brightness', 'display', 'яркость', 'экран'],
-        examples: ['установи яркость на 50 процентов'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'device.apps.search',
@@ -246,12 +221,7 @@ export const deviceManifest: MonarchModuleManifest = {
         required: ['query', 'matches'],
         additionalProperties: true,
       },
-      routing: {
-        aliases: ['find installed app', 'search applications', 'найди установленную программу', 'какие приложения установлены'],
-        keywords: ['find', 'installed', 'application', 'program', 'найди', 'установлен', 'приложение', 'программа'],
-        examples: ['найди установленный Photoshop'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'device.app.open',
@@ -321,19 +291,7 @@ export const deviceManifest: MonarchModuleManifest = {
         required: ['opened', 'displayName', 'performed', 'verified'],
         additionalProperties: true,
       },
-      routing: {
-        aliases: [
-          'open app',
-          'launch program',
-          'открой приложение',
-          'открыть приложение',
-          'запусти программу',
-          'запустить программу',
-        ],
-        keywords: ['open', 'launch', 'start', 'app', 'program', 'открой', 'открыть', 'запусти', 'запустить', 'приложение', 'программа'],
-        examples: ['открой калькулятор', 'можешь открыть калькулятор', 'could you open Calculator'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'device.browser.open',
@@ -359,12 +317,7 @@ export const deviceManifest: MonarchModuleManifest = {
         },
         additionalProperties: false,
       },
-      routing: {
-        aliases: ['open website', 'browse to', 'открой сайт', 'открой в браузере'],
-        keywords: ['browser', 'website', 'url', 'браузер', 'сайт', 'ссылка'],
-        examples: ['открой сайт example.com в браузере'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'device.recycle-bin.empty',
@@ -382,12 +335,7 @@ export const deviceManifest: MonarchModuleManifest = {
         verificationDescription: 'The Windows operation must return an explicit emptied and verified receipt.',
       }),
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      routing: {
-        aliases: ['empty recycle bin', 'clear recycle bin', 'очисти корзину'],
-        keywords: ['empty', 'clear', 'recycle bin', 'очисти', 'корзина'],
-        examples: ['очисти корзину на компьютере'],
-        intentKinds: ['device-control'],
-      },
+
     },
     {
       id: 'device.browser.close-active',
@@ -405,12 +353,7 @@ export const deviceManifest: MonarchModuleManifest = {
         verificationDescription: 'A post-dispatch reconciliation must prove that the exact foreground browser window closed or report failure.',
       }),
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      routing: {
-        aliases: ['close active browser', 'закрой активный браузер'],
-        keywords: ['close', 'active browser', 'закрой', 'активный браузер'],
-        examples: ['закрой активный браузер'],
-        intentKinds: ['device-control'],
-      },
+
     },
   ],
 };

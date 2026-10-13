@@ -37,12 +37,9 @@ def test_installed_defaults_use_explicit_writable_roots(monkeypatch, tmp_path: P
         assert settings.workspace_root == workspace_root
         assert settings.sharing_tts_python == runtime_python
     finally:
-        monkeypatch.delenv("MONARCH_DATA_ROOT")
-        monkeypatch.delenv("MONARCH_PAYLOAD_ROOT")
-        monkeypatch.delenv("MONARCH_GENERATED_ROOT")
-        monkeypatch.delenv("MONARCH_SECRETS_ROOT")
-        monkeypatch.delenv("MONARCH_WORKSPACE_ROOT")
-        monkeypatch.delenv("MONARCH_RUNTIME_ROOT")
-        monkeypatch.delenv("OSCAR_PYTHON")
-        monkeypatch.delenv("MONARCH_BACKEND_ENVIRONMENT_ROOT")
+        # Restore whatever the session started with instead of clearing the
+        # variables: deleting them made the reload below resolve the module
+        # defaults against the developer checkout, so every later test in the
+        # run used the real oscar/data database instead of the test sandbox.
+        monkeypatch.undo()
         importlib.reload(config_module)

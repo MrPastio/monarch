@@ -120,6 +120,8 @@ class Settings(BaseSettings):
     memory_retrieval_deadline_ms: int = Field(default=120, ge=20, le=1000)
     memory_prompt_budget_chars: int = Field(default=2400, ge=800, le=6000)
     coder_models_dir: Path = Field(default=DEFAULT_CODER_MODELS_DIR)
+    # Owner-added GGUF models; the Monarch host writes the registry here.
+    custom_models_dir: Path = Field(default=DEFAULT_MODELS_ROOT / "custom_models")
     # Monarch Sharing exposes the two small Qwen GGUFs as explicit Super Fast
     # chat models and the installed Qwen3-TTS checkpoints through its separate
     # speech endpoint. Keeping both roots explicit prevents a client request
@@ -179,6 +181,15 @@ class Settings(BaseSettings):
     # native CUDA objects are destroyed in-place. Recycling after the response
     # is flushed releases the same memory without dropping the final payload.
     recycle_backend_after_generation: bool = True
+    # How long a finished generation leaves its model loaded. Recycling right
+    # after every generation means no conversation ever reuses a warm model:
+    # the next message always arrives after the delay, so every turn paid a cold
+    # load. The window is scaled down per tier by the residency policy, so this
+    # is the hold time of the smallest tier, not of every model. Zero restores
+    # the previous recycle-immediately behaviour.
+    model_resident_idle_seconds: float = 900.0
+    # Below this much free host RAM the window collapses to the flush floor.
+    model_resident_min_free_ram_gb: float = 3.0
     suppress_llama_logs: bool = True
     allow_cpu_offload: bool = True
     cpu_fallback: bool = True

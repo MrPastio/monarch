@@ -67,7 +67,12 @@ $v1 = Join-Path $install "versions\\0.1.5"
 $v2 = Join-Path $install "versions\\0.2.0"
 New-Item -ItemType Directory -Path $v1, $v2 -Force | Out-Null
 . ${quotePs(layoutScript)}
+New-Item -ItemType Directory -Path (Join-Path $install "secrets") -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $install "secrets/fixture.txt"), "synthetic-before-update")
 $layout1 = Initialize-MonarchInstallLayout -InstallRoot $install -VersionRoot $v1 -AppVersion "0.1.5" -RuntimeVersion "2026.07.1" -BackendEnvironment "backend-0.1.5" -PayloadRoot $payload
+if (-not $layout1.legacySecretMigration) { throw "Initial fixture migration missing." }
+[IO.File]::WriteAllText((Join-Path $install "secrets/fixture.txt"), "synthetic-after-update")
+function Copy-MonarchLegacySecretsForMigration { throw "An upgrade must not read/copy secrets." }
 Write-MonarchVersionDescriptor -VersionRoot $v1 -AppVersion "0.1.5" -RuntimeVersion "2026.07.1" -BackendEnvironment "backend-0.1.5" | Out-Null
 Set-MonarchCurrentVersion -InstallRoot $install -CurrentVersion "0.1.5"
 $wrongGenerated = Join-Path ${quotePs(root)} "wrong-generated"
@@ -91,6 +96,10 @@ New-MonarchPendingUpdate -InstallRoot $install -Layout $layout2 -PreviousVersion
     const pending = JSON.parse(await readFile(path.join(root, 'payload', 'transactions', 'pending-update.json'), 'utf8'));
     const descriptor = JSON.parse(await readFile(path.join(root, 'install', 'versions', '0.2.0', 'version.json'), 'utf8'));
     const installLayout = JSON.parse(await readFile(path.join(root, 'install', 'install-layout.json'), 'utf8'));
+    expect(await readFile(path.join(installLayout.legacySecretMigration, 'fixture.txt'), 'utf8'))
+      .toBe('synthetic-before-update');
+    expect(await readFile(path.join(root, 'install', 'secrets', 'fixture.txt'), 'utf8'))
+      .toBe('synthetic-after-update');
     expect(current).toMatchObject({ currentVersion: '0.1.5', previousVersion: null });
     expect(pending).toMatchObject({
       previousVersion: '0.1.5',

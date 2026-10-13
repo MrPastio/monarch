@@ -3,23 +3,193 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const apiMocks = vi.hoisted(() => ({
   executeCapability: vi.fn(),
   executeConfirmedCapability: vi.fn(),
+  promptSecurityPin: vi.fn(),
 }));
 
 vi.mock('../../src/ui/public/modules/api.js', () => ({
   executeCapability: apiMocks.executeCapability,
   executeConfirmedCapability: apiMocks.executeConfirmedCapability,
 }));
+vi.mock('../../src/ui/public/modules/ui-dialogs.js', () => ({ promptSecurityPin: apiMocks.promptSecurityPin }));
 
 describe('Security pane rendering', () => {
+  it.each([
+    { running: true },
+    { running: true, protection_state: 'protected' },
+    { running: true, protection_state: 'protected', telemetry_verified: false },
+    { running: true, protection_state: 'protected', telemetry_verified: true, heartbeat_stale: true },
+  ])('does not promote an alive or unverifiable runtime to full protection: %j', async (payload) => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', { querySelector: (selector: string) => elements[selector] || null, querySelectorAll: () => [] });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = { busy: false, statusBusy: false, status: { ok: true, output: { payload } }, error: '' };
+    const { renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    renderSecurity();
+    expect(elements['#security-protection-title'].textContent).toBe('Защита работает частично');
+  });
+
+  it('shows limited process observation and pending evidence without counting them as complete coverage', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', { querySelector: (selector: string) => elements[selector] || null, querySelectorAll: () => [] });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    const payload = { running: true, protection_state: 'degraded', telemetry_verified: true, heartbeat: {
+      sensors: ['process_sensor'], sensor_count: 1, sensor_backlog: { queued: 3 }, sensor_health: {
+        process_sensor: { state: 'limited', limitation: 'process-command-line-and-lineage-unavailable', last_success_at: Date.now() / 1000 },
+      },
+    } };
+    state.security = { busy: false, statusBusy: false, status: { ok: true, output: { payload } }, error: '' };
+    const { renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    renderSecurity();
+    expect(elements['#security-health-grid'].innerHTML).toContain('Неполное наблюдение');
+    expect(elements['#security-health-grid'].innerHTML).toContain('недоступны команды');
+    expect(elements['#security-coverage-summary'].textContent).toContain('1 требуют внимания · 0 работают');
+    payload.heartbeat.sensor_health.process_sensor.state = 'healthy';
+    renderSecurity();
+    expect(elements['#security-coverage-summary'].textContent).toBe('3 событий ждут проверки');
+  });
+
+  it.each([
+    { state: 'limited', observation: { status: 'partial', reasons: ['inventory-page-pending'] }, copy: 'продолжаем обход' },
+    { state: 'limited', observation: { status: 'partial', reasons: ['defender-query-unavailable'] }, copy: 'Часть данных недоступна' },
+    { state: 'failed', observation: { status: 'unavailable', reasons: ['watched-root-unavailable'] }, copy: 'прежние результаты сохранены' },
+  ])('explains observation completeness: $state / $copy', async ({ state: sensorState, observation, copy }) => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', { querySelector: (selector: string) => elements[selector] || null, querySelectorAll: () => [] });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = { busy: false, statusBusy: false, status: { ok: true, output: { payload: {
+      running: true, protection_state: 'degraded', telemetry_verified: true,
+      heartbeat: { sensor_health: { file_watch_sensor: { state: sensorState, observation } } },
+    } } }, error: '' };
+    const { renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    renderSecurity();
+    expect(elements['#security-health-grid'].innerHTML).toContain(copy);
+    expect(elements['#security-protection-title'].textContent).toBe('Защита работает частично');
+    expect(elements['#security-coverage-summary'].textContent).toContain('0 работают');
+  });
+
+  it('keeps acknowledged incomplete file checks visible separately from queued events', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', { querySelector: (selector: string) => elements[selector] || null, querySelectorAll: () => [] });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = { busy: false, statusBusy: false, status: { ok: true, output: { payload: {
+      running: true, protection_state: 'degraded', telemetry_verified: true,
+      heartbeat: { sensor_backlog: { queued: 2, queued_events: 0, incomplete_files: 2 }, sensor_health: {} },
+    } } }, error: '' };
+    const { renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    renderSecurity();
+    expect(elements['#security-protection-title'].textContent).toBe('Защита работает частично');
+    expect(elements['#security-coverage-summary'].textContent).toBe('Не завершена проверка файлов: 2 · 0 событий в очереди');
+  });
+
+  it('shows durable retry progress and gates it on fresh running verified protection', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', { querySelector: (selector: string) => elements[selector] || null, querySelectorAll: () => [] });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    const payload = { running: true, protection_state: 'degraded', telemetry_verified: true,
+      heartbeat: { sensor_backlog: { queued: 1, queued_events: 0, incomplete_files: 1 },
+        inspection_recovery: { status: 'idle', checked_files: 0 }, sensor_health: {} } };
+    state.security = { busy: false, statusBusy: false, statusUpdatedAt: Date.now(), status: { ok: true, output: { payload } }, error: '' };
+    const { renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    renderSecurity();
+    expect(elements['#security-inspection-retry'].hidden).toBe(false);
+    expect(elements['#security-inspection-retry'].disabled).toBe(false);
+    payload.telemetry_verified = false;
+    renderSecurity();
+    expect(elements['#security-inspection-retry'].disabled).toBe(true);
+    payload.telemetry_verified = true;
+    payload.heartbeat.inspection_recovery.status = 'running';
+    payload.heartbeat.inspection_recovery.checked_files = 4;
+    renderSecurity();
+    expect(elements['#security-inspection-retry'].disabled).toBe(true);
+    expect(elements['#security-coverage-summary'].textContent).toContain('проверено файлов: 4');
+    payload.heartbeat.inspection_recovery.status = 'incomplete';
+    renderSecurity();
+    expect(elements['#security-inspection-recovery-feedback'].textContent).toContain('сохранены');
+    expect(elements['#security-inspection-retry'].disabled).toBe(false);
+    payload.running = false;
+    renderSecurity();
+    expect(elements['#security-inspection-retry'].disabled).toBe(true);
+  });
+
+  it('routes an inspection retry click without granting paths or starting protection', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', { querySelector: (selector: string) => elements[selector] || null, querySelectorAll: () => [] });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = { busy: false, statusBusy: false, statusUpdatedAt: Date.now(), status: { ok: true, output: { payload: {
+      running: true, protection_state: 'degraded', telemetry_verified: true,
+      heartbeat: { sensor_backlog: { queued: 1, queued_events: 0, incomplete_files: 1 } },
+    } } }, error: '' };
+    apiMocks.executeCapability.mockResolvedValue({ ok: true, result: { ok: true, output: { payload: { status: 'queued', accepted: true } } } });
+    const { initSecurityPane, renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    initSecurityPane(renderSecurity);
+    elements['#security-inspection-retry'].click();
+    await vi.waitFor(() => expect(apiMocks.executeCapability).toHaveBeenCalledWith('security', 'security.inspection.retry', {}, 'ui:security', false));
+    expect(apiMocks.executeConfirmedCapability).not.toHaveBeenCalled();
+    expect(apiMocks.executeCapability.mock.calls.some(call => /security\.(profile\.set|protection\.start|background\.enable)/.test(String(call[1])))).toBe(false);
+  });
+
+  it('withdraws healthy cards when the status cache expires', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', { querySelector: (selector: string) => elements[selector] || null, querySelectorAll: () => [] });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = { busy: false, statusBusy: false, statusUpdatedAt: Date.now() - 21000, status: { ok: true, output: { payload: {
+      running: true, protection_state: 'protected', telemetry_verified: true,
+      heartbeat: { sensor_health: { process_sensor: { state: 'healthy' } } },
+    } } }, error: '' };
+    const { renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    renderSecurity();
+    expect(elements['#security-protection-title'].textContent).toBe('Состояние защиты недоступно');
+    expect(elements['#security-health-grid'].innerHTML).toContain('Нет свежих данных');
+    expect(elements['#security-health-grid'].innerHTML).not.toContain('data-health="healthy"');
+    expect(elements['#security-coverage-summary'].textContent).toBe('Нет свежих данных');
+  });
+
+  it('explains corrupt state and prevents a misleading enable retry', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', { querySelector: (selector: string) => elements[selector] || null, querySelectorAll: () => [] });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = { busy: false, statusBusy: false, status: { ok: true, output: { payload: {
+      running: false, protection_state: 'recovery_required', background: { recovery_required: true },
+    } } }, error: '' };
+    const { renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    renderSecurity();
+    expect(elements['#security-protection-title'].textContent).toBe('Состояние защиты повреждено');
+    expect(elements['#security-start'].disabled).toBe(true);
+  });
   beforeEach(() => {
     vi.resetModules();
     apiMocks.executeCapability.mockReset();
     apiMocks.executeConfirmedCapability.mockReset();
+    apiMocks.promptSecurityPin.mockReset();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    const { disposeSecurityPane } = await import('../../src/ui/public/modules/security-pane.js');
+    disposeSecurityPane();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it('keeps unavailable status distinct from stopped protection and an empty incident queue', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', {
+      querySelector: (selector: string) => elements[selector] || null,
+      querySelectorAll: () => [],
+    });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security.status = null;
+    state.security.lastResult = null;
+    state.security.incidents = null;
+    const { loadSecurityStatus, renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    apiMocks.executeCapability.mockRejectedValue(new Error('connection unavailable'));
+    await loadSecurityStatus(renderSecurity);
+    expect(elements['#security-protection-title'].textContent).toBe('Состояние защиты недоступно');
+    expect(elements['#security-incident-summary-count'].textContent).toBe('—');
+    expect(elements['#security-incident-list'].innerHTML).not.toContain('Событий пока нет');
+    apiMocks.executeCapability.mockResolvedValue(securityStatus(false));
+    await loadSecurityStatus(renderSecurity);
+    expect(elements['#security-protection-title'].textContent).toBe('Защита приостановлена');
+    expect(state.security.statusError).toBe('');
   });
 
   it('starts a non-blocking benchmark, renders progress, and cancels the exact owned job', async () => {
@@ -239,10 +409,42 @@ describe('Security pane rendering', () => {
     expect(elements['#security-stop'].disabled).toBe(false);
     expect(apiMocks.executeConfirmedCapability).toHaveBeenCalledWith(
       'security',
-      'security.protection.start',
-      { noLlm: true },
+      'security.background.enable',
+      {},
       'ui:security',
     );
+  });
+
+  it('enables the balanced profile before persistent protection when the profile was off', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', { querySelector: (selector: string) => elements[selector] || null });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = { busy: false, statusBusy: false,
+      status: { ok: true, output: { payload: { running: false, profile: { level: 'off' } } } }, error: '' };
+    apiMocks.executeConfirmedCapability.mockResolvedValue(securityStatus(true));
+    apiMocks.executeCapability.mockResolvedValue(securityStatus(true));
+    const { initSecurityPane, renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    initSecurityPane(renderSecurity);
+    elements['#security-start'].click();
+    await vi.waitFor(() => expect(apiMocks.executeConfirmedCapability).toHaveBeenCalledTimes(2));
+    expect(apiMocks.executeConfirmedCapability.mock.calls.map(call => [call[1], call[2]])).toEqual([
+      ['security.profile.set', { level: 'balanced' }], ['security.background.enable', {}],
+    ]);
+  });
+
+  it('opens PIN setup instead of asking for a PIN that has never been configured', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', { querySelector: (selector: string) => elements[selector] || null });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = { busy: false, statusBusy: false, status: securityStatus(true),
+      pinStatus: { ok: true, output: { payload: { configured: false } } }, error: '' };
+    const { initSecurityPane, renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    initSecurityPane(renderSecurity);
+    elements['#security-stop'].click();
+    await vi.waitFor(() => expect(state.security.activeTab).toBe('settings'));
+    expect(state.security.pinFeedback).toContain('Сначала создай PIN');
+    expect(apiMocks.promptSecurityPin).not.toHaveBeenCalled();
+    expect(apiMocks.executeConfirmedCapability).not.toHaveBeenCalled();
   });
 
   it('does not dispatch protection stop until a valid six-digit PIN is provided', async () => {
@@ -251,11 +453,10 @@ describe('Security pane rendering', () => {
       querySelector: (selector: string) => elements[selector] || null,
       querySelectorAll: () => [],
     });
-    const promptPin = vi.fn()
+    const promptPin = apiMocks.promptSecurityPin
       .mockReturnValueOnce(null)
       .mockReturnValueOnce('12ab')
       .mockReturnValueOnce('483920');
-    vi.stubGlobal('prompt', promptPin);
     const { state } = await import('../../src/ui/public/modules/state.js');
     state.security = {
       busy: false,
@@ -273,11 +474,11 @@ describe('Security pane rendering', () => {
 
     elements['#security-stop'].click();
     expect(apiMocks.executeConfirmedCapability).not.toHaveBeenCalled();
-    expect(state.security.error).toContain('не введён');
+    await vi.waitFor(() => expect(state.security.error).toContain('не введён'));
 
     elements['#security-stop'].click();
     expect(apiMocks.executeConfirmedCapability).not.toHaveBeenCalled();
-    expect(state.security.error).toContain('6 цифр');
+    await vi.waitFor(() => expect(state.security.error).toContain('6 цифр'));
 
     elements['#security-stop'].click();
     await vi.waitFor(() => expect(apiMocks.executeConfirmedCapability).toHaveBeenCalledOnce());
@@ -463,6 +664,34 @@ describe('Security pane rendering', () => {
     expect(elements['#security-response-actions'].innerHTML).toContain('203.0.113.10:443');
   });
 
+  it('keeps unconfirmed cleanup visible when the executor is degraded or unavailable', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', { querySelector: (selector: string) => elements[selector] || null, querySelectorAll: () => [] });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = { busy: false, activeTab: 'network', error: '', responseActions: { ok: true, output: { payload: { actions: [] } } },
+      responseServiceStatus: { ok: true, output: { payload: { running: false, status: 'degraded', integrity_ok: true, pending_actions: 2 } } } };
+    const { renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    renderSecurity();
+    expect(elements['#security-response-service'].textContent).toContain('незавершённых действий 2');
+    expect(elements['#security-response-actions'].innerHTML).toContain('Снятие ограничений ещё не подтверждено');
+    state.security.responseServiceStatus.output.payload = { running: false };
+    renderSecurity();
+    expect(elements['#security-response-actions'].innerHTML).toContain('Состояние ограничений пока не подтверждено');
+    expect(elements['#security-response-actions'].innerHTML).not.toContain('правила не применяются');
+  });
+
+  it('withdraws a positive executor label when its integrity is invalid', async () => {
+    const elements = createSecurityDom();
+    vi.stubGlobal('document', { querySelector: (selector: string) => elements[selector] || null, querySelectorAll: () => [] });
+    const { state } = await import('../../src/ui/public/modules/state.js');
+    state.security = { busy: false, activeTab: 'network', error: '',
+      responseServiceStatus: { ok: true, output: { payload: { running: true, integrity_ok: false } } } };
+    const { renderSecurity } = await import('../../src/ui/public/modules/security-pane.js');
+    renderSecurity();
+    expect(elements['#security-response-service'].textContent).toContain('не прошло проверку целостности');
+    expect(elements['#security-response-service'].textContent).not.toContain('Исполнитель работает');
+  });
+
   it('shows bounded network containment only for evidence-backed endpoints and a live executor', async () => {
     const elements = createSecurityDom();
     vi.stubGlobal('document', {
@@ -492,7 +721,7 @@ describe('Security pane rendering', () => {
     renderSecurity();
     expect(elements['#security-incident-detail'].innerHTML).toContain('203.0.113.10:443');
     expect(elements['#security-incident-detail'].innerHTML).toContain('Подготовить блокировку');
-    expect(elements['#security-incident-detail'].innerHTML).toContain('автоматический откат');
+    expect(elements['#security-incident-detail'].innerHTML).toContain('связь восстановится автоматически');
   });
 
   it('renders fail-open emergency recovery without pretending to replace Windows login', async () => {
@@ -768,7 +997,8 @@ describe('Security pane rendering', () => {
     expect(elements['#security-danger-log'].innerHTML).toContain('74%');
     expect(elements['#security-danger-log'].innerHTML).toContain('reversibility 100%');
     expect(elements['#security-danger-log'].innerHTML).toContain('confirm');
-    expect(elements['#security-danger-log'].innerHTML).toContain('ledger-danger-1');
+    expect(elements['#security-danger-log'].innerHTML).toContain('Выполнение подтверждено');
+    expect(elements['#security-danger-log'].innerHTML).not.toContain('ledger-danger-1');
   });
 
   it('does not launch incident and PIN checks when the Security profile is off', async () => {
@@ -796,9 +1026,10 @@ describe('Security pane rendering', () => {
 
     await loadSecurityStatus(renderSecurity);
 
-    expect(apiMocks.executeCapability).toHaveBeenCalledTimes(2);
+    expect(apiMocks.executeCapability).toHaveBeenCalledTimes(3);
     expect(apiMocks.executeCapability.mock.calls.map((call) => call[1])).toEqual([
       'security.status',
+      'security.scan.status',
       'security.emergency.status',
     ]);
   });
@@ -818,6 +1049,10 @@ function securityStatus(running: boolean, nested = false) {
 
 function createSecurityDom(): Record<string, FakeElement> {
   const selectors = [
+    '#security-health-grid',
+    '#security-coverage-summary',
+    '#security-inspection-retry',
+    '#security-inspection-recovery-feedback',
     '#security-status-pills',
     '#security-protection-title',
     '#security-protection-copy',

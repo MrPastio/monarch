@@ -14,6 +14,10 @@ export function buildWorkspaceFileArguments(text: string): WorkspaceFileArgument
   };
 }
 
+export interface WorkspaceFileReadArguments {
+  path: string;
+}
+
 /**
  * Compile only explicit path + exact-byte file requirements from user text.
  * Unquoted terminal sentence punctuation is grammar, while punctuation that
@@ -39,6 +43,26 @@ export function parseExactWorkspaceFileWrites(text: string): WorkspaceFileArgume
     unique.set(result.path.replace(/\\/gu, '/').toLocaleLowerCase('en-US'), result);
   }
   return [...unique.values()];
+}
+
+/** Compile an explicit multi-file read request without trusting model-authored paths. */
+export function parseExactWorkspaceFileReads(text: string): WorkspaceFileReadArguments[] {
+  const value = String(text || '').trim();
+  if (!/^(?:(?:please|can\s+you|could\s+you)\s+)?(?:read|inspect)\b|^(?:(?:пожалуйста|можешь)\s+)?(?:прочитай|прочти|проверь\s+содержимое)(?=$|\s|[.,;:!?])/iu.test(value)) {
+    return [];
+  }
+  // A leading read clause may be followed by exact writes. Restrict path
+  // ownership to the pre-write segment so a future output does not become an
+  // impossible read-before-create requirement. The splitter is quote-aware.
+  const readSegment = splitAtomicWriteClauses(value)[0] || value;
+  const paths = [...readSegment.matchAll(
+    /[A-Za-z]:[\\/][^<>:"|?*\r\n]*?\.[A-Za-z0-9]{1,12}(?=$|[\s,;.!?)])/gu,
+  )].map((match) => trimTrailingPunctuation(match[0] || '')).filter(Boolean);
+  const unique = new Map<string, WorkspaceFileReadArguments>();
+  for (const targetPath of paths) {
+    unique.set(targetPath.replace(/\\/gu, '/').toLocaleLowerCase('en-US'), { path: targetPath });
+  }
+  return unique.size >= 2 ? [...unique.values()] : [];
 }
 
 export function hasCompleteWorkspaceFileArguments(text: string): boolean {

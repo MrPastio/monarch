@@ -50,6 +50,7 @@ body[data-tone="primary"] .authorization-signal { border-color: rgba(245, 158, 1
 body[data-tone="primary"] .authorization-signal span { border-color: #fbbf24; box-shadow: 0 0 18px rgba(245, 158, 11, .38); }
 
 .authorization-detail {
+  max-height: 38vh;
   margin: 0;
   padding: 13px 15px;
   border: 1px solid var(--line);

@@ -33,6 +33,8 @@ from monarch_security.actions import (
     install_response_executor_task,
     request_response_execution,
     serve_response_pipe,
+    response_pipe_sddl,
+    _SecuredPipeListener,
     uninstall_response_executor_task,
 )
 from monarch_security.events import ActionDecision, RuleAssessment, SecurityEvent
@@ -142,6 +144,32 @@ class ResponseActionTests(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertEqual(calls[0][0], "add")
 
+    def test_executor_pipe_dacl_grants_only_system_admins_and_signed_in_user(self) -> None:
+        # The elevated executor's default pipe DACL denied write to the
+        # non-elevated Security host (WinError 5); the DACL must be explicit.
+        sid = "S-1-5-21-1111111111-2222222222-3333333333-1001"
+        sddl = response_pipe_sddl(sid)
+        self.assertTrue(sddl.startswith("D:P"))
+        self.assertIn(f"(A;;GRGW;;;{sid})", sddl)
+        self.assertIn("(A;;GA;;;SY)", sddl)
+        self.assertIn("(A;;GA;;;BA)", sddl)
+        for broad in (";;;WD)", ";;;AN)", ";;;AU)", ";;;IU)", ";;;BU)"):
+            self.assertNotIn(broad, sddl)
+
+    def test_executor_pipe_dacl_rejects_non_user_sid(self) -> None:
+        for sid in ("S-1-1-0", "S-1-5-18", "S-1-5-21-1-2-3-4)(A;;GA;;;WD"):
+            with self.assertRaises(ResponseActionError):
+                response_pipe_sddl(sid)
+
+    @unittest.skipUnless(os.name == "nt", "Windows named pipe")
+    def test_pipe_descriptor_is_freed_when_listener_creation_fails(self) -> None:
+        security = mock.Mock(address=0)
+        with mock.patch("monarch_security.actions._PipeSecurityAttributes", return_value=security), \
+                mock.patch("multiprocessing.connection.PipeListener.__init__", side_effect=OSError("pipe occupied")):
+            with self.assertRaisesRegex(OSError, "pipe occupied"):
+                _SecuredPipeListener(r"\\.\pipe\MonarchSecurity-test-init", b"test", response_pipe_sddl())
+        security.free.assert_called_once()
+
     def test_invalid_internal_grant_is_rejected_before_command(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -230,6 +258,36 @@ class ResponseActionTests(unittest.TestCase):
         self.assertIn("-User 'SYSTEM'", command)
         self.assertIn("MonarchSecurityRollback-abc123", command)
         self.assertIn("Remove-NetFirewallRule", command)
+        self.assertLess(command.index("Register-ScheduledTask"), command.index("New-NetFirewallRule"))
+        self.assertIn("Containment expired during firewall update", command)
+
+    def test_failed_apply_removes_possible_partial_firewall_rule(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            proposal, proposals, pin = _proposal(root)
+            grant = ResponseApprovalBroker(proposals, pin).authorize(proposal.proposal.proposal_id, "483920")
+            service = _service(root, [])
+            runner = mock.Mock(side_effect=[TimeoutError("apply timed out"), None])
+            service.command_runner = runner
+            with self.assertRaisesRegex(ResponseActionError, "Firewall containment failed"):
+                service.apply_verified_grant(grant)
+            self.assertEqual([call.args[0][0] for call in runner.call_args_list], ["add", "remove"])
+            self.assertEqual(service.actions.list_latest()[0].status, "failed")
+
+    def test_failed_cleanup_stays_pending_for_reconciliation(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            proposal, proposals, pin = _proposal(root)
+            grant = ResponseApprovalBroker(proposals, pin).authorize(proposal.proposal.proposal_id, "483920")
+            service = _service(root, [])
+            service.command_runner = mock.Mock(side_effect=[TimeoutError("apply timed out"), TimeoutError("remove timed out")])
+            with self.assertRaises(ResponseActionError):
+                service.apply_verified_grant(grant)
+            pending = service.actions.list_latest()[0]
+            self.assertEqual(pending.status, "pending")
+            self.assertIn("cleanup pending", pending.reason)
+            service.command_runner = mock.Mock()
+            self.assertEqual(service.reconcile()[0].status, "rolled_back")
 
     def test_signed_service_heartbeat_detects_tampering(self) -> None:
         with TemporaryDirectory() as directory:
@@ -274,6 +332,7 @@ class ResponseActionTests(unittest.TestCase):
             self.assertIn("Register-ScheduledTask", commands[0])
             self.assertIn("-RestartCount 999", commands[0])
             self.assertIn("-RunLevel Highest", commands[0])
+            self.assertIn("-WindowStyle Hidden -EncodedCommand", commands[0])
             encoded = re.search(r"EncodedCommand ([A-Za-z0-9+/=]+)", commands[0])
             self.assertIsNotNone(encoded)
             script = base64.b64decode(encoded.group(1)).decode("utf-16le")

@@ -56,7 +56,8 @@ class PersistenceBaselineTests(unittest.TestCase):
             )
             signatures = {"run_key:vendor": '{"value":"vendor.exe"}'}
             args.expected_digest = persistence_baseline_digest(signatures)
-            sensor = SimpleNamespace(snapshot_signatures=lambda: signatures, last_error=None)
+            sensor = SimpleNamespace(snapshot_signatures=lambda: signatures, last_error=None,
+                                     observation={'status': 'complete', 'reasons': []})
 
             with patch("monarch_security.cli.PersistenceSensor", return_value=sensor), redirect_stdout(StringIO()):
                 self.assertEqual(_baseline(args, config), 0)
@@ -81,7 +82,8 @@ class PersistenceBaselineTests(unittest.TestCase):
                 expected_digest="0" * 64,
             )
             signatures = {"run_key:new": "new"}
-            sensor = SimpleNamespace(snapshot_signatures=lambda: signatures, last_error=None)
+            sensor = SimpleNamespace(snapshot_signatures=lambda: signatures, last_error=None,
+                                     observation={'status': 'complete', 'reasons': []})
 
             with patch("monarch_security.cli.PersistenceSensor", return_value=sensor), redirect_stdout(StringIO()):
                 self.assertEqual(_baseline(args, config), 1)

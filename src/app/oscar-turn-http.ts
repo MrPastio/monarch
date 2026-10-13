@@ -10,6 +10,8 @@ import type {
   OscarTurnStoreCommit,
 } from '../oscar-turn';
 import { requestReferencesComputerUseCapability } from '../modules/computer';
+import { assertOscarAstraOwner, ownsOscarAstraTurn, submitOscarAstraHttp, submitOscarAstraInputHttp, type AstraOscarHttpContext } from './astra-oscar-http';
+import type { AstraAuthenticatedHttpActor } from './astra-task-facade';
 
 const MAX_TURN_BODY_BYTES = 512 * 1024;
 const MAX_ATTACHMENT_BODY_BYTES = 12 * 1024 * 1024;
@@ -23,6 +25,7 @@ export interface OscarTurnHttpContext {
   enforceMutation: () => void;
   enforceRead: () => void;
   principal: MonarchHttpPrincipal;
+  astra?: AstraOscarHttpContext;
 }
 
 export async function handleOscarTurnHttpRequest(context: OscarTurnHttpContext): Promise<boolean> {
@@ -34,11 +37,34 @@ export async function handleOscarTurnHttpRequest(context: OscarTurnHttpContext):
     && url.pathname !== '/api/oscar/incognito-conversations'
     && !url.pathname.startsWith('/api/oscar/incognito-conversations/')
     && url.pathname !== '/api/oscar/turn-cancellations'
+    && url.pathname !== '/api/oscar/astra/selections'
+    && !url.pathname.startsWith('/api/oscar/astra/selections/')
     && url.pathname !== '/api/oscar/turns'
     && !url.pathname.startsWith('/api/oscar/turns/')) return false;
 
   const devSettings = app.getOwnerDevSettings();
   const zeroRetention = devSettings.zeroRetentionEnabled;
+
+  if (url.pathname === '/api/oscar/astra/selections' || url.pathname.startsWith('/api/oscar/astra/selections/')) {
+    if (!context.astra?.enabled || !context.astra.selections || !context.principal.loopback)
+      throw httpError(404, 'astra-selection-unavailable', 'Explicit target selection host is unavailable.');
+    if (zeroRetention) throw httpError(409, 'astra-persistent-source-required', 'Selected targets require the persistent isolated source.');
+    if (request.method === 'GET' && url.pathname === '/api/oscar/astra/selections') {
+      context.enforceRead(); const actor = context.astra.authenticatedActor();
+      if ([...url.searchParams.keys()].some(key => key !== 'conversationId') || url.searchParams.getAll('conversationId').length !== 1)
+        throw httpError(400, 'astra-invalid-selection-query', 'Exact conversation context is required.');
+      const conversationId = readId(url.searchParams.get('conversationId'), 'conversationId');
+      sendJson(response, 200, { version: 1, selections: context.astra.selections.list({ actor, conversationId }) }); return true;
+    }
+    const revoke = url.pathname.match(/^\/api\/oscar\/astra\/selections\/([A-Za-z0-9_-]{1,96})\/revoke$/u);
+    if (request.method === 'POST' && revoke) {
+      context.enforceMutation(); const actor = context.astra.authenticatedActor(), body = await readBoundedJson(request, 4096);
+      assertVersion(body); assertKeys(body, ['version', 'conversationId']);
+      context.astra.selections.revoke(revoke[1]!, { actor, conversationId: readId(body.conversationId, 'conversationId') });
+      sendJson(response, 200, { version: 1, selectionId: revoke[1], status: 'revoked' }); return true;
+    }
+    throw httpError(404, 'astra-selection-route-not-found', 'Target issuance is not an HTTP operation.');
+  }
 
   if (request.method === 'POST' && url.pathname === '/api/oscar/attachments') {
     context.enforceMutation();
@@ -184,14 +210,22 @@ export async function handleOscarTurnHttpRequest(context: OscarTurnHttpContext):
     context.enforceMutation();
     const body = await readBoundedJson(request, 8 * 1024);
     assertVersion(body);
-    assertKeys(body, ['version', 'clientRequestId', 'privacyMode', 'surface']);
+    assertKeys(body, ['version', 'clientRequestId', 'privacyMode', 'surface', 'astra']);
     const source = resolveHttpSource(body.surface, context.principal.source);
     const privacyMode = zeroRetention ? 'incognito' : readPrivacyMode(body.privacyMode);
     if (privacyMode === 'incognito') assertDesktopIncognitoPrincipal(context.principal.source);
+    const clientRequestId = readId(body.clientRequestId, 'clientRequestId');
+    const existing = await app.oscarTurnCoordinator.findTurnByClientRequestId({ clientRequestId, source, privacyMode });
+    if (existing) assertOscarAstraOwner(existing.turn, context.astra);
+    if (body.astra !== undefined && (body.astra !== true || !context.astra?.enabled || !context.principal.loopback))
+      throw httpError(400, 'astra-invalid-cancellation', 'Explicit Astra cancellation is unavailable.');
+    const astraActorId = body.astra === true || existing?.turn.request.astra ? context.astra!.authenticatedActor().id : undefined;
     const cancellation = await app.oscarTurnCoordinator.cancelByClientRequestId({
-      clientRequestId: readId(body.clientRequestId, 'clientRequestId'),
+      clientRequestId,
       source,
       privacyMode,
+      ...(astraActorId ? { astraActorId } : {}),
+      allowImplicitAstraActor: false,
     });
     sendJson(response, 200, {
       version: 1,
@@ -215,6 +249,12 @@ export async function handleOscarTurnHttpRequest(context: OscarTurnHttpContext):
 
   if (request.method === 'POST' && url.pathname === '/api/oscar/turns') {
     context.enforceMutation();
+    const body = await readBoundedJson(request, MAX_TURN_BODY_BYTES);
+    assertVersion(body);
+    if (body.astra !== undefined) {
+      const checkpoint = await submitOscarAstraHttp(app.oscarTurnCoordinator, body, context.astra, zeroRetention);
+      sendJson(response, checkpoint.turn.status === 'blocked' ? 200 : 202, publicCheckpoint(checkpoint)); return true;
+    }
     const components = app.getComponentManagerSnapshot();
     const onboardingRequired = 'onboarding' in components && components.onboarding.required;
     if (!components.ready && (onboardingRequired || components.autoRepairEnabled)) {
@@ -232,8 +272,6 @@ export async function handleOscarTurnHttpRequest(context: OscarTurnHttpContext):
       });
       return true;
     }
-    const body = await readBoundedJson(request, MAX_TURN_BODY_BYTES);
-    assertVersion(body);
     assertKeys(body, [
       'version', 'clientRequestId', 'conversationId', 'text', 'privacyMode', 'surface', 'inputMessageId',
       'attachmentIds', 'modifiers', 'history', 'replyToTurnId', 'supersedesTurnId', 'retryOf',
@@ -244,7 +282,10 @@ export async function handleOscarTurnHttpRequest(context: OscarTurnHttpContext):
     const conversationId = privacyMode === 'incognito' && !String(body.conversationId || '').trim()
       ? createIncognitoConversationId()
       : readId(body.conversationId, 'conversationId');
-    const text = readText(body.text, 'text', 20_000);
+    // Preserve literal source bytes until coordinator chooses a route. Legacy
+    // normalization remains there; exact ordinary Astra creation must not lose
+    // repeated whitespace inside quoted file content at the HTTP boundary.
+    const text = readText(body.text, 'text', 20_000, false);
     const clientModifiers = body.modifiers !== undefined ? readModifiers(body.modifiers) : {};
     if (!devSettings.internetEnabled) {
       clientModifiers.webSearch = false;
@@ -271,19 +312,38 @@ export async function handleOscarTurnHttpRequest(context: OscarTurnHttpContext):
         },
       } : {}),
     };
+    let authenticatedAgentActor: AstraAuthenticatedHttpActor | undefined;
+    if (privacyMode === 'persistent' && context.astra?.enabled && context.astra.loopback
+      && (source === 'desktop' || source === 'voice' || source === 'api')) {
+      try { authenticatedAgentActor = context.astra.authenticatedActor(source); }
+      catch { /* Answer-only requests remain available to an unauthenticated API principal. */ }
+    }
+    const supersedesTurnId = !zeroRetention && body.supersedesTurnId !== undefined ? readId(body.supersedesTurnId, 'supersedesTurnId') : undefined;
+    const retryOf = !zeroRetention && body.retryOf !== undefined ? readId(body.retryOf, 'retryOf') : undefined;
+    // A saved conversation is its own record: the window's copy can miss a
+    // reply that vanished from the screen or one that arrived from Telegram.
+    // Only an incognito chat, which is never saved, relies on what was sent.
+    const clientHistory = body.history !== undefined ? readHistory(body.history) : undefined;
+    const history = !devSettings.historyContextEnabled ? undefined
+      : privacyMode === 'persistent'
+        ? await app.readOscarConversationHistory(conversationId, {
+          excludeTurnIds: [supersedesTurnId, retryOf].filter((id): id is string => Boolean(id)),
+        }) ?? clientHistory
+        : clientHistory;
     const checkpoint = await app.oscarTurnCoordinator.submit({
       clientRequestId: readId(body.clientRequestId, 'clientRequestId'),
       conversationId,
       text,
       privacyMode,
       source,
+      ...(authenticatedAgentActor ? { authenticatedAgentActor } : {}),
       ...(body.inputMessageId !== undefined ? { inputMessageId: readId(body.inputMessageId, 'inputMessageId') } : {}),
       ...(body.attachmentIds !== undefined ? { attachmentIds: readIdArray(body.attachmentIds, 'attachmentIds', 3) } : {}),
       ...(Object.keys(modifiers).length ? { modifiers } : {}),
-      ...(devSettings.historyContextEnabled && body.history !== undefined ? { history: readHistory(body.history) } : {}),
+      ...(history ? { history } : {}),
       ...(!zeroRetention && body.replyToTurnId !== undefined ? { replyToTurnId: readId(body.replyToTurnId, 'replyToTurnId') } : {}),
-      ...(!zeroRetention && body.supersedesTurnId !== undefined ? { supersedesTurnId: readId(body.supersedesTurnId, 'supersedesTurnId') } : {}),
-      ...(!zeroRetention && body.retryOf !== undefined ? { retryOf: readId(body.retryOf, 'retryOf') } : {}),
+      ...(supersedesTurnId ? { supersedesTurnId } : {}),
+      ...(retryOf ? { retryOf } : {}),
     });
     sendJson(response, checkpoint.turn.status === 'blocked' ? 200 : 202, publicCheckpoint(checkpoint));
     return true;
@@ -302,16 +362,17 @@ export async function handleOscarTurnHttpRequest(context: OscarTurnHttpContext):
         privacyMode,
       });
       if (!checkpoint) throw httpError(404, 'turn-not-found', 'Oscar Turn was not found.');
+      assertOscarAstraOwner(checkpoint.turn, context.astra);
       sendJson(response, 200, publicCheckpoint(checkpoint));
       return true;
     }
     const turns = (await app.oscarTurnCoordinator.persistentStore.listTurns())
-      .filter((turn) => sourceCanRead(context.principal.source, turn.source));
+      .filter((turn) => sourceCanRead(context.principal.source, turn.source) && ownsOscarAstraTurn(turn, context.astra));
     sendJson(response, 200, { version: 1, ok: true, turns });
     return true;
   }
 
-  const match = url.pathname.match(/^\/api\/oscar\/turns\/([^/]+)(?:\/(events|messages|cancel))?$/u);
+  const match = url.pathname.match(/^\/api\/oscar\/turns\/([^/]+)(?:\/(events|messages|cancel|astra-input|astra-recover|pause|resume))?$/u);
   if (!match?.[1]) {
     sendJson(response, 405, { version: 1, ok: false, error: 'method-not-allowed', message: 'Unsupported Oscar Turn method.' });
     return true;
@@ -326,6 +387,7 @@ export async function handleOscarTurnHttpRequest(context: OscarTurnHttpContext):
   }
   const checkpoint = await app.oscarTurnCoordinator.getTurn(turnId);
   if (!checkpoint) throw httpError(404, 'turn-not-found', 'Oscar Turn was not found.');
+  assertOscarAstraOwner(checkpoint.turn, context.astra);
   assertReadableSource(context.principal.source, checkpoint.turn.source);
 
   if (request.method === 'GET' && !action) {
@@ -346,6 +408,23 @@ export async function handleOscarTurnHttpRequest(context: OscarTurnHttpContext):
     }
     streamTurnEvents(app, turnId, after, request, response);
     return true;
+  }
+
+  if (request.method === 'POST' && (action === 'astra-input' || action === 'astra-recover' || action === 'pause' || action === 'resume')) {
+    if (zeroRetention) throw httpError(409, 'zero-retention-new-session-required', 'Нулевое хранение требует нового volatile-чата.');
+    if (!context.astra?.enabled || !checkpoint.turn.request.astra) throw httpError(404, 'astra-runtime-disabled', 'Astra transport is disabled.');
+    const body = await readBoundedJson(request, 32 * 1024); assertVersion(body);
+    if (action === 'astra-input') {
+      const updated = await submitOscarAstraInputHttp(app.oscarTurnCoordinator, checkpoint.turn, body, context.astra);
+      sendJson(response, 200, publicCheckpoint(updated)); return true;
+    }
+    assertKeys(body, action === 'astra-recover' ? ['version', 'conversationId', 'inputMessageId', 'requestId'] : ['version', 'conversationId', 'inputMessageId']);
+    if (body.conversationId !== checkpoint.turn.conversationId || body.inputMessageId !== checkpoint.turn.inputMessageId)
+      throw httpError(409, 'astra-input-source-mismatch', 'Exact source context is required.');
+    const updated = action === 'astra-recover'
+      ? await app.oscarTurnCoordinator.recoverAstra(turnId, checkpoint.turn.source, readId(body.requestId, 'requestId'))
+      : await app.oscarTurnCoordinator.commandAstra(turnId, checkpoint.turn.source, action);
+    sendJson(response, 200, publicCheckpoint(updated)); return true;
   }
 
   if (request.method === 'POST' && action === 'messages') {
@@ -432,7 +511,8 @@ function streamTurnEvents(
 }
 
 function publicCheckpoint(checkpoint: OscarTurnCheckpoint) {
-  return { version: 1, ok: true, turn: checkpoint.turn, events: checkpoint.events };
+  const { authenticatedAgentActor: _authenticatedActor, telegramActor: _telegramActor, ...request } = checkpoint.turn.request;
+  return { version: 1, ok: true, turn: { ...checkpoint.turn, request }, events: checkpoint.events };
 }
 
 function readAfterSequence(request: IncomingMessage, url: URL): number {
@@ -458,7 +538,7 @@ async function readBoundedJson(request: IncomingMessage, maximum: number): Promi
   }
   if (chunks.length === 0) return {};
   try {
-    const value = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+    const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))) as unknown;
     if (!record(value)) throw new Error('not-object');
     return value;
   } catch {

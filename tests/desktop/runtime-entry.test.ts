@@ -28,7 +28,7 @@ describe('Electron runtime entry', () => {
     });
 
     expect(launch.kind).toBe('tsx');
-    expect(launch.args).toEqual([tsx, source]);
+    expect(launch.args).toEqual(['--import', 'tsx', source]);
   });
 
   it('uses live TypeScript in development even when an older bundle exists', () => {
@@ -44,7 +44,7 @@ describe('Electron runtime entry', () => {
     expect(launch).toEqual({
       kind: 'tsx',
       entryPath: source,
-      args: [tsx, source],
+      args: ['--import', 'tsx', source],
     });
   });
 

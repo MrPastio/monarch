@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createMonarchRuntime } from '../../src/bootstrap';
+import { resolveMonarchRuntimePaths } from '../../src/core';
 import { normalizeSpeechLanguage, parseAndValidateCommand, VoiceModule } from '../../src/modules/voice';
 
 const previousTranscribeCommand = process.env.MONARCH_STT_TRANSCRIBE_COMMAND;
@@ -316,6 +317,95 @@ process.exit(2);
     expect(capabilityIds).toContain('voice.transcribe.prepare');
     expect(capabilityIds.some((id) => id.startsWith('voice.mode.'))).toBe(false);
   });
+
+  it('reaps only exact dead-process transcription temp directories on activation', async () => {
+    process.env.MONARCH_DISABLE_DEFAULT_STT = '1';
+    const root = await mkdtemp(path.join(process.cwd(), 'runtime', 'voice-temp-reaper-'));
+    const runtimePaths = resolveMonarchRuntimePaths(root);
+    const tempRoot = path.join(runtimePaths.dataRoot, 'temporary', 'voice');
+    const dead = path.join(tempRoot, 'transcribe-999999-deadfixture');
+    const active = path.join(tempRoot, `transcribe-${process.pid}-activefixture`);
+    const unmarked = path.join(tempRoot, 'keep-user-directory');
+    await Promise.all([dead, active, unmarked].map(async (directory) => {
+      await mkdir(directory, { recursive: true });
+      await writeFile(path.join(directory, 'audio.ogg'), 'fixture', 'utf8');
+    }));
+    const emit = vi.fn(async () => undefined);
+    const voice = new VoiceModule({
+      prepare: vi.fn(), transcribe: vi.fn(), shutdown: vi.fn(async () => undefined),
+      snapshot: () => ({ state: 'idle' as const, engine: 'vosk' as const }),
+    } as any, { workspaceRoot: root, runtimePaths });
+    try {
+      await voice.activate({ emit } as any);
+      expect(await readdir(tempRoot)).toEqual(expect.arrayContaining([
+        `transcribe-${process.pid}-activefixture`, 'keep-user-directory',
+      ]));
+      expect(await readdir(tempRoot)).not.toContain('transcribe-999999-deadfixture');
+      expect(emit).toHaveBeenCalledWith('voice.activated', 'voice', expect.objectContaining({
+        reapedTemporaryDirectories: 1,
+      }));
+    } finally {
+      await voice.deactivate({ emit } as any);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('binds worker and temporary paths to the ModuleLoader runtime context', async () => {
+    const runtimeFixtures = path.join(process.cwd(), 'runtime');
+    await mkdir(runtimeFixtures, { recursive: true });
+    const workspaceRoot = await mkdtemp(path.join(runtimeFixtures, 'voice-factory-context-'));
+    try {
+      const runtime = createMonarchRuntime({
+        workspaceRoot, enabledModules: ['voice'], enableLocalSystemRouter: false,
+      });
+      const voice = runtime.modules.find((module) => module.manifest.id === 'voice') as VoiceModule;
+      const paths = voice as unknown as { workspaceRoot: string; audioTempRoot: string };
+      expect(paths.workspaceRoot).toBe(path.resolve(workspaceRoot));
+      expect(paths.audioTempRoot).toBe(path.join(workspaceRoot, 'data', 'local', 'temporary', 'voice'));
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('cancels the configured transcriber and keeps temporary audio under the runtime data root', async () => {
+    const markerId = Math.random().toString(36).slice(2);
+    const enteredPath = path.join(process.cwd(), 'runtime', `voice-entered-${markerId}.txt`);
+    const latePath = path.join(process.cwd(), 'runtime', `voice-late-${markerId}.txt`);
+    const script = await writeTranscriberScript(`
+import { writeFileSync } from 'node:fs';
+const audioPath = process.argv[2] || '';
+writeFileSync(${JSON.stringify(enteredPath)}, audioPath, 'utf8');
+setTimeout(() => writeFileSync(${JSON.stringify(latePath)}, 'should-not-survive', 'utf8'), 1000);
+setInterval(() => {}, 1000);
+`);
+    process.env.MONARCH_STT_TRANSCRIBE_COMMAND = script.command;
+    const runtime = createMonarchRuntime({ enabledModules: ['voice'], enableLocalSystemRouter: false });
+    const controller = new AbortController();
+    await runtime.kernel.start();
+    try {
+      const pending = runtime.kernel.execute({
+        id: 'exec_voice_cancelled', intentId: 'intent_voice_cancelled', moduleId: 'voice',
+        capabilityId: 'voice.transcribe.audio',
+        input: { audioBase64: Buffer.from('voice-data').toString('base64'), mimeType: 'audio/ogg', language: 'ru-RU' },
+        createdAt: new Date(0).toISOString(), requestedBy: 'test',
+      }, { signal: controller.signal });
+      const audioPath = await waitForFile(enteredPath);
+      const expectedRoot = path.join(resolveMonarchRuntimePaths(process.cwd()).dataRoot, 'temporary', 'voice');
+      expect(path.relative(expectedRoot, audioPath).startsWith('..')).toBe(false);
+
+      const started = Date.now();
+      controller.abort(new Error('owner stopped'));
+      await expect(pending).resolves.toMatchObject({ ok: false, error: 'voice-stt-cancelled' });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      await expect(readFile(latePath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await runtime.kernel.stop().catch(() => undefined);
+      await rm(script.tempDir, { recursive: true, force: true });
+      await rm(enteredPath, { force: true });
+      await rm(latePath, { force: true });
+    }
+  });
 });
 
 describe('Voice command policy', () => {
@@ -398,6 +488,18 @@ function executeVoiceTranscribe(
     createdAt: new Date(0).toISOString(),
     requestedBy: 'test',
   });
+}
+
+async function waitForFile(filePath: string): Promise<string> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      return await readFile(filePath, 'utf8');
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  throw new Error(`Timed out waiting for ${filePath}`);
 }
 
 function restoreEnv(key: string, value: string | undefined) {

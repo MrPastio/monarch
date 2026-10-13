@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { renameWithWindowsRetrySync } from '../../core/durable-json';
 
 export interface ComputerLogicalCursorState {
   visible: boolean;
@@ -411,7 +412,7 @@ function renameWithWindowsReaderRetry(source: string, destination: string): void
   let lastError: unknown;
   for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
-      renameSync(source, destination);
+      renameWithWindowsRetrySync(source, destination);
       return;
     } catch (error) {
       lastError = error;

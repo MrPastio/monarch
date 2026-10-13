@@ -1,8 +1,6 @@
 from pathlib import Path
-import json
 import os
 import struct
-import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from unittest import mock
@@ -10,6 +8,7 @@ import zipfile
 
 from monarch_security.analysis import RuleEngine
 from monarch_security.config import FileConfig, load_config
+from monarch_security.file_parser_worker import ParserExecutionError, PROTOCOL_SCHEMA
 from monarch_security.policy import PolicyEngine
 from monarch_security.sensors.files import (
     ARCHIVE_CENTRAL_DIRECTORY_MAX_BYTES,
@@ -240,8 +239,9 @@ class DeepFileScanTests(unittest.TestCase):
     def test_parser_timeout_becomes_reviewable_event_instead_of_blocking(self):
         scanner = FileScanner(FileConfig(parser_timeout_seconds=0.5))
         with mock.patch(
-            "monarch_security.file_parser_worker.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(["python"], 0.5),
+            "monarch_security.file_parser_worker._run_parser_request",
+            side_effect=ParserExecutionError(
+                'timeout', 'inspect-started', 'worker-timeout'),
         ):
             event = scanner.inspect(Path("boundary.zip"))
         assessment = RuleEngine(load_config().router).assess(event)
@@ -262,22 +262,16 @@ class DeepFileScanTests(unittest.TestCase):
 
     def test_worker_io_error_is_reviewable_instead_of_silently_clean(self):
         response = {
-            "schema": 1,
+            "schema": PROTOCOL_SCHEMA,
             "ok": False,
             "error_kind": "os",
             "error_type": "PermissionError",
             "errno": 13,
             "error": "read access unavailable",
         }
-        completed = subprocess.CompletedProcess(
-            args=["python"],
-            returncode=0,
-            stdout=json.dumps(response, sort_keys=True).encode("utf-8"),
-            stderr=b"",
-        )
         with mock.patch(
-            "monarch_security.file_parser_worker.subprocess.run",
-            return_value=completed,
+            "monarch_security.file_parser_worker._run_parser_request",
+            return_value=response,
         ):
             event = FileScanner(load_config().files).inspect(Path("restricted.zip"))
         assessment = RuleEngine(load_config().router).assess(event)

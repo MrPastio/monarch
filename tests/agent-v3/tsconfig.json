@@ -1,0 +1,4 @@
+{
+  "extends": "../../tsconfig.json",
+  "include": ["./*.ts", "../fixtures/agent-v3/*.ts", "../core/execution-cancellation.test.ts"]
+}

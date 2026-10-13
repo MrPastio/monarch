@@ -180,6 +180,30 @@ describe('Agent capability metadata', () => {
     expect(() => resolveAgentCapabilityMetadata(item)).toThrowError(match);
   });
 
+  it('allows an explicit idempotent network read without weakening network disclosure floors', () => {
+    const resolved = resolveAgentCapabilityMetadata(capability({
+      risk: 'network',
+      agent: {
+        idempotency: 'idempotent',
+        effectProfile: {
+          mutation: 'none',
+          targetScope: 'external-service',
+          reversibility: 'manual',
+          privilege: 'normal',
+          dataSensitivity: 'private',
+          communication: 'third-party',
+          financialImpact: false,
+          identityImpact: false,
+          securityImpact: false,
+        },
+      },
+    }));
+    expect(resolved).toMatchObject({
+      idempotency: 'idempotent',
+      effectProfile: { mutation: 'none', communication: 'third-party', dataSensitivity: 'private' },
+    });
+  });
+
   it.each([
     {
       name: 'read capability hiding a persistent mutation',

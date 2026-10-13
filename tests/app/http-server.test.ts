@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import http, { type Server } from 'node:http';
+import { createHmac } from 'node:crypto';
 import {
   createMonarchHttpServer,
   isLoopbackRemoteAddress,
@@ -10,6 +11,8 @@ import {
   type MonarchApplication,
 } from '../../src/app';
 import { IMAGE_PROVIDER_AGREEMENT_VERSION } from '../../src/image-generation';
+import { DEFAULT_OWNER_DEV_SETTINGS } from '../../src/settings/owner-dev';
+import { SecurityPolicyStore } from '../../src/settings/security-policy';
 
 describe('Monarch HTTP server security', () => {
   it('starts an explicit first-run model selection without restricting the chosen tier', async () => {
@@ -191,6 +194,44 @@ describe('Monarch HTTP server security', () => {
     }
   });
 
+  it('routes without any history when the owner switched history off', async () => {
+    const readSaved = vi.fn(async () => [{ role: 'user' as const, content: 'secret earlier message' }]);
+    const needsWeb = vi.fn(async () => false);
+    const fake = createFakeApplication({
+      getOwnerDevSettings: () => ({ ...DEFAULT_OWNER_DEV_SETTINGS, historyContextEnabled: false }),
+      readOscarConversationHistory: readSaved,
+    } as Partial<MonarchApplication>);
+    (fake as any).oscarTurnCoordinator = { ...(fake as any).oscarTurnCoordinator, requestNeedsWeb: needsWeb };
+    const server = createMonarchHttpServer({
+      app: fake,
+      publicDirectory: path.join(process.cwd(), 'src', 'ui', 'public'),
+      host: '127.0.0.1',
+      port: 4317,
+      apiToken: 'unit-session-token',
+      requireApiToken: true,
+    });
+    const baseUrl = await listen(server);
+    try {
+      const response = await fetch(`${baseUrl}/api/oscar/request-disposition`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Monarch-Session': 'unit-session-token' },
+        body: JSON.stringify({
+          text: 'и что там дальше?',
+          conversationId: 'saved_chat_1',
+          history: [{ role: 'user', content: 'window copy of an earlier message' }],
+          webAllowed: true,
+          requestedModel: 'max-cloud:deepseek:deepseek-chat',
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(readSaved).not.toHaveBeenCalled();
+      expect(needsWeb).toHaveBeenCalled();
+      for (const call of needsWeb.mock.calls) expect(call[1]).toEqual([]);
+    } finally {
+      await close(server);
+    }
+  });
+
   it('should require session tokens for sensitive GET endpoints', async () => {
     const server = createMonarchHttpServer({
       app: createFakeApplication(),
@@ -286,7 +327,9 @@ describe('Monarch HTTP server security', () => {
       });
       await expect(steamAction.json()).resolves.toMatchObject({
         ok: true,
-        disposition: { mode: 'agent', kind: 'system_action' },
+        // Without the structured model disposition provider this endpoint may
+        // describe the target, but wording alone must not activate execution.
+        disposition: { mode: 'chat', kind: 'system_action' },
       });
 
       const requestedMaterial = await fetch(`${baseUrl}/api/oscar/request-disposition`, {
@@ -434,10 +477,12 @@ Inspect the changed tests and run the focused suite.
 
   it('adapts legacy agent dispatch into one server-owned Oscar Turn', async () => {
     let capturedContext: Record<string, unknown> | undefined;
+    let capturedActor: { source: string; id: string } | undefined;
     const server = createMonarchHttpServer({
       app: createFakeApplication({
         submitAgentSurfaceIntent: async (submission) => {
           capturedContext = submission.context;
+          capturedActor = submission.authenticatedAgentActor;
           return {
             intent: { id: 'oscar_turn_agent', source: 'api', text: submission.text, createdAt: new Date(0).toISOString() },
             route: null,
@@ -452,6 +497,7 @@ Inspect the changed tests and run the focused suite.
       port: 4317,
       apiToken: 'unit-session-token',
       requireApiToken: true,
+      astraOscarTurns: true,
     });
     const baseUrl = await listen(server);
 
@@ -475,6 +521,43 @@ Inspect the changed tests and run the focused suite.
         clientConversationId: expect.stringMatching(/^legacy:api:/),
         clientRequestId: expect.stringMatching(/^legacy:api:/),
       });
+      expect(capturedActor).toEqual({ source: 'api', id: 'sha256:' + createHmac('sha256', 'unit-session-token')
+        .update('monarch.astra-v3.http-actor.v1/api').digest('hex') });
+    } finally {
+      await close(server);
+    }
+  });
+
+  it('rejects malformed or over-budget Coder replies before resolving runtime state', async () => {
+    const server = createMonarchHttpServer({
+      app: createFakeApplication(),
+      publicDirectory: path.join(process.cwd(), 'src', 'ui', 'public'),
+      host: '127.0.0.1',
+      port: 4317,
+      requireApiToken: false,
+    });
+    const baseUrl = await listen(server);
+    try {
+      const response = await fetch(`${baseUrl}/api/coder/runs/coder_run_1/reply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          questionId: 'agent_question_1',
+          questionDigest: `sha256:${'a'.repeat(64)}`,
+          text: 'я'.repeat(2_049),
+          injectedMessageId: 'caller_must_not_choose_this',
+        }),
+      });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ error: 'invalid-coder-reply' });
+
+      const invalidModel = await fetch(`${baseUrl}/api/coder/runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: 'Проверь проект.', projectId: 'project-1', model: 'invented-max-fallback' }),
+      });
+      expect(invalidModel.status).toBe(400);
+      await expect(invalidModel.json()).resolves.toMatchObject({ error: 'invalid-coder-model' });
     } finally {
       await close(server);
     }
@@ -658,6 +741,59 @@ Inspect the changed tests and run the focused suite.
         context: { revision: 0, contentHash: 'a'.repeat(64) },
       });
       expect(reads).toBe(1);
+    } finally {
+      await close(server);
+    }
+  });
+
+  it('keeps Telegram Control model-free, desktop-attested, and exact-action only', async () => {
+    const actions: string[] = [];
+    const app = createFakeApplication({
+      executeTelegramDesktopControl: async (action: any) => {
+        actions.push(String(action));
+        return { ok: true, summary: 'Telegram control applied.', output: { running: false, remotePaused: true } } as any;
+      },
+      submitAgentSurfaceIntent: async () => {
+        throw new Error('Telegram Control must not enter Agent planning.');
+      },
+    });
+    const server = createMonarchHttpServer({
+      app,
+      publicDirectory: path.join(process.cwd(), 'src', 'ui', 'public'),
+      host: '127.0.0.1',
+      port: 4317,
+      apiToken: 'telegram-control-api-token',
+      desktopAttestationToken: 'telegram-control-desktop-token',
+      requireApiToken: true,
+    });
+    const baseUrl = await listen(server);
+    try {
+      const apiOnly = await fetch(`${baseUrl}/api/telegram/control`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Monarch-Session': 'telegram-control-api-token' },
+        body: JSON.stringify({ schemaVersion: 1, action: 'pause' }),
+      });
+      expect(apiOnly.status).toBe(403);
+
+      const invalid = await fetch(`${baseUrl}/api/telegram/control`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Monarch-Desktop-Attestation': 'telegram-control-desktop-token' },
+        body: JSON.stringify({ schemaVersion: 1, action: 'telegram.api.call', input: { method: 'getFile' } }),
+      });
+      expect(invalid.status).toBe(400);
+      await expect(invalid.json()).resolves.toMatchObject({ error: 'telegram-control-request-invalid' });
+
+      const desktop = await fetch(`${baseUrl}/api/telegram/control`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Monarch-Desktop-Attestation': 'telegram-control-desktop-token' },
+        body: JSON.stringify({ schemaVersion: 1, action: 'pause' }),
+      });
+      expect(desktop.status).toBe(200);
+      await expect(desktop.json()).resolves.toMatchObject({
+        ok: true,
+        result: { output: { running: false, remotePaused: true } },
+      });
+      expect(actions).toEqual(['pause']);
     } finally {
       await close(server);
     }
@@ -985,6 +1121,7 @@ Inspect the changed tests and run the focused suite.
       port: 4317,
       apiToken: 'unit-session-token',
       requireApiToken: true,
+      astraOscarTurns: true,
     });
     const baseUrl = await listen(server);
     const headers = { 'Content-Type': 'application/json', 'X-Monarch-Session': 'unit-session-token' };
@@ -1050,23 +1187,17 @@ Inspect the changed tests and run the focused suite.
     }
   });
 
-  it('never executes an effectful legacy Action Protocol proposal outside a bound Turn', async () => {
+  it('keeps an effectful Action Protocol proposal typed through Kernel and Security', async () => {
     let captured: Record<string, unknown> | null = null;
     let directProposalCalls = 0;
     const server = createMonarchHttpServer({
       app: createFakeApplication({
-        submitActionProposal: async () => {
+        submitActionProposal: async (submission) => {
           directProposalCalls += 1;
-          throw new Error('effectful legacy proposal must not execute directly');
-        },
-        submitAgentSurfaceIntent: async (submission) => {
           captured = submission as unknown as Record<string, unknown>;
           return {
-            intent: { id: 'oscar_turn_proposal', text: submission.text, source: 'api', createdAt: new Date(0).toISOString() },
-            route: null,
-            plan: null,
-            execution: { ok: false, error: 'confirmation-required', summary: 'Action-card required.', output: { turnId: 'oscar_turn_proposal' } },
-            summary: 'Action-card required.',
+            proposal: submission.proposal,
+            result: { ok: false, error: 'confirmation-required', summary: 'Action-card required.' },
           } as any;
         },
         runtime: {
@@ -1096,34 +1227,23 @@ Inspect the changed tests and run the focused suite.
           originatingUserText: 'создай заметку',
         }),
       });
-      const payload = await response.json() as { accepted?: boolean };
-      expect(response.status).toBe(202);
-      expect(payload.accepted).toBe(true);
-      expect(directProposalCalls).toBe(0);
+      const payload = await response.json() as { result?: { error?: string } };
+      expect(response.status).toBe(200);
+      expect(payload.result?.error).toBe('confirmation-required');
+      expect(directProposalCalls).toBe(1);
       expect(captured).toMatchObject({
         source: 'api',
-        context: { legacyProposal: true },
+        originatingUserText: 'создай заметку',
+        proposal: { capabilityId: 'workspace.files.write', args: { path: 'notes/http.txt', content: 'ok' } },
       });
-      expect(String((captured as any)?.text)).toContain('workspace.files.write');
     } finally {
       await close(server);
     }
   });
 
-  it('adapts an effectful legacy capability call into a Turn and keeps read-only calls synchronous', async () => {
+  it('keeps effectful and read-only capability calls typed through Kernel and Security', async () => {
     let directExecutions = 0;
-    let submittedText = '';
     const fake = createFakeApplication({
-      submitAgentSurfaceIntent: async (submission) => {
-        submittedText = submission.text;
-        return {
-          intent: { id: 'oscar_turn_execute', text: submission.text, source: 'api', createdAt: new Date(0).toISOString() },
-          route: null,
-          plan: null,
-          execution: { ok: false, error: 'confirmation-required', summary: 'Action-card required.', output: { turnId: 'oscar_turn_execute' } },
-          summary: 'Action-card required.',
-        } as any;
-      },
       executeCapability: async () => {
         directExecutions += 1;
         return { ok: true, summary: 'Observed read-only state.' } as any;
@@ -1150,17 +1270,16 @@ Inspect the changed tests and run the focused suite.
         method: 'POST', headers,
         body: JSON.stringify({ moduleId: 'workspace', capabilityId: 'workspace.files.write', input: { path: 'note.txt', content: 'ok' } }),
       });
-      expect(effectful.status).toBe(202);
-      await expect(effectful.json()).resolves.toMatchObject({ accepted: true, successor: '/api/oscar/turns' });
-      expect(directExecutions).toBe(0);
-      expect(submittedText).toContain('workspace.files.write');
+      expect(effectful.status).toBe(200);
+      await expect(effectful.json()).resolves.toMatchObject({ ok: true, result: { ok: true } });
+      expect(directExecutions).toBe(1);
 
       const readOnly = await fetch(`${baseUrl}/api/execute`, {
         method: 'POST', headers,
         body: JSON.stringify({ moduleId: 'workspace', capabilityId: 'workspace.files.read', input: { path: 'note.txt' }, includeState: false }),
       });
       expect(readOnly.status).toBe(200);
-      expect(directExecutions).toBe(1);
+      expect(directExecutions).toBe(2);
     } finally {
       await close(server);
     }
@@ -1208,6 +1327,61 @@ Inspect the changed tests and run the focused suite.
         confirmed: false,
       });
       expect(agentTurns).toBe(0);
+    } finally {
+      await close(server);
+    }
+  });
+
+  it('keeps Simplified Voice on an attested dedicated route without creating an Agent turn', async () => {
+    const executeSimplifiedVoiceCommand = vi.fn(async (text: string, _context?: unknown) => ({
+      schemaVersion: 1,
+      ok: true,
+      mode: 'simplified',
+      status: 'completed',
+      text: `Выполнено: ${text}`,
+      performed: true,
+    }));
+    const submitAgentSurfaceIntent = vi.fn(async () => {
+      throw new Error('Simplified Voice must not enter Agent planning.');
+    });
+    const server = createMonarchHttpServer({
+      app: createFakeApplication({ executeSimplifiedVoiceCommand, submitAgentSurfaceIntent } as Partial<MonarchApplication>),
+      publicDirectory: path.join(process.cwd(), 'src', 'ui', 'public'),
+      host: '127.0.0.1',
+      port: 4317,
+      requireApiToken: true,
+      apiToken: 'unit-session-token',
+      desktopAttestationToken: 'voice-simplified-desktop-token',
+    });
+    const baseUrl = await listen(server);
+    try {
+      const denied = await fetch(`${baseUrl}/api/voice/simplified`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: 'Оскар, открой музыку' }),
+      });
+      expect(denied.status).toBe(403);
+
+      const accepted = await fetch(`${baseUrl}/api/voice/simplified`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Monarch-Desktop-Attestation': 'voice-simplified-desktop-token',
+        },
+        body: JSON.stringify({
+          text: 'Оскар, покажи погоду',
+          deviceLocation: { latitude: 50.45, longitude: 30.52, accuracyMeters: 120 },
+        }),
+      });
+      expect(accepted.status).toBe(200);
+      await expect(accepted.json()).resolves.toMatchObject({
+        ok: true,
+        result: { mode: 'simplified', status: 'completed', performed: true },
+      });
+      expect(executeSimplifiedVoiceCommand).toHaveBeenCalledWith('Оскар, покажи погоду', {
+        deviceLocation: { latitude: 50.45, longitude: 30.52, accuracyMeters: 120 },
+      });
+      expect(submitAgentSurfaceIntent).not.toHaveBeenCalled();
     } finally {
       await close(server);
     }
@@ -1573,6 +1747,44 @@ Inspect the changed tests and run the focused suite.
       await close(server);
     }
   });
+  it('lets only the Desktop window change the security policy, and weakening needs confirmation', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-policy-http-'));
+    const app = createFakeApplication({ securityPolicyStore: new SecurityPolicyStore(root) } as Partial<MonarchApplication>);
+    const server = createMonarchHttpServer({
+      app,
+      publicDirectory: path.join(process.cwd(), 'src', 'ui', 'public'),
+      host: '127.0.0.1',
+      port: 4317,
+      apiToken: 'policy-api-token',
+      desktopAttestationToken: 'policy-desktop-token',
+      requireApiToken: true,
+    });
+    const baseUrl = await listen(server);
+    const post = (headers: Record<string, string>, body: unknown) => fetch(`${baseUrl}/api/security/policy`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+    try {
+      const read = await fetch(`${baseUrl}/api/security/policy`, { headers: { 'X-Monarch-Session': 'policy-api-token' } });
+      expect(read.status).toBe(200);
+      expect((await read.json()).controls.find((item: any) => item.id === 'links.confirmOpen')).toMatchObject({ level: 'always' });
+
+      const apiOnly = await post({ 'X-Monarch-Session': 'policy-api-token' },
+        { control: 'links.confirmOpen', level: 'off', confirmWeakening: true });
+      expect(apiOnly.status).toBe(403);
+
+      const unconfirmed = await post({ 'X-Monarch-Desktop-Attestation': 'policy-desktop-token' },
+        { control: 'links.confirmOpen', level: 'off' });
+      expect(unconfirmed.status).toBe(409);
+      await expect(unconfirmed.json()).resolves.toMatchObject({ error: 'security-policy-weakening-unconfirmed' });
+
+      const confirmed = await post({ 'X-Monarch-Desktop-Attestation': 'policy-desktop-token' },
+        { control: 'links.confirmOpen', level: 'off', confirmWeakening: true });
+      expect(confirmed.status).toBe(200);
+      expect((await confirmed.json()).controls.find((item: any) => item.id === 'links.confirmOpen')).toMatchObject({ level: 'off' });
+    } finally {
+      await close(server);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 function createFakeApplication(overrides: Partial<MonarchApplication> = {}): MonarchApplication {
@@ -1657,6 +1869,8 @@ function createFakeApplication(overrides: Partial<MonarchApplication> = {}): Mon
       getTurn: async () => null,
       subscribe: () => () => undefined,
     },
+    getOwnerDevSettings: () => ({ ...DEFAULT_OWNER_DEV_SETTINGS }),
+    readOscarConversationHistory: async () => [],
     settingsCommandBus: {
       read: async () => ({
         schemaVersion: 1,

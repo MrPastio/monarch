@@ -119,12 +119,7 @@ export const workspaceManifest: MonarchModuleManifest = {
         }],
         examples: [{ goal: 'Locate the active project root before reading files.' }],
       },
-      routing: {
-        aliases: ['workspace root', 'workspace path', 'путь рабочего пространства', 'где находится рабочее пространство'],
-        keywords: ['workspace', 'root', 'path', 'location', 'рабочее пространство', 'путь', 'расположение'],
-        examples: ['where is the workspace', 'укажи точный путь рабочего пространства'],
-        intentKinds: ['workspace.info', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {},
@@ -176,12 +171,7 @@ export const workspaceManifest: MonarchModuleManifest = {
           { goal: 'Проведи аудит папок на диске D и покажи самые большие каталоги.' },
         ],
       },
-      routing: {
-        aliases: ['storage audit', 'disk audit', 'folder audit', 'аудит диска', 'аудит папок', 'сканирование диска'],
-        keywords: ['audit', 'scan', 'storage', 'disk', 'folders', 'sizes', 'аудит', 'скан', 'диск', 'папки', 'размеры'],
-        examples: ['проведи аудит папок на диске D', 'scan D drive folders and report sizes'],
-        intentKinds: ['file.operation', 'workspace.info'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -199,7 +189,7 @@ export const workspaceManifest: MonarchModuleManifest = {
       id: 'workspace.files.read',
       moduleId: 'workspace',
       title: 'Read file',
-      description: 'Read a text file inside the allowed workspace roots.',
+      description: 'Read a text file inside the allowed workspace roots. Returns sizeBytes and lineCount. A file larger than maxBytes needs an explicit offset: pass offset 0, then offset: nextOffset while truncated is true.',
       risk: 'read',
       agent: {
         tags: ['workspace', 'filesystem', 'file', 'read'],
@@ -235,17 +225,13 @@ export const workspaceManifest: MonarchModuleManifest = {
         }],
         examples: [{ path: 'package.json', purpose: 'Inspect project metadata.' }],
       },
-      routing: {
-        aliases: ['read file', 'show file', 'open file', 'прочитай файл', 'прочитать файл', 'открой файл', 'открыть файл', 'покажи файл'],
-        keywords: ['read', 'show', 'open', 'file', 'workspace', 'прочитай', 'прочитать', 'открой', 'открыть', 'покажи', 'показать', 'файл', 'файла', 'путь'],
-        examples: ['read file package.json', 'прочитай package.json', 'можешь прочитать package.json'],
-        intentKinds: ['file.read', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
           path: { type: 'string' },
           maxBytes: { type: 'number' },
+          offset: { type: 'number', description: 'Byte offset to start from; pass nextOffset from a truncated read.' },
         },
         required: ['path'],
         additionalProperties: false,
@@ -291,12 +277,7 @@ export const workspaceManifest: MonarchModuleManifest = {
         }],
         examples: [{ path: 'src', purpose: 'Discover implementation files.' }],
       },
-      routing: {
-        aliases: ['list files', 'show files', 'workspace files', 'покажи файлы', 'список файлов', 'просмотри папки', 'перечисли папки'],
-        keywords: ['list', 'show', 'view', 'files', 'folder', 'directory', 'workspace', 'покажи', 'просмотри', 'посмотри', 'перечисли', 'список', 'файлы', 'папка', 'директория'],
-        examples: ['list files in src', 'покажи файлы в src', 'просмотри названия папок в корневой папке'],
-        intentKinds: ['file.list', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -305,8 +286,20 @@ export const workspaceManifest: MonarchModuleManifest = {
           limit: { type: 'number' },
           entryType: { type: 'string' },
           extension: { type: 'string' },
+          nameContains: { type: 'string' },
         },
         additionalProperties: false,
+      },
+      outputSchema: {
+        type: 'object', required: ['root', 'entries'],
+        properties: {
+          root: { type: 'string', minLength: 1 },
+          entries: { type: 'array', maxItems: 500, items: { type: 'object', required: ['name', 'path', 'type'],
+            properties: { name: { type: 'string' }, path: { type: 'string' }, type: { type: 'string', enum: ['file', 'directory'] },
+              sizeBytes: { type: 'number', minimum: 0 } }, additionalProperties: false } },
+          recursive: { type: 'boolean' }, entryType: { type: ['string', 'null'] }, extension: { type: ['string', 'null'] },
+          truncated: { type: 'boolean' },
+        }, additionalProperties: false,
       },
     },
     {
@@ -349,12 +342,7 @@ export const workspaceManifest: MonarchModuleManifest = {
         }],
         examples: [{ query: 'submitIntentJob', path: 'src', purpose: 'Find a live call path.' }],
       },
-      routing: {
-        aliases: ['search files', 'find in files', 'grep files', 'найди в файлах', 'поиск по файлам'],
-        keywords: ['search', 'find', 'grep', 'files', 'workspace', 'найди', 'ищи', 'поиск', 'файлах', 'файлы'],
-        examples: ['search files for router', 'найди в файлах AssistantModule'],
-        intentKinds: ['file.search', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -370,7 +358,7 @@ export const workspaceManifest: MonarchModuleManifest = {
       id: 'workspace.files.write',
       moduleId: 'workspace',
       title: 'Write file',
-      description: 'Write a text file inside the allowed workspace roots.',
+      description: 'Write a text file inside allowed workspace roots. Without overwrite, creation is exclusive and preserves an existing target even across a concurrent create.',
       risk: 'write',
       agent: {
         tags: ['workspace', 'filesystem', 'file', 'write', 'mutation'],
@@ -419,12 +407,7 @@ export const workspaceManifest: MonarchModuleManifest = {
         },
         examples: [{ path: 'runtime/report.md', purpose: 'Persist a generated workspace report.' }],
       },
-      routing: {
-        aliases: ['write file', 'create file', 'save file', 'создай файл', 'запиши файл', 'сохрани файл'],
-        keywords: ['write', 'create', 'save', 'file', 'workspace', 'создай', 'запиши', 'сохрани', 'файл'],
-        examples: ['write file runtime/example.txt', 'создай файл runtime/example.txt'],
-        intentKinds: ['file.write', 'file.generation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -477,12 +460,7 @@ export const workspaceManifest: MonarchModuleManifest = {
         }],
         examples: [{ knownFolder: 'desktop', purpose: 'Summarize every supported Desktop document.' }],
       },
-      routing: {
-        aliases: ['inspect files in batches', 'summarize all desktop files', 'перескажи все файлы', 'прочитай все документы'],
-        keywords: ['inspect', 'batch', 'pagination', 'digest', 'summarize', 'desktop', 'documents', 'перескажи', 'файлы', 'рабочий стол', 'документы'],
-        examples: ['Перескажи все мои файлы на рабочем столе', 'inspect every document in this folder'],
-        intentKinds: ['file.read', 'file.list', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -517,7 +495,7 @@ export const workspaceManifest: MonarchModuleManifest = {
       id: 'workspace.known-folder.resolve',
       moduleId: 'workspace',
       title: 'Resolve a Windows known folder',
-      description: 'Resolve Desktop or Downloads to the exact current path and verify the filesystem policy before later inspection.',
+      description: 'Resolve Desktop or Downloads to the exact current path and verify the filesystem policy before later inspection. Use it before any Desktop/Downloads path: Windows often redirects them (e.g. to OneDrive), so %USERPROFILE%\\Desktop may not exist.',
       risk: 'read',
       agent: {
         tags: ['workspace', 'known-folder', 'desktop', 'downloads', 'resolve', 'read'],
@@ -545,12 +523,7 @@ export const workspaceManifest: MonarchModuleManifest = {
         cancellation: 'supported',
         verification: [{ kind: 'schema', description: 'The result contains the exact resolved path and existence state.' }],
       },
-      routing: {
-        aliases: ['resolve desktop', 'resolve downloads', 'найди рабочий стол', 'путь загрузок'],
-        keywords: ['resolve', 'known folder', 'desktop', 'downloads', 'рабочий стол', 'загрузки', 'путь'],
-        examples: ['resolve the Desktop folder'],
-        intentKinds: ['file.read', 'file.list', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: { knownFolder: { type: 'string', enum: ['desktop', 'downloads'] } },
@@ -623,30 +596,7 @@ export const workspaceManifest: MonarchModuleManifest = {
           input: { knownFolder: 'desktop', basename: 'ромашка.txt', content: '' },
         }],
       },
-      routing: {
-        aliases: [
-          'write file on desktop',
-          'create file in downloads',
-          'создай файл на рабочем столе',
-          'создай файл в загрузках',
-        ],
-        keywords: [
-          'write',
-          'create',
-          'file',
-          'desktop',
-          'downloads',
-          'создай',
-          'файл',
-          'рабочий стол',
-          'загрузки',
-        ],
-        examples: [
-          'create text file note on desktop',
-          'создай на рабочем столе текстовый файл с именем ромашка',
-        ],
-        intentKinds: ['file.write', 'file.generation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -699,12 +649,7 @@ export const workspaceManifest: MonarchModuleManifest = {
           },
         },
       }),
-      routing: {
-        aliases: ['append file', 'допиши файл', 'добавь в файл'],
-        keywords: ['append', 'add', 'file', 'допиши', 'добавь', 'файл'],
-        examples: ['допиши файл runtime/log.txt с текстом готово'],
-        intentKinds: ['file.write', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: { path: { type: 'string' }, content: { type: 'string' } },
@@ -726,12 +671,7 @@ export const workspaceManifest: MonarchModuleManifest = {
         reversibility: 'manual',
         verificationDescription: 'A filesystem readback must confirm that the exact target is a directory.',
       }),
-      routing: {
-        aliases: ['create folder', 'make folder', 'mkdir', 'создай папку', 'сделай папку'],
-        keywords: ['create', 'make', 'folder', 'directory', 'mkdir', 'создай', 'сделай', 'папку', 'директорию'],
-        examples: ['создай папку artifacts/generated/demo', 'сделай папку artifacts/generated/demo'],
-        intentKinds: ['file.write', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -756,12 +696,7 @@ export const workspaceManifest: MonarchModuleManifest = {
         reversibility: 'manual',
         verificationDescription: 'Every copied file must pass byte-for-byte readback at the exact target.',
       }),
-      routing: {
-        aliases: ['copy file', 'copy folder', 'скопируй файл', 'скопируй папку'],
-        keywords: ['copy', 'duplicate', 'file', 'folder', 'скопируй', 'дублируй', 'файл', 'папку'],
-        examples: ['скопируй папку "runtime/a" в "runtime/b"'],
-        intentKinds: ['file.write', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: { path: { type: 'string' }, targetPath: { type: 'string' } },
@@ -784,12 +719,7 @@ export const workspaceManifest: MonarchModuleManifest = {
         destructive: true,
         verificationDescription: 'Readback must prove the source is absent and the exact target exists.',
       }),
-      routing: {
-        aliases: ['move file', 'rename file', 'перемести файл', 'переименуй папку'],
-        keywords: ['move', 'rename', 'file', 'folder', 'перемести', 'переименуй', 'файл', 'папку'],
-        examples: ['перемести файл "runtime/a.txt" в "runtime/b.txt"'],
-        intentKinds: ['file.delete', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: { path: { type: 'string' }, targetPath: { type: 'string' } },
@@ -811,12 +741,7 @@ export const workspaceManifest: MonarchModuleManifest = {
         reversibility: 'manual',
         verificationDescription: 'Byte-for-byte readback must equal the computed replacement content.',
       }),
-      routing: {
-        aliases: ['replace in file', 'replace file text', 'замени в файле', 'заменить текст в файле'],
-        keywords: ['replace', 'edit', 'file', 'workspace', 'замени', 'заменить', 'исправь', 'файл'],
-        examples: ['replace in file runtime/example.txt "old" with "new"', 'замени в файле runtime/example.txt "old" на "new"'],
-        intentKinds: ['file.write', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -844,12 +769,7 @@ export const workspaceManifest: MonarchModuleManifest = {
         verificationKind: 'external-receipt',
         verificationDescription: 'The Windows recycle operation must succeed and readback must prove the exact original target is absent.',
       }),
-      routing: {
-        aliases: ['trash file', 'remove file', 'delete file', 'удали файл', 'убери в корзину'],
-        keywords: ['trash', 'recycle', 'delete', 'remove', 'file', 'folder', 'удали', 'корзину', 'файл', 'папку'],
-        examples: ['move runtime/example.txt to recycle bin', 'удали файл runtime/example.txt'],
-        intentKinds: ['file.delete', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {
@@ -874,12 +794,7 @@ export const workspaceManifest: MonarchModuleManifest = {
         destructive: true,
         verificationDescription: 'Readback must prove the exact file no longer exists.',
       }),
-      routing: {
-        aliases: ['permanently delete file', 'безвозвратно удали файл', 'удали файл навсегда'],
-        keywords: ['permanent', 'irreversible', 'delete', 'безвозвратно', 'навсегда', 'удали'],
-        examples: ['permanently delete file runtime/example.txt', 'безвозвратно удали файл runtime/example.txt'],
-        intentKinds: ['file.delete', 'file.operation'],
-      },
+
       inputSchema: {
         type: 'object',
         properties: {

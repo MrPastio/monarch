@@ -94,7 +94,7 @@ export interface VoiceSttRuntimeSnapshot {
 
 export interface VoiceSttRuntimePort {
   prepare(language?: string): Promise<VoiceSttPrepareResult>;
-  transcribe(input: VoiceSttTranscribeInput): Promise<VoiceSttTranscribeResult>;
+  transcribe(input: VoiceSttTranscribeInput, signal?: AbortSignal): Promise<VoiceSttTranscribeResult>;
   startStream?(input: VoiceSttStreamStartInput): Promise<VoiceSttStreamStartResult>;
   pushStream?(input: VoiceSttStreamPushInput): Promise<VoiceSttStreamPushResult>;
   finishStream?(streamId: string): Promise<VoiceSttStreamFinalResult>;
@@ -116,6 +116,7 @@ interface PendingRequest {
   resolve: (value: Record<string, unknown>) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  dispose?: () => void;
 }
 
 export class VoiceSttRuntimeError extends Error {
@@ -171,12 +172,13 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
     });
   }
 
-  transcribe(input: VoiceSttTranscribeInput): Promise<VoiceSttTranscribeResult> {
+  transcribe(input: VoiceSttTranscribeInput, signal?: AbortSignal): Promise<VoiceSttTranscribeResult> {
     const normalized = normalizeTranscribeInput(input, this.audioRoot);
     const timeoutMs = readTranscribeTimeout(input.durationMs, this.requestTimeoutMs);
     return this.enqueue(async () => {
+      throwIfSttAborted(signal);
       try {
-        const envelope = await this.sendRequest('transcribe', normalized, 'transcript', timeoutMs);
+        const envelope = await this.sendRequest('transcribe', normalized, 'transcript', timeoutMs, signal);
         const result = readTranscribeResult(envelope);
         this.markReady(result);
         return result;
@@ -184,7 +186,7 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
         this.markFailed(readFailureCode(error));
         throw error;
       }
-    });
+    }, signal);
   }
 
   startStream(input: VoiceSttStreamStartInput): Promise<VoiceSttStreamStartResult> {
@@ -282,10 +284,30 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
     this.intentionalShutdown = false;
   }
 
-  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const current = this.requestTail.then(operation, operation);
+  private enqueue<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const guarded = () => {
+      throwIfSttAborted(signal);
+      return operation();
+    };
+    const current = this.requestTail.then(guarded, guarded);
     this.requestTail = current.then(() => undefined, () => undefined);
-    return current;
+    if (!signal) return current;
+    if (signal.aborted) return Promise.reject(sttCancelled());
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        callback();
+      };
+      const onAbort = () => finish(() => reject(sttCancelled()));
+      signal.addEventListener('abort', onAbort, { once: true });
+      current.then(
+        (value) => finish(() => resolve(value)),
+        (error) => finish(() => reject(error)),
+      );
+    });
   }
 
   private async sendRequest(
@@ -293,14 +315,19 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
     payload: Record<string, unknown>,
     expectedType: PendingRequest['expectedType'],
     timeoutMs = this.requestTimeoutMs,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
+    throwIfSttAborted(signal);
     const child = await this.ensureProcess();
+    throwIfSttAborted(signal);
     const id = this.nextRequestId();
     const message = `${JSON.stringify({ id, type, ...payload })}\n`;
 
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
         this.pending.delete(id);
+        pending?.dispose?.();
         const error = new VoiceSttRuntimeError(
           'voice-stt-timeout',
           `Локальный STT не завершил ${type} за отведённое время.`,
@@ -310,10 +337,28 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
         child.kill();
         reject(error);
       }, timeoutMs);
-      this.pending.set(id, { expectedType, resolve, reject, timer });
+      const onAbort = () => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pending.delete(id);
+        pending.dispose?.();
+        child.kill();
+        pending.reject(sttCancelled());
+      };
+      const dispose = signal
+        ? () => signal.removeEventListener('abort', onAbort)
+        : undefined;
+      this.pending.set(id, { expectedType, resolve, reject, timer, ...(dispose ? { dispose } : {}) });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
       if (!child.stdin.writable || child.stdin.writableEnded || child.stdin.destroyed) {
         clearTimeout(timer);
         this.pending.delete(id);
+        dispose?.();
         reject(new VoiceSttRuntimeError(
           'voice-stt-runtime-unavailable',
           'Локальный STT worker уже остановлен.',
@@ -327,6 +372,7 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
         if (!pending) return;
         clearTimeout(pending.timer);
         this.pending.delete(id);
+        pending.dispose?.();
         const failure = new VoiceSttRuntimeError(
           'voice-stt-runtime-unavailable',
           `Не удалось передать запись локальному STT worker: ${error.message}`,
@@ -366,16 +412,47 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
     this.intentionalShutdown = false;
     let child: ChildProcessWithoutNullStreams;
     try {
+      const workspacePythonPath = path.join(
+        this.workspaceRoot, 'runtime', 'voice', 'one-shot', 'python-packages',
+      );
+      const pythonPath = readOptionalAbsoluteDirectory(
+        process.env.MONARCH_STT_PYTHONPATH
+          || (existsSync(workspacePythonPath) ? workspacePythonPath : undefined),
+        'MONARCH_STT_PYTHONPATH',
+      );
+      // ffmpeg comes with the «Распознавание речи» download (<models>/voice) or the
+      // older developer setup (runtime/voice/one-shot).
+      const ffmpegBuild = ['ffmpeg-8.1.1-essentials_build', 'bin', 'ffmpeg.exe'];
+      const configuredModelsRoot = String(process.env.MONARCH_MODELS_ROOT || '').trim();
+      const ffmpegCandidates = [
+        ...(configuredModelsRoot && path.isAbsolute(configuredModelsRoot)
+          ? [path.join(configuredModelsRoot, 'voice', ...ffmpegBuild)]
+          : []),
+        path.join(this.workspaceRoot, 'runtime', 'voice', 'models', ...ffmpegBuild),
+        path.join(this.workspaceRoot, 'runtime', 'voice', 'one-shot', ...ffmpegBuild),
+      ];
+      const ffmpegPath = readOptionalAbsoluteFile(
+        process.env.MONARCH_FFMPEG_PATH
+          || ffmpegCandidates.find((candidate) => existsSync(candidate)),
+        'MONARCH_FFMPEG_PATH',
+      );
       child = spawn(this.executablePath(), [workerScriptPath, '--worker'], {
         shell: false,
         windowsHide: true,
+        cwd: this.workspaceRoot,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: {
           ...process.env,
+          MONARCH_VOICE_AUDIO_ROOT: this.audioRoot,
+          ...(pythonPath ? { PYTHONPATH: pythonPath } : {}),
+          ...(ffmpegPath ? { MONARCH_FFMPEG_PATH: ffmpegPath } : {}),
           PYTHONIOENCODING: 'utf-8',
           PYTHONUTF8: '1',
         },
       });
+      // EPIPE on a worker that already exited is reported by its exit handling;
+      // an unlistened stream 'error' would end the whole process.
+      child.stdin?.on('error', () => undefined);
     } catch (error) {
       throw runtimeMissingError(error);
     }
@@ -399,18 +476,21 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
       this.stderr = `${this.stderr}${chunk.toString('utf8')}`.slice(-MAX_STDERR_LENGTH);
     });
     child.once('error', (error) => {
+      if (this.child !== child) return;
       const failure = runtimeMissingError(error);
       this.markFailed(failure.code);
       this.rejectPending(failure);
     });
     child.once('close', (exitCode) => {
-      if (this.child === child) this.child = null;
-      this.workerPid = undefined;
+      const wasCurrent = this.child === child;
+      if (wasCurrent) this.child = null;
+      if (wasCurrent) this.workerPid = undefined;
       if (this.stdout === stdout) {
         stdout.close();
         this.stdout = null;
       }
       if (this.intentionalShutdown) return;
+      if (!wasCurrent) return;
       const failure = new VoiceSttRuntimeError(
         'voice-stt-runtime-exited',
         `Локальный STT worker завершился${exitCode === null ? '' : ` с кодом ${exitCode}`}.`,
@@ -447,6 +527,7 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
     if (!pending) return;
     clearTimeout(pending.timer);
     this.pending.delete(id);
+    pending.dispose?.();
 
     const responseType = typeof envelope.type === 'string' ? envelope.type : '';
     if (responseType === 'error') {
@@ -487,6 +568,7 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
   private rejectPending(error: Error): void {
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
+      pending.dispose?.();
       pending.reject(error);
       this.pending.delete(id);
     }
@@ -521,6 +603,44 @@ export class VoiceSttRuntime implements VoiceSttRuntimePort {
   }
 }
 
+function readOptionalAbsoluteDirectory(value: string | undefined, label: string): string | undefined {
+  const candidate = String(value || '').trim();
+  if (!candidate) return undefined;
+  if (!path.isAbsolute(candidate)) {
+    throw new VoiceSttRuntimeError(
+      'voice-stt-runtime-path-denied',
+      `${label} должен быть абсолютным локальным путём.`,
+    );
+  }
+  const resolved = path.resolve(candidate);
+  if (!existsSync(resolved)) {
+    throw new VoiceSttRuntimeError(
+      'voice-stt-runtime-missing',
+      `${label} не существует.`,
+    );
+  }
+  return resolved;
+}
+
+function readOptionalAbsoluteFile(value: string | undefined, label: string): string | undefined {
+  const candidate = String(value || '').trim();
+  if (!candidate) return undefined;
+  if (!path.isAbsolute(candidate)) {
+    throw new VoiceSttRuntimeError(
+      'voice-stt-runtime-path-denied',
+      `${label} должен быть абсолютным локальным путём.`,
+    );
+  }
+  const resolved = path.resolve(candidate);
+  if (!existsSync(resolved)) {
+    throw new VoiceSttRuntimeError(
+      'voice-stt-runtime-missing',
+      `${label} не существует.`,
+    );
+  }
+  return resolved;
+}
+
 function normalizeTranscribeInput(
   input: VoiceSttTranscribeInput,
   audioRoot: string,
@@ -543,6 +663,14 @@ function normalizeTranscribeInput(
     );
   }
   return { audioPath, language };
+}
+
+function sttCancelled(): VoiceSttRuntimeError {
+  return new VoiceSttRuntimeError('voice-stt-cancelled', 'Локальное распознавание отменено владельцем задачи.');
+}
+
+function throwIfSttAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw sttCancelled();
 }
 
 function readTranscribeTimeout(durationMs: number | undefined, fallbackMs: number): number {

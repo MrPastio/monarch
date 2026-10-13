@@ -104,7 +104,8 @@ describe('voice mode visual contract', () => {
     expect(source.indexOf('void prepareVoiceTranscription().catch(() =>')).toBeLessThan(
       source.indexOf('void warmVoiceModeSpeech(speech).then(recordSpeechWarmup'),
     );
-    expect(source).toContain('openTimer = window.setTimeout(startListening, reducedMotion?.matches ? 40 : 140)');
+    expect(source).toContain('openTimer = window.setTimeout(startListening, simplifiedMode ? 40 : reducedMotion?.matches ? 40 : 140)');
+    expect(source).toContain("surface.dataset.speechWarmup = 'system'");
     expect(source).not.toContain('releaseVoiceModeModels');
     expect(source).toContain("surface.dataset.speechWarmup = ready ? 'ready' : 'failed'");
     expect(source).toContain('describeVoiceSpeechFallback(speechState.playback)');
@@ -118,6 +119,9 @@ describe('voice mode visual contract', () => {
     expect(source).toContain("activity.type === 'speech-start'");
     expect(source).toContain("activity.type === 'speech-end'");
     expect(source).toContain("activity.type === 'no-speech'");
+    expect(source).toContain("surface.dataset.lane === 'simplified'");
+    expect(source).toContain('detector.reset(readClockMs())');
+    expect(source).toContain('микрофон остаётся подключён');
     expect(source).toContain('capture?.cancelSilently()');
     expect(source).toContain('capture?.stop()');
     expect(source).toContain('Оскар говорит');

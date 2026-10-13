@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  ensureWritableParentDirectory,
+  extractDriveRoot,
+  isFilesystemRoot,
+} from '../../src/core/filesystem-policy';
+import {
+  extractDriveWriteDestination,
   knownFolderWriteInputMatchesRequest,
   knownFolderWriteOutputMatchesRequest,
   parseKnownFolderFileRequest,
@@ -69,6 +76,46 @@ describe('known-folder request target grammar', () => {
       if (oldDesktop === undefined) delete process.env.MONARCH_DESKTOP_DIR;
       else process.env.MONARCH_DESKTOP_DIR = oldDesktop;
       await rm(desktop, { recursive: true, force: true });
+    }
+  });
+
+  it('treats a drive letter as a write destination only when Desktop/Downloads were not requested', () => {
+    expect(extractDriveRoot('создай игру динозаврика в файле на html и помести ее на диск D')).toBe('D:\\');
+    expect(extractDriveRoot('put the file on drive E')).toBe('E:\\');
+    expect(extractDriveRoot('какие у меня папки на диске E?')).toBe('E:\\');
+    expect(extractDriveRoot('прочитай E:\\Agent-QA\\status.json')).toBe('');
+    expect(extractDriveWriteDestination(
+      'создай игру динозаврика в файле на html и помести ее на диск D',
+    )).toBe('D:\\');
+    expect(parseKnownFolderFileRequest(
+      'создай игру динозаврика в файле на html и помести ее на диск D',
+    )).toBeNull();
+    expect(extractDriveWriteDestination(
+      'создай на рабочем столе текстовый файл с именем ромашка',
+    )).toBe('');
+    expect(extractDriveWriteDestination('какие у меня папки на диске E?')).toBe('E:\\');
+  });
+
+  it('does not treat a file on a drive root as the drive root itself', () => {
+    expect(isFilesystemRoot('D:\\')).toBe(true);
+    expect(isFilesystemRoot('D:/')).toBe(true);
+    expect(isFilesystemRoot('D:\\dino-game.html')).toBe(false);
+    expect(isFilesystemRoot('D:\\games\\dino-game.html')).toBe(false);
+  });
+
+  it('does not mkdir a Windows drive root before writing a file on that volume', async () => {
+    await expect(ensureWritableParentDirectory('D:\\dino-game.html')).resolves.toBeUndefined();
+  });
+
+  it('still creates missing nested parents for an ordinary file path', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-parent-dir-'));
+    const nested = path.join(root, 'games', 'html', 'dino-game.html');
+    try {
+      await ensureWritableParentDirectory(nested);
+      expect(isFilesystemRoot(path.dirname(nested))).toBe(false);
+      expect((await stat(path.dirname(nested))).isDirectory()).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

@@ -1,3 +1,6 @@
+import { initSharedSelects } from '../../src/ui/public/modules/ui-select.js';
+import { readBoundedImport } from './limits.mjs';
+let plaintextGeneration = 0;
 import {
   SAFE_FILE_FORMAT_GROUPS,
   getSafeFileFormat,
@@ -27,6 +30,8 @@ const state = {
   currentBytes: null,
   currentEditable: false,
   currentDirty: false,
+  editorGeneration: 0,
+  openingFile: false,
   objectUrl: null,
   itemMode: 'file',
   importing: false,
@@ -55,6 +60,7 @@ bridge?.onOpenSettings?.(() => {
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
+  initSharedSelects();
   populateFileFormats();
   if (!bridge) {
     $('#auth-error').textContent = 'Safe доступен только в изолированном desktop-окне Monarch.';
@@ -131,6 +137,9 @@ function bindEvents() {
 }
 
 async function handleClick(event) {
+  if (event.target.closest('#clear-selection')) { state.selected.clear(); renderFiles(); return; }
+  if (event.target.closest('#reset-filters')) { $('#safe-search').value = ''; $('#type-filter').value = 'all'; $('#type-filter').dispatchEvent(new Event('change')); return; }
+  if (event.target.closest('#close-editor')) { await requestCloseEditor(); return; }
   const length = event.target.closest('[data-pin-length]');
   if (length) {
     state.pinLength = Number(length.dataset.pinLength);
@@ -150,12 +159,16 @@ async function handleClick(event) {
   if (event.target.closest('#new-folder')) { openItemDialog('folder'); return; }
   if (event.target.closest('#new-file')) { openItemDialog('file'); return; }
   if (event.target.closest('#import-files')) { $('#file-input').click(); return; }
+  if (event.target.closest('#export-selected')) { await exportSelectedFiles(); return; }
+  if (event.target.closest('#export-file')) { await exportFilesById([state.currentFile?.id]); return; }
   if (event.target.closest('#archive-files')) { await archiveSelected(); return; }
   if (event.target.closest('#delete-selected')) { await deleteSelectedFiles(); return; }
   if (event.target.closest('#save-file')) { await saveCurrentFile(); return; }
   if (event.target.closest('#delete-file')) { await deleteCurrentFile(); return; }
   if (event.target.closest('#extract-archive')) { await extractCurrentArchive(); return; }
   const deleteFile = event.target.closest('[data-delete-file]');
+  const exportFile = event.target.closest('[data-export-file]');
+  if (exportFile) { event.stopPropagation(); await exportFilesById([exportFile.dataset.exportFile]); return; }
   if (deleteFile) { event.stopPropagation(); await deleteFilesById([deleteFile.dataset.deleteFile]); return; }
   const editFolder = event.target.closest('[data-edit-folder]');
   if (editFolder) { event.stopPropagation(); openItemDialog('edit-folder', editFolder.dataset.editFolder); return; }
@@ -405,14 +418,16 @@ function renderSections() {
 }
 
 function sectionButton(id, name, color, count) {
-  const button = element('button', { type: 'button', 'data-section-id': id, class: state.sectionId === id ? 'active' : '' });
+  const button = element('button', { type: 'button', 'data-section-id': id, 'aria-label': `${name}, файлов: ${count}`, 'aria-current': state.sectionId === id ? 'page' : 'false', title: name, class: state.sectionId === id ? 'active' : '' });
   button.style.setProperty('--section-color', color); button.append(element('span', { class: 'section-dot' }), element('span', {}, name), element('span', { class: 'section-count' }, String(count))); return button;
 }
 
 function renderFiles() {
   if (!state.manifest) return;
   const body = $('#file-list'); body.replaceChildren();
-  const folders = state.manifest.folders.filter((folder) => state.sectionId !== 'all' && folder.sectionId === state.sectionId && !state.folderId);
+  const query = $('#safe-search').value.trim().toLowerCase();
+  const type = $('#type-filter').value;
+  const folders = state.manifest.folders.filter((folder) => state.sectionId !== 'all' && folder.sectionId === state.sectionId && !state.folderId && type === 'all' && (!query || folder.name.toLowerCase().includes(query)));
   folders.forEach((folder) => {
     const open = element('button', { type: 'button', class: 'file-open-button', 'aria-label': `Открыть папку «${folder.name}»` }, iconName('folder', folder.name));
     const actions = element('div', { class: 'row-actions' },
@@ -422,18 +437,28 @@ function renderFiles() {
     const row = element('tr', { 'data-folder-id': folder.id }); row.append(element('td'), element('td', {}, open), element('td', {}, 'Папка'), element('td', {}, formatDate(folder.updatedAt)), element('td', {}, '—'), element('td', { class: 'row-actions-cell' }, actions)); body.append(row);
   });
   let files = state.manifest.files.filter((file) => (state.sectionId === 'all' || file.sectionId === state.sectionId) && (!state.folderId || file.folderId === state.folderId));
-  const query = $('#safe-search').value.trim().toLowerCase(); if (query) files = files.filter((file) => file.name.toLowerCase().includes(query));
-  const type = $('#type-filter').value; if (type !== 'all') files = files.filter((file) => fileKind(file) === type);
+  if (query) files = files.filter((file) => file.name.toLowerCase().includes(query));
+  if (type !== 'all') files = files.filter((file) => fileKind(file) === type);
   const sort = $('#sort-order').value; files.sort(sort === 'name-asc' ? (a,b)=>a.name.localeCompare(b.name,'ru') : sort === 'size-desc' ? (a,b)=>b.size-a.size : sort === 'type-asc' ? (a,b)=>a.mime.localeCompare(b.mime) : (a,b)=>b.updatedAt.localeCompare(a.updatedAt));
   files.forEach((file) => {
     const row = element('tr', { 'data-file-id': file.id, class: state.currentFile?.id === file.id ? 'active' : '' });
     const checkbox = element('input', { type: 'checkbox', 'data-file-check': file.id, 'aria-label': `Выбрать ${file.name}` }); checkbox.checked = state.selected.has(file.id);
     const open = element('button', { type: 'button', class: 'file-open-button', 'aria-label': `Открыть файл «${file.name}»` }, iconName(fileKind(file), file.name));
+    const exportButton = element('button', { type: 'button', 'data-export-file': file.id, 'aria-label': `Экспортировать файл «${file.name}»`, title: 'Экспортировать' }, '↗');
     const deleteButton = element('button', { type: 'button', class: 'row-delete', 'data-delete-file': file.id, 'aria-label': `Удалить файл «${file.name}»`, title: 'Удалить файл' }, '×');
-    row.append(element('td', { class: 'select-cell' }, checkbox), element('td', {}, open), element('td', {}, kindLabel(file)), element('td', {}, formatDate(file.updatedAt)), element('td', {}, formatBytes(file.size)), element('td', { class: 'row-actions-cell' }, deleteButton)); body.append(row);
+    row.append(element('td', { class: 'select-cell' }, checkbox), element('td', {}, open), element('td', {}, kindLabel(file)), element('td', {}, formatDate(file.updatedAt)), element('td', {}, formatBytes(file.size)), element('td', { class: 'row-actions-cell' }, element('div', { class: 'row-actions' }, exportButton, deleteButton))); body.append(row);
   });
   [...body.children].forEach((row, index) => row.style.setProperty('--motion-index', index));
   $('#empty-state').hidden = folders.length + files.length > 0;
+  $('#workspace-title').textContent = state.manifest.sections.find((section) => section.id === state.sectionId)?.name || 'Все файлы';
+  $('#file-results').textContent = `Файлов: ${files.length}${folders.length ? ` · папок: ${folders.length}` : ''}${query || type !== 'all' ? ' · применён фильтр' : ''}`;
+  $('#reset-filters').hidden = !query && type === 'all';
+  $('#new-folder').disabled = state.sectionId === 'all' || Boolean(state.folderId);
+  $('#new-folder').title = state.sectionId === 'all' ? 'Выбери раздел для новой папки' : state.folderId ? 'Папки создаются в корне раздела' : '';
+  $('#empty-state strong').textContent = query || type !== 'all' ? 'Файлы не найдены' : 'Здесь пока пусто';
+  $('#empty-state span').textContent = query || type !== 'all'
+    ? 'Измени запрос или выбери «Все типы», чтобы увидеть остальные файлы.'
+    : 'Создай файл или перетащи данные в окно. Safe сохранит зашифрованную копию; внешний исходник останется на месте.';
   if (state.folderId) {
     const folderName = state.manifest.folders.find((folder) => folder.id === state.folderId)?.name || '';
     $('#breadcrumb').replaceChildren(
@@ -445,6 +470,10 @@ function renderFiles() {
 }
 
 async function openFile(id) {
+  if (state.openingFile || !state.status?.unlocked) return;
+  if (state.currentFile?.id === id) { $('#close-editor').focus({ preventScroll: true }); return; }
+  state.openingFile = true;
+  const generation = state.editorGeneration;
   const editor = $('#editor-active');
   editor.dataset.openTransition = 'requested';
   if (state.currentDirty) {
@@ -454,11 +483,12 @@ async function openFile(id) {
       copy: `Открыть другой файл и безвозвратно отбросить изменения в «${state.currentFile?.name || 'текущем файле'}»?`,
       actionLabel: 'Отбросить и открыть',
     });
-    if (!confirmed) { editor.dataset.openTransition = 'discard-cancelled'; return; }
+    if (!confirmed || generation !== state.editorGeneration || !state.status?.unlocked) { editor.dataset.openTransition = 'discard-cancelled'; state.openingFile = false; return; }
   }
   try {
     editor.dataset.openTransition = 'reading-encrypted-file';
     const result = await request('readFile', { id });
+    if (generation !== state.editorGeneration || !state.status?.unlocked) { (result.bytes instanceof Uint8Array ? result.bytes : new Uint8Array(result.bytes)).fill(0); return; }
     editor.dataset.openTransition = 'rendering-file';
     revokeObjectUrl(); state.currentBytes?.fill(0); state.currentFile = result.file; state.currentBytes = result.bytes instanceof Uint8Array ? result.bytes : new Uint8Array(result.bytes); renderFiles();
     $('#editor-empty').hidden = true; $('#editor-active').hidden = false; $('#editor-active').classList.remove('motion-reveal'); void $('#editor-active').offsetWidth; $('#editor-active').classList.add('motion-reveal'); $('#editor-file-name').textContent = result.file.name;
@@ -477,10 +507,11 @@ async function openFile(id) {
     } else if (state.currentEditable) $('#hex-editor').value = bytesToHex(state.currentBytes);
     else $('#hex-editor').value = '';
     setCurrentFileDirty(false);
-    $('#extract-archive').hidden = result.file.mime !== 'application/x-monarch-safe-archive'; setEditorTab('edit');
+    $('#extract-archive').hidden = result.file.mime !== 'application/x-monarch-safe-archive'; setEditorTab(state.currentEditable ? 'edit' : 'preview');
     focusFileControl('[data-file-id]', id);
     editor.dataset.openTransition = 'complete';
-  } catch (error) { editor.dataset.openTransition = `error:${error?.code || error?.message || 'unknown'}`; toast(error.message, true); }
+  } catch (error) { editor.dataset.openTransition = `error:${error?.code || error?.message || 'unknown'}`; if (generation === state.editorGeneration && state.status?.unlocked) toast(error.message, true); }
+  finally { state.openingFile = false; }
 }
 
 function setEditorTab(tab) {
@@ -521,9 +552,12 @@ async function saveCurrentFile() {
   let bytes = null;
   try {
     bytes = isText(state.currentFile) ? new TextEncoder().encode($('#text-editor').value) : hexToBytes($('#hex-editor').value);
-    const capabilityToken = await bridge.authorizeWrite({ id: state.currentFile.id, name: state.currentFile.name });
+    const generation = plaintextGeneration;
+    const fileId = state.currentFile.id;
+    const capabilityToken = await bridge.authorizeWrite({ id: fileId, bytes });
+    if (generation !== plaintextGeneration) return;
     if (!capabilityToken) return;
-    state.currentFile = await request('writeFile', { id: state.currentFile.id, bytes, capabilityToken });
+    state.currentFile = await request('writeFile', { id: fileId, bytes, capabilityToken });
     state.currentBytes?.fill(0); state.currentBytes = bytes; bytes = null;
     state.manifest = await request('list'); setCurrentFileDirty(false); renderAll(); toast('Файл зашифрован новым ключом версии и сохранён.');
   } catch (error) { toast(error.message, true); }
@@ -630,7 +664,9 @@ async function importFiles(fileList) {
       let bytes = null;
       try {
         $('#import-files').textContent = `Шифрую ${index + 1}/${files.length}`;
-        bytes = new Uint8Array(await file.arrayBuffer());
+        const generation = plaintextGeneration;
+        bytes = await readBoundedImport(file);
+        if (generation !== plaintextGeneration) throw new Error('Safe заблокирован.');
         await request('importFile', {
           name: file.name,
           mime: file.type || 'application/octet-stream',
@@ -657,6 +693,37 @@ async function importFiles(fileList) {
   }
   if (failure) toast(`Импортировано: ${imported}. Ошибка: ${failure}. Внешние исходники не удалялись.`, true);
   else toast(`Импортировано: ${imported} в «${destination.name}». Зашифрованные копии сохранены в Safe; внешние исходники не удалялись.`);
+}
+async function exportSelectedFiles() {
+  await exportFilesById([...state.selected]);
+}
+async function exportFilesById(ids) {
+  const files = ids.map((id) => state.manifest?.files.find((file) => file.id === id)).filter(Boolean);
+  if (!files.length) return;
+  const dialog = $('#export-dialog');
+  $('#export-description').textContent = files.length === 1
+    ? `Сохранить «${files[0].name}» вне Safe?`
+    : `Сохранить ${files.length} файлов вне Safe? Место для каждого файла выбирается отдельно.`;
+  dialog.returnValue = '';
+  $('#export-close').onclick = () => dialog.close('cancel');
+  const confirmed = await new Promise((resolve) => {
+    dialog.addEventListener('close', () => resolve(dialog.returnValue === 'default'), { once: true });
+    dialog.showModal();
+  });
+  if (!confirmed) return;
+  let exported = 0;
+  for (const file of files) {
+    try {
+      const result = await window.monarchSafe.exportFile({ id: file.id, name: file.name });
+      if (result?.canceled) break;
+      if (!result?.ok) throw new Error('Экспорт не завершён.');
+      exported += 1;
+    } catch (error) {
+      toast(`Экспортировано: ${exported}. ${error.message || 'Ошибка экспорта.'}`, true);
+      return;
+    }
+  }
+  if (exported) toast(`Экспортировано файлов: ${exported}. Копии вне Safe не зашифрованы.`);
 }
 
 function resolveImportDestination() {
@@ -727,13 +794,25 @@ async function deleteFolderById(id) {
 function toggleSelectAll(event) { visibleFileIds().forEach((id) => event.target.checked ? state.selected.add(id) : state.selected.delete(id)); renderFiles(); }
 function renderSelectionState(visibleIds = visibleFileIds()) {
   const selectedVisible = visibleIds.filter((id) => state.selected.has(id));
+  $('#selection-bar').hidden = state.selected.size === 0;
+  const hiddenCount = state.selected.size - selectedVisible.length;
+  $('#selection-summary').textContent = `Выбрано: ${state.selected.size}${hiddenCount ? ` · скрыто фильтром: ${hiddenCount}` : ''}`;
   $('#delete-selected').disabled = state.selected.size === 0;
+  $('#export-selected').disabled = state.selected.size === 0;
+  $('#export-selected').textContent = state.selected.size ? `Экспорт · ${state.selected.size}` : 'Экспорт';
   $('#delete-selected').textContent = state.selected.size ? `Удалить · ${state.selected.size}` : 'Удалить выбранное';
   $('#archive-files').disabled = state.selected.size === 0 || state.sectionId === 'all';
   $('#select-all').checked = visibleIds.length > 0 && selectedVisible.length === visibleIds.length;
   $('#select-all').indeterminate = selectedVisible.length > 0 && selectedVisible.length < visibleIds.length;
 }
-function closeEditor() { revokeObjectUrl(); state.currentBytes?.fill(0); state.currentFile = null; state.currentBytes = null; state.currentEditable = false; setCurrentFileDirty(false); $('#text-editor').value = ''; $('#text-editor').readOnly = false; $('#hex-editor').value = ''; $('#binary-summary').textContent = ''; $('#binary-summary').hidden = true; $('#save-file').hidden = false; $('#editor-empty').hidden = false; $('#editor-active').hidden = true; }
+async function requestCloseEditor() {
+  const id = state.currentFile?.id;
+  if (state.currentDirty && !await confirmInsideSafe({ title: 'Несохранённые изменения', copy: 'Закрыть файл и безвозвратно отбросить несохранённые изменения?', actionLabel: 'Отбросить и закрыть' })) return;
+  closeEditor();
+  renderFiles();
+  focusFileControl('[data-file-id]', id);
+}
+function closeEditor() { state.editorGeneration += 1; revokeObjectUrl(); state.currentBytes?.fill(0); state.currentFile = null; state.currentBytes = null; state.currentEditable = false; setCurrentFileDirty(false); $('#text-editor').value = ''; $('#text-editor').readOnly = false; $('#hex-editor').value = ''; $('#binary-summary').textContent = ''; $('#binary-summary').hidden = true; $('#save-file').hidden = false; $('#editor-empty').hidden = false; $('#editor-active').hidden = true; }
 function markCurrentFileDirty() { armUiLock(); setCurrentFileDirty(true); }
 function setCurrentFileDirty(value) {
   state.currentDirty = Boolean(value && state.currentFile && state.currentEditable);
@@ -766,9 +845,15 @@ function armUiLock() {
     .finally(() => { state.runtimeTouchPending = false; });
 }
 async function request(action, payload = {}) {
+  const generation = plaintextGeneration;
   clearTimeout(state.lockTimer);
   if (state.status?.unlocked) scheduleUiLock();
-  return bridge.request(action, payload);
+  const result = await bridge.request(action, payload);
+  if (generation !== plaintextGeneration && action !== 'lock' && action !== 'status') {
+    result?.bytes?.fill(0);
+    throw new Error('Safe заблокирован. Повтори действие после входа.');
+  }
+  return result;
 }
 function scheduleUiLock() {
   const milliseconds = Number(state.status?.autoLockMs);
@@ -792,6 +877,7 @@ function openSecuritySettings() {
     return;
   }
   const policy = currentSecurityPolicy();
+  $('#settings-pin-warning').textContent = `Осталось попыток PIN: ${state.status?.attemptsRemaining ?? 0}. Ошибки здесь и при входе используют общий лимит. Третья ошибка уничтожает ключи Safe.`;
   $('#safe-auto-lock').value = String(policy.autoLockMs);
   $('#safe-minimize-action').value = policy.minimizeAction;
   $('#safe-clipboard-mode').value = policy.clipboardMode;
@@ -854,6 +940,7 @@ async function saveSecuritySettings(event) {
     toast('Настройки безопасности подтверждены текущим PIN и сохранены.');
   } catch (error) {
     $('#safe-settings-error').textContent = error.message;
+    $('#settings-pin-warning').textContent = `Осталось попыток PIN: ${error.details?.attemptsRemaining ?? state.status?.attemptsRemaining ?? 0}. Третья ошибка уничтожает ключи Safe.`;
     $('#safe-settings-pin').focus();
   }
 }
@@ -866,7 +953,7 @@ function updateAttempts() {
   if (!offered && state.authMode === 'emergency') setAuthMode('pin');
 }
 function authError(message) { $('#auth-error').textContent = message; $('.auth-core').classList.remove('shake'); requestAnimationFrame(() => $('.auth-core').classList.add('shake')); }
-function toast(message, error = false) { const node = $('#toast'); node.textContent = message; node.classList.toggle('error', error); node.hidden = false; clearTimeout(node._timer); node._timer = setTimeout(() => { node.hidden = true; }, 3600); }
+function toast(message, error = false) { if ($('#vault-screen').hidden) return; const node = $('#toast'); node.textContent = message; node.classList.toggle('error', error); node.hidden = false; clearTimeout(node._timer); node._timer = setTimeout(() => { node.hidden = true; }, 3600); }
 function allInputs(container) { return [...container.querySelectorAll('input')]; }
 function values(container) { return allInputs(container).map((input) => input.value).join(''); }
 function fileKind(file) { if (file.mime === 'application/x-monarch-safe-archive') return 'archive'; if (isText(file)) return 'text'; if (file.mime.startsWith('image/')) return 'image'; if (file.mime.startsWith('audio/') || file.mime.startsWith('video/')) return 'media'; if (file.mime === 'application/pdf') return 'pdf'; return 'binary'; }
@@ -884,13 +971,26 @@ function renderMarkdown(value) { return escapeHtml(value).split('\n').map((line)
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g,(char)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char])); }
 function revokeObjectUrl() { if (state.objectUrl) URL.revokeObjectURL(state.objectUrl); state.objectUrl=null; $('#preview-pane')?.replaceChildren(); }
 function purgePlaintextUi() {
+  plaintextGeneration++;
   closeEditor();
+  for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close('cancel');
   clearCredentialInputs();
   state.manifest = null;
   state.selected.clear();
   $('#file-list')?.replaceChildren();
   $('#section-list')?.replaceChildren();
   $('#breadcrumb').textContent = '';
+  $('#workspace-title').textContent = 'Все файлы';
+  $('#file-results').textContent = '';
+  $('#selection-summary').textContent = '';
+  $('#selection-bar').hidden = true;
+  $('#editor-file-name').textContent = '';
+  $('#item-name').value = '';
+  $('#item-destination').textContent = '';
+  $('#confirm-copy').textContent = '';
+  $('#export-description').textContent = '';
+  $('#toast').textContent = '';
+  $('#toast').hidden = true;
   $('#safe-search').value = '';
   $('#recovery-key-list').replaceChildren();
   $('#emergency-phrase-list').replaceChildren();

@@ -236,6 +236,22 @@ const ready = true;
     expect(states.at(-1)?.status).toBe('idle');
   });
 
+  it('forwards the latency-first mode only for a caller that requests it', async () => {
+    const desktop = {
+      speakText: vi.fn().mockResolvedValue({ ok: true, engine: 'windows-sapi' }),
+    };
+    const controller = createOscarSpeechController({
+      desktop,
+      speechSynthesis: undefined,
+      Utterance: undefined,
+      getPreferences: () => ({ voice: 'oscar' }),
+    });
+
+    controller.toggle({ messageId: 'fast-answer', text: 'Готово.', latencyMode: 'fast' });
+    expect(desktop.speakText).toHaveBeenCalledWith(expect.objectContaining({ latencyMode: 'fast' }));
+    await Promise.resolve();
+  });
+
   it('preserves a late partial Qwen failure without relabeling it as a fresh playback', async () => {
     const desktop = {
       speakText: vi.fn().mockResolvedValue({

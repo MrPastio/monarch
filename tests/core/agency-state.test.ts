@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -61,6 +62,85 @@ describe('durable agency state', () => {
     const replay = new MonarchActionLedger(10, file).begin(request);
     expect(replay.status).toBe('replay');
     if (replay.status === 'replay') expect(replay.result.summary).toBe('written');
+  });
+
+  it('retains only a bounded privacy-safe Computer receipt for restart reconciliation', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-agency-computer-receipt-'));
+    roots.push(root);
+    const file = path.join(root, 'ledger.json');
+    const beforeObservationId = 'computer-observation-11111111-1111-4111-8111-111111111111';
+    const afterObservationId = 'computer-observation-22222222-2222-4222-8222-222222222222';
+    const actionReceiptId = 'computer-action-33333333-3333-4333-8333-333333333333';
+    const processInstanceId = `process:${'4'.repeat(64)}`;
+    const privateTitle = 'Private document title must not persist';
+    const privatePath = 'D:\\private\\computer-after.png';
+    const request: MonarchExecutionRequest = {
+      id: 'exec-computer', intentId: 'intent-computer', moduleId: 'computer', capabilityId: 'computer.window.type',
+      input: { windowRef: 'hwnd:0000000000000042', observationId: beforeObservationId, elementId: 'private-editor', text: 'private action text' },
+      createdAt: new Date(0).toISOString(), requestedBy: 'unit', idempotencyKey: 'action:' + '4'.repeat(64),
+      proposalId: 'proposal-computer', proposalHash: '5'.repeat(64),
+      riskVector: { effect: 'device', scope: 'single-object', reversibility: 'irreversible', externality: 'local',
+        privilege: 'user', data: 'personal', novelty: 'new-args' },
+    };
+    const ledger = new MonarchActionLedger(10, file);
+    expect(ledger.begin(request).status).toBe('started');
+    ledger.complete(request.idempotencyKey!, { ok: true, summary: privateTitle, output: { performed: true, verified: true,
+      actionReceiptId, beforeObservationId, afterObservationId, windowRef: 'hwnd:0000000000000042',
+      after: { verified: true, observationId: afterObservationId, observedAt: new Date().toISOString(),
+        window: { windowRef: 'hwnd:0000000000000042', processId: 42, processInstanceId, title: privateTitle,
+          processName: 'private-process' }, screenshot: { sha256: '6'.repeat(64), path: privatePath },
+        elements: [{ name: 'private element text' }] },
+      textVerification: { textMode: 'replace', textSha256: '7'.repeat(64), valueVerifiedAfterDispatch: true } },
+      metadata: { dispatchControl: { dispatched: true, reason: 'module-returned' }, artifacts: [{ reference: privatePath }],
+        policy: { target: 'private policy target' }, runtimeTelemetry: { toolLatencyMs: 1.25 } } });
+
+    const raw = await readFile(file, 'utf8');
+    for (const secret of [privateTitle, privatePath, 'private element text', 'private-process', 'private policy target', 'private action text'])
+      expect(raw).not.toContain(secret);
+    const replay = new MonarchActionLedger(10, file).begin(request);
+    expect(replay.status).toBe('replay');
+    if (replay.status === 'replay') expect(replay.result).toMatchObject({ ok: true, summary: 'Durable Computer action receipt.',
+      output: { recoverySchemaVersion: 'monarch.computer-action-recovery-output.v1', performed: true, verified: true,
+        actionReceiptId, beforeObservationId, afterObservationId, windowRef: 'hwnd:0000000000000042',
+        after: { verified: true, observationId: afterObservationId,
+          window: { windowRef: 'hwnd:0000000000000042', processId: 42, processInstanceId,
+            titleDigest: 'sha256:' + createHash('sha256').update(privateTitle).digest('hex') },
+          screenshot: { sha256: '6'.repeat(64) } },
+        textVerification: { textMode: 'replace', textSha256: '7'.repeat(64), valueVerifiedAfterDispatch: true } },
+      metadata: { recoveryReceipt: { retained: true, reason: 'retained-success' },
+        dispatchControl: { dispatched: true, reason: 'module-returned' } } });
+    // Restore persists its bounded projection again. A second process restart
+    // must not erase the already-sanitized receipt (sanitization is idempotent).
+    const secondReplay = new MonarchActionLedger(10, file).begin(request);
+    expect(secondReplay).toMatchObject({ status: 'replay', result: { ok: true,
+      output: { recoverySchemaVersion: 'monarch.computer-action-recovery-output.v1', after: {
+        window: { titleDigest: 'sha256:' + createHash('sha256').update(privateTitle).digest('hex') } } } } });
+  });
+
+  it('replays an uncertain Computer failure after restart instead of dispatching the same key again', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-agency-computer-unknown-'));
+    roots.push(root);
+    const file = path.join(root, 'ledger.json');
+    const request: MonarchExecutionRequest = {
+      id: 'exec-computer-unknown', intentId: 'intent-computer-unknown', moduleId: 'computer', capabilityId: 'computer.window.click',
+      input: { windowRef: 'hwnd:0000000000000042' }, createdAt: new Date(0).toISOString(), requestedBy: 'unit',
+      idempotencyKey: 'action:' + '8'.repeat(64), proposalId: 'proposal-computer-unknown', proposalHash: '9'.repeat(64),
+      riskVector: { effect: 'device', scope: 'single-object', reversibility: 'irreversible', externality: 'local',
+        privilege: 'user', data: 'personal', novelty: 'new-args' },
+    };
+    const ledger = new MonarchActionLedger(10, file); expect(ledger.begin(request).status).toBe('started');
+    ledger.complete(request.idempotencyKey!, { ok: false, summary: 'private uncertain detail', error: 'computer-action-state-uncertain',
+      output: { performed: 'unknown', verified: false }, metadata: {
+        dispatchControl: { dispatched: true, reason: 'module-returned' },
+        computerDispatch: { phase: 'receipt-returned', nativePreflightRejected: false, mayHaveDispatched: true, reportingFailed: false,
+          failureCode: 'computer-native-helper-exit-23' },
+        warnings: ['private warning detail'] } });
+    const raw = await readFile(file, 'utf8'); expect(raw).not.toContain('private uncertain detail'); expect(raw).not.toContain('private warning detail');
+    const replay = new MonarchActionLedger(10, file).begin(request);
+    expect(replay).toMatchObject({ status: 'replay', result: { ok: false, error: 'computer-action-state-uncertain',
+      output: { recoverySchemaVersion: 'monarch.computer-action-recovery-output.v1', performed: 'unknown', verified: false },
+      metadata: { dispatchControl: { dispatched: true }, computerDispatch: { phase: 'receipt-returned', mayHaveDispatched: true,
+        failureCode: 'computer-native-helper-exit-23' } } } });
   });
 
   it('replays a non-idempotent filesystem effect when the model changes only its Windows path alias', async () => {

@@ -1,26 +1,28 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import os from 'node:os';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import readline from 'node:readline';
 import path from 'node:path';
 import type {
   MonarchExecutionRequest,
+  MonarchExecutionControl,
   MonarchExecutionResult,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
-  MonarchRouteDecision,
+  MonarchModuleFactoryContext,
+  MonarchRuntimePaths,
 } from '../../core';
-import { permissionModeForRisk } from '../../core';
+import { resolveMonarchRuntimePaths } from '../../core';
 import { voiceManifest } from './manifest';
 import {
   VoiceSttRuntimeError,
+  VoiceSttRuntime,
   type VoiceSttRuntimePort,
 } from './voice-stt-runtime';
 import { VoiceStreamingSttRuntime } from './voice-streaming-stt-runtime';
+import { runInBackground } from '../../core/background-work';
 
 type VoiceBridgeKind = 'stt' | 'tts';
 const MAX_TRANSCRIBE_AUDIO_BYTES = 32 * 1024 * 1024;
@@ -32,6 +34,7 @@ const MAX_STREAMING_BATCH_BYTES = 64 * 1024;
 const MAX_STREAMING_DURATION_MS = 10 * 60_000;
 const MAX_STREAMING_SESSIONS = 4;
 const STREAMING_SESSION_TTL_MS = 45_000;
+const LEGACY_TRANSCRIBE_TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 interface VoiceBridgeRecord {
   bridge: VoiceBridgeKind;
@@ -61,22 +64,36 @@ export class VoiceModule implements MonarchModule {
   readonly manifest = voiceManifest;
   private readonly bridges = new Map<VoiceBridgeKind, VoiceBridgeRecord>();
   private readonly sttRuntime: VoiceSttRuntimePort;
+  private readonly workspaceRoot: string;
+  private readonly audioTempRoot: string;
   private readonly sttSessions = new Map<string, VoiceSttSession>();
   private readonly sttSessionByClient = new Map<string, string>();
 
-  constructor(sttRuntime: VoiceSttRuntimePort = new VoiceStreamingSttRuntime()) {
-    this.sttRuntime = sttRuntime;
+  constructor(sttRuntime?: VoiceSttRuntimePort, options: {
+    workspaceRoot?: string;
+    runtimePaths?: MonarchRuntimePaths;
+  } = {}) {
+    this.workspaceRoot = path.resolve(options.workspaceRoot || process.cwd());
+    const runtimePaths = options.runtimePaths || resolveMonarchRuntimePaths(this.workspaceRoot);
+    this.audioTempRoot = path.join(runtimePaths.dataRoot, 'temporary', 'voice');
+    this.sttRuntime = sttRuntime || new VoiceStreamingSttRuntime({
+      fallback: new VoiceSttRuntime({ workspaceRoot: this.workspaceRoot, audioRoot: this.audioTempRoot }),
+    });
   }
 
   async activate(context: MonarchKernelContext): Promise<void> {
-    await context.emit('voice.activated', this.manifest.id, this.statusPayload());
-    if (usesDefaultVoskWorker() && shouldPrewarmDefaultSttOnActivate()) {
-      void this.sttRuntime.prepare(defaultSttLanguage()).then(
+    const reapedTemporaryDirectories = await reapStaleTranscribeDirectories(this.audioTempRoot);
+    await context.emit('voice.activated', this.manifest.id, {
+      ...this.statusPayload(),
+      reapedTemporaryDirectories,
+    });
+    if (usesDefaultVoskWorker(this.workspaceRoot) && shouldPrewarmDefaultSttOnActivate()) {
+      runInBackground('voice-stt-prewarm', this.sttRuntime.prepare(defaultSttLanguage()).then(
         (result) => context.emit('voice.stt.ready', this.manifest.id, result),
         (error) => context.emit('voice.stt.warmup-failed', this.manifest.id, {
           error: error instanceof VoiceSttRuntimeError ? error.code : 'voice-stt-runtime-failed',
         }),
-      );
+      ));
     }
   }
 
@@ -98,49 +115,11 @@ export class VoiceModule implements MonarchModule {
     };
   }
 
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.toLowerCase();
-    if (!mentionsVoiceSubsystem(text)) {
-      return null;
-    }
-
-    if (/(start|launch)/i.test(text)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'voice.bridge.start',
-        confidence: 0.82,
-        reason: 'User asks to start a voice bridge.',
-        permissionMode: permissionModeForRisk('execute'),
-        input: { bridge: inferBridge(text) },
-      };
-    }
-    if (/(stop|shutdown)/i.test(text)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'voice.bridge.stop',
-        confidence: 0.82,
-        reason: 'User asks to stop a voice bridge.',
-        permissionMode: permissionModeForRisk('execute'),
-        input: { bridge: inferBridge(text) },
-      };
-    }
-
-    return {
-      intentId: intent.id,
-      targetModuleId: this.manifest.id,
-      capabilityId: 'voice.status',
-      confidence: 0.84,
-      reason: 'User asks to inspect voice bridge status.',
-      permissionMode: permissionModeForRisk('read'),
-      input: {},
-    };
-  }
 
   async executeCapability(
     request: MonarchExecutionRequest,
-    context: MonarchKernelContext
+    context: MonarchKernelContext,
+    control: MonarchExecutionControl = {},
   ): Promise<MonarchExecutionResult> {
     switch (request.capabilityId) {
     case 'voice.status':
@@ -150,7 +129,7 @@ export class VoiceModule implements MonarchModule {
         output: this.statusPayload(),
       };
     case 'voice.transcribe.audio':
-      return this.transcribeAudio(request.input, context);
+      return this.transcribeAudio(request.input, context, control.signal);
     case 'voice.transcribe.stream.start':
       return this.startSttStream(request, context);
     case 'voice.transcribe.stream.push':
@@ -172,6 +151,19 @@ export class VoiceModule implements MonarchModule {
         error: 'unsupported-capability',
       };
     }
+  }
+
+  /**
+   * Trusted host ingress for transient audio transports such as Telegram.
+   * The caller must not route the base64 payload through a Kernel execution
+   * request because the execution ledger is durable. Only the resulting text
+   * may be admitted to a conversation.
+   */
+  async transcribeEphemeralAudio(
+    input: unknown,
+    signal?: AbortSignal,
+  ): Promise<MonarchExecutionResult> {
+    return this.transcribeAudio(input, undefined, signal);
   }
 
   private async prepareTranscription(context: MonarchKernelContext): Promise<MonarchExecutionResult> {
@@ -213,12 +205,13 @@ export class VoiceModule implements MonarchModule {
     }
 
     try {
-      const parsed = parseAndValidateCommand(command, process.cwd());
+      const parsed = parseAndValidateCommand(command, this.workspaceRoot);
       const child = spawn(parsed.executable, parsed.args, {
         shell: false,
         windowsHide: true,
         stdio: 'pipe',
         env: process.env,
+        cwd: this.workspaceRoot,
       });
       await waitForBridgeSpawn(child);
 
@@ -237,7 +230,7 @@ export class VoiceModule implements MonarchModule {
           this.bridges.delete(bridge);
         }
       });
-      void context.emit('voice.bridge.started', this.manifest.id, this.bridgeSummary(record));
+      runInBackground('voice-event', context.emit('voice.bridge.started', this.manifest.id, this.bridgeSummary(record)));
 
       const activeEngine = bridge === 'stt' ? (process.env.MONARCH_STT_ENGINE || 'vosk') : (process.env.MONARCH_TTS_ENGINE || 'piper');
       return {
@@ -259,7 +252,7 @@ export class VoiceModule implements MonarchModule {
     request: MonarchExecutionRequest,
     _context: MonarchKernelContext,
   ): Promise<MonarchExecutionResult> {
-    if (!usesDefaultVoskWorker()
+    if (!usesDefaultVoskWorker(this.workspaceRoot)
       || !this.sttRuntime.startStream
       || !this.sttRuntime.pushStream
       || !this.sttRuntime.finishStream
@@ -490,7 +483,7 @@ export class VoiceModule implements MonarchModule {
     if (session.timer) clearTimeout(session.timer);
     session.timer = setTimeout(() => {
       if (this.sttSessions.get(session.id) === session) {
-        void this.closeSttSession(session, true);
+        runInBackground('voice-stt-close', this.closeSttSession(session, true));
       }
     }, STREAMING_SESSION_TTL_MS);
     session.timer.unref?.();
@@ -505,9 +498,10 @@ export class VoiceModule implements MonarchModule {
 
   private async transcribeAudio(
     input: unknown,
-    context: MonarchKernelContext
+    context?: MonarchKernelContext,
+    signal?: AbortSignal,
   ): Promise<MonarchExecutionResult> {
-    const command = transcribeCommand();
+    const command = transcribeCommand(this.workspaceRoot);
     if (!command) {
       return {
         ok: false,
@@ -526,22 +520,27 @@ export class VoiceModule implements MonarchModule {
       };
     }
 
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'monarch-voice-'));
+    signal?.throwIfAborted();
+    await mkdir(this.audioTempRoot, { recursive: true });
+    const tempDir = await mkdtemp(path.join(this.audioTempRoot, `transcribe-${process.pid}-`));
     const audioPath = path.join(tempDir, `voice-input${extensionForMimeType(audio.mimeType)}`);
     try {
       await writeFile(audioPath, audio.buffer);
-      const result = usesDefaultVoskWorker()
+      const result = usesDefaultVoskWorker(this.workspaceRoot)
         ? await this.sttRuntime.transcribe({
           audioPath,
           language: audio.language,
           ...(audio.durationMs === null ? {} : { durationMs: audio.durationMs }),
-        })
+        }, signal)
         : await runConfiguredTranscriber(
           command,
           audioPath,
           audio.language,
           transcribeTimeoutMs(audio.durationMs),
+          signal,
+          this.workspaceRoot,
         );
+      signal?.throwIfAborted();
       const transcript = 'text' in result
         ? result.text
         : readTranscriptFromOutput(result.stdout);
@@ -565,20 +564,22 @@ export class VoiceModule implements MonarchModule {
           },
         };
       }
-      await context.emit('voice.transcribe.completed', this.manifest.id, {
-        transcriptLength: transcript.length,
-        mimeType: audio.mimeType,
-        durationMs: audio.durationMs,
-        ...('totalMs' in result ? {
-          engine: result.engine,
-          model: result.model,
-          warm: result.warm,
-          loadMs: result.loadMs,
-          conversionMs: result.conversionMs,
-          recognitionMs: result.recognitionMs,
-          totalMs: result.totalMs,
-        } : {}),
-      });
+      if (context) {
+        await context.emit('voice.transcribe.completed', this.manifest.id, {
+          transcriptLength: transcript.length,
+          mimeType: audio.mimeType,
+          durationMs: audio.durationMs,
+          ...('totalMs' in result ? {
+            engine: result.engine,
+            model: result.model,
+            warm: result.warm,
+            loadMs: result.loadMs,
+            conversionMs: result.conversionMs,
+            recognitionMs: result.recognitionMs,
+            totalMs: result.totalMs,
+          } : {}),
+        });
+      }
       return {
         ok: true,
         summary: 'Voice input transcribed locally.',
@@ -630,7 +631,7 @@ export class VoiceModule implements MonarchModule {
     record.running = false;
     record.process.kill();
     this.bridges.delete(bridge);
-    void context.emit('voice.bridge.stopped', this.manifest.id, this.bridgeSummary(record));
+    runInBackground('voice-event', context.emit('voice.bridge.stopped', this.manifest.id, this.bridgeSummary(record)));
     return {
       ok: true,
       summary: `${bridge} bridge stopped.`,
@@ -643,7 +644,7 @@ export class VoiceModule implements MonarchModule {
       configured: {
         stt: Boolean(commandForBridge('stt')),
         tts: Boolean(commandForBridge('tts')),
-        transcribe: Boolean(transcribeCommand()),
+        transcribe: Boolean(transcribeCommand(this.workspaceRoot)),
       },
       running: {
         stt: Boolean(this.bridges.get('stt')?.running),
@@ -651,7 +652,7 @@ export class VoiceModule implements MonarchModule {
       },
       engines: {
         stt: process.env.MONARCH_STT_ENGINE
-          || (usesDefaultVoskWorker() ? 'sherpa-onnx-t-one+vosk-fallback' : 'custom'),
+          || (usesDefaultVoskWorker(this.workspaceRoot) ? 'sherpa-onnx-t-one+vosk-fallback' : 'custom'),
         tts: process.env.MONARCH_TTS_ENGINE || 'piper',
       },
       sttRuntime: this.sttRuntime.snapshot(),
@@ -676,11 +677,6 @@ export class VoiceModule implements MonarchModule {
     }
     return summary;
   }
-}
-
-function mentionsVoiceSubsystem(text: string): boolean {
-  return /\b(?:monarch voice|voice (?:mode|bridge|assistant|status|settings)|speech (?:recognition|synthesis)|stt|tts|microphone)\b/i.test(text)
-    || /\bvoice\b.{0,32}\b(?:start|stop|launch|status|settings|microphone|stt|tts)\b|\b(?:start|stop|launch|status|settings|microphone|stt|tts)\b.{0,32}\bvoice\b/i.test(text);
 }
 
 type ValidSttInput<T> = { ok: true } & T;
@@ -826,14 +822,14 @@ function attachBridgeLifecycle(
     if (exitSignal !== undefined) record.exitSignal = exitSignal;
     onSettled();
     if (!record.stopRequested) {
-      void context.emit('voice.bridge.exited', 'voice', {
+      runInBackground('voice-event', context.emit('voice.bridge.exited', 'voice', {
         ...bridgeLifecycleSummary(record),
         reason,
         ...(error ? { error: error.message.slice(0, 500) } : {}),
-      });
+      }));
     }
   };
-  record.process.once('error', (error) => settle('error', error));
+  record.process.on('error', (error) => settle('error', error));
   record.process.once('close', (exitCode, exitSignal) => settle('close', undefined, exitCode, exitSignal));
 }
 
@@ -855,20 +851,20 @@ function attachBridgeOutput(
   const stdout = readline.createInterface({ input: record.process.stdout });
   stdout.on('line', (line) => {
     const event = parseBridgeLine(line);
-    void context.emit('voice.bridge.event', 'voice', {
+    runInBackground('voice-event', context.emit('voice.bridge.event', 'voice', {
       bridge: record.bridge,
       stream: 'stdout',
       event,
-    });
+    }));
   });
 
   const stderr = readline.createInterface({ input: record.process.stderr });
   stderr.on('line', (line) => {
-    void context.emit('voice.bridge.event', 'voice', {
+    runInBackground('voice-event', context.emit('voice.bridge.event', 'voice', {
       bridge: record.bridge,
       stream: 'stderr',
       event: { text: line.slice(0, 500) },
-    });
+    }));
   });
 }
 
@@ -890,7 +886,7 @@ function commandForBridge(bridge: VoiceBridgeKind): string {
     : String(process.env.MONARCH_TTS_COMMAND || '').trim();
 }
 
-function transcribeCommand(): string {
+function transcribeCommand(workspaceRoot = process.cwd()): string {
   const explicit = String(process.env.MONARCH_STT_TRANSCRIBE_COMMAND || '').trim();
   if (explicit) {
     return explicit;
@@ -898,16 +894,16 @@ function transcribeCommand(): string {
   if (/^(1|true|yes)$/i.test(String(process.env.MONARCH_DISABLE_DEFAULT_STT || ''))) {
     return '';
   }
-  const defaultScript = path.join(process.cwd(), 'tools', 'local-vosk-transcribe.py');
+  const defaultScript = path.join(workspaceRoot, 'tools', 'local-vosk-transcribe.py');
   return existsSync(defaultScript)
     ? 'python tools/local-vosk-transcribe.py {audio} {language}'
     : '';
 }
 
-function usesDefaultVoskWorker(): boolean {
+function usesDefaultVoskWorker(workspaceRoot = process.cwd()): boolean {
   if (String(process.env.MONARCH_STT_TRANSCRIBE_COMMAND || '').trim()) return false;
   if (/^(1|true|yes)$/i.test(String(process.env.MONARCH_DISABLE_DEFAULT_STT || ''))) return false;
-  return existsSync(path.join(process.cwd(), 'tools', 'local-vosk-transcribe.py'));
+  return existsSync(path.join(workspaceRoot, 'tools', 'local-vosk-transcribe.py'));
 }
 
 function defaultSttLanguage(): string {
@@ -1034,6 +1030,8 @@ function runTranscribeCommand(
   args: string[],
   env: NodeJS.ProcessEnv,
   timeoutMs = TRANSCRIBE_BASE_TIMEOUT_MS,
+  signal?: AbortSignal,
+  workspaceRoot = process.cwd(),
 ): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -1042,20 +1040,30 @@ function runTranscribeCommand(
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: transcribeProcessEnv(env),
+      cwd: workspaceRoot,
     });
     let stdout = '';
     let stderr = '';
     let timer: NodeJS.Timeout;
+    const onAbort = () => {
+      child.kill();
+      fail(new TranscribeCommandError(
+        'voice-stt-cancelled',
+        'Локальное распознавание отменено владельцем задачи.',
+      ));
+    };
     const fail = (error: Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       reject(error);
     };
     const finish = (result: { stdout: string; stderr: string; exitCode: number | null }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       resolve(result);
     };
     timer = setTimeout(() => {
@@ -1066,6 +1074,8 @@ function runTranscribeCommand(
         { stderr }
       ));
     }, timeoutMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     child.stdout.on('data', (chunk: Buffer) => {
       stdout += chunk.toString('utf8');
       if (stdout.length > 64_000) stdout = stdout.slice(-64_000);
@@ -1097,10 +1107,12 @@ async function runConfiguredTranscriber(
   audioPath: string,
   language: string,
   timeoutMs: number,
+  signal?: AbortSignal,
+  workspaceRoot = process.cwd(),
 ): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
-  const parsed = parseAndValidateCommand(command, process.cwd());
+  const parsed = parseAndValidateCommand(command, workspaceRoot);
   const args = withAudioCommandArgs(parsed.args, audioPath, language);
-  return runTranscribeCommand(parsed.executable, args, process.env, timeoutMs);
+  return runTranscribeCommand(parsed.executable, args, process.env, timeoutMs, signal, workspaceRoot);
 }
 
 function transcribeTimeoutMs(durationMs: number | null): number {
@@ -1235,10 +1247,6 @@ function looksLikeServiceOutput(text: string): boolean {
   if (!value) return false;
   if (/^[{\[]/.test(value) || /[{}\[\]]/.test(value)) return true;
   return /\b(LOG|DEBUG|INFO|WARN|ERROR|TRACEBACK|EXCEPTION|STDOUT|STDERR|VoskAPI|ffmpeg|model\.cc|lattice|beam|max-active|voice-stt|base64)\b/i.test(value);
-}
-
-function inferBridge(text: string): VoiceBridgeKind {
-  return /\btts|speak|speech out|voice out\b/i.test(text) ? 'tts' : 'stt';
 }
 
 function readBridge(input: unknown): VoiceBridgeKind {
@@ -1407,8 +1415,59 @@ function isPathInside(workspaceRoot: string, candidatePath: string): boolean {
   return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
 }
 
-export function createVoiceModule(): MonarchModule {
-  return new VoiceModule();
+async function reapStaleTranscribeDirectories(audioTempRoot: string): Promise<number> {
+  let entries;
+  try {
+    entries = await readdir(audioTempRoot, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    return 0;
+  }
+  let reaped = 0;
+  const now = Date.now();
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const processMatch = entry.name.match(/^transcribe-(\d{1,10})-[A-Za-z0-9_-]{1,64}$/u);
+    const legacy = !processMatch && /^transcribe-[A-Za-z0-9_-]{1,64}$/u.test(entry.name);
+    if (!processMatch && !legacy) continue;
+    if (processMatch) {
+      const pid = Number(processMatch[1]);
+      if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid || isProcessAlive(pid)) continue;
+    }
+    const candidate = path.join(audioTempRoot, entry.name);
+    if (path.dirname(path.resolve(candidate)) !== path.resolve(audioTempRoot)) continue;
+    if (legacy) {
+      try {
+        const metadata = await stat(candidate);
+        if (now - metadata.mtimeMs < LEGACY_TRANSCRIBE_TEMP_MAX_AGE_MS) continue;
+      } catch {
+        continue;
+      }
+    }
+    try {
+      await rm(candidate, { recursive: true, force: true });
+      reaped += 1;
+    } catch {
+      // A live process or scanner may still hold the directory. Leave it intact.
+    }
+  }
+  return reaped;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+export function createVoiceModule(context: MonarchModuleFactoryContext = {}): MonarchModule {
+  return new VoiceModule(undefined, {
+    ...(context.workspaceRoot ? { workspaceRoot: context.workspaceRoot } : {}),
+    ...(context.runtimePaths ? { runtimePaths: context.runtimePaths } : {}),
+  });
 }
 
 export const voiceModulePackage: MonarchModulePackage = {
@@ -1421,3 +1480,6 @@ export const voiceModulePackage: MonarchModulePackage = {
   },
   factory: createVoiceModule,
 };
+
+export * from './information-provider';
+export * from './simplified-command';

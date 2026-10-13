@@ -37,6 +37,8 @@ describe('MonarchModelProvisioningManager', () => {
     expect(initial.onboarding).toMatchObject({ required: true, recommendedRole: 'gemma4-fast' });
     expect(initial.models.find((model) => model.role === 'qwen3.8-27b-pro')?.warning)
       .toBe('На этом компьютере модель может работать медленнее.');
+    const pro = initial.models.find((model) => model.role === 'qwen3.8-27b-pro');
+    expect(pro?.recommendedRamGb).toBe(fixture.groups.find((group) => group.role === 'qwen3.8-27b-pro')?.recommendedRamGb);
 
     manager.startInstallModels(['qwen3.8-27b-pro'], 'onboarding');
     await vi.waitFor(() => expect(manager.snapshot().onboarding.completed).toBe(true));
@@ -49,6 +51,21 @@ describe('MonarchModelProvisioningManager', () => {
     await manager.acknowledgeOnboardingWelcome();
     expect(manager.snapshot().onboarding.welcomeRequired).toBe(false);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not recommend a model that exceeds currently available memory', async () => {
+    const fixture = await createFixture();
+    const manager = track(new MonarchModelProvisioningManager(fixture.paths, {
+      groups: fixture.groups,
+      totalMemoryBytes: 32 * 1024 ** 3,
+      availableMemoryBytes: 26 * 1024 ** 3,
+    }));
+
+    const snapshot = await manager.initialize();
+    expect(snapshot.onboarding.recommendedRole).toBe('gemma4-balanced');
+    expect(snapshot.onboarding.hardware).toMatchObject({ ramTotalGb: 32, ramAvailableGb: 26 });
+    expect(snapshot.models.find((model) => model.role === 'qwen3.8-27b-pro')?.warning)
+      .toBe('Сейчас свободно меньше 30 ГБ памяти. Закрой другие приложения перед запуском.');
   });
 
   it('adopts an existing supported model and skips first-run without downloading', async () => {
@@ -195,6 +212,40 @@ describe('MonarchModelProvisioningManager', () => {
       directory: 'models/gemma4-fast',
       url: `https://huggingface.co/test/models/resolve/${'a'.repeat(40)}/fast.gguf`,
     }]);
+  });
+
+  it('clears a stale settings-install error as soon as an explicit retry starts', async () => {
+    const fixture = await createFixture();
+    let fail = true;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (fail) {
+        const missing = new Response('missing', { status: 404 });
+        Object.defineProperty(missing, 'url', { value: String(url) });
+        return missing;
+      }
+      return response(fixture.payloads.get('balanced.gguf')!);
+    });
+    const manager = track(new MonarchModelProvisioningManager(fixture.paths, {
+      groups: fixture.groups,
+      fetchImpl: fetchImpl as typeof fetch,
+      retryDelaysMs: [0],
+      totalMemoryBytes: 16 * 1024 ** 3,
+      availableMemoryBytes: 10 * 1024 ** 3,
+    }));
+    await manager.initialize();
+    await manager.skipOnboarding();
+
+    manager.startInstallModels(['gemma4-balanced'], 'settings');
+    await vi.waitFor(() => expect(manager.snapshot().activeInstall).toBeNull());
+    expect(manager.snapshot().onboarding.error).toBeTruthy();
+
+    fail = false;
+    manager.startInstallModels(['gemma4-balanced'], 'settings');
+    expect(manager.snapshot().onboarding.error).toBeNull();
+    await vi.waitFor(() => expect(manager.snapshot().activeInstall).toBeNull());
+    expect(manager.snapshot().onboarding.error).toBeNull();
+    expect(manager.snapshot().models.find((model) => model.role === 'gemma4-balanced'))
+      .toMatchObject({ installed: true, complete: true, phase: 'ready' });
   });
 });
 

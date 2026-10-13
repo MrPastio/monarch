@@ -1,3 +1,4 @@
+import { traceMonarchStartup } from './startup-timing';
 import type {
   MonarchEvent,
   MonarchExecutionRequest,
@@ -6,12 +7,10 @@ import type {
   MonarchIntentResult,
   MonarchIntentSource,
   MonarchKernelContext,
-  MonarchLlmRouter,
   MonarchModule,
   MonarchPermissionDecision,
   MonarchPlan,
   MonarchPlanExecutionResult,
-  MonarchPlanningMemoryReference,
   MonarchRecentIntentJobQuery,
   MonarchRecentIntentJobSnapshot,
   MonarchRouteDecision,
@@ -33,8 +32,6 @@ import { MonarchExecutionEngine } from './execution-engine';
 import { MonarchHealthMonitor, type MonarchHealthSnapshot } from './health-monitor';
 import { MonarchModuleRegistry } from './module-registry';
 import { MonarchPermissionGate } from './permission-gate';
-import { MonarchPlanner } from './planner';
-import { MonarchRouterMesh } from './router-mesh';
 import { createMonarchId, normalizeText, nowIso } from './utils';
 import { normalizeActionProposal } from './action-protocol';
 import { MonarchActionLedger } from './action-ledger';
@@ -50,17 +47,17 @@ export interface MonarchKernelSnapshot {
   events: MonarchEvent[];
   audit: ReturnType<MonarchAuditLog['list']>;
 }
-
 export interface MonarchKernelOptions {
   workspaceRoot?: string;
   agencyStateDirectory?: string | false;
-  llmRouter?: MonarchLlmRouter;
   recentIntentJobsProvider?: (query: MonarchRecentIntentJobQuery) => readonly MonarchRecentIntentJobSnapshot[];
   permissionProfile?: MonarchPermissionProfile;
   authorityContext?: MonarchAuthorityContext;
 }
 
 export class MonarchKernel {
+  private readonly instanceGeneration = createMonarchId('kernel_instance');
+  private lifecycleRevision = 0;
   private readonly auditLog = new MonarchAuditLog();
   private readonly eventBus = new MonarchEventBus();
   private readonly modules = new MonarchModuleRegistry();
@@ -70,8 +67,6 @@ export class MonarchKernel {
   private readonly actionLedger: MonarchActionLedger;
   private readonly mutationJournal: MonarchMutationJournal;
   private readonly policy: MonarchPolicyKernel;
-  private readonly router: MonarchRouterMesh;
-  private readonly planner = new MonarchPlanner();
   private readonly execution: MonarchExecutionEngine;
   private readonly health = new MonarchHealthMonitor(this.modules);
   private recentIntentJobsProvider: (query: MonarchRecentIntentJobQuery) => readonly MonarchRecentIntentJobSnapshot[];
@@ -94,7 +89,8 @@ export class MonarchKernel {
       agencyRuntimeRoot ? path.join(agencyRuntimeRoot, 'capability-leases.json') : undefined,
     );
     this.actionLedger = new MonarchActionLedger(
-      500,
+      // Agent receipts (reads included) now outlive a restart too.
+      1000,
       agencyRuntimeRoot ? path.join(agencyRuntimeRoot, 'action-ledger.json') : undefined,
     );
     this.mutationJournal = new MonarchMutationJournal(
@@ -110,7 +106,6 @@ export class MonarchKernel {
       this.mutationJournal,
       this.workspaceRoot,
     );
-    this.router = new MonarchRouterMesh(options.llmRouter);
     this.recentIntentJobsProvider = options.recentIntentJobsProvider || (() => []);
   }
 
@@ -139,17 +134,38 @@ export class MonarchKernel {
     this.recentIntentJobsProvider = provider;
   }
 
+  setOwnerRedZoneRootsProvider(provider: () => readonly string[]): void {
+    this.policy.setOwnerRedZoneRootsProvider(provider);
+    this.mutationJournal.setOwnerRedZoneRootsProvider(provider);
+  }
+
   async start(): Promise<void> {
+    this.lifecycleRevision += 1;
     this.modules.validateDependencies();
     const context = this.createContext();
     const traceStartup = /^(1|true|yes)$/i.test(process.env.MONARCH_STARTUP_TRACE || '');
 
+    // One module that cannot start (a damaged settings file, a missing
+    // runtime) used to fail the whole Kernel: the server exited, desktop
+    // recovery ran out and Monarch closed. It is marked failed instead, its
+    // dependants are not started, and the dispatcher refuses its capabilities
+    // (module-unavailable); everything else starts normally.
+    const failedModules = new Set<string>();
     for (const module of this.modules.listModulesInDependencyOrder()) {
+      const missing = (module.manifest.dependencies ?? []).find((dependency) => failedModules.has(dependency));
+      if (missing) {
+        failedModules.add(module.manifest.id);
+        this.modules.setStatus(module.manifest.id, 'failed', `Dependency ${missing} is unavailable.`);
+        console.error(JSON.stringify({ diagnostic: 'monarch-module-failed', moduleId: module.manifest.id, code: 'dependency-unavailable' }));
+        continue;
+      }
       try {
+        traceMonarchStartup('module-start:' + module.manifest.id);
         if (traceStartup) {
           console.log(`[startup] Activating module ${module.manifest.id}...`);
         }
         await module.activate(context);
+        traceMonarchStartup('module-ready:' + module.manifest.id);
         this.modules.setStatus(module.manifest.id, 'active');
         await context.emit('module.started', 'kernel', {
           moduleId: module.manifest.id,
@@ -161,16 +177,20 @@ export class MonarchKernel {
       } catch (error) {
         const message = String(error instanceof Error ? error.message : error);
         this.modules.setStatus(module.manifest.id, 'failed', message);
+        failedModules.add(module.manifest.id);
+        console.error(JSON.stringify({ diagnostic: 'monarch-module-failed', moduleId: module.manifest.id,
+          code: error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code : error instanceof Error ? error.name : 'error' }));
         await context.emit('module.failed', 'kernel', {
           moduleId: module.manifest.id,
           error: message,
-        });
-        throw error;
+        }).catch(() => undefined);
       }
     }
   }
 
   async stop(): Promise<void> {
+    this.lifecycleRevision += 1;
     const context = this.createContext();
 
     for (const module of Array.from(this.modules.listModulesInDependencyOrder()).reverse()) {
@@ -219,129 +239,36 @@ export class MonarchKernel {
       ...(typeof contextData.jobId === 'string' ? { jobId: contextData.jobId } : {}),
     });
 
-    const route = await this.routeIntent(intent);
-    if (!route) {
-      await context.emit('intent.unrouted', 'router-mesh', {
-        intentId: intent.id,
-      });
-
-      // Retrieve the last route trace for this intent to check for unresolved reason
-      const lastTraceEvent = this.getEvents()
-        .slice()
-        .reverse()
-        .find((e) => e.type === 'router.route_trace' && (e.payload as any)?.intentId === intent.id);
-
-      const tracePayload = lastTraceEvent?.payload as any;
-      if (
-        tracePayload
-        && (tracePayload.unresolvedReason === 'ambiguous' || tracePayload.unresolvedReason === 'missing-input')
-      ) {
-        const clarificationSummary = formatClarificationSummary(tracePayload);
-        return {
-          intent,
-          route: null,
-          plan: null,
-          execution: {
-            ok: false,
-            summary: clarificationSummary,
-            error: 'clarification-required',
-            output: {
-              mode: 'clarification-required',
-              clarificationMode: tracePayload.unresolvedReason,
-              text: intent.text,
-              candidates: tracePayload.candidates?.slice(0, 3).map((c: any) => ({
-                targetModuleId: c.targetModuleId,
-                capabilityId: c.capabilityId,
-                confidence: c.confidence,
-                missingInput: c.missingInput || null,
-              })) || [],
-            },
-          },
-          summary: clarificationSummary,
-        };
-      }
-
-      return {
-        intent,
-        route: null,
-        plan: null,
-        execution: null,
-        summary: 'No module could route this intent yet.',
-      };
-    }
-
-    await context.emit('intent.routed', 'router-mesh', {
+    const summary = 'Legacy text-to-capability routing is retired. Submit an Oscar Turn/Astra V3 task or an exact typed capability proposal.';
+    await context.emit('intent.rejected', 'kernel', {
       intentId: intent.id,
-      route,
+      reason: 'legacy-text-router-retired',
     });
-
-    if (!route.capabilityId) {
-      const plan = await this.buildPlan(intent, route);
-      return {
-        intent,
-        route,
-        plan,
-        execution: null,
-        summary: `Intent routed to module ${route.targetModuleId}, but no executable capability was selected.`,
-      };
-    }
-
-    const capability = this.capabilities.get(route.capabilityId);
-    if (!this.planner.requiresPlanning(intent, route, capability)) {
-      const execution = await this.execution.execute({
-        id: createMonarchId('exec_atomic'),
-        intentId: intent.id,
-        moduleId: route.targetModuleId,
-        capabilityId: route.capabilityId,
-        input: route.input ?? { text: intent.text, context: intent.context || {} },
-        createdAt: nowIso(),
-        requestedBy: intent.source,
-        source: intent.source,
-        confirmed: Boolean(intent.context?.confirmed),
-      }, context);
-      if (execution.error !== 'confirmation-required') {
-        return {
-          intent,
-          route,
-          plan: null,
-          execution,
-          summary: execution.summary,
-        };
-      }
-      // A permission/security challenge needs a replayable plan, but ordinary
-      // atomic actions never pay the planning/memory cost.
-      const confirmationPlan = this.createPlan(intent, route);
-      return {
-        intent,
-        route,
-        plan: confirmationPlan,
-        execution,
-        summary: execution.summary,
-      };
-    }
-
-    const plan = await this.buildPlan(intent, route);
-    const planExecution = await this.executePlan(plan, {
-      requestedBy: intent.source,
-      confirmed: Boolean(intent.context?.confirmed),
-    });
-    const execution = planExecution.stepResults.at(-1)?.result || null;
-
+    await context.audit('routing', summary, {
+      intentId: intent.id,
+      source,
+    }, 'warn');
     return {
       intent,
-      route,
-      plan: planExecution.plan,
-      execution,
-      summary: planExecution.summary,
+      route: null,
+      plan: null,
+      execution: {
+        ok: false,
+        summary,
+        error: 'legacy-text-router-retired',
+        output: { mode: 'astra-v3-required' },
+      },
+      summary,
     };
   }
 
   async routeIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const excludedModuleIds = readExcludedModuleIds(intent.context?.excludedModuleIds);
-    const modules = excludedModuleIds.size === 0
-      ? this.modules.listModules()
-      : this.modules.listModules().filter((module) => !excludedModuleIds.has(module.manifest.id));
-    return this.router.route(intent, modules, this.createContext());
+    await this.auditLog.append('routing', 'Legacy text route request rejected.', {
+      intentId: intent.id,
+      source: intent.source,
+      reason: 'legacy-text-router-retired',
+    }, 'warn');
+    return null;
   }
 
   getModule(moduleId: string): MonarchModule | undefined {
@@ -365,6 +292,7 @@ export class MonarchKernel {
       skillIds?: string[];
       confirmed?: boolean;
       securityOverrideConfirmed?: boolean;
+      requireExactConfirmation?: true;
       approvalPolicyDecisionHash?: string;
       approvalPurpose?: 'policy' | 'owner-security-override';
       authorityTierAtApproval?: import('./contracts').MonarchAuthorityTier;
@@ -373,6 +301,7 @@ export class MonarchKernel {
       executionMode?: 'coder' | 'agent-runtime';
       permissionProfileOverride?: MonarchPermissionProfile;
       signal?: AbortSignal;
+      dispatchGuard?: () => boolean;
     } = {},
   ): Promise<{ proposal: MonarchActionProposalV1; result: MonarchExecutionResult }> {
     const proposal = this.prepareActionProposal(input, options);
@@ -396,6 +325,7 @@ export class MonarchKernel {
       ...(options.source ? { source: options.source } : {}),
       confirmed: options.confirmed === true,
       securityOverrideConfirmed: options.securityOverrideConfirmed === true,
+      ...(options.requireExactConfirmation === true ? { requireExactConfirmation: true as const } : {}),
       ...(options.approvalPolicyDecisionHash ? { approvalPolicyDecisionHash: options.approvalPolicyDecisionHash } : {}),
       ...(options.approvalPurpose ? { approvalPurpose: options.approvalPurpose } : {}),
       ...(options.authorityTierAtApproval ? { authorityTierAtApproval: options.authorityTierAtApproval } : {}),
@@ -414,7 +344,10 @@ export class MonarchKernel {
       ...(options.leaseId ? { leaseId: options.leaseId } : {}),
       ...(options.executionMode ? { executionMode: options.executionMode } : {}),
       ...(options.permissionProfileOverride ? { permissionProfileOverride: options.permissionProfileOverride } : {}),
-    }, context, options.signal ? { signal: options.signal } : {});
+    }, context, {
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.dispatchGuard ? { dispatchGuard: options.dispatchGuard } : {}),
+    });
     return { proposal, result };
   }
 
@@ -492,6 +425,16 @@ export class MonarchKernel {
     return moduleId ? this.capabilities.listByModule(moduleId) : this.capabilities.list();
   }
 
+  /** Exact lifecycle facts only; no audit/history enumeration or execution grant. */
+  getCapabilityReadiness(capabilityId: string): { instanceGeneration: string; lifecycleRevision: number;
+    capabilityId: string; moduleId: string; moduleVersion: string; status: import('./contracts').MonarchModuleStatus } | null {
+    const capability = this.capabilities.get(capabilityId);
+    const module = capability ? this.modules.getRecord(capability.moduleId) : undefined;
+    if (!capability || !module) return null;
+    return { instanceGeneration: this.instanceGeneration, lifecycleRevision: this.lifecycleRevision,
+      capabilityId: capability.id, moduleId: capability.moduleId, moduleVersion: module.manifest.version, status: module.status };
+  }
+
   issueTaskLease(proposal: MonarchActionProposalV1): MonarchCapabilityLeaseV1 {
     const lease = this.leases.issueForProposal(proposal);
     this.auditLog.append('policy', 'Capability task lease issued.', {
@@ -516,6 +459,19 @@ export class MonarchKernel {
 
   listActionLedger(limit = 100): MonarchActionLedgerRecord[] {
     return this.actionLedger.list(limit);
+  }
+
+  /** Exact internal recovery lookup; not a renderer endpoint or an execution grant. */
+  getActionLedgerRecord(idempotencyKey: string): MonarchActionLedgerRecord | null {
+    const record = this.actionLedger.getByIdempotencyKey(idempotencyKey);
+    return record ? structuredClone(record) : null;
+  }
+
+  /** Exact internal certification lookup; read-only and never an execution or
+   * rollback grant. Ledger identity is what terminal Agent archives retain. */
+  getActionLedgerRecordById(ledgerId: string): MonarchActionLedgerRecord | null {
+    const record = this.actionLedger.getByLedgerId(ledgerId);
+    return record ? structuredClone(record) : null;
   }
 
   async rollbackAction(ledgerId: string): Promise<MonarchActionRollbackState | null> {
@@ -546,73 +502,6 @@ export class MonarchKernel {
     };
   }
 
-  private createPlan(intent: MonarchIntent, route: MonarchRouteDecision): MonarchPlan {
-    return this.planner.createPlan(
-      intent,
-      route,
-      route.capabilityId ? this.capabilities.get(route.capabilityId) : undefined
-    );
-  }
-
-  private async buildPlan(intent: MonarchIntent, route: MonarchRouteDecision): Promise<MonarchPlan> {
-    const initialPlan = this.createPlan(intent, route);
-    if (!initialPlan.requiresPlanning) {
-      return initialPlan;
-    }
-    const planningMemory = await this.collectPlanningMemory(intent, route);
-    if (planningMemory.length === 0) {
-      return initialPlan;
-    }
-    return this.planner.createPlan(
-      intent,
-      route,
-      route.capabilityId ? this.capabilities.get(route.capabilityId) : undefined,
-      planningMemory
-    );
-  }
-
-  private async collectPlanningMemory(
-    intent: MonarchIntent,
-    route: MonarchRouteDecision
-  ): Promise<MonarchPlanningMemoryReference[]> {
-    if (route.targetModuleId === 'memory' || !this.capabilities.get('memory.search')) {
-      return [];
-    }
-    try {
-      const result = await this.execution.execute({
-        id: createMonarchId('exec_plan_memory'),
-        intentId: intent.id,
-        moduleId: 'memory',
-        capabilityId: 'memory.search',
-        input: {
-          query: intent.text,
-          limit: 5,
-          localOnly: true,
-          types: ['project_decision', 'architecture_note', 'active_bug', 'technical_debt', 'module_state', 'handoff_note', 'diagnostic_note', 'planning_note'],
-        },
-        createdAt: nowIso(),
-        requestedBy: 'planner',
-        confirmed: true,
-      }, this.createContext());
-      if (!result.ok || !result.output || typeof result.output !== 'object') {
-        return [];
-      }
-      const records = (result.output as { records?: unknown }).records;
-      if (!Array.isArray(records)) {
-        return [];
-      }
-      return records.map(readPlanningMemoryReference).filter((entry): entry is MonarchPlanningMemoryReference => Boolean(entry));
-    } catch (error) {
-      await this.auditLog.append(
-        'planning',
-        'Planning memory lookup failed; continuing without memory context.',
-        { intentId: intent.id, error: error instanceof Error ? error.message : String(error) },
-        'warn'
-      );
-      return [];
-    }
-  }
-
   private createContext(): MonarchKernelContext {
     return {
       emit: async (type, source, payload) => this.eventBus.emit(type, source, payload),
@@ -637,88 +526,4 @@ export class MonarchKernel {
     const capability = this.capabilities.get(request.capabilityId);
     return this.permissions.evaluate(request, capability);
   }
-}
-
-function readExcludedModuleIds(value: unknown): Set<string> {
-  if (!Array.isArray(value)) return new Set();
-  return new Set(value
-    .filter((item): item is string => typeof item === 'string')
-    .map((item) => item.trim().toLowerCase())
-    .filter(Boolean));
-}
-
-function formatClarificationSummary(tracePayload: any): string {
-  if (tracePayload?.unresolvedReason === 'missing-input') {
-    const missing = readMissingInputNames(tracePayload);
-    return missing.length > 0
-      ? `Нужно уточнение: не хватает ${missing.join(', ')}.`
-      : 'Нужно уточнение: не хватает данных для безопасного действия.';
-  }
-  if (tracePayload?.unresolvedReason === 'ambiguous') {
-    return 'Нужно уточнение: запрос подходит под несколько действий.';
-  }
-  return 'Нужно уточнение для безопасного выполнения.';
-}
-
-function readMissingInputNames(tracePayload: any): string[] {
-  const topCandidate = Array.isArray(tracePayload?.candidates) ? tracePayload.candidates[0] : null;
-  const rawNames: string[] = Array.isArray(topCandidate?.missingInput)
-    ? topCandidate.missingInput.filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
-    : [];
-  const readable = rawNames.map((name) => {
-    if (name === 'path') return 'пути или имени файла/папки';
-    if (name === 'content') return 'текста';
-    if (name === 'targetPath') return 'целевого пути';
-    return name;
-  });
-  return Array.from(new Set(readable));
-}
-
-function readPlanningMemoryReference(value: unknown): MonarchPlanningMemoryReference | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  const record = value as Record<string, unknown>;
-  const id = readOptionalString(record.id);
-  const text = readOptionalString(record.excerpt)
-    || readOptionalString(record.content)
-    || readOptionalString(record.text);
-  if (!id || !text) {
-    return null;
-  }
-  const type = readOptionalString(record.type) || readOptionalString(record.category) || 'planning_note';
-  const reference: MonarchPlanningMemoryReference = {
-    id,
-    type,
-    title: readOptionalString(record.title) || text.slice(0, 80),
-    excerpt: text.length > 420 ? `${text.slice(0, 417).trim()}...` : text,
-  };
-  const source = readOptionalString(record.source);
-  if (source) reference.source = source;
-  const relevance = readOptionalNumber(record.relevance)
-    ?? readOptionalNumber(record.priority)
-    ?? readOptionalNumber(record.importance);
-  if (relevance !== undefined) reference.relevance = relevance;
-  const relatedFiles = readOptionalStringArray(record.relatedFiles).concat(readOptionalStringArray(record.related_files));
-  if (relatedFiles.length > 0) reference.relatedFiles = relatedFiles;
-  const relatedModules = readOptionalStringArray(record.relatedModules).concat(readOptionalStringArray(record.related_modules));
-  if (relatedModules.length > 0) reference.relatedModules = relatedModules;
-  return reference;
-}
-
-function readOptionalString(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function readOptionalNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
-
-function readOptionalStringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value
-      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-      .map((item) => item.trim())
-      .slice(0, 12)
-    : [];
 }

@@ -223,6 +223,10 @@ function applyDraftMetadata(entry: MonarchModelRuntimeEntry, model: MonarchModel
 
 function endpointForRole(role: MonarchModelRole, env: NodeJS.ProcessEnv): string {
   switch (role) {
+  default: return '';
+  case 'max-gpt-oss-120b':
+  case 'max-qwen-3.8-27b':
+    return ''; // MAX has its own authenticated host, never a generic endpoint override.
   case 'router':
     return normalizeEnv(env.MONARCH_SYSTEM_ROUTER_ENDPOINT);
   case 'vision':
@@ -250,6 +254,10 @@ function allowsExternalModelEndpoint(env: NodeJS.ProcessEnv): boolean {
 
 function runnerPathForRole(role: MonarchModelRole, env: NodeJS.ProcessEnv): string {
   switch (role) {
+  default: return '';
+  case 'max-gpt-oss-120b':
+  case 'max-qwen-3.8-27b':
+    return '';
   case 'router':
     return normalizeEnv(env.MONARCH_SYSTEM_ROUTER_COMMAND);
   case 'vision':
@@ -272,6 +280,11 @@ function runnerPathForRole(role: MonarchModelRole, env: NodeJS.ProcessEnv): stri
 
 function modelNameForRole(role: MonarchModelRole, env: NodeJS.ProcessEnv): string {
   switch (role) {
+  default: return '';
+  case 'max-gpt-oss-120b':
+    return 'openai/gpt-oss-120b';
+  case 'max-qwen-3.8-27b':
+    return 'qwen/qwen3.8-27b';
   case 'router':
     return normalizeEnv(env.MONARCH_SYSTEM_ROUTER_MODEL)
       || normalizeEnv(env.MONARCH_ROUTER_MODEL)
@@ -324,6 +337,10 @@ function adapterForRole(
 
 function runnerHintForRole(role: MonarchModelRole): string {
   switch (role) {
+  default: return '';
+  case 'max-gpt-oss-120b':
+  case 'max-qwen-3.8-27b':
+    return 'Connect MAX in Monarch.';
   case 'router':
     return 'Configure a Monarch-managed router command and local readiness endpoint.';
   case 'vision':

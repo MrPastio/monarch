@@ -2,12 +2,10 @@ import type {
   MonarchCapability,
   MonarchExecutionRequest,
   MonarchExecutionResult,
-  MonarchIntent,
   MonarchKernelContext,
   MonarchModule,
   MonarchModulePackage,
   MonarchModuleRecord,
-  MonarchRouteDecision,
 } from '../../core';
 import { pluginsManifest } from './manifest';
 
@@ -24,47 +22,6 @@ export class PluginsModule implements MonarchModule {
     return {
       ok: true,
       summary: 'Plugins registry module ready.',
-    };
-  }
-
-  async handleIntent(intent: MonarchIntent): Promise<MonarchRouteDecision | null> {
-    const text = intent.text.toLowerCase();
-    if (!mentionsPlugins(text)) {
-      return null;
-    }
-
-    if (/(contract|manifest|how to add|add module|create module|контракт|манифест|как добавить|добавить модуль|создать модуль)/i.test(text)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'plugins.contract.describe',
-        confidence: 0.86,
-        reason: 'User asks how Monarch modules/plugins should be added.',
-        permissionMode: 'allow',
-        input: {},
-      };
-    }
-
-    if (/(capabilit|actions?|map|возможност|действи|карта)/i.test(text)) {
-      return {
-        intentId: intent.id,
-        targetModuleId: this.manifest.id,
-        capabilityId: 'plugins.capability.map',
-        confidence: 0.84,
-        reason: 'User asks to inspect plugin capability coverage.',
-        permissionMode: 'allow',
-        input: {},
-      };
-    }
-
-    return {
-      intentId: intent.id,
-      targetModuleId: this.manifest.id,
-      capabilityId: 'plugins.catalog.list',
-      confidence: 0.82,
-      reason: 'User asks to inspect available Monarch plugins/extensions.',
-      permissionMode: 'allow',
-      input: {},
     };
   }
 
@@ -132,38 +89,30 @@ export class PluginsModule implements MonarchModule {
           'id, name, version, kind, description',
           'kind suite for promoted product-level module groups',
           'parentSuiteId for suite membership; the parent suite must also be a dependency',
-          'owns: domain words the router can use',
+          'owns: semantic domain labels for catalog discovery, never activation phrases',
           'permissions: declared risks the module is allowed to expose',
-          'capabilities: typed actions with risk, inputSchema, outputSchema, routing metadata',
+          'capabilities: typed actions with risk and schemas; no keyword or phrase activators',
           'dependencies and events when needed',
         ],
         lifecycle: [
           'activate(context)',
           'optional deactivate(context)',
           'optional health(context)',
-          'optional handleIntent(intent, context)',
           'executeCapability(request, context) for executable capabilities',
         ],
         rules: [
           'Every risky action must be a capability.',
           'The module owns domain logic; the kernel owns routing, permissions, execution, and audit.',
           'Write, execute, network, device-control, identity, and delete risks require confirmation by default.',
-          'Add focused smoke coverage for routing, permission behavior, and execution.',
+          'Add focused smoke coverage for catalog exposure, permission behavior, and execution.',
         ],
         docs: [
           'docs/03_MODULE_CONTRACT.md',
           'docs/07_ADDING_MODULE.md',
-          'docs/10_MONARCH_STUDIO.md',
         ],
       },
     };
   }
-}
-
-function mentionsPlugins(text: string): boolean {
-  return /\b(?:plugins?|package registry|module package|monarch extensions?)\b/i.test(text)
-    || /\bextensions?\b.{0,24}\b(?:browser|software|code|module|monarch)\b|\b(?:browser|software|code|module|monarch)\b.{0,24}\bextensions?\b/i.test(text)
-    || /плагин|пакет\s+модул|реестр\s+(?:плагин|модул)|расширени.{0,24}(?:браузер|программ|код|модул|monarch|монарх)/i.test(text);
 }
 
 function summarizePlugin(
@@ -195,7 +144,7 @@ function summarizeCapability(capability: MonarchCapability): Record<string, unkn
     description: capability.description,
     inputSchema: capability.inputSchema,
     outputSchema: capability.outputSchema,
-    routing: capability.routing,
+    agent: capability.agent,
   };
 }
 

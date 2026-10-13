@@ -8,10 +8,13 @@ import { fileURLToPath } from 'node:url';
 import { loadOrCreateSafeDeviceKey } from './device-binding.mjs';
 import { isAllowedSafeResourceUrl } from '../electron/safe-window-policy.mjs';
 import { createSafeCapabilityToken } from './capability-token.mjs';
+import { authorizeSafeFiles } from '../electron/safe-file-authorization.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(__dirname, '..', '..');
-const outputRoot = path.join(workspaceRoot, 'output', 'safe-qa');
+const outputRoot = process.env.MONARCH_SAFE_QA_OUTPUT_ROOT && path.isAbsolute(process.env.MONARCH_SAFE_QA_OUTPUT_ROOT)
+  ? path.resolve(process.env.MONARCH_SAFE_QA_OUTPUT_ROOT, 'safe-qa')
+  : path.join(workspaceRoot, 'output', 'safe-qa');
 const profileRoot = await mkdtemp(path.join(os.tmpdir(), 'monarch-safe-electron-qa-'));
 const vaultRoot = path.join(profileRoot, 'vault');
 const qaAutoLockMs = 20_000;
@@ -45,25 +48,12 @@ let serviceSequence = 0;
 let activityKeepAliveTimer = null;
 let activityKeepAliveBusy = false;
 const servicePending = new Map();
-ipcMain.handle('monarch-safe:authorize-write', (event, value = {}) => {
+ipcMain.handle('monarch-safe:authorize-write', (event, value = {}) => qaAuthorize(event, 'writeFile', value));
+ipcMain.handle('monarch-safe:authorize-delete', (event, value = {}) => qaAuthorize(event, 'deleteFile', value));
+async function qaAuthorize(event, action, value) {
   if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id || !capabilityKey) return null;
-  const fileId = String(value?.id || '');
-  if (!/^[0-9a-f-]{36}$/i.test(fileId)) return null;
-  return createSafeCapabilityToken({ key: capabilityKey, action: 'writeFile', resourceId: fileId });
-});
-ipcMain.handle('monarch-safe:authorize-delete', (event, value = {}) => {
-  if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id || !capabilityKey) return null;
-  const files = Array.isArray(value?.files) ? value.files : null;
-  if (files) {
-    const ids = files.map((file) => String(file?.id || '')).filter((id) => /^[0-9a-f-]{36}$/i.test(id));
-    return {
-      tokens: ids.map((id) => ({ id, capabilityToken: createSafeCapabilityToken({ key: capabilityKey, action: 'deleteFile', resourceId: id }) })),
-    };
-  }
-  const fileId = String(value?.id || '');
-  if (!/^[0-9a-f-]{36}$/i.test(fileId)) return null;
-  return createSafeCapabilityToken({ key: capabilityKey, action: 'deleteFile', resourceId: fileId });
-});
+  return authorizeSafeFiles({ action, value, key: capabilityKey, prepare: (payload) => requestSafeService('fileActionContext', payload), prompt: async () => true, isCurrent: () => Boolean(child && window && !window.isDestroyed()) });
+}
 app.whenReady().then(runQa).catch(async (error) => {
   await appendFile(stagePath, `ready-failure ${error?.stack || error}\n`, 'utf8');
   app.exit(1);
@@ -266,6 +256,8 @@ async function runQa() {
   if (!fileOpenState.editorVisible) throw new Error(`Safe could not open QA file: ${fileOpenState.toast || 'unknown error'}`);
   const dirtyGuardMarker = 'SAFE_QA_UNSAVED_GUARD_4E2A';
   await evaluate(`document.querySelector('#text-editor').value = ${JSON.stringify(dirtyGuardMarker)}; document.querySelector('#text-editor').dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('[data-file-id] .file-open-button').click()`);
+  assert(await evaluate(`!document.querySelector('#confirm-dialog').open && document.querySelector('#text-editor').value === ${JSON.stringify(dirtyGuardMarker)}`), 'opening the current file must preserve its draft without a discard prompt');
+  await evaluate(`document.querySelector('#close-editor').click()`);
   await waitFor(() => evaluate(`document.querySelector('#confirm-dialog').open`));
   await evaluate(`document.querySelector('#confirm-form button[value="cancel"]').click()`);
   await waitFor(() => evaluate(`!document.querySelector('#confirm-dialog').open`));
@@ -277,7 +269,7 @@ async function runQa() {
   await waitFor(() => evaluate(`!document.querySelector('#confirm-dialog').open`));
   assert(await evaluate(`!document.querySelector('#vault-screen').hidden && document.querySelector('#text-editor').value === ${JSON.stringify(dirtyGuardMarker)}`), 'canceling manual lock with a dirty draft must keep the unlocked editor intact');
   await touchQaActivity();
-  await evaluate(`document.querySelector('[data-file-id] .file-open-button').click()`);
+  await evaluate(`document.querySelector('#close-editor').click()`);
   await waitFor(() => evaluate(`document.querySelector('#confirm-dialog').open`));
   await evaluate(`document.querySelector('#confirm-action').click()`);
   try {
@@ -296,7 +288,10 @@ async function runQa() {
     throw new Error(`Dirty-discard confirmation did not settle: ${JSON.stringify(discardDiagnostics)}; ${error?.message || error}`);
   }
   const dirtyDiscardState = await evaluate(`({ value: document.querySelector('#text-editor').value, dirty: document.querySelector('#save-file').dataset.dirty })`);
-  assert(dirtyDiscardState.value !== dirtyGuardMarker && dirtyDiscardState.dirty === 'false', 'confirming discard must reload the encrypted generation and clear dirty state');
+  assert(dirtyDiscardState.value !== dirtyGuardMarker && dirtyDiscardState.dirty === 'false', 'confirming close must purge the discarded draft and clear dirty state');
+  assert(await evaluate(`document.querySelector('#editor-active').hidden`), 'closing a file must return to the full file list');
+  await evaluate(`document.querySelector('[data-file-id] .file-open-button').click()`);
+  await waitFor(() => evaluate(`!document.querySelector('#editor-active').hidden`));
   await evaluate(`window.monarchSafe.request('list')`);
   const marker = 'SAFE_QA_PLAINTEXT_MARKER_7C91';
   await evaluate(`document.querySelector('#text-editor').value = ${JSON.stringify(`# План\n\n${marker}\n`)}; document.querySelector('#text-editor').dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#save-file').click()`);
@@ -390,7 +385,7 @@ async function runQa() {
   assert(restoredSecurityPolicy.securityLevel === 'strong' && restoredSecurityPolicy.securityPolicy.clipboardMode === 'blocked', 'strong Safe policy must be restorable with PIN confirmation');
 
   const bridgeSurface = await evaluate(`Object.keys(window.monarchSafe).sort()`);
-  assert(JSON.stringify(bridgeSurface) === JSON.stringify(['authorizeDelete', 'authorizeWrite', 'onEvent', 'onOpenSettings', 'request']), 'Safe preload must expose only bounded confirmations, settings routing, request and event subscription');
+  assert(JSON.stringify(bridgeSurface) === JSON.stringify(['authorizeDelete', 'authorizeWrite', 'exportFile', 'onEvent', 'onOpenSettings', 'request']), 'Safe preload must expose only bounded confirmations, export, settings routing, request and event subscription');
   const popupDenied = await evaluate(`window.open('https://example.com') === null`);
   assert(popupDenied, 'new windows must be denied');
   const networkDenied = await evaluate(`fetch('https://example.com').then(() => false).catch(() => true)`);
@@ -405,15 +400,17 @@ async function runQa() {
   const deletionTargetLiteral = JSON.stringify(deletionTarget);
   const unauthorisedWriteDenied = await evaluate(`window.monarchSafe.request('writeFile', { id: ${deletionTargetLiteral}, bytes: new Uint8Array([9]) }).then(() => false).catch(() => true)`);
   assert(unauthorisedWriteDenied, 'file overwrite must reject renderer requests without a signed capability');
-  const writeToken = createSafeCapabilityToken({ key: capabilityKey, action: 'writeFile', resourceId: deletionTarget });
+  const writeToken = createSafeCapabilityToken({ key: capabilityKey, action: 'writeFile', resourceId: deletionTarget, binding: await requestSafeService('fileActionContext', { id: deletionTarget, action: 'writeFile', bytes: new Uint8Array([0,1,2,3,254,255]) }) });
   const writeTokenLiteral = JSON.stringify(writeToken);
+  const substitutedBytesDenied = await evaluate(`window.monarchSafe.request('writeFile', { id: ${deletionTargetLiteral}, bytes: new Uint8Array([9]), capabilityToken: ${writeTokenLiteral} }).then(() => false).catch(() => true)`);
+  assert(substitutedBytesDenied, 'approved write must reject substituted bytes without consuming the valid proposal');
   const authorisedWrite = await evaluate(`window.monarchSafe.request('writeFile', { id: ${deletionTargetLiteral}, bytes: new Uint8Array([0,1,2,3,254,255]), capabilityToken: ${writeTokenLiteral} }).then(() => true).catch(() => false)`);
   const replayWriteDenied = await evaluate(`window.monarchSafe.request('writeFile', { id: ${deletionTargetLiteral}, bytes: new Uint8Array([9]), capabilityToken: ${writeTokenLiteral} }).then(() => false).catch(() => true)`);
   assert(authorisedWrite && replayWriteDenied, 'file overwrite capability must be resource-bound and single-use');
-  const mutationAuthorization = { unauthorisedWriteDenied, authorisedWrite, replayWriteDenied };
+  const mutationAuthorization = { unauthorisedWriteDenied, substitutedBytesDenied, authorisedWrite, replayWriteDenied };
   const unauthorisedDeleteDenied = await evaluate(`window.monarchSafe.request('deleteFile', { id: ${deletionTargetLiteral} }).then(() => false).catch(() => true)`);
   assert(unauthorisedDeleteDenied, 'file deletion must reject renderer requests without a signed capability');
-  const deletionToken = createSafeCapabilityToken({ key: capabilityKey, action: 'deleteFile', resourceId: deletionTarget });
+  const deletionToken = createSafeCapabilityToken({ key: capabilityKey, action: 'deleteFile', resourceId: deletionTarget, binding: await requestSafeService('fileActionContext', { id: deletionTarget, action: 'deleteFile' }) });
   const deletionTokenLiteral = JSON.stringify(deletionToken);
   const authorisedDelete = await evaluate(`window.monarchSafe.request('deleteFile', { id: ${deletionTargetLiteral}, capabilityToken: ${deletionTokenLiteral} }).then(() => true).catch(() => false)`);
   assert(authorisedDelete, 'signed single-use file deletion capability must authorize only its bound file');

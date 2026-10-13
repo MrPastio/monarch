@@ -1,35 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { MonarchKernel, type MonarchExecutionResult, type MonarchModule } from '../../src/core';
 import { DiagnosticsModule } from '../../src/modules/diagnostics';
+import { executeTypedCapability } from '../helpers/typed-capability';
 
 describe('Diagnostics Module', () => {
-  it.each([
-    'Расскажи про новую систему образования',
-    'Проверь статус системы кровообращения и объясни результат',
-    'Объясни логическую операцию',
-    'Объясни медицинскую диагностику заболевания',
-    'Что означает диагностика математической модели?',
-  ])('ignores unrelated semantic uses of diagnostic vocabulary: %s', async (text) => {
-    const module = new DiagnosticsModule();
-
-    expect(await module.handleIntent({
-      id: 'semantic-diagnostics-counterexample',
-      source: 'desktop',
-      text,
-      createdAt: new Date(0).toISOString(),
-    })).toBeNull();
-  });
-
-  it('routes project diagnostics to a structured read-only report', async () => {
+  it('executes an exact project diagnostics capability as a structured read-only report', async () => {
     const kernel = new MonarchKernel();
     kernel.registerModule(new DiagnosticsModule());
     await kernel.start();
     try {
-      const result = await kernel.submitIntent('проведи диагностику проекта и найди аномалии', 'smoke');
-      const output = result.execution?.output as { status?: string; checked_sources?: string[] } | undefined;
+      const result = await executeTypedCapability(kernel, 'diagnostics.project.report', { limit: 50 });
+      const output = result.output as { status?: string; checked_sources?: string[] } | undefined;
 
-      expect(result.route?.capabilityId).toBe('diagnostics.project.report');
-      expect(result.execution?.ok).toBe(true);
+      expect(result.ok).toBe(true);
       expect(output?.status).toMatch(/ok|warning|critical/);
       expect(output?.checked_sources).toContain('kernel.modules');
     } finally {
@@ -71,21 +54,22 @@ describe('Diagnostics Module', () => {
     }
   });
 
-  it('adaptively probes safe read-only status capabilities across the live system', async () => {
+  it('adaptively probes safe read-only status capabilities through an exact typed call', async () => {
     const kernel = new MonarchKernel();
     kernel.registerModule(new DiagnosticsModule());
     kernel.registerModule(createStatusModule());
     await kernel.start();
     try {
-      const result = await kernel.submitIntent('проверь всю систему Monarch', 'smoke');
-      const output = result.execution?.output as {
+      const result = await executeTypedCapability(kernel, 'diagnostics.system.inspect', {
+        query: 'проверь всю систему Monarch',
+      });
+      const output = result.output as {
         scope?: string;
         modules?: Array<{ id?: string; probe?: string; probeOk?: boolean }>;
         totals?: { probed?: number; failed?: number };
       } | undefined;
 
-      expect(result.route?.capabilityId).toBe('diagnostics.system.inspect');
-      expect(result.execution?.ok).toBe(true);
+      expect(result.ok).toBe(true);
       expect(output?.scope).toBe('all');
       expect(output?.modules).toContainEqual(expect.objectContaining({
         id: 'status-fixture',

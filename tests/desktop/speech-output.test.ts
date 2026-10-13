@@ -25,6 +25,48 @@ describe('Electron Windows speech output', () => {
       .toBe(packagedPython);
   });
 
+  it('does not advertise a partially imported installed neural runtime', async () => {
+    const spawnProcess = vi.fn();
+    const output = createWindowsSpeechOutput({
+      workspaceRoot: path.resolve('versions/test'), platform: 'win32',
+      payloadRoot: path.resolve('payload'), modelsRoot: path.resolve('payload/models'),
+      pythonPath: path.resolve('payload/python/python.exe'), spawnProcess,
+      fileExists: (file: string) => !file.endsWith('monarch-neural-tts.json'),
+    });
+    expect(output.capabilities()).toMatchObject({ neuralInstalled: false });
+    await expect(output.warmup()).resolves.toMatchObject({ ok: false, error: 'neural-tts-runtime-missing' });
+    expect(spawnProcess).not.toHaveBeenCalled();
+    output.dispose();
+  });
+
+  it('loads installed neural dependencies in the Voice child only', async () => {
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+      killed: false, kill: () => { queueMicrotask(() => child.emit('close', 0, null)); return true; },
+    });
+    const spawnProcess = vi.fn(() => {
+      queueMicrotask(() => child.stdout.write('{"type":"ready","engine":"qwen3-tts-cuda-graph"}\n'));
+      return child;
+    });
+    const inheritedPythonPath = process.env.PYTHONPATH;
+    const payloadRoot = path.resolve('payload');
+    const pythonPath = path.join(payloadRoot, 'python/python.exe');
+    const output = createWindowsSpeechOutput({
+      workspaceRoot: path.resolve('versions/test'), platform: 'win32',
+      payloadRoot, modelsRoot: path.join(payloadRoot, 'models'), pythonPath,
+      spawnProcess, fileExists: () => true,
+    });
+    await expect(output.warmup()).resolves.toMatchObject({ ok: true });
+    expect(spawnProcess).toHaveBeenCalledWith(pythonPath, expect.any(Array), expect.objectContaining({
+      windowsHide: true, shell: false, env: expect.objectContaining({
+        PYTHONPATH: path.join(payloadRoot, 'runtimes/voice/neural/python-packages'), HF_HUB_OFFLINE: '1',
+        PYTHONDONTWRITEBYTECODE: '1',
+      }),
+    }));
+    expect(process.env.PYTHONPATH).toBe(inheritedPythonPath);
+    output.dispose();
+  });
+
   it('scales the neural completion budget with long answers instead of capping it at two minutes', () => {
     expect(resolveNeuralCompletionTimeoutMs(100, 120_000)).toBe(120_000);
     expect(resolveNeuralCompletionTimeoutMs(1_000, 120_000)).toBe(400_000);
@@ -300,9 +342,20 @@ describe('Electron Windows speech output', () => {
       enableNeural: false,
     });
 
-    const result = await output.speak({ text: 'Ответ из stdin', language: 'ru-RU', volume: 37 });
+    const result = await output.speak({
+      text: 'Ответ из stdin',
+      language: 'ru-RU',
+      volume: 37,
+      latencyMode: 'fast',
+    });
 
-    expect(result).toMatchObject({ ok: true, voice: 'Microsoft Pavel', language: 'ru-RU' });
+    expect(result).toMatchObject({
+      ok: true,
+      voice: 'Microsoft Pavel',
+      language: 'ru-RU',
+      fallback: true,
+      fallbackFrom: 'neural-tts-cold-fast-path',
+    });
     expect(JSON.parse(written)).toMatchObject({ text: 'Ответ из stdin', language: 'ru-RU', volume: 37 });
     expect(spawnProcess).toHaveBeenCalledWith(
       resolveWindowsPowerShell('Z:\\missing-windows', 'Z:\\missing-program-files', ''),
