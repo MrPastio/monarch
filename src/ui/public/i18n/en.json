@@ -1773,5 +1773,15 @@
 "Твои данные зашифрованы на диске": "Your data is encrypted on disk",
 "История чатов, память, вложения и журналы хранятся зашифрованными. Копия ключа лежит в Monarch Safe, чтобы историю можно было восстановить.": "Chat history, memory, attachments and logs are stored encrypted. A copy of the key is kept in Monarch Safe so the history can be restored.",
 "Новый раздел «Безопасность»": "A new “Security” section",
-"Понятный обзор защиты, события с объяснением и решениями, сеть и настройки приватности — всё в одном месте.": "A clear protection overview, events with explanations and decisions, network and privacy settings — all in one place."
+"Понятный обзор защиты, события с объяснением и решениями, сеть и настройки приватности — всё в одном месте.": "A clear protection overview, events with explanations and decisions, network and privacy settings — all in one place.",
+"Убрать из очереди": "Remove from queue",
+"в очереди": "queued",
+"Нашёл ошибку": "Found a bug",
+"Опиши, что случилось, — откроется письмо разработчику. Отправишь его сам.": "Describe what happened — a letter to the developer opens. You send it yourself.",
+"Сообщить об ошибке": "Report a bug",
+"Что случилось?": "What happened?",
+"Что ты делал, что ожидал и что получилось вместо этого.": "What you did, what you expected and what happened instead.",
+"В письмо добавятся версия Monarch, Windows, объём памяти и состояние моделей. Переписки, ключей и файлов в нём нет. Журналы можно приложить вручную — кнопка «Открыть журналы» выше.": "The letter includes the Monarch version, Windows, memory size and model state. No chats, keys or files. You can attach the logs yourself — use “Open logs” above.",
+"Открыть письмо": "Open the letter",
+"Через Gmail в браузере": "Via Gmail in the browser"
 }

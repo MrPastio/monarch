@@ -1508,9 +1508,12 @@ html:root[data-design="pp"] {
     border-radius: var(--pp-r-lg);
     background: var(--pp-paper-2) !important;
   }
-  & #settings-section .models-page-content .model-record-card > header { position: relative; display: block; }
-  & #settings-section .models-page-content .model-record-side { position: absolute; top: 0; right: 0; }
-  & #settings-section .models-page-content .model-record-card h3 { margin: 6px 0 0; padding-right: 76px; font-size: 15px; }
+  /* The cards are narrow: state and actions get their own row under the text,
+     so the status never sits on top of the tier label. */
+  & #settings-section .models-page-content .model-record-card > header { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  & #settings-section .models-page-content .model-record-side { position: static; display: flex; flex-flow: row wrap; align-items: center; justify-content: flex-start; gap: 6px 8px; }
+  & #settings-section .models-page-content .model-record-card h3 { margin: 6px 0 0; padding-right: 0; font-size: 15px; }
+  & #settings-section .models-page-content .model-remove-action { color: var(--pp-ink-muted); }
   & #settings-section .models-page-content .model-role-description { max-width: none; font-size: 12.5px; line-height: 1.45; }
   & #settings-section .models-page-content .model-record-card .model-ram-fit { max-width: none; gap: 5px; }
   & #settings-section .models-page-content .model-ram-fit > small { font-size: 11.5px; }

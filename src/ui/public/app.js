@@ -144,6 +144,21 @@ let securityStatusRequested = false;
 let componentStateTimer = 0;
 let astraProductPilotActive = false;
 
+/** What a bug report says about the app: look, language and model state. No chats, keys or paths. */
+function describeAppForBugReport() {
+  const root = document.documentElement;
+  const components = state.data?.components;
+  const models = [...(components?.models || []), ...(components?.extras || [])]
+    .map((model) => `${model.role}: ${model.installed ? 'скачана' : model.phase}${model.phase === 'failed' ? ' (ошибка)' : ''}`)
+    .join(', ');
+  return [
+    `Вид: ${root.dataset.design || 'обычный'}, тема ${root.dataset.theme || 'авто'}, язык ${root.lang || 'ru'}`,
+    `Режим работы: ${state.data?.modelPreference?.work || 'не выбран'}`,
+    `Первая настройка: ${components?.onboarding?.completion || 'нет данных'}`,
+    models ? `Модели: ${models}` : null,
+  ].filter(Boolean).join('\n');
+}
+
 // Render Coordinator
 function render() {
   if (state.data?.permissions) syncComputerUsePermissionProfile(state.data.permissions);
@@ -742,6 +757,11 @@ async function init() {
     navigate: (view, subview) => window.dispatchEvent(new CustomEvent('monarch:navigate', { detail: { view, ...(subview ? { subview } : {}) } })),
     checkOscar: async () => { await loadOscarStatus(render); return !state.oscar.error && Boolean(state.oscar.status); },
     openLogs: typeof window.monarchDesktop?.openLogs === 'function' ? () => window.monarchDesktop.openLogs() : undefined,
+    reportBug: typeof window.monarchDesktop?.reportBug === 'function'
+      ? (value) => window.monarchDesktop.reportBug({ ...value, version: state.data?.app?.version || '' })
+      : undefined,
+    reportContext: describeAppForBugReport,
+    reducedMotion: reducedUiMotion,
   });
   initAwaySummary({ openSecurity: () => window.dispatchEvent(new CustomEvent('monarch:navigate', { detail: { view: 'security-section' } })) });
   initSharedSelects();

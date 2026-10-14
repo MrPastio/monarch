@@ -90,6 +90,12 @@ contextBridge.exposeInMainWorld('monarchDesktop', {
   warmSpeechOutput: (value = {}) => ipcRenderer.invoke('monarch:speech-warmup', { retry: value?.retry === true }),
   getSpeechDiagnostics: () => ipcRenderer.invoke('monarch:speech-diagnostics'),
   openLogs: () => ipcRenderer.invoke('monarch:open-logs'),
+  reportBug: (value = {}) => ipcRenderer.invoke('monarch:report-bug', {
+    description: String(value?.description || ''),
+    context: String(value?.context || ''),
+    version: String(value?.version || ''),
+    via: value?.via === 'gmail' ? 'gmail' : 'mail',
+  }),
   getSpeechCapabilities: () => ipcRenderer.invoke('monarch:speech-capabilities'),
   getOwnerEnrollmentStatus: () => ipcRenderer.invoke('monarch:owner-enrollment-status'),
   createOwnerDeviceRequest: () => ipcRenderer.invoke('monarch:owner-device-request-create'),

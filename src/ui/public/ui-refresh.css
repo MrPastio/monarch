@@ -1182,3 +1182,28 @@ html[data-motion="reduced"] *, html[data-motion="reduced"] *::before, html[data-
 .settings-panel-stack .model-record-card > header > div { flex: 1; min-width: 0; }
 .settings-panel-stack .model-record-card > header .model-role-description { max-width: none; }
 .settings-panel-stack .model-record-card > header > .status-text { flex: none; margin-top: 2px; }
+
+/* Models page slots are patched in place; they never take part in the layout. */
+.model-card-slot { display: contents; }
+.model-remove-action {
+  min-height: 32px; padding: 0 10px; border: 0; border-radius: 999px;
+  color: var(--muted); background: transparent; font: inherit; font-size: 12.5px; cursor: pointer;
+  transition: color 160ms ease, background-color 160ms ease;
+}
+.model-remove-action:hover, .model-remove-action:focus-visible { color: var(--text); background: rgba(var(--theme-line-rgb, 255, 255, 255), .08); }
+.model-remove-action:disabled { opacity: .5; cursor: default; }
+.model-extra-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+@media (prefers-reduced-motion: reduce) { .model-remove-action { transition: none; } }
+
+/* Help -> "Сообщить об ошибке": the letter form opens under the list. */
+.bug-report-form { display: grid; gap: 8px; margin-top: 8px; padding: 14px 0 4px; border-top: 1px solid rgba(var(--theme-line-rgb, 255, 255, 255), .07); }
+.bug-report-form[hidden] { display: none; }
+.bug-report-form label { display: grid; gap: 3px; }
+.bug-report-form label strong { font-size: 13px; }
+.bug-report-form small { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.bug-report-form textarea { width: 100%; min-height: 96px; padding: 10px 12px; border: 1px solid rgba(var(--theme-line-rgb, 255, 255, 255), .14); border-radius: 12px; color: var(--text); background: transparent; font: inherit; font-size: 13px; resize: vertical; }
+.bug-report-form textarea:focus-visible { outline: 2px solid var(--accent, #ffa326); outline-offset: 1px; }
+.bug-report-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.bug-report-form output { color: var(--theme-amber-ink, #ffc45f); font-size: 12px; }
+.bug-report-form output:empty { display: none; }
+.bug-report-copy { min-height: 140px; font-family: var(--mono, monospace); font-size: 12px; }

@@ -143,6 +143,8 @@ export interface MonarchModelProvisioningController {
     source: 'onboarding' | 'settings',
   ): MonarchModelProvisioningSnapshot | MonarchComponentManagerSnapshot;
   skipOnboarding?(): Promise<MonarchModelProvisioningSnapshot | MonarchComponentManagerSnapshot>;
+  cancelInstall?(role: MonarchInstallableGroupId): Promise<MonarchModelProvisioningSnapshot | MonarchComponentManagerSnapshot>;
+  removeModel?(role: MonarchInstallableGroupId): Promise<MonarchModelProvisioningSnapshot | MonarchComponentManagerSnapshot>;
   acknowledgeOnboardingWelcome?(): Promise<MonarchModelProvisioningSnapshot | MonarchComponentManagerSnapshot>;
 }
 
@@ -229,6 +231,8 @@ export class MonarchModelProvisioningManager implements MonarchModelProvisioning
   private diskFreeBytes: number | null = null;
   private active: Promise<MonarchModelProvisioningSnapshot> | null = null;
   private activeInstall: MonarchModelProvisioningSnapshot['activeInstall'] = null;
+  /** Roles the person stopped while the queue was running; skipped by runInstall. */
+  private readonly cancelledRoles = new Set<MonarchInstallableGroupId>();
 
   constructor(
     runtimePaths: MonarchRuntimePaths,
@@ -382,6 +386,60 @@ export class MonarchModelProvisioningManager implements MonarchModelProvisioning
     return this.snapshot();
   }
 
+  /**
+   * Stop one download, running or queued. Downloaded parts stay on disk, so
+   * "Скачать" continues later. Stopping a first-setup download returns the
+   * setup to the model choice instead of resuming it on the next start.
+   */
+  async cancelInstall(role: MonarchInstallableGroupId): Promise<MonarchModelProvisioningSnapshot> {
+    const group = this.findGroup(role);
+    if (!group || !this.activeInstall?.roles.includes(role)) return this.snapshot();
+    this.cancelledRoles.add(role);
+    const source = this.activeInstall.source;
+    await Promise.all(group.components.map((spec) => this.managers.get(spec.id)!.cancel()));
+    if (source === 'onboarding' && !this.persisted.completed) {
+      this.persisted = {
+        ...this.persisted,
+        selectedRoles: this.persisted.selectedRoles.filter((selected) => selected !== role),
+        error: null,
+        updatedAt: this.now().toISOString(),
+      };
+      await this.persistState();
+    }
+    return this.snapshot();
+  }
+
+  /**
+   * Delete a downloaded model or feature pack. Files shared with another
+   * installed group stay. A running download of it is stopped first.
+   */
+  async removeModel(role: MonarchInstallableGroupId): Promise<MonarchModelProvisioningSnapshot> {
+    const group = this.findGroup(role);
+    if (!group) return this.snapshot();
+    if (this.activeInstall?.roles.includes(role)) await this.cancelInstall(role);
+    const keep = new Set<string>();
+    for (const other of [...this.groups, ...this.extraGroups]) {
+      if (other.role === role) continue;
+      const described = this.describeGroup(other);
+      if (!described.installed && !described.components.some((component) => component.downloadedBytes > 0)) continue;
+      for (const spec of other.components) keep.add(spec.id);
+    }
+    for (const spec of group.components) {
+      if (keep.has(spec.id)) continue;
+      await this.managers.get(spec.id)!.remove();
+    }
+    if (isChatRole(role) && this.persisted.selectedRoles.includes(role)) {
+      this.persisted = {
+        ...this.persisted,
+        selectedRoles: this.persisted.selectedRoles.filter((selected) => selected !== role),
+        updatedAt: this.now().toISOString(),
+      };
+      await this.persistState();
+    }
+    this.diskFreeBytes = await readDiskFreeBytes(this.runtimePaths.modelsRoot);
+    return this.snapshot();
+  }
+
   async stop(): Promise<void> {
     await Promise.all([...this.managers.values()].map((manager) => manager.stop()));
     await this.active?.catch(() => undefined);
@@ -405,10 +463,12 @@ export class MonarchModelProvisioningManager implements MonarchModelProvisioning
       return this.active;
     }
     this.activeInstall = { source, roles };
+    this.cancelledRoles.clear();
     this.active = this.runInstall(roles, source)
       .finally(() => {
         this.active = null;
         this.activeInstall = null;
+        this.cancelledRoles.clear();
       });
     return this.active;
   }
@@ -437,11 +497,15 @@ export class MonarchModelProvisioningManager implements MonarchModelProvisioning
       await this.persistState();
     }
 
+    let cancelledAny = false;
     for (const role of roles) {
+      if (this.cancelledRoles.has(role)) { cancelledAny = true; continue; }
       const group = [...this.groups, ...this.extraGroups].find((candidate) => candidate.role === role)!;
       for (const spec of group.components) {
+        if (this.cancelledRoles.has(role)) break;
         const result = await this.managers.get(spec.id)!.ensureRequiredModel();
         if (result.ready) continue;
+        if (this.cancelledRoles.has(role)) { cancelledAny = true; break; }
         this.persisted = {
           ...this.persisted,
           error: result.requiredModel.error || 'Не удалось скачать модель. Попробуй ещё раз.',
@@ -453,6 +517,18 @@ export class MonarchModelProvisioningManager implements MonarchModelProvisioning
       }
     }
 
+    const installedAny = this.models().some((model) => model.installed);
+    if (source === 'onboarding' && cancelledAny && !installedAny) {
+      // Every first-setup download was stopped: back to the model choice.
+      this.persisted = {
+        ...this.persisted,
+        selectedRoles: [],
+        error: null,
+        updatedAt: this.now().toISOString(),
+      };
+      await this.persistState();
+      return this.snapshot();
+    }
     if (source === 'onboarding') {
       this.persisted = {
         ...this.persisted,
@@ -465,6 +541,10 @@ export class MonarchModelProvisioningManager implements MonarchModelProvisioning
       await this.persistState();
     }
     return this.snapshot();
+  }
+
+  private findGroup(role: MonarchInstallableGroupId): ModelGroupDefinition | null {
+    return [...this.groups, ...this.extraGroups].find((candidate) => candidate.role === role) || null;
   }
 
   private models(): MonarchProvisionedModel[] {

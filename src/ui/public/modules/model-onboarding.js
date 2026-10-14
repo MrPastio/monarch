@@ -159,6 +159,11 @@ export function renderModelOnboarding() {
   const required = components?.onboarding?.required === true;
   const active = components?.activeInstall || null;
   if (!required) clearBackgroundInstall();
+  if (!required && setupNeverFinished(components) && !flow.open && !flow.finishing) {
+    // An install that already had models (an update from 0.2.x, or files placed
+    // by hand) never saw this setup: theme, work mode and MAX are asked once.
+    openFlow('first');
+  }
   if (required && !flow.open && !flow.finishing) {
     const background = readBackgroundInstall() && (active || !components.onboarding.error);
     if (!background) {
@@ -176,6 +181,15 @@ export function renderModelOnboarding() {
     if (flow.step === 'done') renderSummary();
   }
   renderPill(active);
+}
+
+/** The installed app has never finished the first setup: the work mode it saves
+ * is still unset. Development runs (`not-applicable`) never open it by themselves. */
+function setupNeverFinished(components) {
+  const completion = components?.onboarding?.completion;
+  if (!completion || completion === 'not-applicable' || completion === 'pending') return false;
+  const preference = state.data?.modelPreference;
+  return Boolean(preference) && (preference.work === null || preference.work === undefined);
 }
 
 /* ---------- open / close ---------- */

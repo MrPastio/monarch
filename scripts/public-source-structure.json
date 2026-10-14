@@ -709,7 +709,7 @@
     },
     "src/modules/models/component-manager.ts": {
       "scope": "src",
-      "objectId": "33f78ba967b25ab37fbf20351c1a4fa374971403"
+      "objectId": "a9bcc9821e0414da1e9ee38193c7373bcdaf8fc4"
     },
     "src/modules/oscar/runtime-profile.ts": {
       "scope": "src",
@@ -765,7 +765,7 @@
     },
     "src/ui/public/ui-refresh.css": {
       "scope": "src",
-      "objectId": "ee2eb22f00caa0544d50d98f79947318d6ec35a8"
+      "objectId": "fd3510f514c9c84b26ccd6f05b2cc33b56263483"
     },
     "tests/core/durable-json-file.test.ts": {
       "scope": "tests",
@@ -1737,15 +1737,15 @@
     },
     "src/ui/public/i18n/bg.json": {
       "scope": "src",
-      "objectId": "4668ec07aa5949d4b8d323f2441e910b07e1ba1b"
+      "objectId": "41079029b6852131fa67897f2dcd539113c4a851"
     },
     "src/ui/public/i18n/en.json": {
       "scope": "src",
-      "objectId": "52f20bcd21c147ff11d9e1c03b1468657d292f3a"
+      "objectId": "7d65c3369096246df3b79cb6d1c76ce01ac96495"
     },
     "src/ui/public/i18n/uk.json": {
       "scope": "src",
-      "objectId": "03b392eed769eec7da6cdbd9d68f8f4c9c08dbbd"
+      "objectId": "dd77a14d5d3d46ebb1a5eb3d97b07d6142b0d6fc"
     },
     "src/ui/public/modules/access-matrix.js": {
       "scope": "src",
@@ -1769,7 +1769,7 @@
     },
     "src/ui/public/modules/help-panel.js": {
       "scope": "src",
-      "objectId": "1568d2561a5f0fde4c81b181da96d2aa462321f7"
+      "objectId": "13273c5824612923ef3224b5fa5f804cbcc2bf42"
     },
     "src/ui/public/modules/oscar-starter-prompts.js": {
       "scope": "src",
@@ -1905,7 +1905,7 @@
     },
     "tests/ui/help-panel.test.ts": {
       "scope": "tests",
-      "objectId": "189b2df86dd0fd4d6af9cef65a829740ac644dd3"
+      "objectId": "deb2aa20455ec4181aa3d8e19dbf019c3a27e12c"
     },
     "tests/ui/model-ram-fit.test.ts": {
       "scope": "tests",
@@ -1965,7 +1965,7 @@
     },
     "desktop/electron/preload.cjs": {
       "scope": "desktop",
-      "objectId": "e05a49ff4afaa3340a2226e365147ff4e3e6a129"
+      "objectId": "39746b6e96551745ae6866c91fc09b5b343b2263"
     },
     "desktop/electron/profile-data-key.mjs": {
       "scope": "desktop",
@@ -2265,7 +2265,7 @@
     },
     "src/ui/public/paper-pixel.css": {
       "scope": "src",
-      "objectId": "bc7137969a0c2191b363aa816541f9056d0786bb"
+      "objectId": "b30d12e6f199acf3762764babd25504e1a8af137"
     },
     "tests/agent-v3/max-cloud-limits.test.ts": {
       "scope": "tests",
@@ -2373,7 +2373,7 @@
     },
     "tests/fixtures/network-egress-inventory.json": {
       "scope": "tests",
-      "objectId": "fedecaa34589cb29fe8adc0f00212d8d536d0eb6"
+      "objectId": "86822250bed67f5a41bd24f9559b7cf6487996e5"
     },
     "tests/installer-electron-fuses.test.ts": {
       "scope": "tests",
@@ -2430,6 +2430,22 @@
     "tests/ui/thread-dom-sync.test.ts": {
       "scope": "tests",
       "objectId": "465b2671185a5f6835b73469bbf38105f37064fb"
+    },
+    "desktop/electron/bug-report.mjs": {
+      "scope": "desktop",
+      "objectId": "05651d18c6e3628941fb447014380c8a979a2f1b"
+    },
+    "tests/desktop/bug-report.test.ts": {
+      "scope": "tests",
+      "objectId": "4e66cc56e54742f9fb0f072fcb90112e04807821"
+    },
+    "tests/ui/model-manager-patching.test.ts": {
+      "scope": "tests",
+      "objectId": "80d80a048c6e48f618e540b80b2b0394fb7bfc3b"
+    },
+    "release/notes/v0.3.0.98.md": {
+      "scope": "release",
+      "objectId": "5547dd6959d9527bccd3bdd09be107a4885cfc1b"
     }
   }
 }
