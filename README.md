@@ -7,16 +7,16 @@
 ## What 0.3 Preview does
 
 - **Tasks in a normal chat.** "Create a file", "find my documents": Oscar works step by step, asks before anything important, and ends with what was done, what you allowed and what was blocked.
-- **Reminders** as Windows notifications: "remind me in 20 minutes to check the oven", daily or weekly.
-- **Local models through llama.cpp (GGUF).** Gemma 4 E2B and 12B, Qwen3.8 27B, Qwen3-Coder for code, or any GGUF from a file or a Hugging Face link. Downloaded from Settings → Models with resume and integrity checks.
-- **Coder mode** for your own projects, with a line-by-line diff before every write and a real git diff panel.
+- **Reminders** as Windows notifications while Monarch is running: "remind me in 20 minutes to check the oven", daily or weekly. A reminder that falls due while the app is closed is shown at the next start.
+- **Local models through llama.cpp (GGUF).** Gemma 4 E2B and 12B, Qwen3.8 27B, Qwen3-Coder for code, or your own single-file chat GGUF from a file or a Hugging Face link. Downloaded from Settings → Models with resume and integrity checks.
+- **Coder mode** for your own projects: it shows a line-by-line diff before editing a file (for files up to 2,000 lines) and has a real git diff panel.
 - **Monarch Safe:** an AES-256-GCM vault in a separate offline process that the agent cannot open.
-- **OpenAI-compatible API** on 127.0.0.1, so your own scripts can use the same local models.
+- **OpenAI-compatible API** on 127.0.0.1, so your own scripts can use the built-in chat models (fast, balanced and Pro).
 - Interface in English, Russian, Ukrainian and Bulgarian.
 
 ## How actions stay under control
 
-The model proposes; it never decides its own permissions. Every action goes the same way: request → exact typed action → policy layer (allow / ask / deny) → execution by the module that owns it → a verifier that checks what actually changed. There are three autonomy modes, and actions involving money or security-sensitive changes are denied in all of them.
+The model proposes; it never decides its own permissions. Every action goes the same way: request → exact typed action → policy layer (allow / ask / deny) → execution by the module that owns it → for actions that define a check, a verifier that confirms what actually changed. There are three autonomy modes, and actions involving money or security-sensitive changes are denied in all of them.
 
 ## Requirements and honest limits
 
