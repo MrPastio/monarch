@@ -25,6 +25,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $oscarVenv 'Scripts\python.exe'))) {
 }
 & (Join-Path $oscarVenv 'Scripts\python.exe') -m pip install --disable-pip-version-check --no-deps -r (Join-Path $root 'oscar\requirements-runtime-lock.txt')
 if ($LASTEXITCODE -ne 0) { throw "Oscar runtime install failed with exit code $LASTEXITCODE" }
+# Astra model fixtures use llama.cpp's tokenizer: the CPU wheel, as in
+# oscar\scripts\install.ps1 -CpuOnly (no local compiler involved).
+& (Join-Path $oscarVenv 'Scripts\python.exe') -m pip install --disable-pip-version-check --no-deps `
+  llama-cpp-python==0.3.30 --index-url 'https://abetlen.github.io/llama-cpp-python/whl/cpu' --only-binary llama-cpp-python
+if ($LASTEXITCODE -ne 0) { throw "llama-cpp-python wheel install failed with exit code $LASTEXITCODE" }
 
 $scratch = 'D:\Monarch-test-tmp-astra-v3'
 New-Item -ItemType Directory -Path $scratch -Force | Out-Null

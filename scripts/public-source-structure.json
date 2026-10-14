@@ -341,7 +341,7 @@
     },
     "scripts/ci-test-environment.ps1": {
       "scope": "scripts",
-      "objectId": "3b0258ebeab34eb26e2133d9f2b4bc87ed5e1912"
+      "objectId": "1bbd12321521b3e5de02f921c88411811708dba8"
     },
     "scripts/owner-authority.mjs": {
       "scope": "scripts",
