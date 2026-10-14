@@ -27,6 +27,9 @@ export default defineConfig({
     // useful parallelism while bounding aggregate model/runtime memory.
     maxWorkers: 4,
     maxConcurrency: 4,
+    // Hosted CI runners are several times slower than a developer machine;
+    // tests that start a whole application need more than the 5 s default.
+    ...(process.env.CI ? { testTimeout: 30_000, hookTimeout: 30_000 } : {}),
     exclude: EXCLUDED,
     projects: [
       { extends: true, test: { name: 'unit', exclude: [...EXCLUDED, ...LIVE_PROCESS_TEST_FILES], sequence: { groupOrder: 0 } } },

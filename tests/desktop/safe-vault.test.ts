@@ -508,18 +508,19 @@ describe('Monarch Safe adversarial security gates', () => {
     roots.push(root);
     const vault = new SafeVault(root, {
       testKdf: true,
-      autoLockMs: 40,
+      // Wide enough that setup on a slow runner cannot use up the lease.
+      autoLockMs: 400,
       deviceKey: Buffer.alloc(32, 0x63),
     });
     await vault.initialize();
     await vault.setup({ pin: '1234', pinLength: 4, destructionConfirmed: true });
     await vault.completeSetup({ recoveryAcknowledged: true });
 
-    await delay(25);
+    await delay(250);
     await expect(vault.touch()).resolves.toMatchObject({ unlocked: true });
-    await delay(25);
+    await delay(250);
     expect(vault.status()).toMatchObject({ unlocked: true });
-    await delay(35);
+    await delay(350);
     expect(vault.status()).toMatchObject({ unlocked: false });
   });
 
