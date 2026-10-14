@@ -81,6 +81,27 @@ export async function installModels(roles, source = 'settings') {
   return payload;
 }
 
+/** Stop a running or queued download; what is already downloaded stays. */
+export async function cancelModelInstall(role) {
+  return postModelAction('/api/models/cancel', role);
+}
+
+/** Delete a downloaded model or feature pack from this computer. */
+export async function removeInstalledModel(role) {
+  return postModelAction('/api/models/remove', role);
+}
+
+async function postModelAction(url, role) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: await mutationApiHeaders(),
+    body: JSON.stringify({ role }),
+  });
+  const payload = await readOptionalJson(response);
+  if (!response.ok) throw createMonarchHttpError(response.status, payload);
+  return payload;
+}
+
 export async function skipModelOnboarding() {
   return postModelOnboardingMutation('/api/models/onboarding/skip');
 }

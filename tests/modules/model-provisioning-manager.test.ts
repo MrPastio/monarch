@@ -249,6 +249,69 @@ describe('MonarchModelProvisioningManager', () => {
   });
 });
 
+describe('MonarchModelProvisioningManager stop and delete', () => {
+  it('stops a running download without an error and keeps the downloaded part to continue later', async () => {
+    const fixture = await createFixture();
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(Buffer.from('GGUF')));
+          init?.signal?.addEventListener('abort', () => controller.error(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+        },
+      });
+      const value = new Response(stream, { status: 200, headers: { 'content-length': String(fixture.payloads.get('fast.gguf')!.length) } });
+      Object.defineProperty(value, 'url', { value: 'https://huggingface.co/test/models/resolve/main/model.gguf' });
+      return value;
+    });
+    const manager = track(new MonarchModelProvisioningManager(fixture.paths, {
+      groups: fixture.groups,
+      fetchImpl: fetchImpl as typeof fetch,
+      retryDelaysMs: [0],
+      totalMemoryBytes: 32 * 1024 ** 3,
+      availableMemoryBytes: 24 * 1024 ** 3,
+    }));
+    await manager.initialize();
+    manager.startInstallModels(['gemma4-fast', 'gemma4-balanced'], 'settings');
+    const partial = path.join(fixture.paths.modelsRoot, 'models/gemma4-fast/fast.gguf.monarch-download');
+    await vi.waitFor(async () => expect(await readFile(partial)).toHaveLength(4));
+
+    await manager.cancelInstall('gemma4-balanced');
+    await manager.cancelInstall('gemma4-fast');
+    await vi.waitFor(() => expect(manager.snapshot().activeInstall).toBeNull());
+
+    const fast = manager.snapshot().models.find((model) => model.role === 'gemma4-fast')!;
+    expect(fast).toMatchObject({ phase: 'idle', installed: false });
+    expect(fast.components[0]).toMatchObject({ phase: 'idle', error: null });
+    expect(fast.downloadedBytes).toBe(4);
+    expect(manager.snapshot().onboarding.error).toBeNull();
+    // The queued model never started.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    await expect(readFile(partial)).resolves.toHaveLength(4);
+  });
+
+  it('deletes a downloaded model and its partial files from the models folder', async () => {
+    const fixture = await createFixture();
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => response(fixture.payloads.get(String(url).split('/').at(-1)!)!));
+    const manager = track(new MonarchModelProvisioningManager(fixture.paths, {
+      groups: fixture.groups,
+      fetchImpl: fetchImpl as typeof fetch,
+      retryDelaysMs: [0],
+      totalMemoryBytes: 32 * 1024 ** 3,
+      availableMemoryBytes: 24 * 1024 ** 3,
+    }));
+    await manager.initialize();
+    manager.startInstallModels(['gemma4-fast'], 'onboarding');
+    await vi.waitFor(() => expect(manager.snapshot().onboarding.completed).toBe(true));
+    const modelFile = path.join(fixture.paths.modelsRoot, 'models/gemma4-fast/fast.gguf');
+    await expect(readFile(modelFile)).resolves.toBeTruthy();
+
+    const after = await manager.removeModel('gemma4-fast');
+    expect(after.models.find((model) => model.role === 'gemma4-fast')).toMatchObject({ installed: false, downloadedBytes: 0 });
+    expect(after.onboarding.selectedRoles).toEqual([]);
+    await expect(readFile(modelFile)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
 async function createFixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'monarch-model-setup-'));
   roots.push(root);

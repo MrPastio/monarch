@@ -407,6 +407,8 @@ export class MonarchModelComponentManager {
   private readonly extractTargetPath: string | null;
   private active: Promise<MonarchComponentManagerSnapshot> | null = null;
   private controller: AbortController | null = null;
+  /** The running download was stopped by the person, not by a failure or shutdown. */
+  private cancelRequested = false;
   private state: MonarchManagedModelComponent;
   private legacyQuarantineDetected = false;
   private systemTransportPreferred = false;
@@ -473,6 +475,7 @@ export class MonarchModelComponentManager {
 
   ensureRequiredModel(): Promise<MonarchComponentManagerSnapshot> {
     if (this.active) return this.active;
+    this.cancelRequested = false;
     this.controller = new AbortController();
     this.active = this.ensureWithRetries(this.controller.signal)
       .finally(() => {
@@ -516,6 +519,48 @@ export class MonarchModelComponentManager {
     }
   }
 
+  /** Whether a download of this component is running now. */
+  isActive(): boolean {
+    return this.active !== null;
+  }
+
+  /**
+   * Stop a running download at the person's request. The downloaded part stays
+   * on disk, so starting the download again continues from where it stopped.
+   */
+  async cancel(): Promise<MonarchComponentManagerSnapshot> {
+    if (!this.active) return this.snapshot();
+    this.cancelRequested = true;
+    await this.stop();
+    return this.snapshot();
+  }
+
+  /**
+   * Delete everything this component put under the models root: the model file,
+   * an unpacked folder, a partial download and an unpacking leftover. Paths are
+   * checked to stay inside the models root and never follow links.
+   */
+  async remove(): Promise<MonarchComponentManagerSnapshot> {
+    await this.cancel();
+    if (this.extractTargetPath) {
+      await removeManagedDirectory(this.modelsRoot, this.extractTargetPath);
+      await removeManagedDirectory(
+        this.modelsRoot,
+        path.join(path.dirname(this.extractTargetPath), `.monarch-unpack-${this.spec.id}`),
+      );
+    }
+    await removeManagedFile(this.modelsRoot, this.partialPath);
+    await removeManagedFile(this.modelsRoot, this.targetPath);
+    await this.updateState({
+      phase: 'idle',
+      downloadedBytes: 0,
+      progress: 0,
+      error: null,
+      errorCode: null,
+    });
+    return this.snapshot();
+  }
+
   private async ensureWithRetries(signal: AbortSignal): Promise<MonarchComponentManagerSnapshot> {
     let lastError: unknown = null;
     for (const delayMs of this.retryDelaysMs) {
@@ -527,6 +572,19 @@ export class MonarchModelComponentManager {
         lastError = error;
         if (signal.aborted || isDeterministicComponentFailure(error)) break;
       }
+    }
+    if (signal.aborted && this.cancelRequested) {
+      // Stopped by the person: no error, the partial file waits for "Продолжить".
+      this.cancelRequested = false;
+      const downloadedBytes = Math.max(0, await managedFileSize(this.modelsRoot, this.partialPath).catch(() => 0));
+      await this.updateState({
+        phase: 'idle',
+        downloadedBytes,
+        progress: this.spec.expectedBytes > 0 ? downloadedBytes / this.spec.expectedBytes : 0,
+        error: null,
+        errorCode: null,
+      });
+      return this.snapshot();
     }
     const message = signal.aborted
       ? 'Загрузка остановлена.'
@@ -1278,6 +1336,47 @@ async function isNonEmptyRegularFile(candidate: string): Promise<boolean> {
     if (isMissingFileError(error) || (error && typeof error === 'object' && 'code' in error && error.code === 'ENOTDIR')) return false;
     throw error;
   }
+}
+
+/** A model file removal: refuses links and paths outside the models root. A file
+ * still opened by a running model is reported as `model-component-in-use`. */
+async function removeManagedFile(root: string, candidate: string): Promise<void> {
+  await assertPhysicalFileInside(root, candidate, 'model-component-file-reparse-point');
+  try {
+    await unlink(candidate);
+  } catch (error) {
+    if (isMissingFileError(error)) return;
+    if (isFileInUseError(error)) throw new Error('model-component-in-use');
+    throw error;
+  }
+}
+
+async function removeManagedDirectory(root: string, candidate: string): Promise<void> {
+  const resolvedRoot = path.resolve(root);
+  const resolvedCandidate = path.resolve(candidate);
+  assertPathInside(resolvedRoot, resolvedCandidate, 'model-component-path-outside-models-root');
+  if (resolvedCandidate === resolvedRoot) throw new Error('model-component-path-outside-models-root');
+  let value;
+  try {
+    value = await lstat(resolvedCandidate);
+  } catch (error) {
+    if (isMissingFileError(error)) return;
+    throw error;
+  }
+  if (value.isSymbolicLink() || !value.isDirectory()) throw new Error('model-component-target-reparse-point');
+  const physicalRoot = await realpath(resolvedRoot);
+  assertPathInside(physicalRoot, await realpath(resolvedCandidate), 'model-component-path-outside-models-root');
+  try {
+    await rm(resolvedCandidate, { recursive: true, force: true });
+  } catch (error) {
+    if (isFileInUseError(error)) throw new Error('model-component-in-use');
+    throw error;
+  }
+}
+
+function isFileInUseError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === 'EBUSY' || code === 'EPERM' || code === 'EACCES';
 }
 
 async function pathExists(candidate: string): Promise<boolean> {

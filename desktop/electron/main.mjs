@@ -53,6 +53,7 @@ import {
   resolveImageProviderZoom,
 } from './image-provider-policy.mjs';
 import { createImageProviderDownloadHandler } from './image-provider-download.mjs';
+import { bugReportGmailUrl, bugReportMailto, composeBugReport } from './bug-report.mjs';
 import { loadOrCreateSafeDeviceKey } from '../safe/device-binding.mjs';
 import { authorizeSafeFiles } from './safe-file-authorization.mjs';
 import { normalizeSafeSecurityPolicy } from '../safe/security-policy.mjs';
@@ -773,6 +774,30 @@ ipcMain.handle('monarch:open-logs', async (event) => {
   await mkdir(desktopLogsRoot, { recursive: true });
   const failure = await shell.openPath(desktopLogsRoot);
   return failure ? { ok: false, error: 'open-failed' } : { ok: true };
+});
+
+// Help -> "Сообщить об ошибке": opens a filled-in letter to the fixed address
+// in the mail program (or Gmail in the browser). Monarch sends nothing itself.
+ipcMain.handle('monarch:report-bug', async (event, value) => {
+  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return { ok: false, error: 'untrusted-renderer' };
+  let report;
+  try {
+    report = composeBugReport(value, {
+      version: value?.version || app.getVersion(),
+      os: `Windows ${os.release()} ${os.arch()}`,
+      memory: `${Math.round(os.totalmem() / (1024 ** 3))} ГБ`,
+    });
+  } catch {
+    return { ok: false, error: 'empty' };
+  }
+  const text = `Кому: mrpastio@gmail.com\nТема: ${report.subject}\n\n${report.body}`;
+  const target = value?.via === 'gmail' ? bugReportGmailUrl(report) : bugReportMailto(report);
+  try {
+    await shell.openExternal(target);
+    return { ok: true, text };
+  } catch {
+    return { ok: false, error: 'open-failed', text };
+  }
 });
 
 ipcMain.handle('monarch:speech-diagnostics', (event) => {

@@ -1806,6 +1806,32 @@ export class MonarchApplication {
     return snapshot;
   }
 
+  async cancelModelInstall(
+    role: MonarchInstallableGroupId,
+  ): Promise<MonarchComponentManagerSnapshot | MonarchModelProvisioningSnapshot> {
+    if (!this.modelComponentManager.cancelInstall) return this.modelComponentManager.snapshot();
+    const snapshot = await this.modelComponentManager.cancelInstall(role);
+    this.cachedRuntimeState = null;
+    return snapshot;
+  }
+
+  /** Delete a downloaded model. A model Oscar keeps loaded is unloaded first, once. */
+  async removeModel(
+    role: MonarchInstallableGroupId,
+  ): Promise<MonarchComponentManagerSnapshot | MonarchModelProvisioningSnapshot> {
+    const manager = this.modelComponentManager;
+    if (!manager.removeModel) return manager.snapshot();
+    try {
+      return await manager.removeModel(role);
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'model-component-in-use') throw error;
+      await this.contextClient.unloadModel().catch(() => undefined);
+      return await manager.removeModel(role);
+    } finally {
+      this.cachedRuntimeState = null;
+    }
+  }
+
   async skipModelOnboarding(): Promise<MonarchComponentManagerSnapshot | MonarchModelProvisioningSnapshot> {
     if (!this.modelComponentManager.skipOnboarding) return this.modelComponentManager.snapshot();
     const snapshot = await this.modelComponentManager.skipOnboarding();

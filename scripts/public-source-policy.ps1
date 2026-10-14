@@ -115,6 +115,8 @@ $MonarchPublicBlockedFilePatterns = @(
   '^tests/architecture/',
   '^tests/fixtures/architecture/',
   '^docs/release/MONARCH_0\.2\.5_COMPLETE_CHANGELOG\.md$',
+  # Internal scope review of 0.3 (covers Astra and unpublished boundaries).
+  '^docs/release/MONARCH_0\.3_SIGNIFICANT_CHANGES_FROM_0\.2\.5\.md$',
   '^docs/OSCAR_AGENT_RUNTIME_QA_[^/]+\.md$',
   '^docs/(10_REPAIR_PLAN_[^/]+|CONTROL_PLANE_ARCHITECTURE_AUDIT_[^/]+|TECH_AUDIT_[^/]+|TECH_REVIEW_[^/]+|WORK_CHECKPOINT_[^/]+)\.md$',
   '^docs/astra/STRUCTURAL_PROGRESS\.md$',

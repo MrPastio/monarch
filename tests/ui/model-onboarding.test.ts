@@ -28,6 +28,9 @@ describe('first-run model setup UI', () => {
     expect(html).toContain('Где будет думать Оскар?');
     expect(onboarding).toContain("if (flow.work === 'hybrid') steps.push('local', 'max');");
     expect(onboarding).toContain("saveModelPreference({ work: flow.work || 'local', maxLocalFallback: flow.fallback })");
+    // Installs that already had models (an update from 0.2.x) still get the setup once.
+    expect(onboarding).toContain('if (!required && setupNeverFinished(components) && !flow.open && !flow.finishing)');
+    expect(onboarding).toContain("if (!completion || completion === 'not-applicable' || completion === 'pending') return false;");
     // MAX connects through the same bridge and the same three disclosures as Settings → MAX.
     for (const consent of ['nonLocalProcessing', 'selectedContext', 'providerTerms']) expect(html).toContain(`data-setup-consent="${consent}"`);
     expect(onboarding).toContain('bridge.configureProvider(input)');

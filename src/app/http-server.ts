@@ -109,6 +109,15 @@ export interface MonarchHttpPrincipal {
   desktopAttestation: Exclude<MonarchHttpCredentialState, 'disabled'>;
 }
 
+const MONARCH_INSTALLABLE_GROUP_IDS: ReadonlySet<MonarchInstallableGroupId> = new Set<MonarchInstallableGroupId>([
+  'gemma4-fast',
+  'gemma4-balanced',
+  'qwen3.8-27b-pro',
+  'coder',
+  'coder-backup',
+  'voice-recognition',
+  'memory-search',
+]);
 const MAX_JSON_BODY_BYTES = 50 * 1024 * 1024; // 50MB
 const MAX_OSCAR_DISPOSITION_BODY_BYTES = 128 * 1024;
 const INTERNAL_ERROR_MESSAGE = 'Monarch столкнулся с внутренней ошибкой. Детали остались в локальных логах.';
@@ -830,15 +839,7 @@ async function handleRequest(
         message: 'Выбери хотя бы одну модель.',
       } satisfies JsonError;
     }
-    const allowed = new Set<MonarchInstallableGroupId>([
-      'gemma4-fast',
-      'gemma4-balanced',
-      'qwen3.8-27b-pro',
-      'coder',
-      'coder-backup',
-      'voice-recognition',
-      'memory-search',
-    ]);
+    const allowed = MONARCH_INSTALLABLE_GROUP_IDS;
     const roles = [...new Set(body.roles.map((value) => String(value).trim()))];
     if (!roles.every((role): role is MonarchInstallableGroupId => allowed.has(role as MonarchInstallableGroupId))) {
       throw {
@@ -972,6 +973,35 @@ async function handleRequest(
       catch (error) { throw customError(error); }
       return;
     }
+  }
+
+  const modelAction = url.pathname.match(/^\/api\/models\/(cancel|remove)$/u);
+  if (request.method === 'POST' && modelAction) {
+    enforceMutationGuards(principal);
+    const body = await readJsonBody<{ role?: unknown }>(request, 1024);
+    const role = String(body.role || '').trim();
+    if (!MONARCH_INSTALLABLE_GROUP_IDS.has(role as MonarchInstallableGroupId)) {
+      throw {
+        statusCode: 400,
+        code: 'model-selection-invalid',
+        message: 'Неизвестная модель.',
+      } satisfies JsonError;
+    }
+    try {
+      sendJson(response, 200, modelAction[1] === 'cancel'
+        ? await app.cancelModelInstall(role as MonarchInstallableGroupId)
+        : await app.removeModel(role as MonarchInstallableGroupId));
+    } catch (error) {
+      if (error instanceof Error && error.message === 'model-component-in-use') {
+        throw {
+          statusCode: 409,
+          code: 'model-in-use',
+          message: 'Модель сейчас занята. Дождись конца ответа или закрой Coder и попробуй ещё раз.',
+        } satisfies JsonError;
+      }
+      throw error;
+    }
+    return;
   }
 
   if (request.method === 'POST' && url.pathname === '/api/models/onboarding/skip') {
