@@ -341,7 +341,7 @@
     },
     "scripts/ci-test-environment.ps1": {
       "scope": "scripts",
-      "objectId": "b2787e01c24855140d1a7368dcf6f45917c1c95f"
+      "objectId": "3b0258ebeab34eb26e2133d9f2b4bc87ed5e1912"
     },
     "scripts/owner-authority.mjs": {
       "scope": "scripts",
@@ -1585,7 +1585,7 @@
     },
     "tests/fixtures/agent-v3/product-pilot-renderer-check.mjs": {
       "scope": "tests",
-      "objectId": "51d53cba1cf8df2c8e5eba6cb2f7805a8bde1013"
+      "objectId": "f2b21fc8831ef280bf63c3ee4ea30bcfb742a66e"
     },
     "tests/fixtures/agent-v3/reference-cases.json": {
       "scope": "tests",

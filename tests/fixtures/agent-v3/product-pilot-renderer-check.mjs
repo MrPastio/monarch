@@ -454,7 +454,14 @@ try {
   // The MAX entry lives in the model menu. With nothing connected one click
   // opens Settings -> MAX; with a ready service one click toggles MAX, asking
   // once about sharing memory (the fixture declines, so nothing leaves).
+  // On a slow machine the memory question can open after the decline wait
+  // below; answer it before anything else is clicked behind the modal.
+  const declineOpenMemoryQuestion = async () => {
+    const open = page.locator('#max-memory-consent-dialog[open]');
+    if (await open.count()) await open.locator('button[value="declined"]').click();
+  };
   const openModelMenu = async () => {
+    await declineOpenMemoryQuestion();
     await page.locator('.nav-item[data-scroll-target="oscar-section"]').click();
     // The diagnostic pilot docks the entry in its composer; the ordinary chat
     // keeps it inside the model menu.
@@ -470,7 +477,10 @@ try {
   };
   const selectMaxFromMenu = async () => {
     await openModelMenu();
-    await page.locator('[data-astra-max-open][data-state="ready"]').click();
+    // Connecting a service already turns MAX on; a second click would turn it off.
+    const ready = page.locator('[data-astra-max-open][data-state="ready"]');
+    await ready.waitFor({ timeout: 10_000 });
+    if (await ready.getAttribute('data-selected') !== 'true') await ready.click();
     const memory = page.locator('#max-memory-consent-dialog[open]');
     await memory.waitFor({ timeout: 3_000 }).then(() => memory.locator('button[value="declined"]').click(), () => {});
     await page.waitForFunction(() => document.querySelector('[data-astra-max-open]')?.dataset.selected === 'true',
@@ -508,6 +518,19 @@ try {
         null, { timeout: 15_000 });
       await page.locator('#max-connection-dialog[open]').waitFor({ state: 'detached', timeout: 10_000 });
       if (!maxUnselectedModelTask) await selectMaxFromMenu();
+      else {
+        // "Connect and turn on MAX" turns it on after the memory question; the
+        // person then turns it off again in the model menu, which must stick.
+        const memory = page.locator('#max-memory-consent-dialog[open]');
+        await memory.waitFor({ timeout: 3_000 }).then(() => memory.locator('button[value="declined"]').click(), () => {});
+        await page.waitForFunction(() => document.querySelector('[data-astra-max-open]')?.dataset.selected === 'true',
+          null, { timeout: 10_000 });
+        await openModelMenu();
+        await page.locator('[data-astra-max-open][data-selected="true"]').click();
+        await page.waitForFunction(() => document.querySelector('[data-astra-max-open]')?.dataset.selected === 'false',
+          null, { timeout: 10_000 });
+        await closeModelMenu();
+      }
       const groqAfterSave = await maxGroqView();
       Object.assign(maxSetup, {
         stateAfter: await page.locator('[data-astra-max-open]').getAttribute('data-state'),
@@ -533,6 +556,7 @@ try {
       await page.locator('#max-connection-dialog[open]').waitFor({ state: 'detached', timeout: 10_000 });
     }
     await closeModelMenu();
+    await declineOpenMemoryQuestion();
     await page.locator('.nav-item[data-scroll-target="oscar-section"]').click();
   }
   let uiMaxModelCreate = null;
@@ -857,7 +881,9 @@ function descendantProcesses(parentPid) {
   return items.filter(descendant).map(item => {
     const { processId, name, commandLine } = item;
     return { processId, exactSourceChild: Number.isSafeInteger(processId) && processId > 0 && /^node\.exe$/iu.test(name)
-      && commandLine.toLowerCase().includes(path.resolve('src/main.ts').toLowerCase())
+      // Source runs start either src/main.ts or the development runtime bundle.
+      && (commandLine.toLowerCase().includes(path.resolve('src/main.ts').toLowerCase())
+        || /\\runtime\\desktop\\development\\monarch-server\.mjs(?:\s|$)/iu.test(commandLine))
       && /(?:^|\s)serve(?:\s|$)/iu.test(commandLine) && /(?:^|\s)--port(?:\s|$)/iu.test(commandLine) };
   });
 }
