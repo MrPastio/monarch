@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { MAX_CLOUD_AGREEMENT, MAX_CLOUD_PROVIDERS, cloudRole, parseCloudRole } from '../../src/agent-v3/max-cloud-catalog';
 import { MaxCloudProvider } from '../../src/agent-v3/max-cloud-provider';
 import { MaxCloudHost } from '../../src/agent-v3/max-cloud-host';
@@ -228,7 +230,7 @@ describe('MAX provider transport and exact ownership', () => {
   });
   it('keeps encrypted connections separate and old credentials after failed replacement; binds real native transport', async () => {
     // Exact synthetic E: fixture retained as evidence; no user data or production keys.
-    const root = await mkdtemp('E:/MonarchArtifacts/max-providers-test-');
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-max-providers-test-'));
     const stores = new Map<string, AstraMaxSettingsStore>();
     const store = (providerId: any) => {
       if (!stores.has(providerId)) stores.set(providerId, new AstraMaxSettingsStore({ deployment: 'isolated-validation', rootPath: root, providerId,
@@ -264,10 +266,10 @@ describe('MAX provider transport and exact ownership', () => {
       expect(result).toEqual({ text: 'real transport fixture', model: 'gpt-4.1' }); expect(host.proposePrepared).not.toHaveBeenCalled();
       await expect(requestMaxNative({ role: cloudRole('openai', 'other-model'), messages: [{ role: 'user', content: 'hi' }] }, undefined,
         { MONARCH_MAX_NATIVE_ENDPOINT: server.endpoint, MONARCH_MAX_NATIVE_TOKEN: server.bearerToken })).rejects.toThrow('connection-changed');
-    } finally { await server.close(); }
+    } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
   });
   it('changes a stored model without a renderer key and keeps the previous model after a failed check', async () => {
-    const root = await mkdtemp('E:/MonarchArtifacts/max-model-update-');
+    const root = await mkdtemp(path.join(tmpdir(), 'monarch-max-model-update-'));
     const stores = new Map<string, AstraMaxSettingsStore>();
     const store = (providerId: any) => {
       if (!stores.has(providerId)) stores.set(providerId, new AstraMaxSettingsStore({ deployment: 'isolated-validation', rootPath: root, providerId,
@@ -308,6 +310,7 @@ describe('MAX provider transport and exact ownership', () => {
     await expect(cloud.propose({ role: cloudRole('openai', 'gpt-4.1'), messages: [{ role: 'user', content: 'hi' }],
       responseSchema: schema, maxTokens: 1024 })).rejects.toThrow('connection-changed');
     await expect(cloud.updateModel({ providerId: 'groq', modelId: 'openai/gpt-oss-20b' })).rejects.toThrow('model-retired');
+    await rm(root, { recursive: true, force: true });
   });
 });
 

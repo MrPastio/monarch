@@ -462,10 +462,12 @@ def test_backlog_drain_stops_at_aggregate_processing_budget(
     supervisor = _supervisor(config)
     supervisor._stage_sensor_poll(_signature_sensor("network_sensor", count=3))
     monkeypatch.setattr(supervisor, "_handle_assessment", lambda _assessment: None)
+    # Script only the supervisor's clock: the state lock shares the real
+    # ``time`` module and must keep its own monotonic deadlines.
     moments = iter((100.0, 111.0))
     monkeypatch.setattr(
-        "monarch_security.supervisor.time.monotonic",
-        lambda: next(moments),
+        "monarch_security.supervisor.time",
+        SimpleNamespace(monotonic=lambda: next(moments), time=time.time, sleep=time.sleep),
     )
 
     assert supervisor._drain_sensor_backlog(3) == 1

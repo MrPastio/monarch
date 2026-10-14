@@ -38,8 +38,8 @@
       "basePathDigest": "ba95a0fd3f6aba4b53aa29e399e92e291ce861be38ec5e16f95074a40648012d"
     },
     "scripts": {
-      "baseCount": 13,
-      "basePathDigest": "455e6d594d2fda4a6703982c6d46ec18bff4771da52cb734b0e34f21e4058064"
+      "baseCount": 12,
+      "basePathDigest": "dbb9f5c2361c763c75905c61b1284440879999edcdc2604e5401a3178c41d675"
     },
     "security": {
       "baseCount": 92,
@@ -54,8 +54,8 @@
       "basePathDigest": "226567c0da72e6886f86644a118cebf98207a98ebf7434d8ae91f46c80317122"
     },
     "tests": {
-      "baseCount": 189,
-      "basePathDigest": "8130d4105ab6462f31daa25e1d7dc1a41a599248d201d7dd34a3407e8a48e6e4"
+      "baseCount": 188,
+      "basePathDigest": "1b224ed6ef24dee21947b41333e51cf418434e329d6e66fec044d94a66e5c98a"
     },
     "tools": {
       "baseCount": 10,
@@ -339,6 +339,10 @@
       "scope": "oscar",
       "objectId": "211bc3408b7b9ac938759c4a425479cb10266134"
     },
+    "scripts/ci-test-environment.ps1": {
+      "scope": "scripts",
+      "objectId": "1bbd12321521b3e5de02f921c88411811708dba8"
+    },
     "scripts/owner-authority.mjs": {
       "scope": "scripts",
       "objectId": "315314584431ec0692f784cb5f5a2adb05421b8b"
@@ -353,7 +357,7 @@
     },
     "security/tests/test_supervisor_backlog.py": {
       "scope": "security",
-      "objectId": "da08643a38db237786b79c0c8c17864457dbb483"
+      "objectId": "2ab48207a4844662d96166cfb77de91131d834eb"
     },
     "src/authority/owner-authority.ts": {
       "scope": "src",
@@ -1581,7 +1585,7 @@
     },
     "tests/fixtures/agent-v3/product-pilot-renderer-check.mjs": {
       "scope": "tests",
-      "objectId": "51d53cba1cf8df2c8e5eba6cb2f7805a8bde1013"
+      "objectId": "f2b21fc8831ef280bf63c3ee4ea30bcfb742a66e"
     },
     "tests/fixtures/agent-v3/reference-cases.json": {
       "scope": "tests",
@@ -2141,7 +2145,7 @@
     },
     "security/tests/test_inspection_native.py": {
       "scope": "security",
-      "objectId": "daf95d958a90bfb5ff22497dbe3d9da6ac55b008"
+      "objectId": "8756b05beed5450fee469c686b1353ee70de88a4"
     },
     "security/tests/test_inspection_queue.py": {
       "scope": "security",

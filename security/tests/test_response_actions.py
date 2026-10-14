@@ -466,6 +466,12 @@ class ResponseActionTests(unittest.TestCase):
                 os.symlink(target, link, target_is_directory=True)
             except OSError as exc:
                 self.skipTest(f"Windows symlink fixture unavailable: {exc}")
+            try:
+                _attest_response_runtime((target,))
+            except ResponseActionError as exc:
+                # Hosted runners give broad write access on the temp folder's
+                # parents; attestation then refuses before reaching the link.
+                self.skipTest(f"Temporary folder ancestors are not trusted here: {exc}")
 
             with self.assertRaisesRegex(ResponseActionError, "reparse point"):
                 _attest_response_runtime((link,))

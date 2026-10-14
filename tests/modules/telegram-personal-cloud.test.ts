@@ -9,7 +9,8 @@ async function fixture() {
   const dataRoot = await mkdtemp(path.join(tmpdir(), 'monarch-cloud-sync-')); roots.push(dataRoot);
   let selected = { available: true, providerId: 'groq', modelId: 'openai/gpt-oss-120b', role: 'max:groq:fixture' };
   let fail = false; let paused = false; let revision = 0; let remote: any = {}; const attempts: any[] = [];
-  const broker = createTelegramSecretBroker({ dataRoot, safeStorage: storage, selectedMax: async () => selected,
+  // These cases cover synchronization; the owner allowed sharing the MAX key (F-09 'off').
+  const broker = createTelegramSecretBroker({ dataRoot, safeStorage: storage, selectedMax: async () => selected, cloudKeyPolicy: async () => 'off',
     withSelectedMaxConnection: async (consume: any) => consume({ ...selected, apiKey: 'synthetic-fixture' }),
     cloudSetup: { configure: async (input: any) => { attempts.push(input); if (fail) throw Error('synthetic network loss'); remote = input; } },
     fetchImpl: async (url: string, options: any) => {

@@ -51,10 +51,13 @@ describe('Coder Mode', () => {
 
   it.runIf(process.platform === 'win32')('keeps development sandbox payloads on the source drive instead of a temporary project drive', async () => {
     const monarchRoot = await mkdtemp(path.join(tmpdir(), 'monarch-coder-runtime-placement-'));
+    const configuredRoot = process.env.MONARCH_CODER_SANDBOX_ROOT;
+    delete process.env.MONARCH_CODER_SANDBOX_ROOT;
     try {
       const module = new CoderModule({ monarchRoot });
       expect(module.sandbox.runtimeRoot).toBe(path.resolve(path.parse(process.cwd()).root, 'MonarchCoderSandbox'));
     } finally {
+      if (configuredRoot !== undefined) process.env.MONARCH_CODER_SANDBOX_ROOT = configuredRoot;
       await rm(monarchRoot, { recursive: true, force: true });
     }
   });
@@ -700,7 +703,9 @@ describe('Coder Mode', () => {
       await mkdir(later);
       const { execFileSync } = await import('node:child_process');
       const canonical = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-        `(Get-Acl -LiteralPath '${later.replaceAll("'", "''")}').AreAccessRulesCanonical`], { encoding: 'utf8', windowsHide: true }).trim();
+        // .NET directly: hosted runners cannot always autoload the Get-Acl module.
+        `[IO.Directory]::GetAccessControl('${later.replaceAll("'", "''")}').AreAccessRulesCanonical`],
+        { encoding: 'utf8', windowsHide: true }).trim();
       expect(canonical).toBe('True');
     } finally {
       await rm(monarchRoot, { recursive: true, force: true });

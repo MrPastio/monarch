@@ -76,6 +76,9 @@ $MonarchPublicBlockedDirectoryPatterns = @(
   '^docs/plans/OPEN_STEPS_[^/]+\.md$',
   '^docs/safe/RESUMPTION_[^/]+\.md$',
   '^docs/security/RELIABILITY_ROADMAP\.md$',
+  # Development agent admission runs on the owner's checkout with config/ (not public).
+  '^scripts/subordinate-agent-control\.mjs$',
+  '^tests/subordinate-agent-control\.test\.ts$',
   '^LLM models($|/)',
   '^models($|/)',
   '^local-models($|/)',
