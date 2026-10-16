@@ -434,7 +434,7 @@ describe('Windows installer and public snapshot boundary', () => {
       reviewedBinary: true,
       reviewedBinaryHash: true,
       alteredReviewedBinaryHash: false,
-      reviewedBinaryCount: 46,
+      reviewedBinaryCount: 42,
       reviewedBinaryFailures: 0,
       reviewedBinaryOverLimit: 0,
       csharpText: true,
@@ -1176,7 +1176,7 @@ describe('Windows installer and public snapshot boundary', () => {
     expect(read('desktop/electron/main.mjs')).toContain(
       "process.platform === 'win32' ? 'icon.ico' : 'icon.png'",
     );
-    expect(read('desktop/electron/main.mjs')).toContain('icon: desktopIconPath');
+    expect(read('desktop/electron/main.mjs')).toContain('icon: themedDesktopIconPath()');
     expect(read('tools/launcher/MonarchLauncher.cs')).toContain(
       'private const string LauncherVersion = "1.0.4"',
     );

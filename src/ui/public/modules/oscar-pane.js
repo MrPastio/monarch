@@ -5,6 +5,7 @@ import { plainActivity } from './ui-language.js';
 import { copyTextToClipboard } from './clipboard.js';
 import { closeOscarComposerMenu } from './oscar-plus-menu.js';
 import { createOscarGreeting } from './oscar-greetings.js';
+import { monarchMarkSvg } from './brand-mark.js';
 import {
   armAgentTaskApproval,
   cancelAgentTask,
@@ -3822,7 +3823,7 @@ export function renderOscar() {
     animatedOscarUserMessages.clear();
     elements.oscarThread.innerHTML = `
       <div class="oscar-empty-focus">
-        <div class="empty-mark" aria-hidden="true"><img src="/assets/brand/monarch-mark.png" alt="" /></div>
+        <div class="empty-mark" aria-hidden="true">${monarchMarkSvg()}</div>
         <span class="empty-kicker">Oscar Workspace</span>
         <h1>${escapeHtml(emptyOscarGreeting.title)}</h1>
         ${emptyOscarGreeting.copy ? `<p>${escapeHtml(emptyOscarGreeting.copy)}</p>` : ''}

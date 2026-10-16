@@ -73,6 +73,7 @@ export function initHelpPanel(container, { escapeHtml, navigate, checkOscar, ope
       for (const button of form.querySelectorAll('button')) button.disabled = false;
     }
   };
+  container.addEventListener('monarch:open-bug-report', () => showForm(true));
   form?.addEventListener('submit', (event) => { event.preventDefault(); void sendReport('mail'); });
   form?.addEventListener('click', (event) => {
     if (event.target.closest?.('[data-bug-report-via="gmail"]')) void sendReport('gmail');

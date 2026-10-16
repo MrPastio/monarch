@@ -55,11 +55,23 @@ export function initUpdatePane(documentRef = document, desktop = window.monarchD
   });
   unsubscribe?.();
   unsubscribe = desktop.updates.onStateChanged?.(renderUpdateSnapshot) || null;
+  desktop.updates.onOpenRequested?.(() => openUpdatesPanel(documentRef));
   void desktop.updates.getState()
     .then(renderUpdateSnapshot)
     .then(() => desktop.updates.check())
     .then(renderUpdateSnapshot)
     .catch((error) => renderBridgeError(error));
+}
+
+/** Settings → Система → «Обновления», from the Windows notification. */
+export function openUpdatesPanel(documentRef = document) {
+  documentRef.defaultView?.dispatchEvent(new CustomEvent('monarch:navigate', { detail: { view: 'settings-section', subview: 'system' } }));
+  const panel = documentRef.querySelector('.monarch-update-panel');
+  const tabs = documentRef.querySelector('.system-switcher');
+  if (!panel || !tabs) return;
+  const groups = [...documentRef.querySelectorAll('[data-settings-panel="system"]')]
+    .filter((group) => !group.classList.contains('legacy-system-diagnostics') && !group.classList.contains('service-switcher'));
+  tabs.querySelectorAll('[role="tab"]')[groups.indexOf(panel)]?.click();
 }
 
 export function primaryIntentForState(state) {

@@ -50,8 +50,8 @@
       "basePathDigest": "20dba928733603f0fb653c788a6a7b1d2249615ba901e24d64e47f91a31915d0"
     },
     "src": {
-      "baseCount": 288,
-      "basePathDigest": "226567c0da72e6886f86644a118cebf98207a98ebf7434d8ae91f46c80317122"
+      "baseCount": 285,
+      "basePathDigest": "5a937fc043fdd45444c593dac7250a485ea986a81aa89ce21bf4a75ce442deee"
     },
     "tests": {
       "baseCount": 188,
@@ -455,18 +455,6 @@
       "scope": "src",
       "objectId": "28d5592a25267b9b2dd070d0bb04cd78151f3677"
     },
-    "src/ui/public/assets/brand/monarch-assembly-crown.png": {
-      "scope": "src",
-      "objectId": "d9a6777a2a56483784ab776ec23107f267bc8dd6"
-    },
-    "src/ui/public/assets/brand/monarch-assembly-shield.png": {
-      "scope": "src",
-      "objectId": "d512ecc6be415da466bf1d78f51d39e32d322f9e"
-    },
-    "src/ui/public/assets/fonts/MonarchDisplay-Bold.woff2": {
-      "scope": "src",
-      "objectId": "d6427f6c4a557e8565c8dec96ecd8d6a91d5ccdb"
-    },
     "src/ui/public/assets/brand/monarch-incognito-hooded.png": {
       "scope": "src",
       "objectId": "53d2fed60a9ae4ec8f239af5a52e65dabed93b74"
@@ -765,7 +753,7 @@
     },
     "src/ui/public/ui-refresh.css": {
       "scope": "src",
-      "objectId": "fd3510f514c9c84b26ccd6f05b2cc33b56263483"
+      "objectId": "6aeca654f5607997e9a8ca1bcee2aa88dcdc7718"
     },
     "tests/core/durable-json-file.test.ts": {
       "scope": "tests",
@@ -1177,7 +1165,7 @@
     },
     "src/app/astra-oscar-bridge.ts": {
       "scope": "src",
-      "objectId": "f23185cf1c3fd7ccf070c9dcffce3d106df4dbf9"
+      "objectId": "62ac207778b5ee2b7a47b03316308e3be38dce91"
     },
     "src/app/astra-oscar-http.ts": {
       "scope": "src",
@@ -1737,15 +1725,15 @@
     },
     "src/ui/public/i18n/bg.json": {
       "scope": "src",
-      "objectId": "41079029b6852131fa67897f2dcd539113c4a851"
+      "objectId": "d32f02f7b2df15239da0b8e5644420041f336263"
     },
     "src/ui/public/i18n/en.json": {
       "scope": "src",
-      "objectId": "7d65c3369096246df3b79cb6d1c76ce01ac96495"
+      "objectId": "a044a58b23c39ce92b4c4f3865f1741ff6d575e4"
     },
     "src/ui/public/i18n/uk.json": {
       "scope": "src",
-      "objectId": "dd77a14d5d3d46ebb1a5eb3d97b07d6142b0d6fc"
+      "objectId": "b33f55e09ce7f47697d642127d587a7f7ba4e61a"
     },
     "src/ui/public/modules/access-matrix.js": {
       "scope": "src",
@@ -1769,7 +1757,7 @@
     },
     "src/ui/public/modules/help-panel.js": {
       "scope": "src",
-      "objectId": "13273c5824612923ef3224b5fa5f804cbcc2bf42"
+      "objectId": "deaddc48e20f32bbe5578e98a3fbe29c7e608be3"
     },
     "src/ui/public/modules/oscar-starter-prompts.js": {
       "scope": "src",
@@ -1965,7 +1953,7 @@
     },
     "desktop/electron/preload.cjs": {
       "scope": "desktop",
-      "objectId": "39746b6e96551745ae6866c91fc09b5b343b2263"
+      "objectId": "9aee0424c880060eab007ad936e7f86c929f64d3"
     },
     "desktop/electron/profile-data-key.mjs": {
       "scope": "desktop",
@@ -2265,7 +2253,7 @@
     },
     "src/ui/public/paper-pixel.css": {
       "scope": "src",
-      "objectId": "b30d12e6f199acf3762764babd25504e1a8af137"
+      "objectId": "d5d4f90d300fbace876d2dd2d02524f602de6d5a"
     },
     "tests/agent-v3/max-cloud-limits.test.ts": {
       "scope": "tests",
@@ -2446,6 +2434,22 @@
     "release/notes/v0.3.0.98.md": {
       "scope": "release",
       "objectId": "5547dd6959d9527bccd3bdd09be107a4885cfc1b"
+    },
+    "release/notes/v0.3.0.99.md": {
+      "scope": "release",
+      "objectId": "c4399a3aaefa3c66defe017926b223b2298e90c6"
+    },
+    "src/ui/public/modules/brand-mark.js": {
+      "scope": "src",
+      "objectId": "9e9e0f3ea3af5c97d812a2da6148d8f04dee05fc"
+    },
+    "assets/icon-dark.ico": {
+      "scope": "assets",
+      "objectId": "ac2364689a7498a43a19ff5df41fa953368dfde9"
+    },
+    "assets/icon-light.ico": {
+      "scope": "assets",
+      "objectId": "93538ad9fb9bdabb7669bb3d65e90e9905150667"
     }
   }
 }

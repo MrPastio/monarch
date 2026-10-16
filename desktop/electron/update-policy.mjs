@@ -22,7 +22,10 @@ export function resolveDesktopUpdatePolicy({
     });
   }
 
-  if (!isPackaged) {
+  // The installed launcher starts electron.exe with the app folder, so
+  // isPackaged is false there too; only a run without an install root is a
+  // development workspace.
+  if (!isPackaged && !installRoot) {
     return Object.freeze({
       mode: 'development',
       canInstall: false,

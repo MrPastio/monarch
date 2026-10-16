@@ -1783,5 +1783,7 @@
 "Что ты делал, что ожидал и что получилось вместо этого.": "What you did, what you expected and what happened instead.",
 "В письмо добавятся версия Monarch, Windows, объём памяти и состояние моделей. Переписки, ключей и файлов в нём нет. Журналы можно приложить вручную — кнопка «Открыть журналы» выше.": "The letter includes the Monarch version, Windows, memory size and model state. No chats, keys or files. You can attach the logs yourself — use “Open logs” above.",
 "Открыть письмо": "Open the letter",
-"Через Gmail в браузере": "Via Gmail in the browser"
+"Через Gmail в браузере": "Via Gmail in the browser",
+"Поймал баг?": "Caught a bug?",
+"Поймал баг? Отдай его нам": "Caught a bug? Hand it over"
 }

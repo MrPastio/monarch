@@ -148,6 +148,12 @@ contextBridge.exposeInMainWorld('monarchDesktop', {
       ipcRenderer.on('monarch:update-state-changed', handler);
       return () => ipcRenderer.removeListener('monarch:update-state-changed', handler);
     },
+    onOpenRequested: (listener) => {
+      if (typeof listener !== 'function') return () => {};
+      const handler = () => listener();
+      ipcRenderer.on('monarch:open-updates', handler);
+      return () => ipcRenderer.removeListener('monarch:open-updates', handler);
+    },
   }),
   onSafeChatStatus: (listener) => {
     if (typeof listener !== 'function') return () => {};

@@ -1201,12 +1201,9 @@ html:root[data-design="pp"] {
 }
 
 /* ============================================================= startup */
-/* The owner's crest assembles on plain paper; the wordmark is set in Onest. */
+/* The mark meets and leaves on plain paper. */
 html:root[data-design="pp"] {
   & .startup-motion { background: var(--pp-paper); }
-  & .startup-assembly-backdrop { background: var(--pp-paper); }
-  & .startup-assembly-glow { display: none; }
-  & .startup-assembly-word { color: var(--pp-ink); font-family: var(--pp-font); font-weight: 700; letter-spacing: -.01em; }
   & .startup-motion:not(.is-exiting) + .app-shell { filter: none; }
 }
 

@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   MonarchUpdateService,
   compareSemver,
+  createUpdateAvailableNotifier,
   startBackgroundUpdateChecks,
   verifySignedManifest,
 } from '../../desktop/electron/update-service.mjs';
@@ -663,6 +664,13 @@ describe('Monarch UpdateService recovery', () => {
       await vi.advanceTimersByTimeAsync(5000);
       expect(check).toHaveBeenCalledTimes(2);
 
+      // The first check comes shortly after start, not only after the interval.
+      const early = vi.fn(async () => undefined);
+      const stopEarly = startBackgroundUpdateChecks({ installationPolicy: { canInstall: true }, state: 'idle', activeOperation: null, check: early }, { intervalMs: 60_000, initialDelayMs: 500 });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(early).toHaveBeenCalledTimes(1);
+      stopEarly();
+
       const blocked = vi.fn();
       startBackgroundUpdateChecks({ installationPolicy: { canInstall: false }, state: 'idle', check: blocked }, { intervalMs: 1000 });
       await vi.advanceTimersByTimeAsync(5000);
@@ -670,5 +678,15 @@ describe('Monarch UpdateService recovery', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+  it('announces each new version once and never for a blocked install', () => {
+    const show = vi.fn();
+    const announce = createUpdateAvailableNotifier(show);
+    expect(announce({ state: 'checking' })).toBe(false);
+    expect(announce({ state: 'update-available', release: { version: '0.3.0.99' } })).toBe(true);
+    expect(announce({ state: 'update-available', release: { version: '0.3.0.99' } })).toBe(false);
+    expect(announce({ state: 'update-available', release: { version: '0.3.1.0' }, installation: { canInstall: false } })).toBe(false);
+    expect(announce({ state: 'update-available', release: { version: '0.3.1.0' } })).toBe(true);
+    expect(show).toHaveBeenCalledTimes(2);
   });
 });

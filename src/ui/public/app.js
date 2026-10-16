@@ -23,6 +23,7 @@ import { initSharingPane, renderSharingPane } from './modules/sharing-pane.js';
 import { deriveOscarMascotRuntime, initMascotInteraction, syncMascotFromRuntime } from './modules/mascot-controller.js';
 import { initSettingsPane } from './modules/settings-pane.js';
 import { initUpdatePane } from './modules/update-pane.js';
+import { mountMonarchMarks } from './modules/brand-mark.js';
 import { initVoiceInput } from './modules/voice-input.js';
 import { initOscarVoiceMode } from './modules/oscar-voice-mode.js';
 import { initVoiceWakeService } from './modules/voice-wake-service.js';
@@ -117,14 +118,10 @@ async function copyOscarCodeBlock(button) {
   }, 1400));
 }
 
-const DEFAULT_STARTUP_TYPE = 'assembly';
+const DEFAULT_STARTUP_TYPE = 'mark';
 const STARTUP_TYPE_LABELS = Object.freeze({
-  generated: 'Generated 3D',
-  assembly: 'Сборка знака',
+  mark: 'Знак Monarch',
   disabled: 'Отключена',
-});
-const STARTUP_DURATIONS = Object.freeze({
-  generated: 2700,
 });
 const startupMotionTemplate = document.querySelector('#startup-motion')?.cloneNode(true) || null;
 let activeStartupPreviewCleanup = null;
@@ -143,6 +140,37 @@ let safeLaunchFeedbackTimer = 0;
 let securityStatusRequested = false;
 let componentStateTimer = 0;
 let astraProductPilotActive = false;
+
+/** Sidebar "Поймал баг?": the bug runs off to the right, then the letter form
+ * opens in Settings -> System -> "Если что-то не работает". Desktop only. */
+function initBugNavItem() {
+  const button = document.querySelector('[data-report-bug]');
+  if (!button || typeof window.monarchDesktop?.reportBug !== 'function') return;
+  button.hidden = false;
+  button.addEventListener('click', () => {
+    const open = () => {
+      window.dispatchEvent(new CustomEvent('monarch:navigate', { detail: { view: 'settings-section', subview: 'system' } }));
+      const help = document.querySelector('#monarch-help');
+      const panel = help?.closest('[data-settings-panel="system"]');
+      const groups = [...document.querySelectorAll('[data-settings-panel="system"]')]
+        .filter((group) => !group.classList.contains('legacy-system-diagnostics') && !group.classList.contains('service-switcher'));
+      document.querySelectorAll('.system-switcher [role="tab"]')[groups.indexOf(panel)]?.click();
+      help?.dispatchEvent(new CustomEvent('monarch:open-bug-report'));
+    };
+    const icon = button.querySelector('.nav-bug-icon');
+    if (reducedUiMotion.matches || !icon?.animate) { open(); return; }
+    icon.getAnimations().forEach((animation) => animation.cancel());
+    // The bug scurries off along the row, the form opens as it leaves.
+    icon.animate([
+      { transform: 'translateX(0) rotate(0deg)' },
+      { transform: 'translateX(4px) rotate(90deg)', offset: 0.25 },
+      { transform: 'translateX(150px) rotate(90deg)', opacity: 0, offset: 0.6 },
+      { transform: 'translateX(-14px) rotate(90deg)', opacity: 0, offset: 0.61 },
+      { transform: 'translateX(0) rotate(0deg)', opacity: 1 },
+    ], { duration: 1100, easing: 'cubic-bezier(.4, 0, .2, 1)' });
+    setTimeout(open, 260);
+  });
+}
 
 /** What a bug report says about the app: look, language and model state. No chats, keys or paths. */
 function describeAppForBugReport() {
@@ -731,6 +759,7 @@ async function loadState() {
 
 // Initialization Flow
 async function init() {
+  mountMonarchMarks();
   initStartupMotion();
   initMotionSystem();
   applyPreferences();
@@ -763,6 +792,10 @@ async function init() {
     reportContext: describeAppForBugReport,
     reducedMotion: reducedUiMotion,
   });
+  initBugNavItem();
+  // Updates must work even if a later part of startup fails or waits: they are
+  // how a broken build gets replaced.
+  try { initUpdatePane(); } catch (error) { console.error('Update panel failed to start.', error); }
   initAwaySummary({ openSecurity: () => window.dispatchEvent(new CustomEvent('monarch:navigate', { detail: { view: 'security-section' } })) });
   initSharedSelects();
   let astraBridge = null;
@@ -789,7 +822,6 @@ async function init() {
   initCompactLayout();
   initUiNavigation();
   initImageGenerationPane();
-  initUpdatePane();
   initMascotInteraction();
   if (!astraProductPilotActive) {
     initVoiceInput();
@@ -838,19 +870,7 @@ function initStartupMotion() {
     return;
   }
 
-  if (startupType === 'generated') {
-    playDomStartupMotion(originalDOM, startupType, {
-      completeShell: true,
-    });
-    return;
-  }
-
-  if (startupType === 'assembly') {
-    playAssemblyStartupMotion(originalDOM, {
-      completeShell: true,
-    });
-    return;
-  }
+  playMarkStartupMotion(originalDOM, { completeShell: true });
 }
 
 function scheduleComponentStateRefresh(components) {
@@ -912,171 +932,95 @@ function syncStartupPreferenceControls({ previewing = false } = {}) {
   }
 }
 
-function playDomStartupMotion(root, startupType, options = {}) {
+// The two bands of the mark come in from above along their own diagonals and
+// close into the sign, a light runs across the glass, then the bands lift a
+// little and slide on down their slopes in opposite directions, through each
+// other and out; only then does the app open. Timing follows the owner's sample
+// (enter 650 ms with a long settle, hold 1 s with the sheen, lift 250 ms, exit
+// 420 ms). One owner, HTML layers on the compositor, cancellable at any moment.
+function playMarkStartupMotion(root, options = {}) {
   if (!(root instanceof HTMLElement)) return () => {};
-  root.dataset.startupVariant = startupType;
-  root.classList.remove('is-exiting');
-
-  const duration = reducedMotionMedia?.matches
-    ? 240
-    : STARTUP_DURATIONS[startupType];
-  const exitDelay = reducedMotionMedia?.matches ? 120 : 520;
-  const timers = [];
-  let finished = false;
-
-  timers.push(window.setTimeout(() => {
-    root.classList.add('is-exiting');
-    if (options.completeShell) elements.shell?.classList.add('startup-complete');
-  }, duration));
-  timers.push(window.setTimeout(() => {
-    if (finished) return;
-    finished = true;
-    root.remove();
-    options.onComplete?.();
-  }, duration + exitDelay));
-
-  return () => {
-    if (finished) return;
-    finished = true;
-    timers.forEach((timer) => window.clearTimeout(timer));
-    root.remove();
-  };
-}
-
-// Crown and shield assemble, the name rises, then the mark flies into the sidebar brand
-// while the app opens behind it. Every moving part is a Web Animation with one owner;
-// cleanup cancels them all, so a preview can be interrupted at any moment.
-function playAssemblyStartupMotion(root, options = {}) {
-  if (!(root instanceof HTMLElement)) return () => {};
-  root.dataset.startupVariant = 'assembly';
   root.classList.remove('is-exiting', 'is-static');
-
-  const part = (name) => root.querySelector(`[data-sa="${name}"]`);
-  const mark = part('mark');
-  const shield = part('shield');
-  const crown = part('crown');
-  const word = part('word');
-  const glow = part('glow');
-  const backdrop = root.querySelector('.startup-assembly-backdrop');
-  const letters = [...root.querySelectorAll('[data-sa="letter"]')];
+  const frame = root.querySelector('[data-startup-mark]');
+  const line = root.querySelector('[data-mark="line"]');
+  const glass = root.querySelector('[data-mark="glass"]');
+  const sheen = root.querySelector('[data-mark="sheen"]');
   const timers = [];
   const animations = [];
   let finished = false;
+  let frameRequest = 0;
 
   const finish = (complete) => {
     if (finished) return;
     finished = true;
+    if (frameRequest) cancelAnimationFrame(frameRequest);
     timers.forEach((timer) => window.clearTimeout(timer));
     animations.forEach((animation) => animation.cancel());
     root.remove();
     if (complete) options.onComplete?.();
   };
+  const open = () => {
+    root.classList.add('is-exiting');
+    if (options.completeShell) elements.shell?.classList.add('startup-complete');
+  };
 
-  if (!mark || !shield || !crown || !word || !glow || !backdrop) {
+  if (!frame || !line || !glass || !sheen || typeof line.animate !== 'function') {
     // Markup is incomplete: leave the app usable instead of a stuck overlay.
-    elements.shell?.classList.add('startup-complete');
+    if (options.completeShell) elements.shell?.classList.add('startup-complete');
     finish(true);
     return () => {};
   }
 
   if (reducedMotionMedia?.matches) {
-    // No movement: show the finished lockup briefly, then fade like the other variants.
+    // No movement: the finished sign shows briefly, then the overlay fades.
     root.classList.add('is-static');
-    timers.push(window.setTimeout(() => {
-      root.classList.add('is-exiting');
-      if (options.completeShell) elements.shell?.classList.add('startup-complete');
-    }, 240));
-    timers.push(window.setTimeout(() => finish(true), 360));
+    timers.push(window.setTimeout(open, 500));
+    timers.push(window.setTimeout(() => finish(true), 900));
     return () => finish(false);
   }
 
-  const OUT = 'cubic-bezier(.2,.8,.2,1)';
-  const SPRING = 'cubic-bezier(.16,1,.3,1)';
-  const HANDOFF = 3400;
-  const FLIGHT = 900;
-  const play = (element, keyframes, timing) => {
-    const animation = element.animate(keyframes, { fill: 'both', easing: OUT, ...timing });
-    animations.push(animation);
-    return animation;
+  const ENTER = 650;
+  const HOLD = 1000;
+  const LIFT = 250;
+  const EXIT = 420;
+  const total = ENTER + HOLD + LIFT + EXIT;
+  const at = (ms) => ms / total;
+  const start = () => {
+    frameRequest = 0;
+    const width = frame.getBoundingClientRect().width || 300;
+    const unit = width / 49;
+    // Unit vectors down each band's slope (17u across, 26u down).
+    const length = Math.hypot(17, 26);
+    const slope = { line: { x: 17 / length, y: 26 / length }, glass: { x: -17 / length, y: 26 / length } };
+    const move = (direction, distance, lift = 0) =>
+      `translate3d(${(direction.x * distance * unit).toFixed(1)}px, ${((direction.y * distance + lift) * unit).toFixed(1)}px, 0)`;
+    const band = (element, direction) => {
+      animations.push(element.animate([
+        { transform: move(direction, -30), opacity: 0, offset: 0, easing: 'cubic-bezier(.22, 1, .36, 1)' },
+        { transform: move(direction, -14), opacity: 1, offset: at(ENTER * .28), easing: 'cubic-bezier(.33, 1, .68, 1)' },
+        { transform: move(direction, 0), opacity: 1, offset: at(ENTER), easing: 'linear' },
+        { transform: move(direction, 0), opacity: 1, offset: at(ENTER + HOLD), easing: 'cubic-bezier(.45, 0, .55, 1)' },
+        { transform: move(direction, 0, -1.1), opacity: 1, offset: at(ENTER + HOLD + LIFT), easing: 'cubic-bezier(.55, 0, .9, .45)' },
+        { transform: move(direction, 34, -1.1), opacity: 1, offset: at(ENTER + HOLD + LIFT + EXIT * .7), easing: 'linear' },
+        { transform: move(direction, 48, -1.1), opacity: 0, offset: 1 },
+      ], { duration: total, fill: 'both' }));
+    };
+    band(line, slope.line);
+    band(glass, slope.glass);
+    // From the glass's left edge to past its right one, along the band.
+    animations.push(sheen.animate([
+      { transform: `translateX(${(0.30 * width).toFixed(1)}px) rotate(33.18deg)`, opacity: 0 },
+      { transform: `translateX(${(0.46 * width).toFixed(1)}px) rotate(33.18deg)`, opacity: 1, offset: .3 },
+      { transform: `translateX(${(0.86 * width).toFixed(1)}px) rotate(33.18deg)`, opacity: 1, offset: .8 },
+      { transform: `translateX(${(1.02 * width).toFixed(1)}px) rotate(33.18deg)`, opacity: 0 },
+    ], { duration: 520, delay: ENTER + 230, easing: 'cubic-bezier(.45, 0, .55, 1)', fill: 'both' }));
+    // The app opens once the bands have gone.
+    timers.push(window.setTimeout(open, total - 40));
+    timers.push(window.setTimeout(() => finish(true), total + 460));
   };
-
-  play(glow, [{ opacity: 0 }, { opacity: 1 }], { duration: 1800 });
-  play(shield, [
-    { opacity: 0, transform: 'translateY(14%)' },
-    { opacity: 1, transform: 'none' },
-  ], { delay: 250, duration: 750, easing: SPRING });
-  play(crown, [
-    { opacity: 0, transform: 'translateY(-33%)', offset: 0, easing: 'cubic-bezier(.5,0,.9,.6)' },
-    { opacity: 1, transform: 'translateY(-16%)', offset: .3, easing: 'cubic-bezier(.5,0,.9,.6)' },
-    { opacity: 1, transform: 'translateY(2%)', offset: .72, easing: OUT },
-    { opacity: 1, transform: 'none', offset: 1 },
-  ], { delay: 950, duration: 900, easing: 'linear' });
-  letters.forEach((letter, index) => {
-    play(letter, [
-      { opacity: 0, transform: 'translateY(112%)' },
-      { opacity: 1, transform: 'none' },
-    ], { delay: 1900 + index * 60, duration: 600, easing: SPRING });
-  });
-
-  timers.push(window.setTimeout(() => {
-    // Measure before the shell starts to settle: it is still scaled while blurred.
-    const flight = measureBrandFlight(mark);
-    root.classList.add('is-exiting');
-    if (options.completeShell) elements.shell?.classList.add('startup-complete');
-
-    play(word, [
-      { opacity: 1, transform: 'none' },
-      { opacity: 0, transform: 'translateY(10px)' },
-    ], { duration: 420 });
-    play(backdrop, [{ opacity: 1 }, { opacity: 0 }], { duration: 420 });
-    if (flight) {
-      play(mark, [
-        { transform: 'none' },
-        { transform: `translate(${flight.x}px, ${flight.y}px) scale(${flight.scale})` },
-      ], { duration: FLIGHT, easing: SPRING });
-      play(mark, [
-        { opacity: 1 },
-        { opacity: 1, offset: .6 },
-        { opacity: 0 },
-      ], { duration: FLIGHT, easing: 'linear' });
-    } else {
-      // No sidebar brand on screen (narrow window): the mark simply settles away.
-      play(mark, [{ opacity: 1 }, { opacity: 0 }], { duration: 420 });
-    }
-  }, HANDOFF));
-  timers.push(window.setTimeout(() => finish(true), HANDOFF + FLIGHT + 60));
-
+  // Start on the first painted frame, so loading work cannot eat the entrance.
+  frameRequest = requestAnimationFrame(() => { frameRequest = requestAnimationFrame(start); });
   return () => finish(false);
-}
-
-// Where the mark lands: the start of the sidebar brand name. Returns the translation and
-// scale that carry the centred mark box there, or null when the brand is not visible.
-function measureBrandFlight(mark) {
-  const label = document.querySelector('[data-monarch-brand-label]');
-  const shell = elements.shell;
-  if (!(label instanceof HTMLElement) || !(shell instanceof HTMLElement)) return null;
-  const labelRect = label.getBoundingClientRect();
-  if (!labelRect.width || !labelRect.height) return null;
-
-  // The shell may still be scaled around its centre; undo that so the target is where
-  // the label will rest once the shell has settled.
-  const transform = getComputedStyle(shell).transform;
-  const shellScale = transform && transform !== 'none' ? new DOMMatrixReadOnly(transform).a || 1 : 1;
-  const shellRect = shell.getBoundingClientRect();
-  const centreX = shellRect.left + shellRect.width / 2;
-  const centreY = shellRect.top + shellRect.height / 2;
-  const settle = (value, centre) => centre + (value - centre) / shellScale;
-
-  const box = mark.getBoundingClientRect();
-  // The drawn crown and shield span about 44% of the box width and sit 3.7% above its centre.
-  const scale = Math.max(.08, 20 / (box.width * .445));
-  const targetX = settle(labelRect.left + 10, centreX);
-  const targetY = settle(labelRect.top + labelRect.height / 2, centreY);
-  return {
-    scale,
-    x: targetX - (box.left + box.width / 2),
-    y: targetY + box.height * .037 * scale - (box.top + box.height / 2),
-  };
 }
 
 function previewStartupMotion(value) {
@@ -1100,18 +1044,13 @@ function previewStartupMotion(value) {
     syncStartupPreferenceControls();
   };
 
-  if (startupMotionTemplate instanceof HTMLElement && elements.shell) {
-    const previewRoot = startupMotionTemplate.cloneNode(true);
-    previewRoot.dataset.startupVariant = startupType;
-    elements.shell.before(previewRoot);
-    cleanup = startupType === 'assembly'
-      ? playAssemblyStartupMotion(previewRoot, { onComplete: finish })
-      : playDomStartupMotion(previewRoot, startupType, { onComplete: finish });
-  } else {
+  if (!(startupMotionTemplate instanceof HTMLElement) || !elements.shell) {
     syncStartupPreferenceControls();
     return;
   }
-
+  const previewRoot = startupMotionTemplate.cloneNode(true);
+  elements.shell.before(previewRoot);
+  cleanup = playMarkStartupMotion(previewRoot, { onComplete: finish });
   activeStartupPreviewCleanup = cleanup;
 }
 

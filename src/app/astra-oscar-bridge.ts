@@ -62,7 +62,9 @@ export class AstraOscarBridge implements OscarAstraPort {
     // consent, and only the cloud policies carry the turn/capability budget a
     // long agent run needs. An ordinary turn that names no model therefore runs
     // on MAX; an exact local request still binds locally, and without a
-    // connected MAX default the local lane stays the default.
+    // connected MAX default the local lane stays the default. `maxReady` also
+    // carries the owner's work mode: "На компьютере" keeps unnamed turns local
+    // (owner decision 2026-10-16, after an offline local task failed on MAX).
     const preferMax = !maxChoice && !localChoice && enabled.max && this.maxReady && enabled.defaultMaxModel !== undefined;
     const modelMode = this.policy.requiredModelMode === 'max' || maxChoice || preferMax ? 'max' : 'local';
     if (modelMode === 'max' ? !enabled.max : !enabled.local) return null;

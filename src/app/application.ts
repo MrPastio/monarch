@@ -446,7 +446,11 @@ export class MonarchApplication {
       const journalKey = astraJournalEncryptionKey;
       try {
         return createAstraProductPilotRuntime({
-          ...(optionalMaxHost ? { optionalMaxHost, maxReady: () => isMaxNativeConfigured() } : {}),
+          // An agent task that names no model runs on MAX only while MAX is the
+          // owner's chosen way of working: "На компьютере" (work: local) keeps it
+          // local even with a connected MAX. Read per turn, so a change applies at once.
+          ...(optionalMaxHost ? { optionalMaxHost, maxReady: async () =>
+            this.modelPreferenceStore.snapshot().work !== 'local' && isMaxNativeConfigured() } : {}),
           ...(astraPilotMode === undefined ? {} : { mode: astraPilotMode }),
           canonicalRoot: this.workspaceRoot, stateRoot: this.runtimePaths.stateRoot, kernel: this.runtime.kernel,
           ...(astraDesktopToken === undefined ? {} : { desktopAttestationToken: astraDesktopToken }),
