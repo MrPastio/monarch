@@ -43,6 +43,7 @@ const CHECK_BLOCKED_STATES = new Set([
 ]);
 const BACKGROUND_CHECK_STATES = new Set(['idle', 'up-to-date', 'failed', 'completed']);
 const DEFAULT_BACKGROUND_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_FIRST_BACKGROUND_CHECK_DELAY_MS = 30 * 1000;
 const DOWNLOAD_CONTENT_TYPES = new Set([
   'application/octet-stream',
   'application/x-msdownload',
@@ -846,25 +847,51 @@ export class MonarchUpdateService extends EventEmitter {
   }
 }
 
-// Long-running sessions learn about a new release without a restart. A check
-// only runs from a resting state, so it never replaces a download or install.
+// Monarch learns about a new release shortly after start and again every few
+// hours in long sessions, without the window having to ask. A check only runs
+// from a resting state, so it never replaces a download or install.
 export function startBackgroundUpdateChecks(service, {
   intervalMs = DEFAULT_BACKGROUND_CHECK_INTERVAL_MS,
+  initialDelayMs = DEFAULT_FIRST_BACKGROUND_CHECK_DELAY_MS,
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
 } = {}) {
   if (!service?.installationPolicy?.canInstall) return () => {};
   let running = false;
-  const timer = setIntervalImpl(() => {
+  const run = () => {
     if (running || service.activeOperation || !BACKGROUND_CHECK_STATES.has(service.state)) return;
     running = true;
     Promise.resolve()
       .then(() => service.check())
       .catch(() => undefined)
       .finally(() => { running = false; });
-  }, intervalMs);
+  };
+  const first = initialDelayMs >= 0 ? setTimeoutImpl(run, initialDelayMs) : null;
+  first?.unref?.();
+  const timer = setIntervalImpl(run, intervalMs);
   timer?.unref?.();
-  return () => clearIntervalImpl(timer);
+  return () => {
+    if (first) clearTimeoutImpl(first);
+    clearIntervalImpl(timer);
+  };
+}
+
+/**
+ * One Windows notification per new version in a session, whatever opened the
+ * check (the window, the background timer or the person).
+ */
+export function createUpdateAvailableNotifier(show) {
+  let announced = null;
+  return (snapshot) => {
+    const version = snapshot?.release?.version;
+    if (snapshot?.state !== 'update-available' || !version || version === announced) return false;
+    if (snapshot.installation && snapshot.installation.canInstall === false) return false;
+    announced = version;
+    show(version, snapshot);
+    return true;
+  };
 }
 
 export function verifySignedManifest({

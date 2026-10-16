@@ -14,6 +14,7 @@ import {
   ipcMain,
   nativeImage,
   nativeTheme,
+  net as electronNet,
   powerMonitor,
   safeStorage,
   screen,
@@ -32,7 +33,7 @@ import { createCalendarSecretBroker, startCalendarSecretServer } from './calenda
 import { createCalendarOAuthController } from './calendar-oauth-controller.mjs';
 import { createServiceIntegrationRegistry, registerServiceIntegrationIpc } from './service-integration-registry.mjs';
 import { restrictProtectedIntegrationAcl } from './protected-integration-acl.mjs';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
@@ -90,7 +91,7 @@ import {
 } from './speech-output.mjs';
 import { MONARCH_RELEASE_PUBLIC_KEYS, createMonarchUpdateEndpoints } from './update-config.mjs';
 import { createUpdateDemoRuntime } from './update-demo.mjs';
-import { MonarchUpdateService, startBackgroundUpdateChecks } from './update-service.mjs';
+import { MonarchUpdateService, createUpdateAvailableNotifier, startBackgroundUpdateChecks } from './update-service.mjs';
 import { resolveDesktopUpdatePolicy } from './update-policy.mjs';
 import { createTransactionalInstallerCoordinator } from './installer-coordinator.mjs';
 import {
@@ -111,6 +112,18 @@ const desktopIconPath = path.join(
   'assets',
   process.platform === 'win32' ? 'icon.ico' : 'icon.png',
 );
+// The mark comes in a light and a dark tile. Windows' own theme picks first;
+// once the person chooses a theme in Monarch, the icon follows that choice
+// (nativeTheme.themeSource, see paintWindowChrome).
+const desktopThemedIconPaths = Object.freeze({
+  light: path.join(workspaceRoot, 'assets', 'icon-light.ico'),
+  dark: path.join(workspaceRoot, 'assets', 'icon-dark.ico'),
+});
+function themedDesktopIconPath() {
+  if (process.platform !== 'win32') return desktopIconPath;
+  const themed = nativeTheme.shouldUseDarkColors ? desktopThemedIconPaths.dark : desktopThemedIconPaths.light;
+  return existsSync(themed) ? themed : desktopIconPath;
+}
 const workspacePackage = readJsonFileIfPresent(path.join(workspaceRoot, 'package.json'));
 const safeEntryQaMode = process.argv.includes('--safe-entry-qa');
 const updateDemoMode = process.argv.includes('--update-demo') && !app.isPackaged;
@@ -355,6 +368,7 @@ const safeAuthorizationPath = path.join(safeUiRoot, 'authorization.html');
 const safeAuthorizationPreloadPath = path.join(safeUiRoot, 'authorization-preload.cjs');
 const safeIconPath = path.join(workspaceRoot, 'assets', 'safe', 'monarch-safe.ico');
 const safeLaunchMode = process.argv.includes('--safe') && !safeEntryQaMode;
+const desktopAppUserModelId = safeLaunchMode ? 'Monarch.Safe' : updateDemoMode ? 'Monarch.UpdateDemo' : 'Monarch.App';
 const appName = updateDemoMode
   ? 'Monarch · безопасная демонстрация обновления'
   : desktopAcceptanceMode ? 'Monarch · Acceptance' : 'Monarch';
@@ -399,7 +413,24 @@ const updateService = new MonarchUpdateService({
     return installerCoordinator(context);
   }),
 });
+// A Windows notification when a new version is found; a click opens the
+// Updates panel. It does not depend on the window having finished loading.
+const announceUpdate = createUpdateAvailableNotifier((version) => {
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({
+    title: 'Доступно обновление Monarch',
+    body: `Версия ${version} готова к установке. Нажми, чтобы открыть обновления.`,
+    silent: false,
+  });
+  notification.on('click', () => {
+    void showMainWindow()
+      .then(() => sendToMainWindow('monarch:open-updates', {}))
+      .catch(() => undefined);
+  });
+  notification.show();
+});
 updateService.on('state', (snapshot) => {
+  announceUpdate(snapshot);
   if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
   mainWindow.webContents.send('monarch:update-state-changed', snapshot);
 });
@@ -475,7 +506,7 @@ if (!safeEntryQaMode && !updateDemoMode && !smokeMode && !desktopAcceptanceMode 
     });
   }
 
-  app.setAppUserModelId(safeLaunchMode ? 'Monarch.Safe' : updateDemoMode ? 'Monarch.UpdateDemo' : 'Monarch.App');
+  app.setAppUserModelId(desktopAppUserModelId);
 
   app.whenReady()
     .then(startDesktopApp)
@@ -522,6 +553,7 @@ ipcMain.handle('monarch:get-runtime-url', () => runtimeUrl);
 /** Window chrome follows the painted theme; "system" is resolved by Windows. */
 function paintWindowChrome() {
   const light = !nativeTheme.shouldUseDarkColors;
+  applyThemedDesktopIcon();
   mainWindow?.setBackgroundColor(light ? '#faf8f4' : '#08090a');
   if (process.platform === 'win32') mainWindow?.setTitleBarOverlay({
     color: light ? '#faf8f4' : '#08090a',
@@ -529,6 +561,83 @@ function paintWindowChrome() {
   });
 }
 nativeTheme.on('updated', () => { if (nativeTheme.themeSource === 'system') paintWindowChrome(); });
+let appliedDesktopIconPath = null;
+function applyThemedDesktopIcon() {
+  const iconPath = themedDesktopIconPath();
+  if (iconPath === appliedDesktopIconPath) return;
+  appliedDesktopIconPath = iconPath;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setIcon(iconPath);
+    setWindowsTaskbarIdentity(mainWindow, iconPath, appName);
+  }
+  if (tray) tray.setImage(trayImage(iconPath));
+  syncStartMenuShortcutIcon(iconPath);
+}
+
+/**
+ * What starts Monarch again: the launcher of this installation (installed or
+ * source workspace), never bare electron.exe, which opens Electron's own
+ * default page.
+ */
+function desktopLauncher() {
+  const candidates = [configuredInstallRoot && path.join(configuredInstallRoot, 'Monarch.exe'),
+    path.join(workspaceRoot, 'Monarch.exe')].filter(Boolean);
+  const launcher = candidates.find((candidate) => existsSync(candidate));
+  return launcher
+    ? { target: launcher, args: '', cwd: path.dirname(launcher) }
+    : { target: process.execPath, args: `"${path.join(__dirname, 'main.mjs')}"`, cwd: workspaceRoot };
+}
+
+function samePath(left, right) {
+  return Boolean(left && right) && path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase();
+}
+
+/**
+ * Windows takes the taskbar button, its icon and what a pin starts from the
+ * Start Menu shortcut registered for our AppUserModelID. Electron creates one
+ * for notifications (named after the app, bare electron.exe, no icon), so the
+ * button showed the Electron atom and a pin opened Electron's default page.
+ * Monarch keeps its own "Monarch" shortcut on the launcher with our ID and the
+ * themed icon, removes Electron's generated one, and repairs a pin made from it.
+ */
+function syncStartMenuShortcutIcon(iconPath) {
+  if (process.platform !== 'win32' || desktopAppUserModelId !== 'Monarch.App' || safeEntryQaMode || smokeMode) return;
+  const programs = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+  const pinned = path.join(app.getPath('appData'), 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned', 'TaskBar');
+  const launcher = desktopLauncher();
+  const details = { target: launcher.target, args: launcher.args, cwd: launcher.cwd, description: 'Monarch',
+    icon: iconPath, iconIndex: 0, appUserModelId: desktopAppUserModelId };
+  const read = (file) => { try { return existsSync(file) ? shell.readShortcutLink(file) : null; } catch { return null; } };
+  const ours = (link) => Boolean(link) && (link.appUserModelId === desktopAppUserModelId || samePath(link.target, launcher.target));
+  // Electron's generated shortcut: our ID on bare electron.exe with no app.
+  const generated = (link) => Boolean(link) && link.appUserModelId === desktopAppUserModelId
+    && samePath(link.target, process.execPath) && !String(link.args || '').trim();
+  const write = (file, operation) => { try { shell.writeShortcutLink(file, operation, details); } catch { /* the window keeps its icon */ } };
+  const current = (link) => link && samePath(link.target, launcher.target) && String(link.args || '') === launcher.args
+    && link.icon === iconPath && link.appUserModelId === desktopAppUserModelId;
+
+  const installed = path.join(programs, 'Monarch', 'Monarch.lnk');
+  const own = configuredInstallRoot && ours(read(installed)) ? installed : path.join(programs, 'Monarch.lnk');
+  const ownLink = read(own);
+  if (!ownLink) write(own, 'create');
+  else if (ours(ownLink) && !current(ownLink)) write(own, 'replace');
+
+  for (const directory of [programs, pinned]) {
+    let names = [];
+    try { names = readdirSync(directory).filter((name) => name.toLowerCase().endsWith('.lnk')); } catch { continue; }
+    for (const name of names) {
+      const file = path.join(directory, name);
+      if (samePath(file, own)) continue;
+      const link = read(file);
+      if (!ours(link)) continue;
+      if (directory === programs && generated(link)) {
+        try { rmSync(file, { force: true }); } catch { /* left in place */ }
+      } else if (!current(link)) {
+        write(file, 'replace');
+      }
+    }
+  }
+}
 ipcMain.handle('monarch:set-theme', (event, theme) => {
   assertTrustedMainRenderer(event);
   if (theme !== 'dark' && theme !== 'light' && theme !== 'system') throw Error('Invalid theme');
@@ -1277,6 +1386,22 @@ function scheduleRetainedUpdateCleanup() {
   return retainedUpdateCleanupPromise;
 }
 
+/**
+ * With an explicit AppUserModelID and no shortcut registered for it, the
+ * Windows taskbar shows the icon of the running executable (electron.exe),
+ * not the window's. The relaunch details name the Monarch icon and the command
+ * that starts Monarch again, so the taskbar button and a pinned item use them.
+ */
+function setWindowsTaskbarIdentity(window, iconPath, displayName) {
+  if (process.platform !== 'win32' || !window || window.isDestroyed()) return;
+  const launcher = desktopLauncher();
+  const relaunchCommand = `"${launcher.target}"${launcher.args ? ' ' + launcher.args : ''}`;
+  try {
+    window.setAppDetails({ appId: desktopAppUserModelId, appIconPath: iconPath, appIconIndex: 0,
+      relaunchCommand, relaunchDisplayName: displayName });
+  } catch { /* The window keeps its own icon. */ }
+}
+
 async function createMainWindow() {
   markDesktopStartup('window-create');
   // Windows' own theme until the renderer applies the saved choice, so an
@@ -1284,7 +1409,7 @@ async function createMainWindow() {
   nativeTheme.themeSource = 'system';
   mainWindow = new BrowserWindow({
     title: appName,
-    icon: desktopIconPath,
+    icon: themedDesktopIconPath(),
     width: 1360,
     height: 900,
     minWidth: 980,
@@ -1305,6 +1430,9 @@ async function createMainWindow() {
     },
   });
   mainWindow.setMenu(null);
+  appliedDesktopIconPath = themedDesktopIconPath();
+  setWindowsTaskbarIdentity(mainWindow, appliedDesktopIconPath, appName);
+  syncStartMenuShortcutIcon(appliedDesktopIconPath);
 
   const readyToShow = new Promise((resolve) => mainWindow.once('ready-to-show', () => {
     markDesktopStartup('window-ready-to-show');
@@ -1471,6 +1599,7 @@ async function showSafeWindow() {
   });
   safeWindow = launchedSafeWindow;
   launchedSafeWindow.setMenu(null);
+  setWindowsTaskbarIdentity(launchedSafeWindow, existsSync(safeIconPath) ? safeIconPath : desktopIconPath, 'Monarch Safe');
   launchedSafeWindow.setContentProtection(true);
   configureSafeWindowSecurity(launchedSafeWindow);
   launchedSafeWindow.on('minimize', () => {
@@ -2142,11 +2271,14 @@ function stopSafeRuntime(targetProcess = safeProcess, targetCapabilityKey = safe
   try { processToStop.kill(); } catch { /* process already stopped */ }
 }
 
+function trayImage(iconPath) {
+  const source = nativeImage.createFromPath(iconPath);
+  return process.platform === 'win32' ? source.resize({ width: 16, height: 16 }) : source;
+}
+
 function createTray() {
   if (smokeMode || tray) return;
-  const source = nativeImage.createFromPath(desktopIconPath);
-  const icon = process.platform === 'win32' ? source.resize({ width: 16, height: 16 }) : source;
-  tray = new Tray(icon);
+  tray = new Tray(trayImage(themedDesktopIconPath()));
   syncTrayTooltip();
   tray.on('click', () => {
     if (mainWindow?.isVisible()) {
@@ -2783,7 +2915,10 @@ async function startRuntime({ requestedPort = null, preserveModelHostOnFailure =
   if (astraMaxNativeEnabled && !astraMaxNativeServer) {
     astraMaxNativeServer = await startAstraMaxNativeServer({ complete: (input, signal) => astraMaxDesktopBridge.completeNative(input, signal),
       stream: (input, signal) => astraMaxDesktopBridge.streamNative(input, signal),
+      // Ready means a usable key and a network: offline, an agent task that
+      // names no model stays on the computer instead of failing on MAX.
       status: async () => {
+        if (!electronNet.isOnline()) return false;
         const view = await astraMaxDesktopBridge.providers();
         return view.available === true && Array.isArray(view.providers)
           && view.providers.some(provider => provider?.id === view.selectedProviderId && provider?.state === 'ready');

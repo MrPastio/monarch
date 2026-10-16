@@ -63,7 +63,8 @@
   gap: 7px; height: 32px; padding: 0 150px 0 12px; background: var(--bg); color: var(--text-soft);
   font-size: 12.5px; user-select: none; -webkit-app-region: drag;
 }
-.desktop-titlebar img { width: 16px; height: 16px; }
+.desktop-titlebar img, .desktop-titlebar-mark { width: 16px; height: auto; }
+.desktop-titlebar-mark { display: block; --mark-stroke: 1.6px; }
 :root[data-desktop-titlebar="true"] .oscar-voice-mode { top: 32px; }
 
 :root[data-theme="light"] body {

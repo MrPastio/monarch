@@ -1207,3 +1207,49 @@ html[data-motion="reduced"] *, html[data-motion="reduced"] *::before, html[data-
 .bug-report-form output { color: var(--theme-amber-ink, #ffc45f); font-size: 12px; }
 .bug-report-form output:empty { display: none; }
 .bug-report-copy { min-height: 140px; font-family: var(--mono, monospace); font-size: 12px; }
+
+/* Sidebar "Поймал баг?": the legs paddle while the pointer is on it; the click
+   sends the bug running off along the row (app.js). Reduced motion: still. */
+.nav-bug { margin-top: 6px; }
+.nav-item.optional-nav.nav-bug[hidden] { display: none; }
+.nav-bug-icon { overflow: visible; transform-box: fill-box; transform-origin: center; }
+.nav-bug-legs { transform-box: fill-box; }
+.nav-bug-legs-a { transform-origin: right center; }
+.nav-bug-legs-b { transform-origin: left center; }
+.nav-bug:hover .nav-bug-legs-a,
+.nav-bug:focus-visible .nav-bug-legs-a { animation: nav-bug-paddle 360ms ease-in-out infinite alternate; }
+.nav-bug:hover .nav-bug-legs-b,
+.nav-bug:focus-visible .nav-bug-legs-b { animation: nav-bug-paddle 360ms ease-in-out -180ms infinite alternate-reverse; }
+@keyframes nav-bug-paddle { from { transform: rotate(-12deg); } to { transform: rotate(12deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .nav-bug:hover .nav-bug-legs-a, .nav-bug:hover .nav-bug-legs-b,
+  .nav-bug:focus-visible .nav-bug-legs-a, .nav-bug:focus-visible .nav-bug-legs-b { animation: none; }
+}
+
+/* The Monarch mark (modules/brand-mark.js): contour band and glass band. The
+   strokes are clipped to their band, so only the inner half shows; the contour
+   never shows through the glass. */
+:root {
+  --mark-line: #3c3b36;
+  --mark-glass-a: #dcdbd6;
+  --mark-glass-b: #cdccc7;
+  --mark-glass-edge: #ecebe7;
+  --mark-sheen: #ffffff;
+  --mark-stroke: 2.4px;
+}
+:root[data-theme="dark"] {
+  --mark-line: #dcdcda;
+  --mark-glass-a: #3e3e3e;
+  --mark-glass-b: #2b2b2b;
+  --mark-glass-edge: #545454;
+  --mark-sheen: #ffffff;
+}
+.monarch-mark { display: block; width: 100%; height: auto; overflow: visible; }
+.monarch-mark-contour { fill: none; stroke: var(--mark-line); stroke-width: var(--mark-stroke); stroke-linejoin: miter; }
+.monarch-mark-edge { fill: none; stroke: var(--mark-glass-edge); stroke-width: calc(var(--mark-stroke) * .75); stroke-linejoin: miter; }
+.sidebar-brand-mark .sidebar-brand-logo { display: block; flex: none; width: 22px; margin: 0 7px 0 0; }
+.sidebar-brand-mark .monarch-brand-word { white-space: nowrap; max-width: none; }
+.topbar-mark[data-monarch-mark] .monarch-mark { width: 26px; }
+.empty-mark[data-monarch-mark], .empty-mark .monarch-mark { width: 72px; --mark-stroke: 3px; }
+.setup-brand .setup-brand-logo { display: block; width: 28px; }
+.model-setup-welcome-logo[data-monarch-mark] { display: block; width: 96px; --mark-stroke: 3px; }

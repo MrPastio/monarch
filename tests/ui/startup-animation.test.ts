@@ -2,129 +2,112 @@ import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
+import { MARK_LEFT_BAND, MARK_RIGHT_BAND, monarchMarkSvg } from '../../src/ui/public/modules/brand-mark.js';
 
 const publicDir = new URL('../../src/ui/public/', import.meta.url);
 const indexPath = new URL('index.html', publicDir);
 const stylesPath = new URL('styles-v2.css', publicDir);
 const appPath = new URL('app.js', publicDir);
-const generatedAssetPath = new URL('assets/brand/monarch-startup-3d.png', publicDir);
 
 const readStartupMarkup = async () => {
   const html = await readFile(indexPath, 'utf8');
   return {
     html,
-    markup: html.match(/<div class="startup-motion"[\s\S]*?<div class="app-shell/)?.[0] ?? '',
+    markup: html.match(/<div class="startup-motion"[\s\S]*?<section class="setup"/)?.[0] ?? '',
   };
 };
 
+describe('Monarch mark', () => {
+  it('draws both bands on the 49u x 26u grid: contour left, glass on top right', () => {
+    expect(MARK_LEFT_BAND).toBe('M0 0H15L32 26H17Z');
+    expect(MARK_RIGHT_BAND).toBe('M34 0H49L32 26H17Z');
+    const svg = monarchMarkSvg();
+    expect(svg).toContain('viewBox="0 0 49 26"');
+    // The glass comes after the contour, so the contour never shows through it.
+    expect(svg.indexOf('data-mark="line"')).toBeLessThan(svg.indexOf('data-mark="glass"'));
+    expect(svg).toContain('vector-effect="non-scaling-stroke"');
+    expect(svg).toContain('var(--mark-glass-a)');
+    expect(monarchMarkSvg()).not.toBe(svg); // clip ids stay unique per copy
+  });
+});
+
 describe('Monarch startup animation', () => {
-  it('offers the Generated 3D and assembly variants and a way to switch it off', async () => {
+  it('has one intro, the mark, and a way to switch it off', async () => {
     const { html, markup } = await readStartupMarkup();
     const app = await readFile(appPath, 'utf8');
 
-    expect(markup).toContain('startup-variant--generated');
-    expect(markup).toContain('startup-variant--assembly');
-    expect(html).toContain('<option value="generated">Generated 3D</option>');
-    expect(html).toContain('<option value="assembly">Сборка знака — по умолчанию</option>');
+    expect(markup).toContain('class="startup-mark" data-startup-mark');
+    expect(markup).toContain('data-mark="sheen"');
+    expect(html).toContain('<option value="mark">Знак Monarch — по умолчанию</option>');
     expect(html).toContain('<option value="disabled">Отключена</option>');
-    expect(html).toContain("new Set(['generated', 'assembly', 'disabled'])");
-    expect(app).toContain("assembly: 'Сборка знака'");
+    expect(app).toContain("const DEFAULT_STARTUP_TYPE = 'mark'");
+    expect(app).toContain("mark: 'Знак Monarch'");
   });
 
-  it('makes the assembly the default and moves earlier defaults to it exactly once', async () => {
+  it('moves every earlier intro to the mark exactly once and keeps a deliberate opt-out', async () => {
     const { html } = await readStartupMarkup();
-    const app = await readFile(appPath, 'utf8');
-
-    expect(html).toContain("let startupType = 'assembly'");
-    expect(html).toContain("localStorage.getItem('monarch.startup.default') !== 'assembly-v1'");
-    expect(html).toContain("localStorage.setItem('monarch.startup.default', 'assembly-v1')");
-    // Only a deliberate opt-out survives the move.
-    expect(html).toContain("savedStartupType !== 'disabled'");
-    expect(app).toContain("const DEFAULT_STARTUP_TYPE = 'assembly'");
-    expect(app).toContain('Object.hasOwn(STARTUP_TYPE_LABELS, value) ? value : DEFAULT_STARTUP_TYPE');
+    expect(html).toContain("localStorage.getItem('monarch.startup.default') !== 'mark-v1'");
+    expect(html).toContain("if (savedStartupType !== 'disabled') savedStartupType = 'mark'");
+    expect(html).toContain("localStorage.setItem('monarch.startup.default', 'mark-v1')");
   });
 
-  it('no longer ships the classic, full 3D model or system startup variants', async () => {
+  it('no longer ships the Generated 3D, assembly or older intros and their assets', async () => {
     const [{ html, markup }, app, styles] = await Promise.all([
       readStartupMarkup(),
       readFile(appPath, 'utf8'),
       readFile(stylesPath, 'utf8'),
     ]);
-
-    expect(markup).not.toContain('startup-variant--classic');
-    expect(markup).not.toContain('startup-variant--model');
-    expect(markup).not.toContain('data-monarch-logo-3d');
-    expect(html).not.toContain('value="classic"');
-    expect(html).not.toContain('value="model"');
-    expect(html).not.toContain('value="test"');
-    expect(html).not.toContain('/startup/monarch-startup.css');
-    expect(app).not.toContain('mountMonarchLogo3D');
-    expect(app).not.toContain('MonarchStartup');
-    expect(app).not.toContain('playSystemStartupMotion');
-    expect(styles).not.toContain('.startup-logo-webgl');
-    expect(styles).not.toContain('startupCrown');
-    expect(styles).not.toContain('.startup-wordmark');
-    expect(styles).not.toContain('startupFallbackRise');
-    for (const file of ['monarch-startup.js', 'monarch-startup.ts', 'monarch-startup.css']) {
-      expect(existsSync(new URL(`startup/${file}`, publicDir))).toBe(false);
+    for (const removed of ['startup-variant', 'startup-generated', 'startup-assembly', 'data-sa=']) {
+      expect(markup).not.toContain(removed);
+      expect(styles).not.toContain(removed);
+    }
+    expect(html).not.toContain('value="generated"');
+    expect(html).not.toContain('value="assembly"');
+    expect(app).not.toContain('playAssemblyStartupMotion');
+    expect(app).not.toContain('playDomStartupMotion');
+    expect(app).not.toContain('measureBrandFlight');
+    expect(styles).not.toContain('Monarch Display');
+    for (const file of ['brand/monarch-startup-3d.png', 'brand/monarch-assembly-crown.png',
+      'brand/monarch-assembly-shield.png', 'brand/monarch-mark.png', 'brand/monarch-icon.png',
+      'fonts/MonarchDisplay-Bold.woff2']) {
+      expect(existsSync(new URL(`assets/${file}`, publicDir))).toBe(false);
     }
   });
 
-  it('keeps the generated PNG that Generated 3D and the first-run panel still use', async () => {
-    const [{ markup }, asset] = await Promise.all([readStartupMarkup(), readFile(generatedAssetPath)]);
+  it('meets along the diagonals, shines, then leaves down the slopes; cancellable, reduced motion still', async () => {
+    const app = await readFile(appPath, 'utf8');
+    const intro = app.match(/function playMarkStartupMotion[\s\S]*?\nfunction previewStartupMotion/)?.[0];
 
-    expect(markup).toContain('/assets/brand/monarch-startup-3d.png');
-    expect(asset.subarray(1, 4).toString('ascii')).toBe('PNG');
+    expect(intro).toBeDefined();
+    // Owner's sample: enter 650 ms, hold 1 s with the sheen, lift 250 ms, exit 420 ms.
+    expect(intro).toContain('const ENTER = 650;');
+    expect(intro).toContain('const HOLD = 1000;');
+    expect(intro).toContain('const LIFT = 250;');
+    expect(intro).toContain('const EXIT = 420;');
+    expect(intro).toContain("glass: { x: -17 / length, y: 26 / length }");
+    expect(intro).toContain('band(line, slope.line)');
+    expect(intro).toContain('band(glass, slope.glass)');
+    // HTML layers move on the compositor; the start waits for a painted frame.
+    expect(intro).toContain('translate3d(');
+    expect(intro).toContain('requestAnimationFrame(start)');
+    expect(intro).toContain('timers.push(window.setTimeout(open, total - 40))');
+    expect(intro).toContain('animations.forEach((animation) => animation.cancel())');
+    expect(intro).toContain('timers.forEach((timer) => window.clearTimeout(timer))');
+    expect(intro).toContain('reducedMotionMedia?.matches');
+    expect(intro).toContain("root.classList.add('is-static')");
+    expect(app).toContain('playMarkStartupMotion(originalDOM, { completeShell: true })');
+    expect(app).toContain('playMarkStartupMotion(previewRoot, { onComplete: finish })');
   });
 
-  it('ships the assembly assets and the display face used for its name', async () => {
-    const [{ markup }, styles, crown, shield, font] = await Promise.all([
-      readStartupMarkup(),
-      readFile(stylesPath, 'utf8'),
-      readFile(new URL('assets/brand/monarch-assembly-crown.png', publicDir)),
-      readFile(new URL('assets/brand/monarch-assembly-shield.png', publicDir)),
-      readFile(new URL('assets/fonts/MonarchDisplay-Bold.woff2', publicDir)),
-    ]);
-
-    expect(markup).toContain('/assets/brand/monarch-assembly-crown.png');
-    expect(markup).toContain('/assets/brand/monarch-assembly-shield.png');
-    expect(markup.match(/data-sa="letter"/g)).toHaveLength(7);
-    expect(crown.subarray(1, 4).toString('ascii')).toBe('PNG');
-    expect(shield.subarray(1, 4).toString('ascii')).toBe('PNG');
-    expect(font.subarray(0, 4).toString('ascii')).toBe('wOF2');
-    expect(styles).toContain('font-family: "Monarch Display"');
-    expect(styles).toContain('.startup-assembly-word');
-  });
-
-  it('drives the assembly with cancellable animations and falls back without movement', async () => {
-    const [app, styles] = await Promise.all([readFile(appPath, 'utf8'), readFile(stylesPath, 'utf8')]);
-    const assembly = app.match(/function playAssemblyStartupMotion[\s\S]*?\nfunction measureBrandFlight/)?.[0];
-
-    expect(assembly).toBeDefined();
-    expect(assembly).toContain('animations.forEach((animation) => animation.cancel())');
-    expect(assembly).toContain('timers.forEach((timer) => window.clearTimeout(timer))');
-    expect(assembly).toContain('reducedMotionMedia?.matches');
-    expect(assembly).toContain("root.classList.add('is-static')");
-    expect(assembly).toContain('measureBrandFlight(mark)');
-    expect(assembly).toContain("elements.shell?.classList.add('startup-complete')");
-    expect(app).toContain("startupType === 'assembly'");
-    expect(app).toContain('playAssemblyStartupMotion(originalDOM');
-    expect(app).toContain('playAssemblyStartupMotion(previewRoot');
-    expect(styles).toContain('.startup-motion.is-static .startup-variant--assembly [data-sa-in]');
-    expect(styles).toContain('html[data-theme="light"] .startup-assembly-shield');
-  });
-
-  it('persists the selected default and previews it without restarting the app', async () => {
+  it('persists the choice and previews it without restarting the app', async () => {
     const [html, app, styles] = await Promise.all([
       readFile(indexPath, 'utf8'),
       readFile(appPath, 'utf8'),
       readFile(stylesPath, 'utf8'),
     ]);
-
     expect(html).toContain('id="startup-animation-preview"');
     expect(html).toContain('id="startup-animation-status"');
     expect(app).toContain("localStorage.setItem('monarch.startup.type', startupType)");
-    expect(app).toContain('function previewStartupMotion(value)');
     expect(app).toContain('startupMotionTemplate.cloneNode(true)');
     expect(app).toContain('elements.shell.before(previewRoot)');
     expect(styles).toContain('.startup-preview-button');

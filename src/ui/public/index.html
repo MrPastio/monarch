@@ -38,20 +38,17 @@
       window.monarchDesktop?.setTheme?.(document.documentElement.dataset.themeSource || document.documentElement.dataset.theme).catch(() => {});
     </script>
     <script>
-      const startupTypes = new Set(['generated', 'assembly', 'disabled']);
-      let startupType = 'assembly';
+      // One intro: the Monarch mark. "Отключена" was a deliberate choice and
+      // stays; the removed Generated 3D and Assembly intros become the mark once.
+      let startupType = 'mark';
       try {
         let savedStartupType = localStorage.getItem('monarch.startup.type');
-        // One-time move to the new default. Disabled was a deliberate choice and stays;
-        // the old default (Generated 3D) and the removed variants become Assembly.
-        if (localStorage.getItem('monarch.startup.default') !== 'assembly-v1') {
-          if (savedStartupType !== 'disabled') {
-            savedStartupType = 'assembly';
-            localStorage.setItem('monarch.startup.type', savedStartupType);
-          }
-          localStorage.setItem('monarch.startup.default', 'assembly-v1');
+        if (localStorage.getItem('monarch.startup.default') !== 'mark-v1') {
+          if (savedStartupType !== 'disabled') savedStartupType = 'mark';
+          localStorage.setItem('monarch.startup.type', savedStartupType);
+          localStorage.setItem('monarch.startup.default', 'mark-v1');
         }
-        startupType = startupTypes.has(savedStartupType) ? savedStartupType : 'assembly';
+        startupType = savedStartupType === 'disabled' ? 'disabled' : 'mark';
       } catch {
         // Storage is optional.
       }
@@ -72,53 +69,36 @@
   <link rel="stylesheet" href="/paper-pixel.css">
 </head>
   <body data-theme="light">
-    <header class="desktop-titlebar" aria-label="Окно Monarch"><img src="/favicon.ico" alt=""><span>Monarch</span></header>
+    <header class="desktop-titlebar" aria-label="Окно Monarch"><span class="desktop-titlebar-mark" data-monarch-mark aria-hidden="true"></span><span>Monarch</span></header>
     <div class="startup-motion" id="startup-motion" aria-hidden="true">
       <div class="startup-stage">
-        <div class="startup-variant startup-variant--generated">
-          <div class="startup-generated-scene" aria-hidden="true">
-            <span class="startup-generated-shadow">
-              <img src="/assets/brand/monarch-startup-3d.png" alt="">
-            </span>
-            <span class="startup-generated-echo">
-              <img src="/assets/brand/monarch-startup-3d.png" alt="">
-            </span>
-            <span class="startup-generated-reveal">
-              <img src="/assets/brand/monarch-startup-3d.png" alt="">
-            </span>
-            <span class="startup-generated-light"></span>
+        <div class="startup-mark" data-startup-mark>
+          <div class="startup-band startup-band--line" data-mark="line">
+            <svg class="monarch-mark" viewBox="0 0 49 26" aria-hidden="true" focusable="false">
+              <defs><clipPath id="startup-mark-l"><path d="M0 0H15L32 26H17Z"/></clipPath></defs>
+              <path d="M0 0H15L32 26H17Z" clip-path="url(#startup-mark-l)" class="monarch-mark-contour" vector-effect="non-scaling-stroke"/>
+            </svg>
           </div>
-        </div>
-
-        <div class="startup-variant startup-variant--assembly">
-          <div class="startup-assembly-backdrop" aria-hidden="true">
-            <span class="startup-assembly-glow" data-sa-in data-sa="glow"></span>
-          </div>
-          <div class="startup-assembly-lockup" aria-hidden="true">
-            <div class="startup-assembly-mark" data-sa="mark">
-              <img class="startup-assembly-shield" data-sa-in data-sa="shield" src="/assets/brand/monarch-assembly-shield.png" alt="">
-              <img class="startup-assembly-crown" data-sa-in data-sa="crown" src="/assets/brand/monarch-assembly-crown.png" alt="">
-            </div>
-            <div class="startup-assembly-word" data-sa="word">
-              <span class="startup-assembly-letter"><span data-sa-in data-sa="letter">M</span></span>
-              <span class="startup-assembly-letter"><span data-sa-in data-sa="letter">O</span></span>
-              <span class="startup-assembly-letter"><span data-sa-in data-sa="letter">N</span></span>
-              <span class="startup-assembly-letter"><span data-sa-in data-sa="letter">A</span></span>
-              <span class="startup-assembly-letter"><span data-sa-in data-sa="letter">R</span></span>
-              <span class="startup-assembly-letter"><span data-sa-in data-sa="letter">C</span></span>
-              <span class="startup-assembly-letter"><span data-sa-in data-sa="letter">H</span></span>
-            </div>
+          <div class="startup-band startup-band--glass" data-mark="glass">
+            <svg class="monarch-mark" viewBox="0 0 49 26" aria-hidden="true" focusable="false">
+              <defs>
+                <clipPath id="startup-mark-r"><path d="M34 0H49L32 26H17Z"/></clipPath>
+                <linearGradient id="startup-mark-g" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" style="stop-color:var(--mark-glass-a)"/><stop offset="1" style="stop-color:var(--mark-glass-b)"/>
+                </linearGradient>
+              </defs>
+              <path d="M34 0H49L32 26H17Z" style="fill:url(#startup-mark-g)"/>
+              <path d="M34 0H49L32 26H17Z" clip-path="url(#startup-mark-r)" class="monarch-mark-edge" vector-effect="non-scaling-stroke"/>
+            </svg>
+            <span class="startup-sheen-clip" aria-hidden="true"><span class="startup-sheen" data-mark="sheen"></span></span>
           </div>
         </div>
       </div>
     </div>
-    <script>
-      document.getElementById('startup-motion').dataset.startupVariant = startupType;
-    </script>
     <section class="setup" id="model-setup" aria-labelledby="setup-title" aria-modal="true" role="dialog" data-step="hello" hidden>
       <div class="setup-wash" aria-hidden="true"></div>
       <header class="setup-top">
-        <div class="setup-brand"><img src="/assets/brand/monarch-icon.png" alt=""><strong>Monarch</strong><span class="setup-stage-badge">0.3 Preview</span></div>
+        <div class="setup-brand"><span class="setup-brand-logo" data-monarch-mark aria-hidden="true"></span><strong>Monarch</strong><span class="setup-stage-badge">0.3 Preview</span></div>
         <ol class="setup-rail" id="setup-rail" aria-label="Шаги настройки"></ol>
         <button class="setup-close" id="setup-close" type="button" aria-label="Закрыть настройку" hidden>
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
@@ -325,7 +305,7 @@
     </button>
     <section class="model-setup-welcome" id="model-setup-welcome" aria-label="Добро пожаловать в Monarch" hidden>
       <div class="model-setup-welcome-brand" aria-hidden="true">
-        <span class="model-setup-welcome-logo"><img src="/assets/brand/monarch-startup-3d.png" alt=""></span>
+        <span class="model-setup-welcome-logo" data-monarch-mark></span>
         <strong>Monarch</strong>
       </div>
       <div class="model-setup-welcome-message" role="status">
@@ -340,6 +320,7 @@
         
         <div class="sidebar-top">
           <button class="sidebar-brand-mark" type="button" aria-label="Показать маскота Oscar" aria-pressed="false" title="Показать маскота Oscar" data-monarch-brand-cycle>
+            <span class="sidebar-brand-logo" data-monarch-mark aria-hidden="true"></span>
             <strong class="monarch-brand-word" data-monarch-brand-label>Monarch</strong>
             <span class="product-stage-badge" title="Monarch 0.3 Preview — ранняя версия">Preview</span>
           </button>
@@ -387,6 +368,10 @@
           <button class="nav-item optional-nav" type="button" data-scroll-target="settings-section" aria-label="Открыть настройки" title="Настройки">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
             <span>Настройки</span>
+          </button>
+          <button class="nav-item optional-nav nav-bug" type="button" data-report-bug aria-label="Сообщить об ошибке" title="Поймал баг? Отдай его нам" hidden>
+            <svg class="nav-bug-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><g class="nav-bug-legs nav-bug-legs-a"><path d="M8 13H4"></path><path d="M8.5 9.5 5.5 7"></path><path d="M8.5 16.5 5.5 19"></path></g><g class="nav-bug-legs nav-bug-legs-b"><path d="M16 13h4"></path><path d="m15.5 9.5 3-2.5"></path><path d="m15.5 16.5 3 2.5"></path></g><rect x="8" y="8" width="8" height="12" rx="4"></rect><path d="M12 11v9"></path><path d="M9.5 8a2.5 2.5 0 0 1 5 0"></path><path d="m10 5.5-1-1.5M14 5.5l1-1.5"></path></svg>
+            <span>Поймал баг?</span>
           </button>
           <button class="nav-item optional-nav" type="button" data-scroll-target="settings-section" data-settings-open="telegram" aria-label="Открыть настройки Telegram-бота" title="Telegram-бот">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13"></path><path d="m22 2-7 20-4-9-9-4Z"></path></svg>
@@ -559,9 +544,7 @@
           <div class="claude-chat-feed">
             <div class="oscar-topbar" aria-label="Oscar toolbar">
               <div class="oscar-breadcrumb">
-                <span class="topbar-mark" aria-hidden="true">
-                  <img src="/assets/brand/monarch-mark.png" alt="" />
-                </span>
+                <span class="topbar-mark" aria-hidden="true" data-monarch-mark></span>
                 <span id="oscar-chat-title">Новый чат</span>
               </div>
               <div class="chat-mode-switch" role="tablist" aria-label="Режим Oscar" data-active-mode="chat">
@@ -649,7 +632,7 @@
             <div class="oscar-thread-shell">
               <div id="oscar-thread" class="claude-thread is-empty" role="log" aria-live="polite" aria-relevant="additions text" aria-atomic="false">
                 <div class="oscar-empty-focus oscar-empty-boot">
-                  <div class="empty-mark" aria-hidden="true"><img src="/assets/brand/monarch-mark.png" alt="" /></div>
+                  <div class="empty-mark" aria-hidden="true" data-monarch-mark></div>
                   <span class="empty-kicker">Oscar</span>
                   <h1>Чем займёмся?</h1>
                   <p>Спроси, создай или проверь что-нибудь в рабочем пространстве</p>
@@ -2566,8 +2549,7 @@
                       <label for="startup-animation-select">Запуск</label>
                       <div class="startup-preference-control">
                         <select id="startup-animation-select">
-                          <option value="generated">Generated 3D</option>
-                          <option value="assembly">Сборка знака — по умолчанию</option>
+                          <option value="mark">Знак Monarch — по умолчанию</option>
                           <option value="disabled">Отключена</option>
                         </select>
                         <button

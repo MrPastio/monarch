@@ -31,6 +31,23 @@ describe('desktop update policy', () => {
     });
   });
 
+  it('treats the installed launcher as installed although Electron runs the app folder unpackaged', () => {
+    expect(resolveDesktopUpdatePolicy({
+      isPackaged: false,
+      fallbackVersion: '0.3.0.97',
+      installRoot: 'C:\\Monarch Install',
+      payloadRoot: 'C:\\Monarch Data',
+      installedDescriptor: { appVersion: '0.3.0.97' },
+      installedPointer: { currentVersion: '0.3.0.97' },
+      installedLayout: { schemaVersion: 1, payloadRoot: 'C:\\Monarch Data' },
+    })).toEqual({
+      mode: 'installed',
+      canInstall: true,
+      currentVersion: '0.3.0.97',
+      reason: null,
+    });
+  });
+
   it('fails closed when launcher pointer and running binaries disagree', () => {
     expect(resolveDesktopUpdatePolicy({
       isPackaged: true,
