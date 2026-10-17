@@ -2,7 +2,7 @@
 
 **A free, local-first AI assistant for Windows.** Oscar answers questions, does tasks on your computer right in the chat, reminds you about things, writes code in Coder mode and keeps your secrets in an encrypted vault. Models run on your PC; cloud services connect only if you turn them on.
 
-**Download:** [official site](https://monarch-site-sigma.vercel.app/en) · [all releases](https://github.com/MrPastio/monarch-releases/releases) · [Русский ↓](#monarch-ru)
+**Download:** [official site](https://monarch-site-sigma.vercel.app/en) · [all releases](https://github.com/MrPastio/monarch-releases/releases) · [Telegram news](https://t.me/markprojectPastio) · [Русский ↓](#monarch-ru)
 
 ## What 0.3 Preview does
 
@@ -37,7 +37,7 @@ The model proposes; it never decides its own permissions. Every action goes the 
 
 **Monarch 0.3 Preview** — твой личный AI-помощник для Windows. Оскар отвечает на вопросы, делает задачи на компьютере прямо в чате, напоминает о делах, пишет код в режиме Coder и защищает компьютер. Модели работают на твоём компьютере; облако (MAX) подключается, только если ты сам этого захочешь. Monarch бесплатный и полностью твой.
 
-**Скачать:** [официальный сайт](https://monarch-site-sigma.vercel.app/ru) · [все версии](https://github.com/MrPastio/monarch-releases/releases)
+**Скачать:** [официальный сайт](https://monarch-site-sigma.vercel.app/ru) · [все версии](https://github.com/MrPastio/monarch-releases/releases) · [Telegram-канал](https://t.me/markprojectPastio)
 
 ## Что умеет 0.3 Preview
 
