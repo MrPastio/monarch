@@ -34,10 +34,10 @@ import {
   resumeAgentTask,
   fetchSkills,
   fetchSkillMatches,
-  readLocalSettings,
   resolveAgentTaskApproval,
   streamOscarTurn,
   uploadOscarAttachment,
+  readLocalSettings,
   writeLocalSettings,
 } from './api.js';
 import {
@@ -64,6 +64,7 @@ import {
   createOscarMessage,
   replacePendingOscarMessage,
   createThinkParser,
+  memoryRecordId,
 } from './utils.js';
 import { hasSentOscarMessage, setMascotState } from './mascot-controller.js';
 import { createOscarSpeechController } from './oscar-speech.js';
@@ -172,12 +173,6 @@ const elements = {
   oscarHistorySearch: document.querySelector('#oscar-history-search'),
   oscarMemoryNav: document.querySelector('[data-oscar-memory-nav]'),
   oscarMemoryManager: document.querySelector('#oscar-memory-manager'),
-  oscarMemoryPanel: document.querySelector('#oscar-memory-panel'),
-  oscarMemoryClose: document.querySelector('#oscar-memory-close'),
-  oscarMemoryForm: document.querySelector('#oscar-memory-form'),
-  oscarMemoryInput: document.querySelector('#oscar-memory-input'),
-  oscarMemoryCategory: document.querySelector('#oscar-memory-category'),
-  oscarMemoryItems: document.querySelector('#oscar-memory-items'),
   oscarPriorityCard: document.querySelector('#oscar-priority-card'),
   oscarPriorityTitle: document.querySelector('#oscar-priority-title'),
   oscarPriorityDetail: document.querySelector('#oscar-priority-detail'),
@@ -216,7 +211,6 @@ let activeOscarSubmissionController = null;
 let activeOscarSubmission = null;
 let activeOscarApprovalSettlement = null;
 let waitingOscarTurn = null;
-let oscarMemoryRevision = 0;
 let oscarMissionTasks = [];
 let oscarMissionsOpen = false;
 let oscarMissionsLoading = false;
@@ -414,9 +408,14 @@ export function initOscarPane(appRenderCallback, options = {}) {
         void loadOlderOscarMessages();
         return;
       }
+      const memoryUndoButton = event.target.closest('[data-memory-undo]');
+      if (memoryUndoButton) {
+        void undoLearnedMemory(memoryUndoButton.dataset.memoryUndo || '');
+        return;
+      }
       const memorySourceButton = event.target.closest('[data-source-open-memory]');
       if (memorySourceButton) {
-        openMemorySettingsFromSource();
+        openMemorySettingsFromSource(memorySourceButton.dataset.sourceOpenMemory || '');
         return;
       }
       const copyButton = event.target.closest('[data-message-copy]');
@@ -567,11 +566,7 @@ export function initOscarPane(appRenderCallback, options = {}) {
       setOscarHistoryOpen(false, { restoreFocus: true });
     }
     if (event.key !== 'Escape' || event.defaultPrevented || document.querySelector('dialog[open]')) return;
-    if (state.oscar.memoryPanelOpen) {
-      state.oscar.memoryPanelOpen = false;
-      renderOscar();
-      elements.oscarMemoryManager?.focus({ preventScroll: true });
-    } else if (oscarMissionsOpen) {
+    if (oscarMissionsOpen) {
       setOscarMissionsOpen(false);
       elements.oscarMissionsToggle?.focus({ preventScroll: true });
     }
@@ -704,47 +699,16 @@ export function initOscarPane(appRenderCallback, options = {}) {
     });
   }
 
-  if (elements.oscarMemoryManager) {
-    elements.oscarMemoryManager.addEventListener('click', () => {
-      state.oscar.memoryPanelOpen = !state.oscar.memoryPanelOpen;
-      // One topbar panel at a time: both anchor to the same corner.
-      if (state.oscar.memoryPanelOpen) setOscarMissionsOpen(false);
-      renderOscar();
-      if (state.oscar.memoryPanelOpen) void loadOscarMemoryItems();
-    });
-  }
-
-  if (elements.oscarMemoryClose) {
-    elements.oscarMemoryClose.addEventListener('click', () => {
-      state.oscar.memoryPanelOpen = false;
-      renderOscar();
-    });
-  }
+  // Memory has one place: Settings → Память. The topbar button goes there.
+  elements.oscarMemoryManager?.addEventListener('click', () => openMemorySettingsFromSource());
 
   if (elements.oscarContext) {
     elements.oscarContext.addEventListener('click', (event) => {
       const memorySource = event.target.closest('[data-source-open-memory]');
-      if (memorySource) openMemorySettingsFromSource();
+      if (memorySource) openMemorySettingsFromSource(memorySource.dataset.sourceOpenMemory || '');
     });
   }
 
-  if (elements.oscarMemoryForm) {
-    elements.oscarMemoryForm.addEventListener('submit', (event) => {
-      event.preventDefault();
-      void createOscarMemoryItem();
-    });
-  }
-
-  if (elements.oscarMemoryItems) {
-    elements.oscarMemoryItems.addEventListener('click', (event) => {
-      const saveButton = event.target.closest('[data-memory-save]');
-      const toggleButton = event.target.closest('[data-memory-toggle]');
-      const deleteButton = event.target.closest('[data-memory-delete]');
-      if (saveButton) void saveOscarMemoryItem(saveButton.getAttribute('data-memory-save') || '');
-      if (toggleButton) void toggleOscarMemoryItem(toggleButton.getAttribute('data-memory-toggle') || '');
-      if (deleteButton) void deleteOscarMemoryItem(deleteButton.getAttribute('data-memory-delete') || '');
-    });
-  }
 
   if (elements.oscarMemoryToggle) {
     elements.oscarMemoryToggle.addEventListener('change', () => {
@@ -769,10 +733,6 @@ export function initOscarPane(appRenderCallback, options = {}) {
 
   elements.oscarMissionsToggle?.addEventListener('click', () => {
     const open = !oscarMissionsOpen;
-    if (open && state.oscar.memoryPanelOpen) {
-      state.oscar.memoryPanelOpen = false;
-      renderOscar();
-    }
     setOscarMissionsOpen(open);
   });
   elements.oscarMissionsClose?.addEventListener('click', () => setOscarMissionsOpen(false));
@@ -1396,7 +1356,6 @@ async function encryptOscarConversation(conversationId) {
       state.oscar.incognito = false;
       state.oscar.encrypted = true;
       resetOscarMessagePage();
-      state.oscar.memoryPanelOpen = false;
     }
     state.oscar.safeUnlocked = true;
     await loadOscarConversations({ supersede: true });
@@ -1430,7 +1389,6 @@ async function openEncryptedOscarConversation(conversationId) {
     state.oscar.editingMessageId = null;
     state.oscar.messages = Array.isArray(record.messages) ? structuredClone(record.messages) : [];
     state.oscar.context = null;
-    state.oscar.memoryPanelOpen = false;
     resetOscarMessagePage();
     setOscarHistoryOpen(false);
   } catch (error) {
@@ -1501,7 +1459,6 @@ function clearActiveOscarConversationState() {
   state.oscar.activeSkills = [];
   state.oscar.selectedSkill = null;
   state.oscar.attachments = [];
-  state.oscar.memoryPanelOpen = false;
   state.oscar.error = '';
   resetOscarMessagePage();
   if (elements.oscarInput) {
@@ -1586,7 +1543,6 @@ async function toggleOscarIncognitoConversation() {
   state.oscar.conversationId = null;
   state.oscar.incognito = true;
   state.oscar.encrypted = false;
-  state.oscar.memoryPanelOpen = false;
   if (elements.oscarInput) {
     elements.oscarInput.value = '';
     syncOscarInputHeight();
@@ -2015,7 +1971,8 @@ async function refreshActiveConversationMessages() {
       const hydratedMessages = mapConversationMessages(result.output.messages);
       const existingPage = state.oscar.messagePage || {};
       const hydratedTail = appendUnhydratedLocalAssistant(existingMessages, hydratedMessages);
-      const hydratedWithPreviews = hydratedTail.map((message) => inheritAttachmentPreviews(existingMessages, message));
+      const hydratedWithPreviews = hydratedTail.map((message) => inheritMemoryNote(existingMessages,
+        inheritAttachmentPreviews(existingMessages, message)));
       state.oscar.messages = Number(existingPage.loadedPages) > 1
         ? mergeHydratedConversationTail(existingMessages, hydratedWithPreviews)
         : hydratedWithPreviews;
@@ -2051,6 +2008,14 @@ function mergeHydratedConversationTail(existingMessages, hydratedTail) {
   return firstOverlap >= 0
     ? [...existingMessages.slice(0, firstOverlap), ...hydratedWithPreviews]
     : hydratedWithPreviews;
+}
+
+/** «Запомнил сам» lives on the streamed answer, not in stored history. */
+function inheritMemoryNote(existingMessages, hydratedMessage) {
+  if (hydratedMessage.memoryNote || hydratedMessage.role !== 'assistant' || !hydratedMessage.turnId) return hydratedMessage;
+  const existing = existingMessages.find((message) => message.role === 'assistant'
+    && message.turnId === hydratedMessage.turnId && message.memoryNote);
+  return existing ? { ...hydratedMessage, memoryNote: existing.memoryNote } : hydratedMessage;
 }
 
 function inheritAttachmentPreviews(existingMessages, hydratedMessage) {
@@ -2303,83 +2268,6 @@ function formatAttachmentSize(value) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`;
 }
 
-async function loadOscarMemoryItems() {
-  if (state.oscar.memoryBusy) return;
-  state.oscar.memoryBusy = true;
-  renderMemoryPanel();
-  try {
-    const context = await readLocalSettings('memory');
-    applyOscarMemoryContext(context);
-  } catch (error) {
-    state.oscar.error = error instanceof Error ? error.message : String(error);
-  } finally {
-    state.oscar.memoryBusy = false;
-    renderMemoryPanel();
-  }
-}
-
-async function createOscarMemoryItem() {
-  if (state.oscar.incognito || state.oscar.encrypted) return;
-  const content = elements.oscarMemoryInput?.value.trim() || '';
-  if (!content || state.oscar.memoryBusy) return;
-  state.oscar.memoryBusy = true;
-  renderMemoryPanel();
-  try {
-    const saved = await writeLocalSettings('memory.create', {
-      text: content,
-      category: elements.oscarMemoryCategory?.value || 'other',
-      source: 'oscar-memory-panel',
-    }, { expectedRevision: oscarMemoryRevision });
-    applyOscarMemoryContext(saved.context);
-    elements.oscarMemoryInput.value = '';
-    await loadOscarStatus(renderApp);
-  } finally {
-    state.oscar.memoryBusy = false;
-    await loadOscarMemoryItems();
-  }
-}
-
-async function saveOscarMemoryItem(itemId) {
-  if (state.oscar.incognito || state.oscar.encrypted) return;
-  const item = elements.oscarMemoryItems?.querySelector(`[data-memory-item="${CSS.escape(itemId)}"]`);
-  const content = item?.querySelector('[data-memory-content]')?.value.trim() || '';
-  const category = item?.querySelector('[data-memory-category]')?.value || 'other';
-  if (!content) return;
-  const saved = await writeLocalSettings('memory.update', {
-    id: itemId, text: content, category,
-  }, { expectedRevision: oscarMemoryRevision });
-  applyOscarMemoryContext(saved.context);
-  renderMemoryPanel();
-}
-
-async function toggleOscarMemoryItem(itemId) {
-  if (state.oscar.incognito || state.oscar.encrypted) return;
-  const current = state.oscar.memoryItems.find((item) => item.id === itemId);
-  if (!current) return;
-  const saved = await writeLocalSettings('memory.update', {
-    id: itemId, enabled: !current.enabled,
-  }, { expectedRevision: oscarMemoryRevision });
-  applyOscarMemoryContext(saved.context);
-  renderMemoryPanel();
-  await loadOscarStatus(renderApp);
-}
-
-async function deleteOscarMemoryItem(itemId) {
-  if (state.oscar.incognito || state.oscar.encrypted) return;
-  if (!itemId || !await confirmAction('Удалить эту запись памяти?')) return;
-  const saved = await writeLocalSettings('memory.delete', { id: itemId }, {
-    expectedRevision: oscarMemoryRevision,
-  });
-  applyOscarMemoryContext(saved.context);
-  renderMemoryPanel();
-  await loadOscarStatus(renderApp);
-}
-
-function applyOscarMemoryContext(context) {
-  oscarMemoryRevision = Math.max(0, Number(context?.revision) || 0);
-  state.oscar.memoryItems = Array.isArray(context?.value?.records) ? context.value.records : [];
-}
-
 function readOscarRequestedModel({ vision = false } = {}) {
   const max = oscarMaxMode?.selected();
   if (max) return max.role || 'max-gpt-oss-120b';
@@ -2493,7 +2381,6 @@ function readOscarOwnerDevSettings() {
 function enforceOscarOwnerDevState() {
   const dev = readOscarOwnerDevSettings();
   if (dev.internetEnabled === false) state.oscar.web = false;
-  if (dev.memoryEnabled === false || dev.zeroRetentionEnabled === true) state.oscar.memoryPanelOpen = false;
   if (dev.skillsEnabled === false) {
     state.oscar.activeSkills = [];
     state.oscar.selectedSkill = null;
@@ -2508,7 +2395,6 @@ function enforceOscarOwnerDevState() {
   state.oscar.editingMessageId = null;
   state.oscar.context = null;
   state.oscar.historyPanelOpen = false;
-  state.oscar.memoryPanelOpen = false;
   resetOscarMessagePage();
 }
 
@@ -2841,6 +2727,7 @@ async function consumeOscarTurn({
   activeOscarTurnStreamController = streamController;
   activeOscarTurnId = turnId;
   let content = '';
+  let memoryNote = null;
   let lastSequence = Number(after || 0);
   const progress = [];
   // Research steps outlive the eight-event window: answer tokens push them
@@ -2911,6 +2798,10 @@ async function consumeOscarTurn({
         if (delta) content += delta;
         state.oscar.streamTokens += delta ? 1 : 0;
         renderProgress('turn-answer', 'Готовит ответ');
+        break;
+      }
+      case 'memory.changed': {
+        memoryNote = payload && typeof payload === 'object' ? { ...payload } : null;
         break;
       }
       case 'answer.replace': {
@@ -3059,6 +2950,9 @@ async function consumeOscarTurn({
           showTrace,
           streamEvents: [...progress],
           researchSteps: [...researchSteps],
+          // A pure «запомни» already says so in its reply; the note is for a
+          // message that also asked something.
+          ...(memoryNote && outcome !== 'verified' ? { memoryNote } : {}),
         }), pendingMessageId);
         state.oscar.context = { summary, request: { turnId }, sources, outcome, provenance: verification };
         setMascotState(outcome === 'failed' ? 'error' : outcome === 'cancelled' ? 'idle' : 'success');
@@ -3789,6 +3683,24 @@ function applyOscarStarterPrompt(id) {
 }
 let previousOscarConversationEmpty = true;
 
+/** «Отменить» under «Запомнил сам»: Oscar misread the person. A replaced
+ * fact comes back (`undo`), so a wrong guess never costs the true one. */
+async function undoLearnedMemory(recordId) {
+  const message = state.oscar.messages.find((item) => item.memoryNote?.recordId === recordId);
+  if (!recordId || !message || message.memoryNote.action !== 'learned') return;
+  const note = message.memoryNote;
+  message.memoryNote = { ...note, action: 'undoing' };
+  renderOscar();
+  try {
+    const current = await readLocalSettings('memory');
+    await writeLocalSettings('memory.delete', { id: recordId, undo: true }, { expectedRevision: current?.revision || 0 });
+    message.memoryNote = { ...note, action: 'undone' };
+  } catch {
+    message.memoryNote = note;
+  }
+  renderOscar();
+}
+
 export function renderOscar() {
   if (!elements.oscarThread) {
     return;
@@ -3805,7 +3717,6 @@ export function renderOscar() {
   renderOscarContext();
   renderSkillRadar();
   renderConversationList();
-  renderMemoryPanel();
   renderOscarAttachments();
   renderRamWarning();
   renderGenerationStatus();
@@ -4157,9 +4068,7 @@ function renderOscarPriority() {
   if (elements.oscarPriorityMemory) {
     elements.oscarPriorityMemory.textContent = backend?.memoryStats
       ? readOscarMemoryLabel(backend.memoryStats)
-      : state.oscar.memoryItems?.length
-        ? `${state.oscar.memoryItems.length} записей`
-        : 'нет данных';
+      : 'нет данных';
   }
 }
 
@@ -4612,100 +4521,6 @@ function formatConversationCount(count) {
   if (mod10 === 1 && mod100 !== 11) return `${count} чат`;
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${count} чата`;
   return `${count} чатов`;
-}
-
-function renderMemoryPanel() {
-  if (!elements.oscarMemoryPanel || !elements.oscarMemoryItems) return;
-  if (state.oscar.incognito || state.oscar.encrypted) state.oscar.memoryPanelOpen = false;
-  const memoryOpen = state.oscar.memoryPanelOpen === true;
-  elements.oscarMemoryPanel.hidden = !memoryOpen;
-  syncMemoryToggleControls(memoryOpen);
-  if (!memoryOpen) return;
-  const items = state.oscar.memoryItems || [];
-  if (state.oscar.memoryBusy && items.length === 0) {
-    elements.oscarMemoryItems.innerHTML = '<div class="empty-state">Загружаю память…</div>';
-    return;
-  }
-  if (items.length === 0) {
-    elements.oscarMemoryItems.innerHTML = '<div class="empty-state">Нет сохранённых воспоминаний. Добавь только действительно устойчивый факт или правило.</div>';
-    return;
-  }
-  elements.oscarMemoryItems.innerHTML = items.map((item) => `
-    <article class="memory-item ${item.enabled ? '' : 'disabled'}" data-memory-item="${escapeHtml(item.id)}">
-      <textarea data-memory-content aria-label="Текст памяти">${escapeHtml(item.content || '')}</textarea>
-      <div class="memory-item-footer">
-        <select data-memory-category aria-label="Категория памяти">
-          ${memoryCategoryOptions(item.type || item.category)}
-        </select>
-        <span>${escapeHtml(memoryTypeLabel(item.type || item.category))} · ${item.use_count ? `использовано ${item.use_count} раз` : 'ещё не использовалось'}</span>
-        <button type="button" data-memory-toggle="${escapeHtml(item.id)}">${item.enabled ? 'Выключить' : 'Включить'}</button>
-        <button type="button" data-memory-save="${escapeHtml(item.id)}">Сохранить</button>
-        <button type="button" class="danger-link" data-memory-delete="${escapeHtml(item.id)}">Удалить</button>
-      </div>
-    </article>
-  `).join('');
-}
-
-function syncMemoryToggleControls(memoryOpen) {
-  if (state.oscar.incognito || state.oscar.encrypted) {
-    state.oscar.memoryPanelOpen = false;
-    memoryOpen = false;
-  }
-  for (const [button, label] of [
-    [elements.oscarMemoryManager, memoryOpen ? 'Закрыть память' : 'Память'],
-    [elements.oscarMemoryNav, memoryOpen ? 'Закрыть память Oscar' : 'Открыть память Oscar'],
-  ]) {
-    if (!button) continue;
-    button.setAttribute('aria-expanded', String(memoryOpen));
-    button.setAttribute('aria-label', label);
-    button.title = label;
-  }
-}
-
-function memoryCategoryOptions(selected) {
-  const categories = [
-    ['user_preference', 'Предпочтение'],
-    ['project_decision', 'Решение'],
-    ['architecture_note', 'Архитектура'],
-    ['active_bug', 'Активный баг'],
-    ['fixed_bug', 'Исправленный баг'],
-    ['technical_debt', 'Техдолг'],
-    ['temporary_task', 'Временная задача'],
-    ['module_state', 'Состояние модуля'],
-    ['handoff_note', 'Handoff'],
-    ['diagnostic_note', 'Диагностика'],
-    ['planning_note', 'Планирование'],
-    ['preference', 'Предпочтение · legacy'],
-    ['profile', 'О пользователе · legacy'],
-    ['project', 'Проект · legacy'],
-    ['instruction', 'Правило · legacy'],
-    ['other', 'Другое · legacy'],
-  ];
-  return categories.map(([value, label]) =>
-    `<option value="${value}" ${value === selected ? 'selected' : ''}>${label}</option>`
-  ).join('');
-}
-
-function memoryTypeLabel(value) {
-  const labels = {
-    user_preference: 'предпочтение',
-    project_decision: 'решение',
-    architecture_note: 'архитектура',
-    active_bug: 'активный баг',
-    fixed_bug: 'исправленный баг',
-    technical_debt: 'техдолг',
-    temporary_task: 'временная задача',
-    module_state: 'состояние',
-    handoff_note: 'handoff',
-    diagnostic_note: 'диагностика',
-    planning_note: 'планирование',
-    preference: 'предпочтение',
-    profile: 'профиль',
-    project: 'проект',
-    instruction: 'правило',
-    other: 'другое',
-  };
-  return labels[value] || 'память';
 }
 
 function syncOscarButtons() {
@@ -5309,7 +5124,7 @@ function renderOscarSource(source) {
   const detail = source?.detail || source?.url || source?.snippet || source?.path || '';
   if (memory) {
     return `
-      <button type="button" class="source-chip is-memory" data-source-open-memory title="Открыть память Oscar — ${escapeHtml(detail)}">
+      <button type="button" class="source-chip is-memory" data-source-open-memory="${escapeHtml(memoryRecordId(source?.url))}" title="${escapeHtml(detail || 'Оскар опирался на твою память')}">
         Из памяти
       </button>
     `;
@@ -5321,11 +5136,10 @@ function renderOscarSource(source) {
   `;
 }
 
-/** The chip only says a past turn or a saved fact was used; it carries no id
- * back from the model's evidence reference, so it opens the review surface
- * (Settings → Память) rather than pretending to jump to the exact record. */
-function openMemorySettingsFromSource() {
+/** Settings → Память; with a record id the record is scrolled to and marked. */
+function openMemorySettingsFromSource(recordId = '') {
   document.querySelector('.nav-item[data-scroll-target="settings-section"][data-settings-open="memory"]')?.click();
+  if (recordId) window.dispatchEvent(new CustomEvent('monarch:memory-focus', { detail: { id: recordId } }));
 }
 
 function requiredModelBlocksChat() {

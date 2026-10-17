@@ -230,8 +230,6 @@ export class AstraModule implements MonarchModule {
           knownEndpoints: [
             'GET /api/health',
             'GET /api/model/status',
-            'GET /api/memory/stats',
-            'GET /api/memory/search?q=<query>&limit=<n>',
             'POST /api/search',
             'POST /api/chat',
             'POST /api/chat/stream',
@@ -243,7 +241,6 @@ export class AstraModule implements MonarchModule {
             'oscar.status',
             'oscar.chat.local',
             'oscar.chat.web',
-            'oscar.memory.search',
             'oscar.search.ingest',
           ],
           intendedFlow: [

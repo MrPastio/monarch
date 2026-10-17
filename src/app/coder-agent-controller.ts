@@ -4,6 +4,7 @@ import type { MonarchExecutionResult } from '../core';
 import type { MonarchApplication } from './application';
 import type { AstraTaskHttpTask } from './astra-task-facade';
 import { CoderModule } from '../modules/coder';
+import { isKnowledgeStale } from '../modules/coder/project-map';
 import { CoderRunStore, coderRunSessionId } from '../modules/coder/context-manager';
 import { astraAgentHistoryTail } from '../agent-v3/agent-task-profile';
 import { isCoderMaxModelId, isCoderModelId,
@@ -381,7 +382,11 @@ export class CoderAgentController {
     this.running.set(runId, execution);
     const project = (turn: OscarTurnV1) => { queue = queue.then(() => {
       if (turn.taskId !== taskId || !turn.request.astra) throw new Error('Coder Astra task binding changed.');
+      const before = this.runs.get(runId)?.status;
       const projected = this.runs.projectAstraTask(runId, this.astraProjection(turn, this.astraTask(turn)));
+      // Only the transition to "completed" teaches project memory; a restart
+      // re-projecting an old finished run does not write again.
+      if (projected.status === 'completed' && before !== 'completed') void this.app.learnFromCoderRun(projected).catch(() => undefined);
       if (TERMINAL_TASK_STATUSES.has(projected.status)) settle();
     }).catch(error => { this.runs.fail(runId, error instanceof Error ? error.message : String(error)); settle(); }); };
     const unsubscribe = this.app.oscarTurnCoordinator.subscribe(turnId, commit => project(commit.turn));
@@ -425,6 +430,30 @@ export class CoderAgentController {
       activities: structuredClone(task.activities ?? []), ...(status === 'completed' ? { answer: summary || '' } : {}),
       ...(status === 'failed' ? { error: summary || `Astra V3 task stopped with status ${task.status}.` } : {}),
       ...(approval ? { approval } : {}), ...(question ? { question } : {}) };
+  }
+
+  /** "Память проекта": the map summary and the project's notes. A refresh
+   * rescans the project (incrementally); otherwise the stored map is shown. */
+  async projectMemory(projectId: string, options: { refresh?: boolean } = {}) {
+    const project = this.coder.projects.require(projectId);
+    const map = options.refresh || !this.coder.readProjectMap(project.id)
+      ? await this.coder.ensureProjectMap(project.id, { timeBudgetMs: 8_000 })
+      : this.coder.readProjectMap(project.id)!;
+    const knowledge = (await this.coder.recallProjectKnowledge(project.id, '').catch(() => []))
+      .map((entry) => ({ ...entry, stale: isKnowledgeStale(map, entry) }));
+    return {
+      projectId: project.id,
+      available: this.coder.memoryAvailable,
+      scannedAt: map.scannedAt,
+      truncated: map.truncated,
+      files: map.files.length,
+      stack: map.stack,
+      commands: map.commands,
+      entrypoints: map.entrypoints,
+      modules: map.modules.slice(0, 12).map((module) => ({ path: module.path, files: module.files })),
+      rules: map.rules.map((rule) => ({ source: rule.source, excerpt: rule.text.slice(0, 600) })),
+      knowledge,
+    };
   }
 
   /** Working-tree changes for the review panel, read through the same Kernel git capabilities. */

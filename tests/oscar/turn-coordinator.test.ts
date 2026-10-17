@@ -873,7 +873,7 @@ describe('OscarTurnCoordinator', () => {
         status: 'succeeded',
         outcome: {
           kind: 'verified',
-          summary: 'Запомнил. Запись сохранена в постоянной памяти.',
+          summary: 'Запомнил: «1. Monarch 0.2.5 ещё не опубликован. 2. Stable остаётся 0.2.4».',
           evidenceRefs: [{
             evidenceClass: 'kernel-verification',
             reference: 'settings-receipt:settings_receipt_memory_turn',
@@ -884,6 +884,142 @@ describe('OscarTurnCoordinator', () => {
       expect(terminal.events.some((event) => event.type === 'approval.required')).toBe(false);
       await waitFor(() => persisted.some((message) => message.role === 'assistant'));
       expect(persisted.find((message) => message.role === 'assistant')?.provenance.verification).toBe('kernel-verified');
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('writes «запомни» next to a question and still answers the question', async () => {
+    const rememberMemory = vi.fn(async () => ({
+      receiptId: 'settings_receipt_mixed', revision: 2, contentHash: 'b'.repeat(64), action: 'created', text: 'Я живу в Варне',
+    }));
+    const answerExecutor = vi.fn(async () => stream([{ type: 'token', token: 'В Варне завтра солнечно.' }, { type: 'done' }]));
+    const coordinator = createCoordinator({ rememberMemory, answerExecutor });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit(submission('Сколько будет два плюс два? И запомни, что я живу в Варне', 'client_mixed_memory'));
+      const terminal = await waitForTerminal(coordinator, accepted.turn.id);
+      expect(rememberMemory).toHaveBeenCalledWith(expect.objectContaining({ text: 'что я живу в Варне' }));
+      expect(answerExecutor).toHaveBeenCalled();
+      expect(terminal.turn.status).toBe('succeeded');
+      expect(terminal.events.find((event) => event.type === 'memory.changed')?.payload).toMatchObject({
+        action: 'created', text: 'Я живу в Варне',
+      });
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('says what was replaced when a new statement supersedes an old one', async () => {
+    const rememberMemory = vi.fn(async () => ({
+      receiptId: 'r', revision: 3, contentHash: 'c'.repeat(64), action: 'replaced', text: 'Я живу в Софии', replacedText: 'Я живу в Варне',
+    }));
+    const coordinator = createCoordinator({ rememberMemory });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit(submission('запомни, что я живу в Софии', 'client_replace_memory'));
+      const terminal = await waitForTerminal(coordinator, accepted.turn.id);
+      expect(terminal.turn.outcome?.summary).toBe('Запомнил: «Я живу в Софии». Прежнее «Я живу в Варне» больше не учитываю.');
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('writes «запомни» under Direct Access instead of routing it to an agent', async () => {
+    const rememberMemory = vi.fn(async () => ({ receiptId: 'r', revision: 1, contentHash: 'd'.repeat(64), action: 'created' }));
+    const answerExecutor = vi.fn(async () => stream([{ type: 'done' }]));
+    const coordinator = createCoordinator({
+      rememberMemory,
+      answerExecutor,
+      getOwnerUnrestrictedOverride: () => ({ enabled: true, lifetime: 'persistent', shellApprovalPolicy: 'never' }),
+    });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit(submission('запомни, что я люблю тёмный шоколад', 'client_direct_memory'));
+      const terminal = await waitForTerminal(coordinator, accepted.turn.id);
+      expect(rememberMemory).toHaveBeenCalledTimes(1);
+      expect(answerExecutor).not.toHaveBeenCalled();
+      expect(terminal.turn.outcome?.kind).toBe('verified');
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('shows what it learned from the person under the answer, and only that', async () => {
+    const learnFromMessage = vi.fn(async ({ text }: { text: string }) => text.includes('Бургас')
+      ? [{ id: 'record_9', text: 'Я живу в Бургасе', action: 'created', origin: 'learned' as const }] : []);
+    const answerExecutor = vi.fn(async () => stream([{ type: 'token', token: 'Четыре.' }, { type: 'done' }]));
+    const coordinator = createCoordinator({ learnFromMessage, answerExecutor });
+    await coordinator.start();
+    try {
+      const learned = await waitForTerminal(coordinator,
+        (await coordinator.submit(submission('Я живу в Бургасе. Сколько будет 2+2?', 'client_learn'))).turn.id);
+      expect(learned.events.find((event) => event.type === 'memory.changed')?.payload).toEqual({
+        action: 'learned', recordId: 'record_9', text: 'Я живу в Бургасе',
+      });
+      const plain = await waitForTerminal(coordinator,
+        (await coordinator.submit(submission('Сколько будет 3+3?', 'client_plain'))).turn.id);
+      expect(plain.events.some((event) => event.type === 'memory.changed')).toBe(false);
+      await waitForTerminal(coordinator,
+        (await coordinator.submit(submission('запомни, что я живу в Бургасе', 'client_explicit'))).turn.id);
+      expect(learnFromMessage).toHaveBeenCalledTimes(2);
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('forgets the record a «забудь» command points at', async () => {
+    const forgetMemory = vi.fn(async () => ({
+      receiptId: 'f', revision: 5, contentHash: 'e'.repeat(64), forgotten: { id: 'record_1', text: 'Я живу в Варне' },
+    }));
+    const coordinator = createCoordinator({ forgetMemory });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit(submission('Забудь, где я живу', 'client_forget'));
+      const terminal = await waitForTerminal(coordinator, accepted.turn.id);
+      expect(forgetMemory).toHaveBeenCalledWith(expect.objectContaining({ query: 'где я живу' }));
+      expect(terminal.turn.outcome?.summary).toBe('Забыл: «Я живу в Варне». Вернуть можно в Настройках → Память.');
+      expect(terminal.events.find((event) => event.type === 'memory.changed')?.payload).toMatchObject({
+        action: 'forgotten', recordId: 'record_1',
+      });
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('treats a conversational «забудь» as an ordinary message', async () => {
+    const forgetMemory = vi.fn();
+    const answerExecutor = vi.fn(async () => stream([{ type: 'token', token: 'Хорошо.' }, { type: 'done' }]));
+    const coordinator = createCoordinator({ forgetMemory, answerExecutor });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit(submission('забудь предыдущее сообщение', 'client_forget_chat'));
+      await waitForTerminal(coordinator, accepted.turn.id);
+      expect(forgetMemory).not.toHaveBeenCalled();
+      expect(answerExecutor).toHaveBeenCalled();
+    } finally {
+      await coordinator.stop();
+    }
+  });
+
+  it('answers «что ты обо мне знаешь» from the records themselves', async () => {
+    const listMemory = vi.fn(async () => [
+      { id: '1', text: 'Я живу в Варне', category: 'about', origin: 'learned' },
+      { id: '2', text: 'Отвечай кратко', category: 'rule', origin: 'owner' },
+      { id: '3', text: 'Я люблю оливки', category: 'preference', origin: 'suggested' },
+    ]);
+    const answerExecutor = vi.fn();
+    const coordinator = createCoordinator({ listMemory, answerExecutor });
+    await coordinator.start();
+    try {
+      const accepted = await coordinator.submit(submission('Что ты обо мне знаешь?', 'client_overview'));
+      const terminal = await waitForTerminal(coordinator, accepted.turn.id);
+      expect(answerExecutor).not.toHaveBeenCalled();
+      const summary = terminal.turn.outcome?.summary || '';
+      expect(summary).toContain('**Обо мне**\n- Я живу в Варне');
+      expect(summary).toContain('**Правила**\n- Отвечай кратко');
+      expect(summary).not.toContain('оливки');
+      expect(summary.indexOf('Обо мне')).toBeLessThan(summary.indexOf('Правила'));
     } finally {
       await coordinator.stop();
     }
@@ -2178,11 +2314,19 @@ function createCoordinator(options: {
     void | { disposition: 'created' | 'duplicate' | 'superseded' }
   >;
   resolveAttachments?: (...args: any[]) => Promise<any[]>;
+  learnFromMessage?: (input: { turn: OscarTurnV1; text: string }) => Promise<any[]>;
   rememberMemory?: (input: { turn: OscarTurnV1; text: string }) => Promise<{
     receiptId: string;
     revision: number;
     contentHash: string;
+    action?: string;
+    text?: string;
+    replacedText?: string;
   }>;
+  forgetMemory?: (input: { turn: OscarTurnV1; query: string }) => Promise<{
+    receiptId: string; revision: number; contentHash: string; forgotten: { id: string; text: string } | null;
+  }>;
+  listMemory?: (input: { turn: OscarTurnV1 }) => Promise<Array<{ id: string; text: string; category: string; origin: string }>>;
   resolvePersonality?: () => Promise<OscarTurnV1['request']['personality'] | null>;
   researchEvidence?: (input: { query: string; deep: boolean; signal: AbortSignal }) => Promise<string>;
   agentFirst?: boolean;
@@ -2208,6 +2352,9 @@ function createCoordinator(options: {
       : {}),
     ...(options.consumeDataEgressConsent ? { consumeDataEgressConsent: options.consumeDataEgressConsent } : {}),
     ...(options.rememberMemory ? { rememberMemory: options.rememberMemory } : {}),
+    ...(options.learnFromMessage ? { learnFromMessage: options.learnFromMessage } : {}),
+    ...(options.forgetMemory ? { forgetMemory: options.forgetMemory } : {}),
+    ...(options.listMemory ? { listMemory: options.listMemory } : {}),
     ...(options.resolvePersonality ? { resolvePersonality: options.resolvePersonality } : {}),
     ...(options.researchEvidence ? { researchEvidence: options.researchEvidence } : {}),
   });

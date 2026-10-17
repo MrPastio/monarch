@@ -18,6 +18,10 @@ import { coderManifest } from './manifest';
 import { CoderProjectStore } from './project-store';
 import { CoderSandboxRunner, sanitizedProcessEnvironment } from './sandbox-runner';
 import type { CoderProject } from './types';
+import {
+  fileFingerprint, isKnowledgeStale, ProjectMapStore, scanProject, searchProjectMap,
+  type ProjectKnowledge, type ProjectMap,
+} from './project-map';
 import { renameWithWindowsRetry } from '../../core/durable-json-file';
 
 const DEFAULT_READ_BYTES = 512 * 1024;
@@ -38,6 +42,26 @@ export interface CoderModuleOptions {
   sandboxRoot?: string;
 }
 
+export type CoderKnowledgeKind = 'decision' | 'convention' | 'pitfall' | 'command' | 'component';
+
+/** Durable project knowledge lives in Monarch Memory (scope coder-project);
+ * the Application attaches the port, the module only asks through it. */
+export interface CoderMemoryPort {
+  recall(projectId: string, query: string): Promise<ProjectKnowledge[]>;
+  note(projectId: string, input: {
+    kind: CoderKnowledgeKind;
+    text: string;
+    relatedFiles: string[];
+    origin: 'owner' | 'learned';
+    source: string;
+  }): Promise<{ id: string; action: string }>;
+}
+
+const CODER_KNOWLEDGE_KINDS = new Set<CoderKnowledgeKind>(['decision', 'convention', 'pitfall', 'command', 'component']);
+const CODE_SEARCH_MAX_MATCHES = 200;
+const CODE_SEARCH_MAX_FILE_BYTES = 512 * 1024;
+const CODE_SEARCH_BUDGET_MS = 4_000;
+
 interface ProcessResult {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -55,11 +79,15 @@ export class CoderModule implements MonarchModule {
   readonly sandbox: CoderSandboxRunner;
   private readonly huggingFaceExecutablePath: string;
   private readonly fileMutationQueues = new Map<string, Promise<void>>();
+  readonly maps: ProjectMapStore;
+  private readonly mapScans = new Map<string, Promise<ProjectMap>>();
+  private memoryPort: CoderMemoryPort | null = null;
 
   constructor(options: CoderModuleOptions = {}) {
     this.monarchRoot = path.resolve(options.monarchRoot || process.cwd());
     const runtimePaths = resolveMonarchRuntimePaths(this.monarchRoot);
     this.runsRoot = path.join(runtimePaths.stateRoot, 'coder', 'runs');
+    this.maps = new ProjectMapStore(path.join(runtimePaths.stateRoot, 'coder', 'maps'));
     this.projects = new CoderProjectStore({
       monarchRoot: this.monarchRoot,
       registryPath: options.registryPath || path.join(runtimePaths.stateRoot, 'coder', 'projects.json'),
@@ -99,6 +127,52 @@ export class CoderModule implements MonarchModule {
       output: { ...registry, sandbox },
       ...(sandbox.available === true ? {} : { error: 'coder-sandbox-unavailable' }),
     };
+  }
+
+  attachMemory(port: CoderMemoryPort | null): void {
+    this.memoryPort = port;
+  }
+
+  get memoryAvailable(): boolean {
+    return this.memoryPort !== null;
+  }
+
+  /** The project's architecture map, rescanned incrementally (unchanged files
+   * are reused by size and mtime). One scan per project at a time. */
+  async ensureProjectMap(projectId: string, options: { signal?: AbortSignal; timeBudgetMs?: number } = {}): Promise<ProjectMap> {
+    const project = this.projects.require(projectId);
+    const running = this.mapScans.get(project.id);
+    if (running) return running;
+    const scan = (async () => {
+      const previous = this.maps.read(project.id);
+      const result = await scanProject(project.id, path.resolve(project.root), previous, options);
+      if (!previous || result.changed.length || result.removed.length || previous.root !== result.map.root) {
+        this.maps.write(result.map);
+      }
+      return result.map;
+    })().finally(() => this.mapScans.delete(project.id));
+    this.mapScans.set(project.id, scan);
+    return scan;
+  }
+
+  readProjectMap(projectId: string): ProjectMap | null {
+    return this.maps.read(this.projects.require(projectId).id);
+  }
+
+  async recallProjectKnowledge(projectId: string, query: string): Promise<ProjectKnowledge[]> {
+    if (!this.memoryPort) return [];
+    return this.memoryPort.recall(this.projects.require(projectId).id, query);
+  }
+
+  async noteProjectKnowledge(projectId: string, input: {
+    kind: CoderKnowledgeKind; text: string; files?: string[]; origin: 'owner' | 'learned'; source: string;
+  }): Promise<{ id: string; action: string }> {
+    if (!this.memoryPort) throw new Error('Project memory is unavailable right now.');
+    const project = this.projects.require(projectId);
+    const map = this.maps.read(project.id);
+    const relatedFiles = [...new Set((input.files || []).map((file) => normalizeProjectRelative(project.root, file)).filter(Boolean))]
+      .slice(0, 24).map((file) => fileFingerprint(map, file));
+    return this.memoryPort.note(project.id, { kind: input.kind, text: input.text, relatedFiles, origin: input.origin, source: input.source });
   }
 
   async listActiveSkills(projectId?: string): Promise<Array<{ name: string; description: string; instructions: string }>> {
@@ -191,6 +265,12 @@ export class CoderModule implements MonarchModule {
         return await this.createSkill(request.input, context, control.signal);
       case 'coder.integrations.status':
         return await this.integrationsStatus(control.signal);
+      case 'coder.memory.search':
+        return await this.searchProjectMemory(request.input, control.signal);
+      case 'coder.memory.note':
+        return await this.noteProjectMemory(request.input);
+      case 'coder.code.search':
+        return await this.searchProjectCode(request.input, control.signal);
       default:
         return fail(`Unsupported Coder capability: ${request.capabilityId}`, 'unsupported-capability');
       }
@@ -198,6 +278,94 @@ export class CoderModule implements MonarchModule {
       if (control.signal?.aborted) throw error;
       return fail(error instanceof Error ? error.message : String(error), 'coder-operation-failed');
     }
+  }
+
+  private async searchProjectMemory(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    const project = this.projects.require(readOptionalString(input, 'projectId'));
+    const query = readString(input, 'query').slice(0, 500);
+    const limit = clamp(readNumber(input, 'limit', 12), 1, 40);
+    const map = await this.ensureProjectMap(project.id, { ...(signal ? { signal } : {}), timeBudgetMs: 4_000 });
+    const files = searchProjectMap(map, query, limit);
+    const knowledge = (await this.recallProjectKnowledge(project.id, query).catch(() => []))
+      .map((entry) => ({ ...entry, stale: isKnowledgeStale(map, entry) }));
+    return ok(`Project memory: ${files.length} file(s), ${knowledge.length} note(s).`, {
+      files, knowledge,
+      ...(files.length || knowledge.length ? {} : { hint: 'Nothing in the map matched; try coder.code.search for text in files.' }),
+    });
+  }
+
+  private async noteProjectMemory(input: unknown): Promise<MonarchExecutionResult> {
+    const project = this.projects.require(readOptionalString(input, 'projectId'));
+    const kind = readString(input, 'kind') as CoderKnowledgeKind;
+    if (!CODER_KNOWLEDGE_KINDS.has(kind)) throw new Error('Note kind must be decision, convention, pitfall, command or component.');
+    const text = readString(input, 'text').trim();
+    if (text.length < 8 || text.length > 1_200) throw new Error('A project note needs 8 to 1200 characters.');
+    const files = Array.isArray((input as { files?: unknown })?.files)
+      ? ((input as { files: unknown[] }).files).map(String).slice(0, 24) : [];
+    const saved = await this.noteProjectKnowledge(project.id, { kind, text, files, origin: 'learned', source: 'coder-agent' });
+    return ok(saved.action === 'unchanged' ? 'Project memory already had this note.' : 'Project note saved.', saved);
+  }
+
+  private async searchProjectCode(input: unknown, signal?: AbortSignal): Promise<MonarchExecutionResult> {
+    const project = this.projects.require(readOptionalString(input, 'projectId'));
+    const query = readString(input, 'query');
+    if (!query.trim() || query.length > 300) throw new Error('Search text must contain 1 to 300 characters.');
+    const evaluation = await this.projects.policy.evaluatePath(readOptionalString(input, 'path') || '.', 'list', project.root);
+    if (!evaluation.allowed) return blocked(evaluation.message, evaluation);
+    const useRegex = readBoolean(input, 'regex', false);
+    // The search runs in the host process: refuse the nested quantifiers that
+    // make a regular expression backtrack for minutes on one long line.
+    if (useRegex && /\([^)]*[+*}][^)]*\)\s*[+*{]/u.test(query)) {
+      throw new Error('This regular expression has nested repetition; use a simpler pattern.');
+    }
+    let matcher: RegExp;
+    try {
+      matcher = new RegExp(useRegex ? query : query.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), readBoolean(input, 'caseSensitive', false) ? 'u' : 'iu');
+    } catch {
+      throw new Error('The search pattern is not a valid regular expression.');
+    }
+    const limit = clamp(readNumber(input, 'limit', 60), 1, CODE_SEARCH_MAX_MATCHES);
+    const deadline = Date.now() + CODE_SEARCH_BUDGET_MS;
+    const matches: Array<{ path: string; line: number; text: string }> = [];
+    const queue = [evaluation.resolvedPath];
+    let filesScanned = 0;
+    let truncated = false;
+    while (queue.length && matches.length < limit) {
+      signal?.throwIfAborted();
+      if (Date.now() > deadline) { truncated = true; break; }
+      const directory = queue.shift()!;
+      let children;
+      try { children = await readdir(directory, { withFileTypes: true }); } catch { continue; }
+      children.sort((left, right) => left.name.localeCompare(right.name));
+      for (const child of children) {
+        if (child.isSymbolicLink()) continue;
+        const absolute = path.join(directory, child.name);
+        if (child.isDirectory()) {
+          if (!shouldSkipDirectory(child.name) && !['__pycache__', '.next', 'coverage', 'out', 'bin', 'obj'].includes(child.name)) queue.push(absolute);
+          continue;
+        }
+        if (!child.isFile()) continue;
+        let info;
+        try { info = await stat(absolute); } catch { continue; }
+        if (info.size > CODE_SEARCH_MAX_FILE_BYTES) continue;
+        let buffer: Buffer;
+        try { buffer = await readFile(absolute); } catch { continue; }
+        if (buffer.subarray(0, 4096).includes(0)) continue;
+        filesScanned += 1;
+        const lines = buffer.toString('utf8').split(/\r?\n/u);
+        for (let index = 0; index < lines.length && matches.length < limit; index += 1) {
+          if (matcher.test(lines[index]!.slice(0, 4_000))) {
+            matches.push({
+              path: path.relative(project.root, absolute).split(path.sep).join('/'),
+              line: index + 1,
+              text: lines[index]!.trim().slice(0, 240),
+            });
+          }
+        }
+        if (matches.length >= limit) { truncated = true; break; }
+      }
+    }
+    return ok(`Found ${matches.length} match(es) in ${filesScanned} file(s).`, { matches, filesScanned, truncated });
   }
 
   private async createProject(input: unknown, context: MonarchKernelContext): Promise<MonarchExecutionResult> {
@@ -1371,6 +1539,14 @@ function clamp(value: number, min: number, max: number): number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeProjectRelative(root: string, file: string): string {
+  const value = String(file || '').trim();
+  if (!value) return '';
+  const absolute = path.resolve(root, value);
+  if (!isPathWithinRoot(absolute, root)) return '';
+  return path.relative(root, absolute).split(path.sep).join('/');
 }
 
 function shouldSkipDirectory(name: string): boolean {

@@ -10,9 +10,9 @@ import {
   coderSessionGroup, coderSessions, coderStepDetail, coderSteps, coderTitle, isCoderRunActive,
 } from './coder-thread.js';
 import {
-  armAgentTaskApproval, cancelCoderRun, deleteCoderRun, executeCapability, fetchCoderChanges, fetchCoderOverview,
+  armAgentTaskApproval, cancelCoderRun, deleteCoderRun, executeCapability, fetchCoderChanges, fetchCoderMemory, fetchCoderOverview,
   fetchCoderRun, mutateCoderProject, resolveAgentTaskApproval, resumeCoderRun, startCoderRun, streamCoderRun,
-  submitCoderReply,
+  readLocalSettings, submitCoderReply, writeLocalSettings,
 } from './api.js';
 
 const MODEL_KEY = 'monarch.coder.model';
@@ -37,7 +37,7 @@ const state = {
   railOpen: true,
   search: '',
   review: { open: false, tab: 'changes', changes: null, loading: false, error: '', expanded: new Set(), fileQuery: '',
-    preview: null },
+    preview: null, memory: null, memoryLoading: false, memoryError: '', memoryNotice: null },
   expandedSteps: new Set(),
   expandedRuns: new Set(),
   approvalBusy: '',
@@ -197,9 +197,10 @@ function bindEvents() {
 
   ui['open-changes'].addEventListener('click', () => toggleReview('changes'));
   ui['open-files'].addEventListener('click', () => toggleReview('files'));
+  ui['open-memory'].addEventListener('click', () => toggleReview('memory'));
   ui['review-close'].addEventListener('click', () => setReview(false));
   ui.scrim.addEventListener('click', () => { setReview(false); if (narrow()) setRail(false); });
-  for (const tab of ui.tabs) tab.addEventListener('click', () => { state.review.tab = tab.dataset.cdrTab; renderReview(); if (tab.dataset.cdrTab === 'changes') void loadChanges(); });
+  for (const tab of ui.tabs) tab.addEventListener('click', () => { state.review.tab = tab.dataset.cdrTab; renderReview(); if (tab.dataset.cdrTab === 'changes') void loadChanges(); if (tab.dataset.cdrTab === 'memory') void loadMemory(); });
   ui['review-body'].addEventListener('click', handleReviewClick);
   ui['review-body'].addEventListener('input', event => {
     if (!event.target.matches('[data-file-search]')) return;
@@ -591,6 +592,59 @@ function setReview(open, tab = state.review.tab) {
   syncLayout();
   renderHead();
   if (open && tab === 'changes') void loadChanges();
+  if (open && tab === 'memory') void loadMemory();
+}
+
+async function loadMemory(refresh = false) {
+  const id = projectId();
+  if (!id || state.review.memoryLoading) return;
+  state.review.memoryLoading = true; state.review.memoryError = '';
+  if (state.review.memory?.projectId !== id) state.review.memory = null;
+  renderReview();
+  try {
+    const payload = await fetchCoderMemory(id, refresh);
+    if (id === projectId()) state.review.memory = payload.memory;
+  } catch (error) { state.review.memoryError = messageOf(error); }
+  finally { state.review.memoryLoading = false; renderReview(); }
+}
+
+async function memoryCommand(command, payload) {
+  const scope = { type: 'coder-project', projectId: projectId() };
+  const current = await readLocalSettings('memory', scope);
+  return writeLocalSettings(command, payload, { scope, expectedRevision: current?.revision || 0 });
+}
+
+async function forgetProjectNote(button) {
+  const id = button.dataset.memoryForget;
+  const note = state.review.memory?.knowledge?.find((entry) => entry.id === id);
+  button.disabled = true;
+  try {
+    await memoryCommand('memory.delete', { id });
+    state.review.memoryNotice = { id, text: note?.text || '' };
+    await loadMemory();
+  } catch (error) { state.review.memoryError = messageOf(error); renderReview(); }
+}
+
+async function restoreProjectNote(id) {
+  try {
+    await memoryCommand('memory.restore', { id });
+    state.review.memoryNotice = null;
+    await loadMemory();
+  } catch (error) { state.review.memoryError = messageOf(error); renderReview(); }
+}
+
+async function addProjectRule(form) {
+  const field = form.querySelector('textarea');
+  const text = String(field?.value || '').trim();
+  if (!text) return;
+  const submit = form.querySelector('button[type="submit"]');
+  if (submit) submit.disabled = true;
+  try {
+    await memoryCommand('memory.create', { text, category: 'rule', type: 'convention', source: 'coder-ui', pinned: true });
+    field.value = '';
+    await loadMemory();
+  } catch (error) { state.review.memoryError = messageOf(error); renderReview(); }
+  finally { if (submit) submit.disabled = false; }
 }
 
 async function loadChanges() {
@@ -624,6 +678,11 @@ function handleReviewClick(event) {
   if (file) { void previewFile(file.dataset.filePath); return; }
   if (event.target.closest('[data-preview-close]')) { state.review.preview = null; renderReview(); return; }
   if (event.target.closest('[data-refresh-changes]')) void loadChanges();
+  if (event.target.closest('[data-memory-refresh]')) void loadMemory(true);
+  const forget = event.target.closest('[data-memory-forget]');
+  if (forget) void forgetProjectNote(forget);
+  const restore = event.target.closest('[data-memory-restore]');
+  if (restore) void restoreProjectNote(restore.dataset.memoryRestore);
 }
 
 async function previewFile(filePath) {
@@ -778,6 +837,7 @@ function renderHead() {
   ui['changes-count'].textContent = String(changes);
   ui['open-changes'].setAttribute('aria-expanded', String(state.review.open && state.review.tab === 'changes'));
   ui['open-files'].setAttribute('aria-expanded', String(state.review.open && state.review.tab === 'files'));
+  ui['open-memory'].setAttribute('aria-expanded', String(state.review.open && state.review.tab === 'memory'));
   const railShown = ui.root.dataset.rail === 'true';
   ui['rail-toggle'].setAttribute('aria-expanded', String(railShown));
   ui['rail-toggle'].setAttribute('aria-label', railShown ? 'Скрыть разговоры' : 'Показать разговоры');
@@ -1105,7 +1165,99 @@ function renderReview() {
   for (const tab of ui.tabs) tab.setAttribute('aria-selected', String(tab.dataset.cdrTab === state.review.tab));
   if (!open) return;
   if (state.review.preview) { ui['review-body'].replaceChildren(previewView()); return; }
-  ui['review-body'].replaceChildren(state.review.tab === 'files' ? filesView() : changesView());
+  ui['review-body'].replaceChildren(state.review.tab === 'files' ? filesView()
+    : state.review.tab === 'memory' ? memoryView() : changesView());
+}
+
+const KNOWLEDGE_KINDS = { decision: 'Решение', convention: 'Соглашение', pitfall: 'Осторожно', command: 'Команда', component: 'Компонент' };
+
+function memoryAge(iso) {
+  const minutes = Math.round((Date.now() - Date.parse(iso || '')) / 60000);
+  if (!Number.isFinite(minutes)) return '';
+  if (minutes < 1) return 'только что';
+  if (minutes < 60) return `${minutes} мин назад`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours} ч назад` : `${Math.round(hours / 24)} дн назад`;
+}
+
+/** "Память проекта": what Coder knows before it opens a single file. */
+function memoryView() {
+  const box = el('div', 'cdr-memory');
+  const memory = state.review.memory;
+  const head = el('div', 'cdr-review-sub');
+  head.append(el('span', '', memory ? `Карта: ${memory.files}${memory.truncated ? '+' : ''} файлов · ${memoryAge(memory.scannedAt)}` : 'Память проекта'),
+    el('button', 'cdr-link', state.review.memoryLoading ? 'Обновляю…' : 'Обновить карту',
+      { type: 'button', 'data-memory-refresh': '', ...(state.review.memoryLoading ? { disabled: '' } : {}) }));
+  box.append(head);
+  if (state.review.memoryError) box.append(el('p', 'cdr-inline-error', state.review.memoryError));
+  if (!memory) { box.append(el('p', 'cdr-quiet', state.review.memoryLoading ? 'Изучаю проект…' : 'Загружаю память проекта…')); return box; }
+  const notice = state.review.memoryNotice;
+  if (notice) {
+    const line = el('p', 'cdr-memory-notice', `Забыто: «${notice.text.slice(0, 80)}». `);
+    line.append(el('button', 'cdr-link', 'Вернуть', { type: 'button', 'data-memory-restore': notice.id }));
+    box.append(line);
+  }
+
+  const overview = el('section', 'cdr-memory-section');
+  overview.append(el('h4', '', 'Обзор'));
+  if (memory.stack.length) {
+    const chips = el('div', 'cdr-memory-chips');
+    for (const item of memory.stack) chips.append(el('span', 'cdr-memory-chip', item));
+    overview.append(chips);
+  }
+  if (memory.commands.length) {
+    const list = el('dl', 'cdr-memory-commands');
+    for (const command of memory.commands) list.append(el('dt', '', command.name), el('dd', '', command.command));
+    overview.append(list);
+  }
+  if (memory.entrypoints.length) overview.append(el('p', 'cdr-quiet', `Точки входа: ${memory.entrypoints.join(', ')}`));
+  if (memory.modules.length) {
+    overview.append(el('p', 'cdr-quiet', `Структура: ${memory.modules.map((module) => `${module.path}/ (${module.files})`).join(', ')}`));
+  }
+  if (!memory.stack.length && !memory.commands.length && !memory.modules.length) {
+    overview.append(el('p', 'cdr-quiet', 'Проект пока почти пустой — карта появится вместе с кодом.'));
+  }
+  box.append(overview);
+
+  const rules = el('section', 'cdr-memory-section');
+  rules.append(el('h4', '', 'Правила проекта'));
+  const ownerRules = memory.knowledge.filter((entry) => entry.category === 'rule');
+  for (const entry of ownerRules) rules.append(knowledgeRow(entry));
+  for (const rule of memory.rules) {
+    const details = el('details', 'cdr-memory-rulefile');
+    details.append(el('summary', '', `Из ${rule.source}`), el('pre', '', rule.excerpt));
+    rules.append(details);
+  }
+  if (!ownerRules.length && !memory.rules.length) {
+    rules.append(el('p', 'cdr-quiet', 'Правил пока нет. Coder также читает AGENTS.md, CLAUDE.md и README в корне проекта.'));
+  }
+  if (memory.available) {
+    const form = el('form', 'cdr-memory-rule-form', '', { 'data-memory-rule-form': '' });
+    const field = el('textarea', '', '', { rows: '2', maxlength: '600', placeholder: 'Например: не трогать папку generated/', 'aria-label': 'Новое правило проекта' });
+    form.append(field, el('button', 'cdr-link', 'Добавить правило', { type: 'submit' }));
+    form.addEventListener('submit', (event) => { event.preventDefault(); void addProjectRule(form); });
+    rules.append(form);
+  }
+  box.append(rules);
+
+  const learned = el('section', 'cdr-memory-section');
+  learned.append(el('h4', '', 'Что Coder запомнил'));
+  const notes = memory.knowledge.filter((entry) => entry.category !== 'rule');
+  if (!memory.available) learned.append(el('p', 'cdr-quiet', 'Память выключена в настройках — Coder ничего не запоминает между задачами.'));
+  else if (!notes.length) learned.append(el('p', 'cdr-quiet', 'Пока ничего. После задач здесь появятся решения, рабочие команды и ловушки проекта.'));
+  for (const entry of notes) learned.append(knowledgeRow(entry));
+  box.append(learned);
+  return box;
+}
+
+function knowledgeRow(entry) {
+  const row = el('article', 'cdr-memory-note');
+  const top = el('div', 'cdr-memory-note-top');
+  if (KNOWLEDGE_KINDS[entry.type]) top.append(el('span', 'cdr-memory-kind', KNOWLEDGE_KINDS[entry.type]));
+  if (entry.stale) top.append(el('span', 'cdr-memory-stale', 'файлы с тех пор менялись', { title: 'Связанные файлы изменились после этой записи — она может устареть' }));
+  top.append(el('button', 'cdr-link cdr-memory-forget', 'Забыть', { type: 'button', 'data-memory-forget': entry.id }));
+  row.append(top, el('p', '', entry.text));
+  return row;
 }
 
 function changesView() {

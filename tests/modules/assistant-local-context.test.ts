@@ -3,7 +3,7 @@ import { buildAssistantModelMessages } from '../../src/modules/assistant';
 import type { MonarchKernelContext } from '../../src/core';
 
 describe('assistant local profile context', () => {
-  it('injects saved style and only permanent memory into the system prompt', async () => {
+  it('injects saved style and no legacy memory into the system prompt', async () => {
     const context = {
       execute: vi.fn(async (request) => request.moduleId === 'profile'
         ? { ok: true, summary: 'ok', output: { profile: {
@@ -13,10 +13,7 @@ describe('assistant local profile context', () => {
           boundaries: [],
           preferences: { communicationPreset: 'warm' },
         } } }
-        : { ok: true, summary: 'ok', output: { records: [
-          { text: 'Не удалять чужие изменения', category: 'project', tier: 'permanent', pinned: true },
-          { text: 'Временная заметка', category: 'note', tier: 'working', pinned: false },
-        ] } }),
+        : { ok: false, summary: 'unexpected read', error: 'unexpected-read' }),
       listModules: vi.fn(() => []),
       listCapabilities: vi.fn(() => []),
       getPermissionProfile: vi.fn(() => ({ sandboxMode: 'workspace-write', approvalPolicy: 'on-request' })),
@@ -37,8 +34,9 @@ describe('assistant local profile context', () => {
     expect(messages[0]?.content).toContain('execution result/receipt');
     const localContext = messages.find((message) => message.content.includes('<local_user_context>'))?.content || '';
     expect(localContext).toContain('Сначала результат');
-    expect(localContext).toContain('Не удалять чужие изменения');
-    expect(localContext).not.toContain('Временная заметка');
+    expect(localContext).not.toContain('permanentMemory');
+    // Remembered facts come from Memory 4.1 in the backend, not from a Kernel read.
+    expect(vi.mocked(context.execute).mock.calls.every(([request]) => request.moduleId === 'profile')).toBe(true);
     expect(messages[0]?.content.length).toBeLessThan(3200);
 
     const englishMessages = await buildAssistantModelMessages({ text: 'Are you excited?', context });

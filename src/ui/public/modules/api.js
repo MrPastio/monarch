@@ -753,6 +753,12 @@ export async function startCoderRun(prompt, projectId, model, clientRequestId, s
     body: { prompt, projectId, model, clientRequestId, ...(sessionId ? { sessionId } : {}) } });
 }
 
+/** Coder Memory: map summary and project notes; refresh rescans the project. */
+export async function fetchCoderMemory(projectId, refresh = false) {
+  return coderRequest(`/api/coder/projects/${encodeURIComponent(projectId)}/memory`,
+    refresh ? { method: 'POST', body: {} } : undefined);
+}
+
 export async function fetchCoderChanges(projectId) {
   return coderRequest(`/api/coder/projects/${encodeURIComponent(projectId)}/changes`);
 }

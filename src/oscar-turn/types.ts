@@ -126,6 +126,7 @@ export type OscarTurnEventType =
   | 'runtime.waiting'
   | 'non-authoritative-confirmation'
   | 'turn.outcome'
+  | 'memory.changed'
   | 'turn.failed';
 
 export interface OscarTurnEventDraft {

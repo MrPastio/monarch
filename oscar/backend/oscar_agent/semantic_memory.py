@@ -15,6 +15,16 @@ class SemanticRerankResult:
     timed_out: bool = False
 
 
+@dataclass(slots=True)
+class QueryEmbedding:
+    vector: Any | None  # normalised float32 numpy row, or None
+    engine: str
+    timed_out: bool = False
+
+
+ENGINE = "multilingual-e5-small-int8-cpu"
+
+
 class SemanticMemoryReranker:
     """Single CPU worker for bounded multilingual E5 inference.
 
@@ -32,6 +42,9 @@ class SemanticMemoryReranker:
         self._load_error = ""
         self._lock = threading.Lock()
         self._warmup: Future[Any] | None = None
+        self._admission_lock = threading.Lock()
+        self._active: Future[Any] | None = None
+        self._closed = False
 
     @property
     def files_present(self) -> bool:
@@ -42,31 +55,82 @@ class SemanticMemoryReranker:
         if self._load_error:
             return f"unavailable:{self._load_error}"
         if self._session is not None:
-            return "ready:multilingual-e5-small-int8-cpu"
+            return "ready:" + ENGINE
         return "warming" if self._warmup else "not-loaded"
 
     def warmup(self) -> None:
-        if not self.files_present or self._warmup is not None or self._session is not None:
-            return
-        self._warmup = self._executor.submit(self._load)
+        with self._admission_lock:
+            if self._closed or not self.files_present or self._warmup is not None or self._session is not None:
+                return
+            if self._active is not None and not self._active.done():
+                return
+            self._warmup = self._active = self._executor.submit(self._load)
+
+    @property
+    def model_id(self) -> str:
+        """Identity of the weights; stored vectors from other weights are stale."""
+        try:
+            return f"e5-small-int8:{self._model_path().stat().st_size}"
+        except OSError:
+            return ""
+
+    def embed_query(self, query: str) -> QueryEmbedding:
+        """One query vector within the request deadline, or a lexical fallback.
+
+        Same admission rule as rerank: one task, no queue, overload falls back."""
+        if not self.files_present:
+            return QueryEmbedding(None, "fts:model-files-missing")
+        with self._admission_lock:
+            if self._closed:
+                return QueryEmbedding(None, "fts:semantic-closed")
+            if self._active is not None and not self._active.done():
+                return QueryEmbedding(None, "fts:semantic-busy")
+            future = self._active = self._executor.submit(self._embed, [f"query: {query}"])
+        try:
+            return QueryEmbedding(future.result(timeout=self.deadline_ms / 1000.0)[0], ENGINE)
+        except TimeoutError:
+            future.cancel()
+            return QueryEmbedding(None, "fts:semantic-deadline", timed_out=True)
+        except Exception as exc:
+            self._load_error = type(exc).__name__
+            return QueryEmbedding(None, f"fts:semantic-{type(exc).__name__}")
+
+    def embed_passages(self, passages: list[str]) -> Any:
+        """Vectors for stored records, computed on the caller's (background)
+        thread. ONNX Runtime sessions accept concurrent runs, so this never
+        takes the request slot that embed_query and rerank share."""
+        if self._closed:
+            raise RuntimeError("semantic-closed")
+        return self._embed([f"passage: {passage}" for passage in passages])
 
     def rerank(self, query: str, passages: list[str]) -> SemanticRerankResult:
         if not passages:
             return SemanticRerankResult([], "semantic-empty")
         if not self.files_present:
             return SemanticRerankResult(None, "fts:model-files-missing")
-        future = self._executor.submit(self._score, query, passages)
+        # A deadline bounds latency, not CPU work: a running ONNX invocation
+        # cannot be cancelled. Admit only one task, with no pending queue.
+        # Overload immediately uses lexical retrieval and retains no passages.
+        with self._admission_lock:
+            if self._closed:
+                return SemanticRerankResult(None, "fts:semantic-closed")
+            if self._active is not None and not self._active.done():
+                return SemanticRerankResult(None, "fts:semantic-busy")
+            future = self._active = self._executor.submit(self._score, query, passages)
         try:
             scores = future.result(timeout=self.deadline_ms / 1000.0)
-            return SemanticRerankResult(scores, "multilingual-e5-small-int8-cpu")
+            return SemanticRerankResult(scores, ENGINE)
         except TimeoutError:
+            future.cancel()
             return SemanticRerankResult(None, "fts:semantic-deadline", timed_out=True)
         except Exception as exc:
             self._load_error = type(exc).__name__
             return SemanticRerankResult(None, f"fts:semantic-{type(exc).__name__}")
 
     def close(self) -> None:
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        with self._admission_lock:
+            self._closed = True
+            self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _load(self) -> None:
         if self._session is not None:
@@ -82,7 +146,7 @@ class SemanticMemoryReranker:
             options.inter_op_num_threads = 1
             options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
             options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            self._session = ort.InferenceSession(
+            session = ort.InferenceSession(
                 str(self._model_path()),
                 sess_options=options,
                 providers=["CPUExecutionProvider"],
@@ -90,14 +154,21 @@ class SemanticMemoryReranker:
             processor = spm.SentencePieceProcessor()
             if not processor.load(str(self._tokenizer_path())):
                 raise RuntimeError("SentencePiece model could not be loaded")
+            # Publish only a complete pair; a tokenizer failure must not leave
+            # a half-initialized model which every later request tries to use.
             self._sentencepiece = processor
+            self._session = session
             self._load_error = ""
 
     def _score(self, query: str, passages: list[str]) -> list[float]:
+        pooled = self._embed([f"query: {query}", *[f"passage: {passage}" for passage in passages]])
+        query_embedding = pooled[0]
+        return [float(max(-1.0, min(1.0, score))) for score in pooled[1:] @ query_embedding]
+
+    def _embed(self, texts: list[str]) -> Any:
         self._load()
         import numpy as np
 
-        texts = [f"query: {query}", *[f"passage: {passage}" for passage in passages]]
         encoded = [self._encode(text, 256) for text in texts]
         width = max(len(row) for row in encoded)
         input_ids = np.full((len(encoded), width), 1, dtype=np.int64)
@@ -117,9 +188,7 @@ class SemanticMemoryReranker:
         mask = attention[..., None].astype(hidden.dtype)
         pooled = (hidden * mask).sum(axis=1) / np.clip(mask.sum(axis=1), 1e-9, None)
         norms = np.linalg.norm(pooled, axis=1, keepdims=True)
-        pooled = pooled / np.clip(norms, 1e-9, None)
-        query_embedding = pooled[0]
-        return [float(max(-1.0, min(1.0, score))) for score in pooled[1:] @ query_embedding]
+        return (pooled / np.clip(norms, 1e-9, None)).astype(np.float32)
 
     def _encode(self, text: str, maximum: int) -> list[int]:
         # XLM-R keeps its fairseq special ids in front of SentencePiece:

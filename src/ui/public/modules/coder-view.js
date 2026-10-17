@@ -6,6 +6,7 @@ const ICON = {
   search: '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="9" cy="9" r="4.8"/><path d="m12.6 12.6 3.4 3.4"/></svg>',
   changes: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4v8M6 15.5v.5M14 4.5V5M14 8v8"/><circle cx="6" cy="13.8" r="1.6"/><circle cx="14" cy="6.6" r="1.6"/></svg>',
   files: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 3.5h5.2L15 7.3v9.2H6z"/><path d="M11 3.5v4h4"/></svg>',
+  memory: '<svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="3" width="10" height="14" rx="2.2"/><path d="M8 3v6l2-1.4L12 9V3M8 13h4"/></svg>',
   more: '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="10" r="1.2"/><circle cx="10" cy="10" r="1.2"/><circle cx="15" cy="10" r="1.2"/></svg>',
   close: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.5 5.5 9 9m0-9-9 9"/></svg>',
   send: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15.5v-11M5.5 9 10 4.5 14.5 9"/></svg>',
@@ -46,6 +47,7 @@ export function mountCoderView(root) {
         <div class="cdr-head-actions">
           <button class="cdr-chip-button" type="button" data-cdr="open-changes" aria-expanded="false">${ICON.changes}<span>Изменения</span><b data-cdr="changes-count" hidden></b></button>
           <button class="cdr-chip-button" type="button" data-cdr="open-files" aria-expanded="false">${ICON.files}<span>Файлы</span></button>
+          <button class="cdr-chip-button" type="button" data-cdr="open-memory" aria-expanded="false" title="Что Coder знает о проекте">${ICON.memory}<span>Память</span></button>
           <div class="cdr-more">
             <button class="cdr-icon-button" type="button" data-cdr="more" aria-label="Ещё" aria-haspopup="menu" aria-expanded="false">${ICON.more}</button>
             <div class="cdr-menu cdr-more-menu" data-cdr="more-menu" role="menu" hidden>
@@ -82,6 +84,7 @@ export function mountCoderView(root) {
         <div class="cdr-tabs" role="tablist" aria-label="Панель проекта">
           <button type="button" role="tab" data-cdr-tab="changes" aria-selected="true">Изменения</button>
           <button type="button" role="tab" data-cdr-tab="files" aria-selected="false">Файлы</button>
+          <button type="button" role="tab" data-cdr-tab="memory" aria-selected="false">Память проекта</button>
         </div>
         <button class="cdr-icon-button" type="button" data-cdr="review-close" aria-label="Закрыть панель">${ICON.close}</button>
       </header>

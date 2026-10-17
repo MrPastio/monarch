@@ -1,0 +1,39 @@
+{
+  "_about": "Held-out synthetic set written after the patterns were changed against facts_ru.json, to check they generalise. Same format. No real personal data.",
+  "cases": [
+    {"id": "h01", "kind": "direct", "text": "Меня зовут Святослав, привет!", "gold": [["name", ["святослав"]]]},
+    {"id": "h02", "kind": "direct", "text": "Я живу во Владивостоке уже пять лет.", "gold": [["home_city", ["владивосток"]]]},
+    {"id": "h03", "kind": "direct", "text": "Я программист, пишу на Go.", "gold": [["occupation", ["программист"]]]},
+    {"id": "h04", "kind": "direct", "text": "Я обожаю старые фильмы.", "gold": [["preference", ["стар", "фильм"]]]},
+    {"id": "h05", "kind": "direct", "text": "У меня есть попугай Кеша.", "gold": [["pet", ["попуга", "кеш"]]]},
+    {"id": "h06", "kind": "direct", "text": "Отвечай на русском.", "gold": [["language_pref", ["русск"]]]},
+    {"id": "h07", "kind": "direct", "text": "Я работаю в больнице, а живу в Твери.", "gold": [["occupation", ["больниц"]], ["home_city", ["твер"]]]},
+
+    {"id": "q01", "kind": "paraphrase", "text": "Обитаю в Калининграде, люблю море.", "gold": [["home_city", ["калининград"]], ["preference", ["мор"]]]},
+    {"id": "q02", "kind": "paraphrase", "text": "Работаю переводчиком с японского.", "gold": [["occupation", ["переводчик"]]]},
+    {"id": "q03", "kind": "paraphrase", "text": "По профессии я повар.", "gold": [["occupation", ["повар"]]]},
+    {"id": "q04", "kind": "paraphrase", "text": "Мне очень нравится северное сияние.", "gold": [["preference", ["северн", "сиян"]]]},
+    {"id": "q05", "kind": "paraphrase", "text": "Терпеть не могу, когда меня перебивают.", "gold": [["preference", ["перебива"]]]},
+    {"id": "q06", "kind": "paraphrase", "text": "Хорошо владею итальянским.", "gold": [["languages", ["итальянск"]]]},
+    {"id": "q07", "kind": "paraphrase", "text": "Давай на ты, так проще.", "gold": [["address_form", ["ты"]]]},
+    {"id": "q08", "kind": "paraphrase", "text": "Мой родной город — Ярославль.", "gold": [["hometown", ["ярославл"]]]},
+    {"id": "q09", "kind": "paraphrase", "text": "У меня три кошки.", "gold": [["pet", ["кошк"]]]},
+    {"id": "q10", "kind": "paraphrase", "text": "Зовут меня Тимур.", "gold": [["name", ["тимур"]]]},
+    {"id": "q11", "kind": "paraphrase", "text": "Живу теперь в Праге.", "gold": [["home_city", ["праг"]]]},
+
+    {"id": "m01", "kind": "negative", "text": "Работаю над отчётом, помоги со структурой.", "gold": []},
+    {"id": "m02", "kind": "negative", "text": "Напиши письмо от моего имени: я живу в Туле и прошу перенести встречу.", "gold": []},
+    {"id": "m03", "kind": "negative", "text": "Он сказал мне: «я живу в Москве».", "gold": []},
+    {"id": "m04", "kind": "negative", "text": "Мой брат работает инженером в Перми.", "gold": []},
+    {"id": "m05", "kind": "negative", "text": "Мама переехала в Псков.", "gold": []},
+    {"id": "m06", "kind": "negative", "text": "Придумай диалог, где я говорю на французском.", "gold": []},
+    {"id": "m07", "kind": "negative", "text": "Работаю медленно сегодня, не торопи.", "gold": []},
+    {"id": "m08", "kind": "negative", "text": "Мой любимый персонаж — Шерлок.", "gold": []},
+    {"id": "m09", "kind": "negative", "text": "Как сказать «я люблю тебя» по-итальянски?", "gold": []},
+    {"id": "m10", "kind": "negative", "text": "Переведи: мне нравится гулять под дождём.", "gold": []},
+    {"id": "m11", "kind": "paraphrase", "text": "Не люблю, когда ты отвечаешь шаблонно", "gold": [["preference", ["шаблонн"]]]},
+    {"id": "m12", "kind": "negative", "text": "Кошка соседки опять у меня на балконе.", "gold": []},
+    {"id": "m13", "kind": "negative", "text": "Работаю на выходных, так что напомни в понедельник.", "gold": []},
+    {"id": "m14", "kind": "negative", "text": "Где сейчас лучше жить — в Казани или Сочи?", "gold": []}
+  ]
+}

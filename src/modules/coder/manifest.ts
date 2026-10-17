@@ -30,6 +30,9 @@ function coderRoutingTags(capabilityId: string): string[] {
   if (capabilityId.startsWith('coder.network.')) return ['сеть', 'url', 'api', 'запрос'];
   if (capabilityId.startsWith('coder.github.')) return ['github', 'pull request', 'pr'];
   if (capabilityId.startsWith('coder.huggingface.')) return ['hugging face', 'модель', 'dataset'];
+  if (capabilityId === 'coder.memory.search') return ['память', 'архитектура', 'где', 'определено', 'импорт', 'решение'];
+  if (capabilityId === 'coder.memory.note') return ['память', 'запомнить', 'решение', 'соглашение'];
+  if (capabilityId === 'coder.code.search') return ['поиск', 'grep', 'найти', 'код', 'текст'];
   return [];
 }
 
@@ -447,6 +450,57 @@ export const coderManifest: MonarchModuleManifest = {
           validation: { type: 'object' },
         },
         required: ['name', 'description', 'instructions'],
+        additionalProperties: false,
+      },
+    },
+    {
+      id: 'coder.memory.search',
+      moduleId: 'coder',
+      title: 'Search project memory',
+      description: 'Search the project map (files, symbols, who imports what) and the notes earlier tasks left: decisions, conventions, pitfalls, commands. Use before exploring files one by one.',
+      risk: 'read',
+      inputSchema: {
+        type: 'object',
+        properties: { projectId: { type: 'string' }, query: { type: 'string' }, limit: { type: 'number' } },
+        required: ['query'],
+        additionalProperties: false,
+      },
+    },
+    {
+      id: 'coder.code.search',
+      moduleId: 'coder',
+      title: 'Search code text',
+      description: 'Find lines containing a text (or a regular expression with regex: true) across project files, skipping dependencies and build output. Returns path, line number and the line.',
+      risk: 'read',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectId: { type: 'string' },
+          query: { type: 'string' },
+          path: { type: 'string' },
+          regex: { type: 'boolean' },
+          caseSensitive: { type: 'boolean' },
+          limit: { type: 'number' },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+    },
+    {
+      id: 'coder.memory.note',
+      moduleId: 'coder',
+      title: 'Remember a project note',
+      description: 'Save a short durable note for future tasks in this project: a decision and why, a convention, a pitfall to avoid, a command that works, or what a component does. Link the files it concerns.',
+      risk: 'write',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          projectId: { type: 'string' },
+          kind: { type: 'string', enum: ['decision', 'convention', 'pitfall', 'command', 'component'] },
+          text: { type: 'string' },
+          files: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['kind', 'text'],
         additionalProperties: false,
       },
     },

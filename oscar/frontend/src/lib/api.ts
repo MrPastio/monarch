@@ -23,7 +23,7 @@ export async function getHardware() {
 }
 
 export async function getMemoryStats() {
-  return fetchJson<MemoryStats>(`${API_BASE}/api/memory/stats`);
+  return (await getHealth()).memory;
 }
 
 export async function getModelStatus() {

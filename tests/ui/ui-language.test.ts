@@ -45,7 +45,11 @@ describe('plain user-facing status', () => {
       sources, provenance: { verification: 'source-grounded' }, usage: { total_tokens: 432, elapsed_ms: 2000 },
     });
     const html = renderOscarMessage(message);
-    expect(html.match(/Учтена память/g)).toHaveLength(1);
+    expect(html.match(/>Из памяти</g)).toHaveLength(1);
+    // The profile core comes with every answer and does not earn a chip.
+    const profileOnly = renderOscarMessage(createOscarMessage('assistant', 'Ок.', 'Oscar', {
+      sources: [{ kind: 'memory', url: 'memory://profile/a1' }] }));
+    expect(profileOnly).not.toContain('Из памяти');
     expect(html).not.toContain('С источниками');
     expect(html).not.toContain('432');
     expect(html).toContain('Токен — технический термин.');

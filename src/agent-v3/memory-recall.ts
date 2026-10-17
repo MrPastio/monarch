@@ -104,7 +104,7 @@ export function compileAstraMemoryRecall(value: unknown, query: string): AstraMe
   const validity = value.validityToken === undefined ? {} : { validityToken: value.validityToken as `sha256:${string}` };
   check(value.schemaVersion === 1 && record(value.scope) && Object.keys(value.scope).length === 1 && value.scope.type === 'chat'
     && typeof value.revision === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(value.revision)
-    && Array.isArray(value.explicitMemories) && value.explicitMemories.length <= 4
+    && Array.isArray(value.explicitMemories) && value.explicitMemories.length <= 8
     && Array.isArray(value.episodes) && value.episodes.length <= 4
     && Number.isSafeInteger(value.budgetChars) && Number(value.budgetChars) >= 0 && Number(value.budgetChars) <= 16_384
     && Number.isSafeInteger(value.usedChars) && Number(value.usedChars) >= 0 && Number(value.usedChars) <= Number(value.budgetChars)

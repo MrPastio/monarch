@@ -4,7 +4,6 @@ export * from './artifacts';
 export * from './astra';
 export * from './diagnostics';
 export * from './knowledge';
-export * from './memory';
 export * from './models';
 export * from './oscar';
 export * from './profile';

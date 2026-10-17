@@ -17,6 +17,7 @@ import pytest
 
 from oscar_agent import secure_db
 from oscar_agent.config import Settings
+from oscar_agent.context_settings import ContextSettingsStore
 from oscar_agent.memory import MemoryStore
 
 
@@ -53,10 +54,12 @@ def run_profile(monkeypatch, tmp_path: Path, caplog, *, sealed: bool):
     conversation = store.create_conversation("Проверка")
     store.append_conversation_message(conversation["id"], "user", f"Что значит слово {marker}?")
     store.append_conversation_message(conversation["id"], "assistant", f"Ответ про {marker}.")
-    store.create_memory_item(f"Любимое слово {marker}")
+    context = ContextSettingsStore(settings)
+    context.execute(client_request_id="marker-remember", command="memory.remember", scope={"type": "chat"},
+                    expected_revision=context.read("memory", {"type": "chat"})["revision"],
+                    payload={"text": f"Любимое слово {marker}"}, policy_decision_hash="b" * 64)
     store.upsert_document(url=None, title="Заметка", text=f"Заметка про {marker} и ещё немного текста.", source="note")
     assert marker in str(store.get_conversation(conversation["id"]))
-    assert store.search(marker)
 
     hits = []
     for file in tmp_path.rglob("*"):
@@ -83,9 +86,9 @@ def test_access_log_keeps_the_path_and_drops_search_text():
 
     marker = "MARKER" + secrets.token_hex(8)
     record = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d',
-                               ("127.0.0.1:5000", "GET", f"/api/memory/search?q={marker}&limit=6", "1.1", 200), None)
+                               ("127.0.0.1:5000", "GET", f"/api/workspace/search?q={marker}&limit=6", "1.1", 200), None)
     assert AccessLogWithoutQuery().filter(record)
-    assert record.getMessage() == '127.0.0.1:5000 - "GET /api/memory/search HTTP/1.1" 200'
+    assert record.getMessage() == '127.0.0.1:5000 - "GET /api/workspace/search HTTP/1.1" 200'
 
 
 def test_search_fetch_logs_name_the_site_not_the_page(monkeypatch, tmp_path, caplog):

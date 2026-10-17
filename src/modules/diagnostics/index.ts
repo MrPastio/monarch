@@ -216,7 +216,7 @@ export class DiagnosticsModule implements MonarchModule {
       recommendedActions.add('No immediate action required; keep using focused tests for changed modules.');
     } else {
       recommendedActions.add('Start with the highest severity anomaly and verify with the narrowest focused test.');
-      suggestedTests.add('npm test -- tests/core/router.test.ts tests/modules/memory.test.ts');
+      suggestedTests.add('npm test -- tests/core/router.test.ts');
     }
 
     const status = reportStatus(anomalies);

@@ -334,7 +334,11 @@ describe('Oscar live shell regressions', () => {
     expect(indexSource).toContain('id="memory-cross-chat-enabled"');
     expect(settingsSource).toContain("writeLocalSettings('memory.cross-chat.set'");
     expect(settingsSource).toContain("readLocalSettings('memory')");
-    expect(oscarSource).toContain("writeLocalSettings('memory.create'");
+    // One place for memory: the chat no longer has a second editor.
+    expect(indexSource).not.toContain('id="oscar-memory-panel"');
+    expect(oscarSource).not.toContain("writeLocalSettings('memory.create'");
+    expect(settingsSource).toContain("writeLocalSettings('memory.remember'");
+    expect(settingsSource).toContain("'memory.learning.set'");
     expect(oscarSource).not.toContain("capability: 'oscar.memory.manage'");
     expect(utilsSource).toContain('data-source-open-memory');
     expect(settingsStyles).toContain('.source-chip.is-memory');

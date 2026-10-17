@@ -24,7 +24,9 @@ import { describeReminderTime, parseReminderCommand, type ParsedReminderCommand 
 import type { MonarchReminderV1 } from '../modules/reminders/reminder-store';
 import {
   classifyOscarServerDisposition,
-  extractExplicitMemoryText,
+  isMemoryOverviewRequest,
+  parseExplicitMemoryCommand,
+  parseForgetMemoryCommand,
   isNonAuthoritativeConfirmationText,
   researchThenActDisposition,
   type OscarStructuredDispositionProvider,
@@ -90,10 +92,88 @@ export interface OscarAnswerFallbackResult {
   usage?: Record<string, unknown>;
 }
 
+/** A fact Oscar learned from the person's own words (setting «Сам»/«Спрашивать»). */
+export interface OscarLearnedMemory {
+  id: string;
+  text: string;
+  /** created | replaced | confirmed */
+  action: string;
+  origin: 'learned' | 'suggested';
+  replacedText?: string;
+}
+
 export interface OscarMemoryWriteResult {
   receiptId: string;
   revision: number;
   contentHash: string;
+  /** created | replaced | unchanged | confirmed (Memory 4.1). */
+  action?: string;
+  recordId?: string;
+  text?: string;
+  replacedText?: string;
+}
+
+export interface OscarMemoryForgetResult {
+  receiptId: string;
+  revision: number;
+  contentHash: string;
+  forgotten: { id: string; text: string } | null;
+}
+
+export interface OscarMemoryOverviewRecord {
+  id: string;
+  text: string;
+  category: string;
+  origin: string;
+}
+
+const MEMORY_CATEGORY_TITLES: Record<string, string> = {
+  about: 'Обо мне',
+  preference: 'Предпочтения',
+  rule: 'Правила',
+  project: 'Проекты',
+  note: 'Заметки',
+};
+
+function quoteMemory(text: string): string {
+  const value = text.replace(/\s+/g, ' ').trim().replace(/[.!]+$/u, '');
+  return value.length > 160 ? `${value.slice(0, 159)}…` : value;
+}
+
+export function memoryWriteSummary(receipt: OscarMemoryWriteResult, fallbackText: string): string {
+  const text = quoteMemory(receipt.text || fallbackText);
+  if (receipt.action === 'unchanged') return `Это я уже помню: «${text}».`;
+  if (receipt.action === 'replaced' && receipt.replacedText) {
+    return `Запомнил: «${text}». Прежнее «${quoteMemory(receipt.replacedText)}» больше не учитываю.`;
+  }
+  return `Запомнил: «${text}».`;
+}
+
+function memoryChangedPayload(receipt: OscarMemoryWriteResult, fallbackText: string): Record<string, unknown> {
+  return {
+    action: receipt.action || 'created',
+    text: receipt.text || fallbackText,
+    ...(receipt.recordId ? { recordId: receipt.recordId } : {}),
+    ...(receipt.replacedText ? { replacedText: receipt.replacedText } : {}),
+  };
+}
+
+export function memoryOverviewText(records: OscarMemoryOverviewRecord[]): string {
+  const active = records.filter((record) => record.origin !== 'suggested');
+  if (!active.length) {
+    return 'Пока я ничего о тебе не запомнил. Скажи «запомни, …» — и я сохраню.';
+  }
+  const groups = new Map<string, string[]>();
+  for (const record of active.slice(0, 40)) {
+    const title = MEMORY_CATEGORY_TITLES[record.category] || MEMORY_CATEGORY_TITLES.note!;
+    groups.set(title, [...(groups.get(title) || []), `- ${quoteMemory(record.text)}`]);
+  }
+  const order = Object.values(MEMORY_CATEGORY_TITLES);
+  const sections = [...groups.entries()]
+    .sort(([left], [right]) => order.indexOf(left) - order.indexOf(right))
+    .map(([title, lines]) => `**${title}**\n${lines.join('\n')}`);
+  const more = active.length > 40 ? `\n\nИ ещё ${active.length - 40} — в Настройках → Память.` : '';
+  return `Вот что я о тебе помню:\n\n${sections.join('\n\n')}${more}\n\nИзменить или удалить любую запись можно в Настройках → Память.`;
 }
 
 export interface OscarPersistedMessage {
@@ -180,6 +260,14 @@ export interface OscarTurnCoordinatorOptions {
    * untrusted evidence. */
   researchEvidence?: (input: { query: string; deep: boolean; signal: AbortSignal }) => Promise<string>;
   rememberMemory?: (input: { turn: OscarTurnV1; text: string }) => Promise<OscarMemoryWriteResult>;
+  learnFromMessage?: (input: { turn: OscarTurnV1; text: string }) => Promise<OscarLearnedMemory[]>;
+  /** Coder Memory: the project brief a Coder task starts from (map,
+   * knowledge, rules). Untrusted initial evidence; failure means no brief. */
+  prepareCoderEvidence?: (turn: OscarTurnV1) => Promise<AstraAgentInitialEvidenceItem[]>;
+  /** «Забудь …»: the record the words point at, restorable from Settings. */
+  forgetMemory?: (input: { turn: OscarTurnV1; query: string }) => Promise<OscarMemoryForgetResult>;
+  /** «Что ты обо мне знаешь?» */
+  listMemory?: (input: { turn: OscarTurnV1 }) => Promise<OscarMemoryOverviewRecord[]>;
   /** Reminders asked for in the chat («напомни …»): a local store, delivered by the Desktop host. */
   reminders?: {
     create: (input: { text: string; dueAt: Date; recurrence: 'none' | 'daily' | 'weekly'; conversationId: string }) => Promise<MonarchReminderV1>;
@@ -1043,7 +1131,15 @@ export class OscarTurnCoordinator {
 
     const modifiers = checkpoint.turn.request.modifiers;
     const egressRequested = modifiers.webSearch === true || modifiers.researchMode === 'deep';
-    const explicitMemoryText = extractExplicitMemoryText(requestText);
+    // «Запомни» may sit anywhere in the message. A pure command is answered
+    // by the memory lane; with a question next to it, the record is written
+    // first and the question then goes through ordinary routing.
+    const memoryCommand = checkpoint.turn.request.explicitAgentTask ? null : parseExplicitMemoryCommand(requestText);
+    const explicitMemoryText = memoryCommand && !memoryCommand.rest ? memoryCommand.memory : null;
+    const forgetQuery = explicitMemoryText || checkpoint.turn.request.explicitAgentTask
+      ? null : parseForgetMemoryCommand(requestText);
+    const memoryOverview = !explicitMemoryText && !forgetQuery && !checkpoint.turn.request.explicitAgentTask
+      && isMemoryOverviewRequest(requestText);
     const reminderCommand = this.options.reminders && !checkpoint.turn.request.explicitAgentTask
       ? parseReminderCommand(requestText, new Date(this.nowIso()))
       : null;
@@ -1055,6 +1151,13 @@ export class OscarTurnCoordinator {
       this.options.getOwnerUnrestrictedOverride?.(),
       checkpoint.turn.source,
     );
+    if (memoryCommand?.rest && checkpoint.turn.source === 'desktop' && checkpoint.turn.privacyMode === 'persistent') {
+      await this.rememberAlongside(checkpoint, memoryCommand.memory);
+    }
+    if (!memoryCommand && !forgetQuery && !memoryOverview && !explicitAgentTask
+      && checkpoint.turn.source === 'desktop' && checkpoint.turn.privacyMode === 'persistent') {
+      await this.learnAlongside(checkpoint, requestText);
+    }
     const routingController = new AbortController();
     this.answerControllers.set(turnId, routingController);
     let disposition: OscarServerDisposition;
@@ -1083,6 +1186,32 @@ export class OscarTurnCoordinator {
             reason: 'An explicit reminder command is a typed local data write, not an Agent action.',
             requiresExternalResearch: false,
           }
+        // Memory commands come before Direct Access: that route only answers
+        // or starts an agent, so «запомни» under it was never written.
+        : explicitMemoryText
+          ? {
+            lane: 'memory' as const,
+            kind: 'memory_remember',
+            confidence: 1,
+            reason: 'Exact typed Desktop memory command stays runtime-owned.',
+            requiresExternalResearch: false,
+          }
+        : forgetQuery
+          ? {
+            lane: 'memory' as const,
+            kind: 'memory_forget',
+            confidence: 1,
+            reason: 'An explicit forget command is a typed local data write.',
+            requiresExternalResearch: false,
+          }
+        : memoryOverview
+          ? {
+            lane: 'memory' as const,
+            kind: 'memory_overview',
+            confidence: 1,
+            reason: 'What Oscar remembers is answered from the records themselves.',
+            requiresExternalResearch: false,
+          }
         : isCustomModelRole(modifiers.requestedModel) && !explicitMemoryText
           ? {
             // An owner-added model is not admitted to agent work, and its JSON
@@ -1097,15 +1226,7 @@ export class OscarTurnCoordinator {
           && !isOscarCapabilitiesOrIdentityRequest(requestText)
           ? await this.directAccessDisposition(requestText, checkpoint.turn.request.history,
             modifiers.requestedModel, egressRequested, routingController.signal)
-        : explicitMemoryText
-          ? {
-            lane: 'memory' as const,
-            kind: 'memory_remember',
-            confidence: 1,
-            reason: 'Exact typed Desktop memory command stays runtime-owned.',
-            requiresExternalResearch: false,
-            }
-          : await this.routeTurn(requestText, {
+        : await this.routeTurn(requestText, {
             externalResearch: egressRequested,
             history: checkpoint.turn.request.history,
             requestedModel: modifiers.requestedModel,
@@ -1127,7 +1248,9 @@ export class OscarTurnCoordinator {
     const requestedCancellation = await this.cancelForClientIntent(checkpoint.turn, undefined, false);
     if (requestedCancellation) return requestedCancellation;
     if (disposition.lane === 'memory') {
-      return this.runMemoryWrite(checkpoint, explicitMemoryText);
+      if (disposition.kind === 'memory_forget') return this.runMemoryForget(checkpoint, forgetQuery);
+      if (disposition.kind === 'memory_overview') return this.runMemoryOverview(checkpoint);
+      return this.runMemoryWrite(checkpoint, explicitMemoryText ?? memoryCommand?.memory ?? null);
     }
     if (disposition.lane === 'reminder' && reminderCommand) {
       return this.runReminderCommand(checkpoint, reminderCommand);
@@ -1388,7 +1511,7 @@ export class OscarTurnCoordinator {
         summary: `Memory V4 committed revision ${receipt.revision} and verified its durable read-back.`,
         checksum: receipt.contentHash,
       }];
-      const summary = 'Запомнил. Запись сохранена в постоянной памяти.';
+      const summary = memoryWriteSummary(receipt, memoryText);
       const messageId = `oscar_message_${randomUUID().replace(/-/g, '')}`;
       const current = await this.requireTurn(checkpoint.turn.id);
       return this.finishTurn(store, checkpoint.turn.id, {
@@ -1397,7 +1520,10 @@ export class OscarTurnCoordinator {
         summary,
         evidenceRefs,
         outputMessageId: messageId,
-        events: [{ type: 'answer.delta', payload: { content: summary } }],
+        events: [
+          { type: 'memory.changed', payload: memoryChangedPayload(receipt, memoryText) },
+          { type: 'answer.delta', payload: { content: summary } },
+        ],
         outbox: [messageOutbox(current.turn, {
           conversationId: current.turn.conversationId,
           messageId,
@@ -1414,6 +1540,144 @@ export class OscarTurnCoordinator {
           outcome: 'verified',
         })],
       });
+    } catch (error) {
+      await this.failTurn(checkpoint.turn.id, error);
+      return this.requireTurn(checkpoint.turn.id);
+    }
+  }
+
+  /** Learning is visible: what Oscar took from the person's words shows under
+   * the answer with «Отменить». A failure stays silent — nothing was learned. */
+  private async learnAlongside(checkpoint: OscarTurnCheckpoint, text: string): Promise<void> {
+    if (!this.options.learnFromMessage) return;
+    const learned = await this.options.learnFromMessage({ turn: checkpoint.turn, text }).catch(() => []);
+    const first = learned.find((entry) => entry.origin === 'learned');
+    if (!first) return;
+    await this.updateTurn(this.storeForTurn(checkpoint.turn), checkpoint.turn.id, (current) => ({
+      turn: current,
+      events: [{ type: 'memory.changed', payload: {
+        action: 'learned', recordId: first.id, text: first.text,
+        ...(first.replacedText ? { replacedText: first.replacedText } : {}),
+        ...(learned.length > 1 ? { more: learned.length - 1 } : {}),
+      } }],
+    }));
+  }
+
+  /** The «запомни» part of a message that also asks something. A failure is
+   * reported on the Turn and does not stop the question from being answered. */
+  private async rememberAlongside(checkpoint: OscarTurnCheckpoint, memoryText: string): Promise<void> {
+    if (!this.options.rememberMemory) return;
+    const store = this.storeForTurn(checkpoint.turn);
+    let payload: Record<string, unknown>;
+    try {
+      payload = memoryChangedPayload(await this.options.rememberMemory({ turn: checkpoint.turn, text: memoryText }), memoryText);
+    } catch (error) {
+      payload = { action: 'failed', text: memoryText, error: error instanceof Error ? error.message.slice(0, 200) : 'failed' };
+    }
+    await this.updateTurn(store, checkpoint.turn.id, (current) => ({
+      turn: current,
+      events: [{ type: 'memory.changed', payload }],
+    }));
+  }
+
+  private async memoryCommandGate(
+    checkpoint: OscarTurnCheckpoint,
+    available: boolean,
+  ): Promise<OscarTurnCheckpoint | null> {
+    const store = this.storeForTurn(checkpoint.turn);
+    if (checkpoint.turn.source !== 'desktop' || checkpoint.turn.privacyMode !== 'persistent') {
+      return this.finishTurn(store, checkpoint.turn.id, {
+        status: 'blocked',
+        kind: 'blocked',
+        summary: checkpoint.turn.privacyMode === 'incognito'
+          ? 'Incognito не читает и не сохраняет постоянную память.'
+          : 'Постоянную память можно изменить только из локального Desktop-чата.',
+        events: [{ type: 'turn.routed', payload: { disposition: 'memory', blockedBy: 'persistent-desktop-required' } }],
+      });
+    }
+    if (!available) {
+      return this.finishTurn(store, checkpoint.turn.id, {
+        status: 'failed',
+        kind: 'failed',
+        summary: 'Локальный сервис памяти сейчас недоступен.',
+        events: [{ type: 'turn.routed', payload: { disposition: 'memory', blockedBy: 'memory-service-unavailable' } }],
+      });
+    }
+    return null;
+  }
+
+  private async finishMemoryReply(
+    checkpoint: OscarTurnCheckpoint,
+    summary: string,
+    receipt: { receiptId: string; revision: number; contentHash: string } | null,
+    extraEvents: OscarTurnEventDraft[] = [],
+  ): Promise<OscarTurnCheckpoint> {
+    const store = this.storeForTurn(checkpoint.turn);
+    const evidenceRefs: AgentEvidenceReference[] = receipt ? [{
+      kind: 'api',
+      evidenceClass: 'kernel-verification',
+      reference: `settings-receipt:${receipt.receiptId}`,
+      summary: `Memory committed revision ${receipt.revision} and verified its durable read-back.`,
+      checksum: receipt.contentHash,
+    }] : [];
+    const messageId = `oscar_message_${randomUUID().replace(/-/g, '')}`;
+    const current = await this.requireTurn(checkpoint.turn.id);
+    return this.finishTurn(store, checkpoint.turn.id, {
+      status: 'succeeded',
+      kind: receipt ? 'verified' : 'answered',
+      summary,
+      evidenceRefs,
+      outputMessageId: messageId,
+      events: [...extraEvents, { type: 'answer.delta', payload: { content: summary } }],
+      outbox: [messageOutbox(current.turn, {
+        conversationId: current.turn.conversationId,
+        messageId,
+        role: 'assistant',
+        content: summary,
+        turnId: current.turn.id,
+        provenance: {
+          schemaVersion: MESSAGE_PROVENANCE_SCHEMA_VERSION,
+          origin: 'kernel',
+          verification: receipt ? 'kernel-verified' : 'system-state',
+          turnId: current.turn.id,
+          evidenceRefs,
+        },
+        outcome: receipt ? 'verified' : 'answered',
+      })],
+    });
+  }
+
+  private async runMemoryForget(checkpoint: OscarTurnCheckpoint, query: string | null): Promise<OscarTurnCheckpoint> {
+    const blocked = await this.memoryCommandGate(checkpoint, Boolean(this.options.forgetMemory && query));
+    if (blocked) return blocked;
+    await this.updateTurn(this.storeForTurn(checkpoint.turn), checkpoint.turn.id, (current) => ({
+      turn: { ...current, mode: 'answer', status: 'running' },
+      events: [{ type: 'turn.routed', payload: { disposition: 'memory', reason: 'typed-forget-command' } }],
+    }));
+    try {
+      const result = await this.options.forgetMemory!({ turn: checkpoint.turn, query: query! });
+      if (!result.forgotten) {
+        return this.finishMemoryReply(checkpoint, `В памяти нет записи про «${query}». Всё, что я помню, — в Настройках → Память.`, null);
+      }
+      return this.finishMemoryReply(checkpoint, `Забыл: «${result.forgotten.text}». Вернуть можно в Настройках → Память.`, result, [
+        { type: 'memory.changed', payload: { action: 'forgotten', recordId: result.forgotten.id, text: result.forgotten.text } },
+      ]);
+    } catch (error) {
+      await this.failTurn(checkpoint.turn.id, error);
+      return this.requireTurn(checkpoint.turn.id);
+    }
+  }
+
+  private async runMemoryOverview(checkpoint: OscarTurnCheckpoint): Promise<OscarTurnCheckpoint> {
+    const blocked = await this.memoryCommandGate(checkpoint, Boolean(this.options.listMemory));
+    if (blocked) return blocked;
+    await this.updateTurn(this.storeForTurn(checkpoint.turn), checkpoint.turn.id, (current) => ({
+      turn: { ...current, mode: 'answer', status: 'running' },
+      events: [{ type: 'turn.routed', payload: { disposition: 'memory', reason: 'memory-overview' } }],
+    }));
+    try {
+      const records = await this.options.listMemory!({ turn: checkpoint.turn });
+      return this.finishMemoryReply(checkpoint, memoryOverviewText(records), null);
     } catch (error) {
       await this.failTurn(checkpoint.turn.id, error);
       return this.requireTurn(checkpoint.turn.id);
@@ -1769,6 +2033,11 @@ export class OscarTurnCoordinator {
             });
             return;
           }
+        } else if (current.turn.source === 'coder' && current.turn.request.executionProfile?.kind === 'coder-project'
+          && this.options.prepareCoderEvidence) {
+          const initialEvidence = await this.options.prepareCoderEvidence(current.turn).catch(() => []);
+          if (initialEvidence.length) prepared = { kind: 'agent-attachments-v1', initialEvidence: initialEvidence.slice(0, 1) };
+          else if (port.prepare) prepared = await port.prepare(current.turn);
         } else if (port.prepare) prepared = await port.prepare(current.turn);
         current = await this.requireTurn(turnId);
         // Preparation has no execution authority. Recheck durable control before

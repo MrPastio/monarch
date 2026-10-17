@@ -48,37 +48,24 @@ def test_workspace_api_lists_and_reads_generated_artifacts(monkeypatch, tmp_path
 def test_search_query_params_reject_blank_or_oversized_before_services(monkeypatch) -> None:
     import oscar_agent.main as main
 
-    memory_calls: list[tuple[str, int]] = []
     workspace_calls: list[tuple[str, str, int]] = []
-
-    class FakeMemory:
-        def search(self, query: str, limit: int = 6):
-            memory_calls.append((query, limit))
-            return []
-
-        def hits_to_sources(self, hits):
-            return []
 
     class FakeWorkspace:
         def search(self, query: str, path: str = ".", *, limit: int = 40):
             workspace_calls.append((query, path, limit))
             return {"ok": True, "matches": []}
 
-    monkeypatch.setattr(main, "memory", FakeMemory())
     monkeypatch.setattr(main, "workspace", FakeWorkspace())
     monkeypatch.setattr(main.settings, "disable_api_token", True)
 
     client = TestClient(main.app, raise_server_exceptions=False)
 
     responses = [
-        client.get("/api/memory/search", params={"q": "   \t", "limit": 6}),
-        client.get("/api/memory/search", params={"q": "x" * 2049, "limit": 6}),
         client.get("/api/workspace/search", params={"q": "   \t", "path": ".", "limit": 40}),
         client.get("/api/workspace/search", params={"q": "x" * 2049, "path": ".", "limit": 40}),
     ]
 
-    assert [response.status_code for response in responses] == [422, 422, 422, 422]
-    assert memory_calls == []
+    assert [response.status_code for response in responses] == [422, 422]
     assert workspace_calls == []
 
 

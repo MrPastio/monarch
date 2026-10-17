@@ -14,7 +14,6 @@ import {
   type MonarchModule,
   type MonarchModulePackage,
 } from './core';
-import { MemoryModule } from './modules/memory';
 import { OscarClient } from './modules/oscar/client';
 
 let smokeExecutionSequence = 0;
@@ -43,13 +42,7 @@ async function executeSmokeCapability(
 
 
 async function main(): Promise<void> {
-  const previousMemoryPath = process.env.MONARCH_MEMORY_STORE_PATH;
   const previousSmokeTest = process.env.MONARCH_SMOKE_TEST;
-  const smokeMemoryPath = path.join(
-    process.cwd(),
-    'runtime',
-    `smoke-default-memory-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
-  );
 
   // Applications started by the smoke must not reconcile the owner's source
   // turns, outbox or settings: give them their own data and state roots.
@@ -59,7 +52,6 @@ async function main(): Promise<void> {
   const previousRoots = { MONARCH_DATA_ROOT: process.env.MONARCH_DATA_ROOT, MONARCH_STATE_ROOT: process.env.MONARCH_STATE_ROOT };
   process.env.MONARCH_DATA_ROOT = path.join(isolationRoot, 'data');
   process.env.MONARCH_STATE_ROOT = path.join(isolationRoot, 'state');
-  process.env.MONARCH_MEMORY_STORE_PATH = smokeMemoryPath;
   process.env.MONARCH_SMOKE_TEST = '1';
   try {
     await runSmokeSuite();
@@ -69,17 +61,11 @@ async function main(): Promise<void> {
       else process.env[key] = value;
     }
     await rm(isolationRoot, { recursive: true, force: true, maxRetries: 3 });
-    if (previousMemoryPath === undefined) {
-      delete process.env.MONARCH_MEMORY_STORE_PATH;
-    } else {
-      process.env.MONARCH_MEMORY_STORE_PATH = previousMemoryPath;
-    }
     if (previousSmokeTest === undefined) {
       delete process.env.MONARCH_SMOKE_TEST;
     } else {
       process.env.MONARCH_SMOKE_TEST = previousSmokeTest;
     }
-    await rm(smokeMemoryPath, { force: true });
   }
 }
 
@@ -103,7 +89,6 @@ async function runSmokeSuite(): Promise<void> {
   await assertSecurityModuleRoutes();
   await assertHttpMutationApiRequiresSessionToken();
   await assertApplicationLayerAssemblesProgram();
-  await assertUnifiedMemoryBridgeFlow();
   await assertStreamCompletionAndCancellationFlow();
 
   const kernel = createMonarchKernel();
@@ -267,19 +252,19 @@ function assertManifestPermissionValidation(): void {
 }
 
 async function assertBootstrapCanSelectModules(): Promise<void> {
-  const memoryOnlyRuntime = createMonarchRuntime({
-    enabledModules: ['memory'],
+  const profileOnlyRuntime = createMonarchRuntime({
+    enabledModules: ['profile'],
   });
-  const moduleIds = memoryOnlyRuntime.modules.map((module) => module.manifest.id);
-  const diagnosticsRecord = memoryOnlyRuntime.loadRecords.find((record) => record.packageId === 'diagnostics');
+  const moduleIds = profileOnlyRuntime.modules.map((module) => module.manifest.id);
+  const diagnosticsRecord = profileOnlyRuntime.loadRecords.find((record) => record.packageId === 'diagnostics');
 
-  if (moduleIds.join(',') !== 'memory' || diagnosticsRecord?.status !== 'skipped') {
-    throw new Error('Bootstrap selection smoke failed: enabledModules should load only memory.');
+  if (moduleIds.join(',') !== 'profile' || diagnosticsRecord?.status !== 'skipped') {
+    throw new Error('Bootstrap selection smoke failed: enabledModules should load only profile.');
   }
 
-  await memoryOnlyRuntime.kernel.start();
-  const diagnosticsCapability = memoryOnlyRuntime.kernel.getCapability('diagnostics.modules.list');
-  await memoryOnlyRuntime.kernel.stop();
+  await profileOnlyRuntime.kernel.start();
+  const diagnosticsCapability = profileOnlyRuntime.kernel.getCapability('diagnostics.modules.list');
+  await profileOnlyRuntime.kernel.stop();
 
   if (diagnosticsCapability) {
     throw new Error('Bootstrap selection smoke failed: disabled diagnostics capability was registered.');
@@ -629,7 +614,7 @@ async function assertPluginRegistryModuleRoutes(): Promise<void> {
 
 async function assertAstraSkillLayerRoutes(): Promise<void> {
   const runtime = createMonarchRuntime({
-    enabledModules: ['memory', 'astra'],
+    enabledModules: ['profile', 'astra'],
     enableLocalSystemRouter: false,
   });
 
@@ -637,7 +622,7 @@ async function assertAstraSkillLayerRoutes(): Promise<void> {
   try {
     const indexResult = await executeSmokeCapability(runtime.kernel, 'astra.skills.index');
     const slotResult = await executeSmokeCapability(runtime.kernel, 'astra.slot.preview', {
-      capabilityId: 'memory.search',
+      capabilityId: 'profile.read',
     });
     const bridgeResult = await executeSmokeCapability(runtime.kernel, 'astra.oscar.bridge.describe');
 
@@ -653,15 +638,15 @@ async function assertAstraSkillLayerRoutes(): Promise<void> {
 
     if (
       !indexResult.ok
-      || !cards.some((card) => card.capabilityId === 'memory.search')
+      || !cards.some((card) => card.capabilityId === 'profile.read')
     ) {
       throw new Error(`Astra skill index smoke failed: ${indexResult.summary}`);
     }
 
     if (
       !slotResult.ok
-      || slot?.capabilityId !== 'memory.search'
-      || slot.moduleId !== 'memory'
+      || slot?.capabilityId !== 'profile.read'
+      || slot.moduleId !== 'profile'
     ) {
       throw new Error(`Astra slot preview smoke failed: ${slotResult.summary}`);
     }
@@ -1249,110 +1234,6 @@ function createThrowingExecutionModule(): MonarchModule {
       throw new Error('smoke execution failure');
     },
   };
-}
-
-async function assertUnifiedMemoryBridgeFlow(): Promise<void> {
-  const filePath = path.join(
-    process.cwd(),
-    'runtime',
-    `smoke-unified-mem-${Date.now()}.json`
-  );
-
-  const kernel = new MonarchKernel();
-
-  // Register unified MemoryModule
-  kernel.registerModule(new MemoryModule({ storePath: filePath }));
-
-  // Register a mock OscarModule
-  kernel.registerModule({
-    manifest: {
-      id: 'oscar',
-      name: 'Oscar Mock',
-      version: '0.1.0',
-      kind: 'system',
-      description: 'Mock Oscar backend module',
-      owns: ['oscar'],
-      permissions: ['read', 'write'],
-      capabilities: [
-        {
-          id: 'oscar.memory.search',
-          moduleId: 'oscar',
-          title: 'Search Oscar Memory',
-          risk: 'read',
-        }
-      ]
-    },
-    async activate(): Promise<void> {},
-    async executeCapability(request: MonarchExecutionRequest): Promise<MonarchExecutionResult> {
-      if (request.capabilityId === 'oscar.memory.search') {
-        return {
-          ok: true,
-          summary: 'Mock search finished',
-          output: {
-            results: [
-              {
-                id: 101,
-                title: 'Oscar Fact 1',
-                url: null,
-                excerpt: 'Oscar has GGUF models running locally',
-                score: -1.5,
-              },
-              {
-                id: 102,
-                title: 'Oscar Fact 2',
-                url: null,
-                excerpt: 'Oscar low relevance fact',
-                score: -0.1,
-              }
-            ]
-          }
-        };
-      }
-      return { ok: false, summary: 'unsupported' };
-    }
-  });
-
-  await kernel.start();
-  try {
-    // 1. Remember a local record
-    await kernel.execute({
-      id: 'exec_smoke_remember',
-      intentId: 'intent_smoke_remember',
-      moduleId: 'memory',
-      capabilityId: 'memory.remember',
-      input: { text: 'Monarch is a private local AI kernel', pinned: true },
-      createdAt: new Date().toISOString(),
-      requestedBy: 'smoke',
-      confirmed: true,
-    });
-
-    // 2. Perform unified memory search
-    const searchResult = await kernel.execute({
-      id: 'exec_smoke_search',
-      intentId: 'intent_smoke_search',
-      moduleId: 'memory',
-      capabilityId: 'memory.search',
-      input: { query: 'local AI models', limit: 10 },
-      createdAt: new Date().toISOString(),
-      requestedBy: 'smoke',
-    });
-
-    if (!searchResult.ok) {
-      throw new Error(`Unified memory search execution failed: ${searchResult.summary}`);
-    }
-
-    const records = (searchResult.output as any)?.records || [];
-    const hasLocal = records.some((r: any) => r.text.includes('private local AI kernel'));
-    const hasOscarRelevant = records.some((r: any) => r.text.includes('GGUF models running locally'));
-    const hasOscarLowRel = records.some((r: any) => r.text.includes('low relevance fact'));
-
-    if (!hasLocal || !hasOscarRelevant || hasOscarLowRel) {
-      throw new Error(`Unified memory bridge validation failed. local: ${hasLocal}, oscar: ${hasOscarRelevant}, filtered: ${!hasOscarLowRel}`);
-    }
-  } finally {
-    await kernel.stop();
-    await rm(filePath, { force: true });
-  }
 }
 
 async function assertStreamCompletionAndCancellationFlow(): Promise<void> {

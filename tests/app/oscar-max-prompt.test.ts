@@ -25,7 +25,7 @@ describe('Oscar MAX system prompt', () => {
 
   it('keeps every rule that stops a false claim about this call', () => {
     for (const rule of [
-      'Сохранённая память Monarch не передана',
+      'нет такого блока — памяти в этом вызове нет',
       'запомнил факт или выполнил действие',
       'не доказывает, что хранилище пусто',
       'не означает, что у Оскара нет доступа к интернету',

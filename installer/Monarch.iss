@@ -10,7 +10,7 @@
 
 #define AppName "Monarch"
 #ifndef AppVersion
-  #define AppVersion "0.3.0.99"
+  #define AppVersion "0.3.0.100"
 #endif
 #ifndef RuntimeVersion
 #define RuntimeVersion "2026.10.1"
