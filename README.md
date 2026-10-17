@@ -1,8 +1,43 @@
 # Monarch
 
+**A free, local-first AI assistant for Windows.** Oscar answers questions, does tasks on your computer right in the chat, reminds you about things, writes code in Coder mode and keeps your secrets in an encrypted vault. Models run on your PC; cloud services connect only if you turn them on.
+
+**Download:** [official site](https://monarch-site-sigma.vercel.app/en) · [all releases](https://github.com/MrPastio/monarch-releases/releases) · [Telegram news](https://t.me/markprojectPastio) · [Русский ↓](#monarch-ru)
+
+## What 0.3 Preview does
+
+- **Tasks in a normal chat.** "Create a file", "find my documents": Oscar works step by step, asks before anything important, and ends with what was done, what you allowed and what was blocked.
+- **Reminders** as Windows notifications while Monarch is running: "remind me in 20 minutes to check the oven", daily or weekly. A reminder that falls due while the app is closed is shown at the next start.
+- **Local models through llama.cpp (GGUF).** Gemma 4 E2B and 12B, Qwen3.8 27B, Qwen3-Coder for code, or your own single-file chat GGUF from a file or a Hugging Face link. Downloaded from Settings → Models with resume and integrity checks.
+- **Coder mode** for your own projects: it shows a line-by-line diff before editing a file (for files up to 2,000 lines) and has a real git diff panel.
+- **Monarch Safe:** an AES-256-GCM vault in a separate offline process that the agent cannot open.
+- **OpenAI-compatible API** on 127.0.0.1, so your own scripts can use the built-in chat models (fast, balanced and Pro).
+- Interface in English, Russian, Ukrainian and Bulgarian.
+
+## How actions stay under control
+
+The model proposes; it never decides its own permissions. Every action goes the same way: request → exact typed action → policy layer (allow / ask / deny) → execution by the module that owns it → for actions that define a check, a verifier that confirms what actually changed. There are three autonomy modes, and actions involving money or security-sensitive changes are denied in all of them.
+
+## Requirements and honest limits
+
+- Windows 10 or 11 x64, 8 GB RAM minimum, 16 GB recommended (the 27B model needs about 30 GB).
+- The installer is not Authenticode-signed yet, so SmartScreen may warn. Updates are verified against an Ed25519-signed manifest, and you can check the installer's SHA-256 on the download page.
+- This is a Preview: quality depends on the model you choose. Voice is early. Monarch Security is early monitoring, not an antivirus.
+- No analytics or trackers. The update check goes online without asking; web search and cloud services need separate consent.
+
+## Building from source
+
+`Install-Monarch.cmd` prepares everything on Windows; `npm run verify` runs the checks. Details are in the Russian section below and in `docs/`.
+
+---
+
+<a id="monarch-ru"></a>
+
+# Monarch
+
 **Monarch 0.3 Preview** — твой личный AI-помощник для Windows. Оскар отвечает на вопросы, делает задачи на компьютере прямо в чате, напоминает о делах, пишет код в режиме Coder и защищает компьютер. Модели работают на твоём компьютере; облако (MAX) подключается, только если ты сам этого захочешь. Monarch бесплатный и полностью твой.
 
-**Скачать:** [официальный сайт](https://monarch-site-sigma.vercel.app/ru) · [все версии](https://github.com/MrPastio/monarch-releases/releases)
+**Скачать:** [официальный сайт](https://monarch-site-sigma.vercel.app/ru) · [все версии](https://github.com/MrPastio/monarch-releases/releases) · [Telegram-канал](https://t.me/markprojectPastio)
 
 ## Что умеет 0.3 Preview
 
