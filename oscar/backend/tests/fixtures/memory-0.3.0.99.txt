@@ -1,0 +1,246 @@
+BEGIN TRANSACTION;
+CREATE TABLE chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                    chunk_index INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+PRAGMA writable_schema=ON;
+CREATE TABLE conversation_messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    token_count INTEGER,
+                    elapsed_ms INTEGER,
+                    model_tier TEXT,
+                    attachments_json TEXT,
+                    sources_json TEXT,
+                    client_message_id TEXT,
+                    turn_id TEXT,
+                    task_id TEXT,
+                    causal_parent_id TEXT,
+                    provenance_json TEXT,
+                    outcome TEXT,
+                    integrity_warning TEXT,
+                    created_at TEXT NOT NULL
+                , max_fallback_code TEXT, research_steps_json TEXT);
+INSERT INTO "conversation_messages" VALUES('879f109e51e6428f8eb0a47c47d21b96','conv0','user','Расскажи про кота Барсика номер 00',NULL,NULL,NULL,NULL,NULL,'user_t00','t00',NULL,NULL,'{"legacy":true,"origin":"user","schemaVersion":"monarch.message-provenance.v1","verification":"user-assertion"}',NULL,NULL,'2026-10-17T09:18:41.643813+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('8e2becd9dd00482d8c242b1e4266c784','conv0','assistant','Барсик 00 любит рыбу и спит на окне',NULL,NULL,NULL,NULL,NULL,'assistant_t00','t00',NULL,NULL,'{"legacy":true,"origin":"legacy","schemaVersion":"monarch.message-provenance.v1","verification":"legacy-unknown"}','answered',NULL,'2026-10-17T09:18:41.651396+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('56039b532d014264be8b438e57f51009','conv0','user','Расскажи про кота Барсика номер 01',NULL,NULL,NULL,NULL,NULL,'user_t01','t01',NULL,NULL,'{"legacy":true,"origin":"user","schemaVersion":"monarch.message-provenance.v1","verification":"user-assertion"}',NULL,NULL,'2026-10-17T09:18:41.668275+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('f233ffb756ec43af860c331b1d51e374','conv0','assistant','Барсик 01 любит рыбу и спит на окне',NULL,NULL,NULL,NULL,NULL,'assistant_t01','t01',NULL,NULL,'{"legacy":true,"origin":"legacy","schemaVersion":"monarch.message-provenance.v1","verification":"legacy-unknown"}','answered',NULL,'2026-10-17T09:18:41.677894+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('fc1534284acc4f0c810a03bf1e1f2617','conv0','user','Расскажи про кота Барсика номер 02',NULL,NULL,NULL,NULL,NULL,'user_t02','t02',NULL,NULL,'{"legacy":true,"origin":"user","schemaVersion":"monarch.message-provenance.v1","verification":"user-assertion"}',NULL,NULL,'2026-10-17T09:18:41.695400+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('f0ee2b59d6ad4982805fd36d361b6544','conv0','assistant','Барсик 02 любит рыбу и спит на окне',NULL,NULL,NULL,NULL,NULL,'assistant_t02','t02',NULL,NULL,'{"legacy":true,"origin":"legacy","schemaVersion":"monarch.message-provenance.v1","verification":"legacy-unknown"}','answered',NULL,'2026-10-17T09:18:41.703224+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('e8593af2c53f432fb2e16857c676c1bd','conv1','user','Расскажи про кота Барсика номер 10',NULL,NULL,NULL,NULL,NULL,'user_t10','t10',NULL,NULL,'{"legacy":true,"origin":"user","schemaVersion":"monarch.message-provenance.v1","verification":"user-assertion"}',NULL,NULL,'2026-10-17T09:18:41.719798+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('6b4b3384e8f8474e8a8c9b4f985f0c6e','conv1','assistant','Барсик 10 любит рыбу и спит на окне',NULL,NULL,NULL,NULL,NULL,'assistant_t10','t10',NULL,NULL,'{"legacy":true,"origin":"legacy","schemaVersion":"monarch.message-provenance.v1","verification":"legacy-unknown"}','answered',NULL,'2026-10-17T09:18:41.728726+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('aa94d35c05a14bfe8d4e94ad05354cb3','conv1','user','Расскажи про кота Барсика номер 11',NULL,NULL,NULL,NULL,NULL,'user_t11','t11',NULL,NULL,'{"legacy":true,"origin":"user","schemaVersion":"monarch.message-provenance.v1","verification":"user-assertion"}',NULL,NULL,'2026-10-17T09:18:41.747134+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('6838f9a8cad54f3a8eaf0eb690e5918d','conv1','assistant','Барсик 11 любит рыбу и спит на окне',NULL,NULL,NULL,NULL,NULL,'assistant_t11','t11',NULL,NULL,'{"legacy":true,"origin":"legacy","schemaVersion":"monarch.message-provenance.v1","verification":"legacy-unknown"}','answered',NULL,'2026-10-17T09:18:41.754925+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('b04b92872f004155b61e46fdcc6fe592','conv1','user','Расскажи про кота Барсика номер 12',NULL,NULL,NULL,NULL,NULL,'user_t12','t12',NULL,NULL,'{"legacy":true,"origin":"user","schemaVersion":"monarch.message-provenance.v1","verification":"user-assertion"}',NULL,NULL,'2026-10-17T09:18:41.769043+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('eab8120ad7b5402d84065bdf5f1241cf','conv1','assistant','Барсик 12 любит рыбу и спит на окне',NULL,NULL,NULL,NULL,NULL,'assistant_t12','t12',NULL,NULL,'{"legacy":true,"origin":"legacy","schemaVersion":"monarch.message-provenance.v1","verification":"legacy-unknown"}','answered',NULL,'2026-10-17T09:18:41.781304+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('568758fdd11a4c8bbbad3558a8fafa10','conv2','user','Расскажи про кота Барсика номер 20',NULL,NULL,NULL,NULL,NULL,'user_t20','t20',NULL,NULL,'{"legacy":true,"origin":"user","schemaVersion":"monarch.message-provenance.v1","verification":"user-assertion"}',NULL,NULL,'2026-10-17T09:18:41.797604+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('f453e43ff8f94a198a0a5d8d120c6b8f','conv2','assistant','Барсик 20 любит рыбу и спит на окне',NULL,NULL,NULL,NULL,NULL,'assistant_t20','t20',NULL,NULL,'{"legacy":true,"origin":"legacy","schemaVersion":"monarch.message-provenance.v1","verification":"legacy-unknown"}','answered',NULL,'2026-10-17T09:18:41.805560+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('76b20060354f4ad4bf3ecbd1a92b4dff','conv2','user','Расскажи про кота Барсика номер 21',NULL,NULL,NULL,NULL,NULL,'user_t21','t21',NULL,NULL,'{"legacy":true,"origin":"user","schemaVersion":"monarch.message-provenance.v1","verification":"user-assertion"}',NULL,NULL,'2026-10-17T09:18:41.823998+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('084fa048712747ea896e95052f041e92','conv2','assistant','Барсик 21 любит рыбу и спит на окне',NULL,NULL,NULL,NULL,NULL,'assistant_t21','t21',NULL,NULL,'{"legacy":true,"origin":"legacy","schemaVersion":"monarch.message-provenance.v1","verification":"legacy-unknown"}','answered',NULL,'2026-10-17T09:18:41.833402+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('36332772c7b441f19313d82cdbc6c446','conv2','user','Расскажи про кота Барсика номер 22',NULL,NULL,NULL,NULL,NULL,'user_t22','t22',NULL,NULL,'{"legacy":true,"origin":"user","schemaVersion":"monarch.message-provenance.v1","verification":"user-assertion"}',NULL,NULL,'2026-10-17T09:18:41.848821+00:00',NULL,NULL);
+INSERT INTO "conversation_messages" VALUES('7ae68ddc38324b218510c7586c00a87e','conv2','assistant','Барсик 22 любит рыбу и спит на окне',NULL,NULL,NULL,NULL,NULL,'assistant_t22','t22',NULL,NULL,'{"legacy":true,"origin":"legacy","schemaVersion":"monarch.message-provenance.v1","verification":"legacy-unknown"}','answered',NULL,'2026-10-17T09:18:41.857569+00:00',NULL,NULL);
+CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                , local_only INTEGER NOT NULL DEFAULT 0);
+INSERT INTO "conversations" VALUES('conv0','Расскажи про кота Барсика номер 00',0,'2026-10-17T09:18:41.643813+00:00','2026-10-17T09:18:41.703224+00:00',0);
+INSERT INTO "conversations" VALUES('conv1','Расскажи про кота Барсика номер 10',0,'2026-10-17T09:18:41.719798+00:00','2026-10-17T09:18:41.781304+00:00',0);
+INSERT INTO "conversations" VALUES('conv2','Расскажи про кота Барсика номер 20',0,'2026-10-17T09:18:41.797604+00:00','2026-10-17T09:18:41.857569+00:00',0);
+CREATE TABLE documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    url TEXT UNIQUE,
+                    title TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'web',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+CREATE TABLE memory_capsules (
+                    id TEXT PRIMARY KEY,
+                    scope_type TEXT NOT NULL,
+                    scope_id TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    children_json TEXT NOT NULL,
+                    provenance_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+CREATE TABLE memory_episodes (
+                    id TEXT PRIMARY KEY,
+                    scope_type TEXT NOT NULL,
+                    scope_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    user_text TEXT NOT NULL,
+                    assistant_text TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    search_text TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'hot',
+                    capsule_id TEXT,
+                    provenance_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(source, turn_id)
+                );
+INSERT INTO "memory_episodes" VALUES('4144651513e2479a8b19cf6c72091003','chat','default','conv0','t00','desktop','Расскажи про кота Барсика номер 00','Расскажи про кота Барсика номер 00','Барсик 00 любит рыбу и спит на окне','Запрос: Расскажи про кота Барсика номер 00
+Итог: Барсик 00 любит рыбу и спит на окне','Расскажи про кота Барсика номер 00
+Барсик 00 любит рыбу и спит на окне
+Запрос: Расскажи про кота Барсика номер 00
+Итог: Барсик 00 любит рыбу и спит на окне','hot',NULL,'{"conversationId":"conv0","schemaVersion":1,"scope":{"type":"chat"},"source":"desktop","turnId":"t00"}','e193495e623216a86df31805d2172349088fc5e697309be91361f65ff0e6c70b','2026-10-17T09:18:41.651396+00:00','2026-10-17T09:18:41.659637+00:00');
+INSERT INTO "memory_episodes" VALUES('4e07271d9da14d1dbbe5165f15d5bfcd','chat','default','conv0','t01','desktop','Расскажи про кота Барсика номер 00','Расскажи про кота Барсика номер 01','Барсик 01 любит рыбу и спит на окне','Запрос: Расскажи про кота Барсика номер 01
+Итог: Барсик 01 любит рыбу и спит на окне','Расскажи про кота Барсика номер 01
+Барсик 01 любит рыбу и спит на окне
+Запрос: Расскажи про кота Барсика номер 01
+Итог: Барсик 01 любит рыбу и спит на окне','hot',NULL,'{"conversationId":"conv0","schemaVersion":1,"scope":{"type":"chat"},"source":"desktop","turnId":"t01"}','4bb8406a13c941c1d6911fc0c3a05f2783899cd8289b2a3de15a7d8eac41d8ca','2026-10-17T09:18:41.677894+00:00','2026-10-17T09:18:41.687286+00:00');
+INSERT INTO "memory_episodes" VALUES('3aef45c6a24e43568b462fb6fb82f100','chat','default','conv0','t02','desktop','Расскажи про кота Барсика номер 00','Расскажи про кота Барсика номер 02','Барсик 02 любит рыбу и спит на окне','Запрос: Расскажи про кота Барсика номер 02
+Итог: Барсик 02 любит рыбу и спит на окне','Расскажи про кота Барсика номер 02
+Барсик 02 любит рыбу и спит на окне
+Запрос: Расскажи про кота Барсика номер 02
+Итог: Барсик 02 любит рыбу и спит на окне','hot',NULL,'{"conversationId":"conv0","schemaVersion":1,"scope":{"type":"chat"},"source":"desktop","turnId":"t02"}','3ce360d8bc13b4b7f7857a115b0e405ec1fa803a8e33b157e81c5e5900953459','2026-10-17T09:18:41.703224+00:00','2026-10-17T09:18:41.713058+00:00');
+INSERT INTO "memory_episodes" VALUES('09a71c6c1d5c4c30bdf34a7362a43b81','chat','default','conv1','t10','desktop','Расскажи про кота Барсика номер 10','Расскажи про кота Барсика номер 10','Барсик 10 любит рыбу и спит на окне','Запрос: Расскажи про кота Барсика номер 10
+Итог: Барсик 10 любит рыбу и спит на окне','Расскажи про кота Барсика номер 10
+Барсик 10 любит рыбу и спит на окне
+Запрос: Расскажи про кота Барсика номер 10
+Итог: Барсик 10 любит рыбу и спит на окне','hot',NULL,'{"conversationId":"conv1","schemaVersion":1,"scope":{"type":"chat"},"source":"desktop","turnId":"t10"}','960f81f563ad375d953e55bca73358a73993f98f0da346bfe6de063dc3be06e2','2026-10-17T09:18:41.728726+00:00','2026-10-17T09:18:41.737798+00:00');
+INSERT INTO "memory_episodes" VALUES('59498cc10250441ea4d87d33715949f0','chat','default','conv1','t11','desktop','Расскажи про кота Барсика номер 10','Расскажи про кота Барсика номер 11','Барсик 11 любит рыбу и спит на окне','Запрос: Расскажи про кота Барсика номер 11
+Итог: Барсик 11 любит рыбу и спит на окне','Расскажи про кота Барсика номер 11
+Барсик 11 любит рыбу и спит на окне
+Запрос: Расскажи про кота Барсика номер 11
+Итог: Барсик 11 любит рыбу и спит на окне','hot',NULL,'{"conversationId":"conv1","schemaVersion":1,"scope":{"type":"chat"},"source":"desktop","turnId":"t11"}','5fc84358dc5791b6367afafd257cf4d40970a4d1c992ee096cc784b8f2ea27e5','2026-10-17T09:18:41.754925+00:00','2026-10-17T09:18:41.764983+00:00');
+INSERT INTO "memory_episodes" VALUES('63b8aa024e0447ebbf0225f309cfcf43','chat','default','conv1','t12','desktop','Расскажи про кота Барсика номер 10','Расскажи про кота Барсика номер 12','Барсик 12 любит рыбу и спит на окне','Запрос: Расскажи про кота Барсика номер 12
+Итог: Барсик 12 любит рыбу и спит на окне','Расскажи про кота Барсика номер 12
+Барсик 12 любит рыбу и спит на окне
+Запрос: Расскажи про кота Барсика номер 12
+Итог: Барсик 12 любит рыбу и спит на окне','hot',NULL,'{"conversationId":"conv1","schemaVersion":1,"scope":{"type":"chat"},"source":"desktop","turnId":"t12"}','180e2db43ff09f2c9fab873992776554382221ea710b8e7446697d909c199c8d','2026-10-17T09:18:41.781304+00:00','2026-10-17T09:18:41.791677+00:00');
+INSERT INTO "memory_episodes" VALUES('cb844dee50c64563b4c6c8681597d0a0','chat','default','conv2','t20','desktop','Расскажи про кота Барсика номер 20','Расскажи про кота Барсика номер 20','Барсик 20 любит рыбу и спит на окне','Запрос: Расскажи про кота Барсика номер 20
+Итог: Барсик 20 любит рыбу и спит на окне','Расскажи про кота Барсика номер 20
+Барсик 20 любит рыбу и спит на окне
+Запрос: Расскажи про кота Барсика номер 20
+Итог: Барсик 20 любит рыбу и спит на окне','hot',NULL,'{"conversationId":"conv2","schemaVersion":1,"scope":{"type":"chat"},"source":"desktop","turnId":"t20"}','d8d88e97c527b5009b124fb737c85eb110d74c30b2307240b9a348474710b01c','2026-10-17T09:18:41.805560+00:00','2026-10-17T09:18:41.817879+00:00');
+INSERT INTO "memory_episodes" VALUES('9a84ea8d1f3a46e3b7f6c522c99852b3','chat','default','conv2','t21','desktop','Расскажи про кота Барсика номер 20','Расскажи про кота Барсика номер 21','Барсик 21 любит рыбу и спит на окне','Запрос: Расскажи про кота Барсика номер 21
+Итог: Барсик 21 любит рыбу и спит на окне','Расскажи про кота Барсика номер 21
+Барсик 21 любит рыбу и спит на окне
+Запрос: Расскажи про кота Барсика номер 21
+Итог: Барсик 21 любит рыбу и спит на окне','hot',NULL,'{"conversationId":"conv2","schemaVersion":1,"scope":{"type":"chat"},"source":"desktop","turnId":"t21"}','4cdeca6be8de54420f5e99491291eb24eb20ff3990c320030bb3bcc30c7f5c55','2026-10-17T09:18:41.833402+00:00','2026-10-17T09:18:41.844339+00:00');
+INSERT INTO "memory_episodes" VALUES('faa2b923d1404d528d80464cc775ee06','chat','default','conv2','t22','desktop','Расскажи про кота Барсика номер 20','Расскажи про кота Барсика номер 22','Барсик 22 любит рыбу и спит на окне','Запрос: Расскажи про кота Барсика номер 22
+Итог: Барсик 22 любит рыбу и спит на окне','Расскажи про кота Барсика номер 22
+Барсик 22 любит рыбу и спит на окне
+Запрос: Расскажи про кота Барсика номер 22
+Итог: Барсик 22 любит рыбу и спит на окне','hot',NULL,'{"conversationId":"conv2","schemaVersion":1,"scope":{"type":"chat"},"source":"desktop","turnId":"t22"}','e89170e04830808158acec2c2e208952fc480e1bd6bad3ece706e907bf8b2b83','2026-10-17T09:18:41.857569+00:00','2026-10-17T09:18:41.869665+00:00');
+CREATE TABLE memory_items (
+                    id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    category TEXT NOT NULL DEFAULT 'other',
+                    type TEXT NOT NULL DEFAULT 'planning_note',
+                    title TEXT NOT NULL DEFAULT '',
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    source TEXT NOT NULL DEFAULT 'user',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_used_at TEXT,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    priority REAL NOT NULL DEFAULT 0.55,
+                    expires_at TEXT,
+                    related_files_json TEXT NOT NULL DEFAULT '[]',
+                    related_modules_json TEXT NOT NULL DEFAULT '[]',
+                    closed_at TEXT
+                , schema_version INTEGER NOT NULL DEFAULT 4, scope_type TEXT NOT NULL DEFAULT 'chat', scope_id TEXT NOT NULL DEFAULT 'default', revision INTEGER NOT NULL DEFAULT 1, content_hash TEXT NOT NULL DEFAULT '', deleted_at TEXT, tier TEXT NOT NULL DEFAULT 'long', importance REAL NOT NULL DEFAULT 0.65, pinned INTEGER NOT NULL DEFAULT 0, access_count INTEGER NOT NULL DEFAULT 0, decay_rate REAL NOT NULL DEFAULT 0.02);
+INSERT INTO "memory_items" VALUES('63eff8c64d304694bbb86f4a2649b95c','Меня зовут Тестер','fact','planning_note','Меня зовут Тестер','[]',1,'settings-ui','2026-10-17T09:18:41.566271+00:00','2026-10-17T09:18:41.566271+00:00',NULL,0,0.65,NULL,'[]','[]',NULL,4,'chat','default',1,'0736ff0d677a5c485cdcb2810a47c1d0a0dfd4d3d695b502cec0dee69a99ea08',NULL,'long',0.65,0,0,0.02);
+INSERT INTO "memory_items" VALUES('a5dd83038ae9411996cc8de137d735f0','Предпочитаю короткие ответы','preference','user_preference','Предпочитаю короткие ответы','[]',1,'settings-ui','2026-10-17T09:18:41.577429+00:00','2026-10-17T09:18:41.577429+00:00',NULL,0,0.65,NULL,'[]','[]',NULL,4,'chat','default',1,'a53fe03772e1eb4c19c965675529814d69a4fec7b620b6e0915c1eed2b4f3d09',NULL,'long',0.65,0,0,0.02);
+INSERT INTO "memory_items" VALUES('0748db5ef70744b79627ac2c6fd058d8','Проект Альфа на Rust','project','planning_note','Проект Альфа на Rust','[]',1,'settings-ui','2026-10-17T09:18:41.587714+00:00','2026-10-17T09:18:41.587714+00:00',NULL,0,0.65,NULL,'[]','[]',NULL,4,'chat','default',1,'5294a6b06255743729298c115c766d9c19be7659588c62db3f4d1ba1bc1a85e8',NULL,'long',0.65,0,0,0.02);
+INSERT INTO "memory_items" VALUES('51797a1cd83c40208a937d4de6f32f69','Город пишется Варна, не Варно','correction','planning_note','Город пишется Варна, не Варно','[]',1,'settings-ui','2026-10-17T09:18:41.597181+00:00','2026-10-17T09:18:41.597181+00:00',NULL,0,0.65,NULL,'[]','[]',NULL,4,'chat','default',1,'a2fadd95dfb45b02522fb5f067cd64cbb94dd1ad358aade4743022c66a34604f',NULL,'long',0.65,0,0,0.02);
+INSERT INTO "memory_items" VALUES('6dbf2e0aeb674d7f9f54ee7a4b3f80e9','Купить молоко','note','planning_note','Купить молоко','[]',1,'settings-ui','2026-10-17T09:18:41.607037+00:00','2026-10-17T09:18:41.607037+00:00',NULL,0,0.65,NULL,'[]','[]',NULL,4,'chat','default',1,'d93e0f821481370d3d26d2e20e0966cbe9059269591f93e4b8d0b3f62200f554',NULL,'long',0.65,0,0,0.02);
+INSERT INTO "memory_items" VALUES('8ad41f4a0858415ea6e617d60418a8fc','Любимый цвет бирюзовый','other','planning_note','Любимый цвет бирюзовый','[]',1,'settings-ui','2026-10-17T09:18:41.617145+00:00','2026-10-17T09:18:41.617145+00:00',NULL,0,0.65,NULL,'[]','[]',NULL,4,'chat','default',1,'c0476f862fdcb5f9ddc5d4dbb4b74663862d7cbf38bf254d3bd68a0780f1876f',NULL,'long',0.65,0,0,0.02);
+INSERT INTO "memory_items" VALUES('5a7728fc1f4a4b199845fbf75fcd5f75','Всегда отвечай на русском','instruction','planning_note','Всегда отвечай на русском','[]',1,'settings-ui','2026-10-17T09:18:41.627035+00:00','2026-10-17T09:18:41.627035+00:00',NULL,0,0.65,NULL,'[]','[]',NULL,4,'chat','default',1,'9a921af5cb5f8c6398c8a3074ae7111f14bdeebe5dc1a93c80a0d7a8b11e7dba',NULL,'long',0.65,0,0,0.02);
+INSERT INTO "memory_items" VALUES('68aafedf2bf44243964b5cdacf8947dc','Живу в Пловдиве','profile','user_preference','Живу в Пловдиве','[]',1,'settings-ui','2026-10-17T09:18:41.637491+00:00','2026-10-17T09:18:41.637491+00:00',NULL,0,0.95,NULL,'[]','[]',NULL,4,'chat','default',1,'28a8335aaeabcb79ab0c41a6102d4dfe1c2dd238bfb1443100bced31cb4e6826',NULL,'long',0.95,1,0,0.0);
+CREATE TABLE memory_scope_preferences (
+                    scope_type TEXT NOT NULL,
+                    scope_id TEXT NOT NULL,
+                    cross_chat_enabled INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(scope_type, scope_id)
+                );
+CREATE TABLE memory_v4_backfill_state (
+                    source TEXT PRIMARY KEY,
+                    cursor INTEGER NOT NULL,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+CREATE TABLE memory_v4_identity (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), corpus_id TEXT NOT NULL);
+INSERT INTO "memory_v4_identity" VALUES(1,'b4db11425f2c48c4b4567e62ebc85148');
+CREATE TABLE memory_v4_scope_revisions (
+                    scope_type TEXT NOT NULL,
+                    scope_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(scope_type, scope_id)
+                );
+INSERT INTO "memory_v4_scope_revisions" VALUES('chat','default',9,'2026-10-17T09:18:41.869665+00:00');
+CREATE TABLE settings_documents (
+                    kind TEXT NOT NULL,
+                    scope_type TEXT NOT NULL,
+                    scope_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    content_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(kind, scope_type, scope_id)
+                );
+INSERT INTO "settings_documents" VALUES('personality','chat','default',1,'{"createdAt":"2026-10-17T09:18:41.545325+00:00","enabled":false,"profiles":[{"addressForm":"ты","contentHash":"2e19c05b35ed98694bffd36da59d2cd6ff6fd9e3336debc4ecfab0fe13781157","createdAt":"2026-10-17T09:18:41.545325+00:00","customRules":[],"dimensions":{"brevity":76,"directness":68,"humor":10,"initiative":38,"skepticism":68,"structure":80,"technicalDepth":68,"warmth":40},"id":"personality-restrained","language":"auto","name":"Сдержанный","revision":1,"schemaVersion":2,"updatedAt":"2026-10-17T09:18:41.545325+00:00","variant":"restrained"},{"addressForm":"ты","contentHash":"388d7cab5b826fcb0cfd0fa4da571440656e6bc1553224ad7cdec7a4b99308bf","createdAt":"2026-10-17T09:18:41.545325+00:00","customRules":[],"dimensions":{"brevity":70,"directness":88,"humor":18,"initiative":56,"skepticism":74,"structure":74,"technicalDepth":78,"warmth":44},"id":"personality-direct","language":"auto","name":"Прямой","revision":1,"schemaVersion":2,"updatedAt":"2026-10-17T09:18:41.545325+00:00","variant":"direct"},{"addressForm":"ты","contentHash":"e8e79ac736f12871069449c9f4875447800e768b0c36e5758b94dccd3671a98b","createdAt":"2026-10-17T09:18:41.545325+00:00","customRules":[],"dimensions":{"brevity":52,"directness":70,"humor":52,"initiative":68,"skepticism":57,"structure":62,"technicalDepth":68,"warmth":72},"id":"personality-lively","language":"auto","name":"Живой","revision":1,"schemaVersion":2,"updatedAt":"2026-10-17T09:18:41.545325+00:00","variant":"lively"}],"questionnaire":{"addressForm":"ты","brevity":62,"directness":68,"humor":28,"initiative":52,"language":"auto","skepticism":62,"structure":66,"technicalDepth":68,"warmth":52},"schemaVersion":2,"selectedProfileId":"personality-restrained","updatedAt":"2026-10-17T09:18:41.545325+00:00"}','a267059f874aedf8198eb2f35886515957e0cc48ee1298bce520fe8d73d7290a','2026-10-17T09:18:41.545325+00:00','2026-10-17T09:18:41.545325+00:00');
+CREATE TABLE settings_migrations (
+                    migration_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    diagnostic TEXT NOT NULL,
+                    completed_at TEXT NOT NULL
+                );
+INSERT INTO "settings_migrations" VALUES('legacy-context-v4','completed','legacy-context-migrated:profile=0,memory=0','2026-10-17T09:18:41.537048+00:00');
+INSERT INTO "settings_migrations" VALUES('profile-to-personality-v2','completed','profile-personality-v2:personality=1,memory=0','2026-10-17T09:18:41.545325+00:00');
+CREATE TABLE settings_receipts (
+                    client_request_id TEXT PRIMARY KEY,
+                    request_hash TEXT NOT NULL,
+                    receipt_json TEXT NOT NULL,
+                    committed_at TEXT NOT NULL
+                );
+INSERT INTO "settings_receipts" VALUES('r0','d25b1a96890b88d78188e14bab3ebc730277f7e44c66a322379f0d230010193e','{"clientRequestId":"r0","command":"memory.create","committedAt":"2026-10-17T09:18:41.567290+00:00","contentHash":"d8c17d948506ddd96b8b4f5b052d0205cb51b4b00d27d84dc3cb63a4a24d5a37","policyDecisionHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","readBackHash":"d8c17d948506ddd96b8b4f5b052d0205cb51b4b00d27d84dc3cb63a4a24d5a37","receiptId":"settings_receipt_55940e19bf8443cd889812145b2d20b1","replayed":false,"result":{"record":{"accessCount":0,"category":"fact","closedAt":null,"content":"Меня зовут Тестер","contentHash":"0736ff0d677a5c485cdcb2810a47c1d0a0dfd4d3d695b502cec0dee69a99ea08","createdAt":"2026-10-17T09:18:41.566271+00:00","decayRate":0.02,"deletedAt":null,"enabled":true,"expiresAt":null,"id":"63eff8c64d304694bbb86f4a2649b95c","importance":0.65,"pinned":false,"priority":0.65,"relatedFiles":[],"relatedModules":[],"revision":1,"schemaVersion":4,"scope":{"type":"chat"},"source":"settings-ui","tags":[],"text":"Меня зовут Тестер","tier":"long","title":"Меня зовут Тестер","type":"planning_note","updatedAt":"2026-10-17T09:18:41.566271+00:00"}},"revision":1,"schemaVersion":1,"scope":{"type":"chat"}}','2026-10-17T09:18:41.567290+00:00');
+INSERT INTO "settings_receipts" VALUES('r1','5ccd9dee35791db7908ba9860857d6f876beba97a76b08b94ae6e62792b0d3ed','{"clientRequestId":"r1","command":"memory.create","committedAt":"2026-10-17T09:18:41.577429+00:00","contentHash":"c43f5a1f0a6e00797179da01873a7c1345f193053b770e20b0df369efc6a6866","policyDecisionHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","readBackHash":"c43f5a1f0a6e00797179da01873a7c1345f193053b770e20b0df369efc6a6866","receiptId":"settings_receipt_e977c41ac9c747a78b7d34e16986484f","replayed":false,"result":{"record":{"accessCount":0,"category":"preference","closedAt":null,"content":"Предпочитаю короткие ответы","contentHash":"a53fe03772e1eb4c19c965675529814d69a4fec7b620b6e0915c1eed2b4f3d09","createdAt":"2026-10-17T09:18:41.577429+00:00","decayRate":0.02,"deletedAt":null,"enabled":true,"expiresAt":null,"id":"a5dd83038ae9411996cc8de137d735f0","importance":0.65,"pinned":false,"priority":0.65,"relatedFiles":[],"relatedModules":[],"revision":1,"schemaVersion":4,"scope":{"type":"chat"},"source":"settings-ui","tags":[],"text":"Предпочитаю короткие ответы","tier":"long","title":"Предпочитаю короткие ответы","type":"user_preference","updatedAt":"2026-10-17T09:18:41.577429+00:00"}},"revision":2,"schemaVersion":1,"scope":{"type":"chat"}}','2026-10-17T09:18:41.577429+00:00');
+INSERT INTO "settings_receipts" VALUES('r2','a90b198fafe41440f933ba2a7b672a9c5dd9f9af20b770ab7e3d5cf9c02b73b8','{"clientRequestId":"r2","command":"memory.create","committedAt":"2026-10-17T09:18:41.588732+00:00","contentHash":"0682d0f0ac25729cffa35030ebc7ce9c585ca79fd7c0622c6889bf835306c1b0","policyDecisionHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","readBackHash":"0682d0f0ac25729cffa35030ebc7ce9c585ca79fd7c0622c6889bf835306c1b0","receiptId":"settings_receipt_5b56cfe3dd6d4bce8bb07e218bb2b73a","replayed":false,"result":{"record":{"accessCount":0,"category":"project","closedAt":null,"content":"Проект Альфа на Rust","contentHash":"5294a6b06255743729298c115c766d9c19be7659588c62db3f4d1ba1bc1a85e8","createdAt":"2026-10-17T09:18:41.587714+00:00","decayRate":0.02,"deletedAt":null,"enabled":true,"expiresAt":null,"id":"0748db5ef70744b79627ac2c6fd058d8","importance":0.65,"pinned":false,"priority":0.65,"relatedFiles":[],"relatedModules":[],"revision":1,"schemaVersion":4,"scope":{"type":"chat"},"source":"settings-ui","tags":[],"text":"Проект Альфа на Rust","tier":"long","title":"Проект Альфа на Rust","type":"planning_note","updatedAt":"2026-10-17T09:18:41.587714+00:00"}},"revision":3,"schemaVersion":1,"scope":{"type":"chat"}}','2026-10-17T09:18:41.588732+00:00');
+INSERT INTO "settings_receipts" VALUES('r3','4b403756863df7437318ce1175ae7d2c3d87a9763e196998503d4c228c3f8f6e','{"clientRequestId":"r3","command":"memory.create","committedAt":"2026-10-17T09:18:41.597181+00:00","contentHash":"647e9ebfc35505e36d452926ec398ee59026fac28a1d9e47a8e959c17b195ef4","policyDecisionHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","readBackHash":"647e9ebfc35505e36d452926ec398ee59026fac28a1d9e47a8e959c17b195ef4","receiptId":"settings_receipt_45a518dfad4f48e19c69add53fea002a","replayed":false,"result":{"record":{"accessCount":0,"category":"correction","closedAt":null,"content":"Город пишется Варна, не Варно","contentHash":"a2fadd95dfb45b02522fb5f067cd64cbb94dd1ad358aade4743022c66a34604f","createdAt":"2026-10-17T09:18:41.597181+00:00","decayRate":0.02,"deletedAt":null,"enabled":true,"expiresAt":null,"id":"51797a1cd83c40208a937d4de6f32f69","importance":0.65,"pinned":false,"priority":0.65,"relatedFiles":[],"relatedModules":[],"revision":1,"schemaVersion":4,"scope":{"type":"chat"},"source":"settings-ui","tags":[],"text":"Город пишется Варна, не Варно","tier":"long","title":"Город пишется Варна, не Варно","type":"planning_note","updatedAt":"2026-10-17T09:18:41.597181+00:00"}},"revision":4,"schemaVersion":1,"scope":{"type":"chat"}}','2026-10-17T09:18:41.597181+00:00');
+INSERT INTO "settings_receipts" VALUES('r4','cc92a6e332014a4e22061963f3aca32e9f00c268d1b57f155b8ca68c474fcd9b','{"clientRequestId":"r4","command":"memory.create","committedAt":"2026-10-17T09:18:41.608083+00:00","contentHash":"599326fb5de9af7fb8d30aa3e2d91afa3988d186862adf9906be24ad8661abcc","policyDecisionHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","readBackHash":"599326fb5de9af7fb8d30aa3e2d91afa3988d186862adf9906be24ad8661abcc","receiptId":"settings_receipt_dfda7d7896bf41fc9724c2c78f8775d1","replayed":false,"result":{"record":{"accessCount":0,"category":"note","closedAt":null,"content":"Купить молоко","contentHash":"d93e0f821481370d3d26d2e20e0966cbe9059269591f93e4b8d0b3f62200f554","createdAt":"2026-10-17T09:18:41.607037+00:00","decayRate":0.02,"deletedAt":null,"enabled":true,"expiresAt":null,"id":"6dbf2e0aeb674d7f9f54ee7a4b3f80e9","importance":0.65,"pinned":false,"priority":0.65,"relatedFiles":[],"relatedModules":[],"revision":1,"schemaVersion":4,"scope":{"type":"chat"},"source":"settings-ui","tags":[],"text":"Купить молоко","tier":"long","title":"Купить молоко","type":"planning_note","updatedAt":"2026-10-17T09:18:41.607037+00:00"}},"revision":5,"schemaVersion":1,"scope":{"type":"chat"}}','2026-10-17T09:18:41.608083+00:00');
+INSERT INTO "settings_receipts" VALUES('r5','c226bb811b68898b1ace74b0212b860a496c0dbd3f4c28e0624e07160d37a6a9','{"clientRequestId":"r5","command":"memory.create","committedAt":"2026-10-17T09:18:41.617662+00:00","contentHash":"5c950fead29aad8ef3bbc014b90ff77774519ef306064e30e9bceaaf33127810","policyDecisionHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","readBackHash":"5c950fead29aad8ef3bbc014b90ff77774519ef306064e30e9bceaaf33127810","receiptId":"settings_receipt_29d32f068f644a9bad3f32527223983b","replayed":false,"result":{"record":{"accessCount":0,"category":"other","closedAt":null,"content":"Любимый цвет бирюзовый","contentHash":"c0476f862fdcb5f9ddc5d4dbb4b74663862d7cbf38bf254d3bd68a0780f1876f","createdAt":"2026-10-17T09:18:41.617145+00:00","decayRate":0.02,"deletedAt":null,"enabled":true,"expiresAt":null,"id":"8ad41f4a0858415ea6e617d60418a8fc","importance":0.65,"pinned":false,"priority":0.65,"relatedFiles":[],"relatedModules":[],"revision":1,"schemaVersion":4,"scope":{"type":"chat"},"source":"settings-ui","tags":[],"text":"Любимый цвет бирюзовый","tier":"long","title":"Любимый цвет бирюзовый","type":"planning_note","updatedAt":"2026-10-17T09:18:41.617145+00:00"}},"revision":6,"schemaVersion":1,"scope":{"type":"chat"}}','2026-10-17T09:18:41.617662+00:00');
+INSERT INTO "settings_receipts" VALUES('r6','ae0d759cc2b9cf83b28b5e26407c49e2abe5425b88d3135fba267c742953c6e0','{"clientRequestId":"r6","command":"memory.create","committedAt":"2026-10-17T09:18:41.627717+00:00","contentHash":"e02e7c2a15c9a5e5350f403f6d977418eed3167667c486b1f376a01d5d07628d","policyDecisionHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","readBackHash":"e02e7c2a15c9a5e5350f403f6d977418eed3167667c486b1f376a01d5d07628d","receiptId":"settings_receipt_f30fb6fbdc6f4e2d9c0a36a6b954959a","replayed":false,"result":{"record":{"accessCount":0,"category":"instruction","closedAt":null,"content":"Всегда отвечай на русском","contentHash":"9a921af5cb5f8c6398c8a3074ae7111f14bdeebe5dc1a93c80a0d7a8b11e7dba","createdAt":"2026-10-17T09:18:41.627035+00:00","decayRate":0.02,"deletedAt":null,"enabled":true,"expiresAt":null,"id":"5a7728fc1f4a4b199845fbf75fcd5f75","importance":0.65,"pinned":false,"priority":0.65,"relatedFiles":[],"relatedModules":[],"revision":1,"schemaVersion":4,"scope":{"type":"chat"},"source":"settings-ui","tags":[],"text":"Всегда отвечай на русском","tier":"long","title":"Всегда отвечай на русском","type":"planning_note","updatedAt":"2026-10-17T09:18:41.627035+00:00"}},"revision":7,"schemaVersion":1,"scope":{"type":"chat"}}','2026-10-17T09:18:41.627717+00:00');
+INSERT INTO "settings_receipts" VALUES('r7','9079fbd317d0aa260d00483aff963be1fd9313d4e576ec6e3151f53207b04fed','{"clientRequestId":"r7","command":"memory.create","committedAt":"2026-10-17T09:18:41.638105+00:00","contentHash":"a559f7d8156b3dd8a53a9a6bc09626782b2b4d030450674cc835eaa184f0b9b8","policyDecisionHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","readBackHash":"a559f7d8156b3dd8a53a9a6bc09626782b2b4d030450674cc835eaa184f0b9b8","receiptId":"settings_receipt_ddb340be989444f9a3b4d7a7f378317a","replayed":false,"result":{"record":{"accessCount":0,"category":"profile","closedAt":null,"content":"Живу в Пловдиве","contentHash":"28a8335aaeabcb79ab0c41a6102d4dfe1c2dd238bfb1443100bced31cb4e6826","createdAt":"2026-10-17T09:18:41.637491+00:00","decayRate":0.0,"deletedAt":null,"enabled":true,"expiresAt":null,"id":"68aafedf2bf44243964b5cdacf8947dc","importance":0.95,"pinned":true,"priority":0.95,"relatedFiles":[],"relatedModules":[],"revision":1,"schemaVersion":4,"scope":{"type":"chat"},"source":"settings-ui","tags":[],"text":"Живу в Пловдиве","tier":"long","title":"Живу в Пловдиве","type":"user_preference","updatedAt":"2026-10-17T09:18:41.637491+00:00"}},"revision":8,"schemaVersion":1,"scope":{"type":"chat"}}','2026-10-17T09:18:41.638105+00:00');
+CREATE TABLE settings_scope_revisions (
+                    kind TEXT NOT NULL,
+                    scope_type TEXT NOT NULL,
+                    scope_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(kind, scope_type, scope_id)
+                );
+INSERT INTO "settings_scope_revisions" VALUES('memory','chat','default',8,'2026-10-17T09:18:41.637491+00:00');
+CREATE INDEX memory_items_enabled_updated_idx
+                    ON memory_items(enabled, updated_at DESC);
+CREATE INDEX conversation_messages_conversation_idx
+                    ON conversation_messages(conversation_id, created_at);
+CREATE UNIQUE INDEX conversation_messages_client_message_idx ON conversation_messages(client_message_id) WHERE client_message_id IS NOT NULL;
+CREATE INDEX memory_items_scope_updated_idx ON memory_items(scope_type, scope_id, deleted_at, updated_at DESC);
+CREATE INDEX memory_episodes_scope_state_idx
+                    ON memory_episodes(scope_type, scope_id, state, created_at DESC);
+CREATE INDEX memory_capsules_scope_idx
+                    ON memory_capsules(scope_type, scope_id, updated_at DESC);
+PRAGMA writable_schema=OFF;
+DELETE FROM "sqlite_sequence";
+COMMIT;

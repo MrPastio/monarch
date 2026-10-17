@@ -608,7 +608,8 @@ async def test_incognito_stream_is_clean_and_does_not_persist_chat_or_memory(mon
     assert request.use_memory is False
     with pytest.raises(KeyError):
         store.get_conversation("private-conversation")
-    assert store.list_memory_items() == []
+    with store._connection() as con:
+        assert con.execute("SELECT COUNT(*) FROM memory_items").fetchone()[0] == 0
 
 
 @pytest.mark.asyncio
@@ -2122,48 +2123,6 @@ def test_conversation_message_create_persists_predispatched_action(monkeypatch, 
     assert conversation["messages"][1]["model_tier"] == "system"
 
 
-def test_memory_and_conversation_api_reject_blank_content(monkeypatch, tmp_path):
-    settings = make_settings(tmp_path)
-    settings.api_token = "test-token"
-    settings.disable_api_token = False
-    store = MemoryStore(settings)
-    store.create_conversation(conversation_id="blank-content")
-    message = store.append_conversation_message("blank-content", "user", "Исходный вопрос")
-    memory_item = store.create_memory_item("Исходная заметка", category="other")
-    monkeypatch.setattr(main_module, "settings", settings)
-    monkeypatch.setattr(main_module, "memory", store)
-    client = TestClient(main_module.app, raise_server_exceptions=False)
-    headers = {"X-Oscar-Token": "test-token"}
-
-    blank_message = client.post(
-        "/api/conversations/blank-content/messages",
-        headers=headers,
-        json={"role": "user", "content": "   \n\t"},
-    )
-    blank_memory = client.post(
-        "/api/memory/items",
-        headers=headers,
-        json={"content": "   \n\t", "category": "other"},
-    )
-    blank_message_update = client.patch(
-        f"/api/conversations/blank-content/messages/{message['id']}",
-        headers=headers,
-        json={"content": "   \n\t"},
-    )
-    blank_memory_update = client.patch(
-        f"/api/memory/items/{memory_item['id']}",
-        headers=headers,
-        json={"content": "   \n\t"},
-    )
-
-    assert blank_message.status_code == 422
-    assert blank_memory.status_code == 422
-    assert blank_message_update.status_code == 422
-    assert blank_memory_update.status_code == 422
-    assert [item["content"] for item in store.get_conversation("blank-content")["messages"]] == ["Исходный вопрос"]
-    assert [item["content"] for item in store.list_memory_items()] == ["Исходная заметка"]
-
-
 def test_memory_and_conversation_path_ids_reject_blank_or_oversized_before_store(monkeypatch, tmp_path):
     settings = make_settings(tmp_path)
     settings.api_token = "test-token"
@@ -2171,14 +2130,6 @@ def test_memory_and_conversation_path_ids_reject_blank_or_oversized_before_store
     calls: list[tuple[str, tuple[object, ...]]] = []
 
     class FakeMemory:
-        def update_memory_item(self, *args, **kwargs):
-            calls.append(("update_memory_item", args))
-            raise KeyError(args[0])
-
-        def delete_memory_item(self, *args):
-            calls.append(("delete_memory_item", args))
-            return False
-
         def get_conversation(self, *args, **kwargs):
             calls.append(("get_conversation", args))
             raise KeyError(args[0])
@@ -2206,8 +2157,6 @@ def test_memory_and_conversation_path_ids_reject_blank_or_oversized_before_store
     oversized = "x" * 65
 
     cases = [
-        ("PATCH", "/api/memory/items/%20%20%20", {"content": "valid memory"}),
-        ("DELETE", f"/api/memory/items/{oversized}", None),
         ("GET", "/api/conversations/%20%20%20", None),
         ("PATCH", f"/api/conversations/{oversized}", {"title": "renamed"}),
         ("PATCH", "/api/conversations/valid/messages/%20%20%20", {"content": "updated"}),

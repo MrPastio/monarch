@@ -425,8 +425,8 @@ function renderComposerStatusBar() {
   const securityRunning = state.security?.status?.runtime?.running;
   const securityStatus = securityRunning ? 'Защищено' : 'Требуется проверка';
 
-  const memoryHealth = state.data.runtime.health.modules.find((entry) => entry.moduleId === 'memory')?.health;
-  const memoryStatus = memoryHealth?.ok ? 'Включена' : 'Отключена';
+  // Memory 4.1 lives in the Oscar backend; /api/health reports its counts.
+  const memoryStatus = oscarBackend?.connected && oscarBackend?.memoryStats ? 'Включена' : 'Отключена';
   const workspaceRoot = state.data.app?.workspaceRoot || 'неизвестно';
   const diagnostics = state.data.runtime.diagnostics || {};
   const queue = diagnostics.queue || {};

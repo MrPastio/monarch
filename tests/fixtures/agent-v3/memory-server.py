@@ -28,7 +28,7 @@ memory = MemoryStore(settings)
 context = ContextSettingsStore(settings)
 service = MemoryV4Service(settings)
 receipt = context.execute(client_request_id="synthetic-seed", command="memory.create", scope={"type": "chat"},
-                          expected_revision=0, payload={"text": "syntheticneedle use concise answers", "category": "fact"},
+                          expected_revision=0, payload={"text": "syntheticneedle use concise answers", "category": "rule"},
                           policy_decision_hash="b" * 64)
 item_id = receipt["result"]["record"]["id"]
 retrieval_count = 0

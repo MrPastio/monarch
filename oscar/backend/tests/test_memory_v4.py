@@ -10,8 +10,8 @@ import pytest
 from oscar_agent.config import Settings
 from oscar_agent.context_settings import ContextSettingsStore
 from oscar_agent.memory import MemoryStore
-from oscar_agent.memory_v4 import MemoryV4Service, RetrievalCandidate
-from oscar_agent.semantic_memory import SemanticMemoryReranker, SemanticRerankResult
+from oscar_agent.memory_v4 import MemoryV4Service
+from oscar_agent.semantic_memory import QueryEmbedding, SemanticMemoryReranker
 
 
 POLICY_HASH = "b" * 64
@@ -159,14 +159,25 @@ def test_only_successful_persistent_desktop_answer_turns_become_episodes(tmp_pat
         service.close()
 
 
+def topic_vector(text: str) -> list[float]:
+    """A tiny deterministic embedding: peach/colour talk on one axis, the rest
+    on another, so semantic recall can be checked without the real model."""
+    folded = text.casefold()
+    return [1.0, 0.0] if ("персиков" in folded or "цвет" in folded) else [0.0, 1.0]
+
+
 class DeterministicReranker:
     diagnostic = "test"
+    files_present = True
+    model_id = "test-model"
 
-    def rerank(self, _query: str, passages: list[str]) -> SemanticRerankResult:
-        return SemanticRerankResult(
-            [0.94 if "персиков" in passage.casefold() else 0.71 for passage in passages],
-            "test-semantic",
-        )
+    def embed_passages(self, passages: list[str]):
+        import numpy as np
+        return np.array([topic_vector(passage) for passage in passages], dtype=np.float32)
+
+    def embed_query(self, query: str) -> QueryEmbedding:
+        import numpy as np
+        return QueryEmbedding(np.array(topic_vector(query), dtype=np.float32), "test-semantic")
 
     def warmup(self) -> None:
         return None
@@ -176,13 +187,15 @@ class DeterministicReranker:
 
 
 class DeadlineReranker(DeterministicReranker):
-    def rerank(self, _query: str, _passages: list[str]) -> SemanticRerankResult:
-        return SemanticRerankResult(None, "fts:semantic-deadline", timed_out=True)
+    def embed_query(self, _query: str) -> QueryEmbedding:
+        return QueryEmbedding(None, "fts:semantic-deadline", timed_out=True)
 
 
 class UnavailableReranker(DeterministicReranker):
-    def rerank(self, _query: str, _passages: list[str]) -> SemanticRerankResult:
-        return SemanticRerankResult(None, "fts:semantic-unavailable", timed_out=False)
+    files_present = False
+
+    def embed_query(self, _query: str) -> QueryEmbedding:
+        return QueryEmbedding(None, "fts:semantic-unavailable", timed_out=False)
 
 
 def test_request_without_content_does_not_become_an_episode(tmp_path: Path) -> None:
@@ -200,15 +213,16 @@ def test_request_without_content_does_not_become_an_episode(tmp_path: Path) -> N
         service.close()
 
 
-def test_unavailable_reranker_does_not_inject_a_weak_episode(tmp_path: Path, monkeypatch) -> None:
-    _memory, _context, service = make_services(tmp_path)
+def test_unavailable_reranker_does_not_inject_a_weak_episode(tmp_path: Path) -> None:
+    memory, _context, service = make_services(tmp_path)
     service.reranker.close()
     service.reranker = UnavailableReranker()  # type: ignore[assignment]
-    weak = RetrievalCandidate(kind="episode", id="old-refusal", text="Слабосвязанная старая ошибка",
-                              title="Старый чат", created_at="2026-01-01T00:00:00+00:00", lexical_score=0.35)
-    monkeypatch.setattr(service, "_candidates", lambda *_args: [weak])
+    append_turn(memory, conversation_id="old-chat", turn_id="old-refusal", user_text="Почему старая ошибка?",
+                assistant_text="Слабосвязанная старая ошибка доступа.")
+    service.index_turn(conversation_id="old-chat", turn_id="old-refusal", source="desktop")
     try:
-        result = service.retrieve("ошибка сейчас", {"type": "chat"})
+        # One shared word out of three is weak evidence without semantics.
+        result = service.retrieve("ошибка установки принтера", {"type": "chat"})
         assert result["episodes"] == []
         assert result["retrievalReason"] == "lexical-floor-fallback"
         assert result["rerankerStatus"] == "reranker-unavailable"
@@ -237,6 +251,7 @@ def test_semantic_paraphrase_is_selected_without_injecting_unrelated_recent_cont
             assistant_text="SQLite migration completed.",
             structured_summary={"database": "sqlite"},
         )
+        service._embed_pending()
 
         result = service.retrieve(
             "какую цветовую гамму мы выбрали?",
@@ -374,14 +389,14 @@ def test_retrieval_rechecks_scope_after_reranking(tmp_path: Path, monkeypatch, c
         with sqlite3.connect(service.db_path) as con:
             con.execute("UPDATE memory_items SET expires_at = '2030-01-01T01:00:00Z' WHERE id = ?", (item_id,))
     class ChangingReranker(DeterministicReranker):
-        def rerank(self, query: str, passages: list[str]) -> SemanticRerankResult:
+        def embed_query(self, query: str) -> QueryEmbedding:
             if change == "expiry":
                 clock[0] = "2030-01-01T02:00:00+00:00"
             else:
                 context.execute(client_request_id="race-change", command="memory.delete" if change == "delete" else "memory.cross-chat.set",
                     scope={"type": "chat"}, expected_revision=1,
                     payload={"id": item_id} if change == "delete" else {"enabled": False}, policy_decision_hash=POLICY_HASH)
-            return super().rerank(query, passages)
+            return super().embed_query(query)
     service.reranker.close()
     service.reranker = ChangingReranker()  # type: ignore[assignment]
     try:
@@ -833,7 +848,7 @@ def test_the_chat_being_answered_is_not_recalled_as_a_past_chat(tmp_path: Path) 
                 conversation_id=conversation_id,
                 turn_id=turn_id,
                 user_text="jokeneedle расскажи шутку",
-                assistant_text="jokeneedle ответ",
+                assistant_text=f"jokeneedle ответ в {conversation_id}",
             )
             service.index_turn(conversation_id=conversation_id, turn_id=turn_id, source="desktop")
 

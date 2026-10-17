@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import shutil
 import sqlite3
@@ -15,11 +16,16 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .memory_index import ensure_row_columns
+from .memory_facts import classify, extract_learnable, forget_subject, forget_terms, normalize_statement
+from .memory_text import STEMMER_VERSION, norm_key, stem_text
 from .prompt_catalog import (
     OSCAR_PROMPT_DEFINITIONS,
     OSCAR_PROMPT_VERSION,
     get_oscar_prompt_definition,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SettingsRevisionConflict(RuntimeError):
@@ -50,6 +56,7 @@ class ContextSettingsStore:
         self._init_db()
         self._migrate_legacy_context()
         self._migrate_profile_to_personality_v2()
+        self._migrate_memory_categories_v41()
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -134,6 +141,15 @@ class ContextSettingsStore:
             for column, definition in additions.items():
                 if column not in memory_columns:
                     con.execute(f"ALTER TABLE memory_items ADD COLUMN {column} {definition}")
+            # Memory 4.1 columns (stems, origin, status, subject); idempotent.
+            ensure_row_columns(con)
+            # History left behind by records deleted before cascading existed.
+            forget_superseded_history(con)
+            preference_columns = {row["name"] for row in con.execute("PRAGMA table_info(memory_scope_preferences)")}
+            if "learning_mode" not in preference_columns:
+                # auto: Oscar remembers what the person says about themselves;
+                # suggest: it asks first; off: only «запомни» writes.
+                con.execute("ALTER TABLE memory_scope_preferences ADD COLUMN learning_mode TEXT NOT NULL DEFAULT 'auto'")
             con.execute(
                 "CREATE INDEX IF NOT EXISTS memory_items_scope_updated_idx "
                 "ON memory_items(scope_type, scope_id, deleted_at, updated_at DESC)"
@@ -271,6 +287,19 @@ class ContextSettingsStore:
             elif command == "memory.cross-chat.set":
                 kind = "memory"
                 result = self._set_cross_chat_enabled(con, scope_type, scope_id, expected_revision, payload)
+            elif command == "memory.remember":
+                kind = "memory"
+                result = self._remember_memory(con, scope_type, scope_id, expected_revision, payload)
+            elif command == "memory.forget":
+                kind = "memory"
+                result = self._forget_memory(con, scope_type, scope_id, expected_revision, payload)
+            elif command in ("memory.suggestion.accept", "memory.suggestion.dismiss"):
+                kind = "memory"
+                result = self._settle_suggestion(con, scope_type, scope_id, expected_revision, payload,
+                                                 command.endswith("accept"))
+            elif command == "memory.learning.set":
+                kind = "memory"
+                result = self._set_learning_mode(con, scope_type, scope_id, expected_revision, payload)
             elif command == "prompts.update":
                 kind = "prompts"
                 result = self._update_prompt_override(
@@ -323,16 +352,17 @@ class ContextSettingsStore:
             revision = self._scope_revision(con, kind, scope_type, scope_id)
             rows = con.execute(
                 "SELECT * FROM memory_items WHERE scope_type = ? AND scope_id = ? "
-                "AND deleted_at IS NULL ORDER BY pinned DESC, updated_at DESC LIMIT 500",
+                "AND deleted_at IS NULL AND status = 'active' ORDER BY pinned DESC, updated_at DESC LIMIT 500",
                 (scope_type, scope_id),
             ).fetchall()
             preference = con.execute(
-                "SELECT cross_chat_enabled FROM memory_scope_preferences WHERE scope_type = ? AND scope_id = ?",
+                "SELECT cross_chat_enabled, learning_mode FROM memory_scope_preferences WHERE scope_type = ? AND scope_id = ?",
                 (scope_type, scope_id),
             ).fetchone()
             value: Any = {
                 "records": [self._memory_record(row) for row in rows],
                 "crossChatEnabled": bool(preference["cross_chat_enabled"]) if preference else True,
+                "learningMode": str(preference["learning_mode"]) if preference else "auto",
             }
         elif kind == "prompts":
             assert_prompt_scope(scope_type, scope_id)
@@ -378,7 +408,15 @@ class ContextSettingsStore:
             "value": value,
             "migration": self.migration_diagnostic,
         }
-        response["contentHash"] = sha256_json(response)
+        hashed = response
+        if kind == "memory":
+            # Use counters change in the background whenever a record helps an
+            # answer; they are not content, so a write's read-back still matches.
+            hashed = {**response, "value": {**value, "records": [
+                {key: item for key, item in record.items() if key not in ("accessCount", "lastUsedAt")}
+                for record in value["records"]
+            ]}}
+        response["contentHash"] = sha256_json(hashed)
         return response
 
     def resolve_prompt(self, prompt_id: str) -> str:
@@ -614,6 +652,41 @@ class ContextSettingsStore:
             # Legacy corruption must not make the canonical store unavailable.
             # The original and any completed backup remain untouched for repair.
             self.migration_diagnostic = f"legacy-context-migration-failed:{type(exc).__name__}"
+
+    def _migrate_memory_categories_v41(self) -> None:
+        """Memory 4.1 has five plain categories; older records used eight
+        (and the chat panel sixteen types). Mapped once, revisions bumped so
+        no cache keeps the old shape."""
+        migration_id = "memory-categories-v41"
+        try:
+            self._map_memory_categories(migration_id)
+        except Exception as exc:  # A failed upgrade must not take chat down; retried next start.
+            LOGGER.exception("Memory category migration failed")
+            self.migration_diagnostic += f";memory-categories-v41-failed:{type(exc).__name__}"
+
+    def _map_memory_categories(self, migration_id: str) -> None:
+        with self._connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            if con.execute("SELECT 1 FROM settings_migrations WHERE migration_id = ? AND status = 'completed'",
+                           (migration_id,)).fetchone():
+                return
+            scopes = set()
+            for legacy, canonical in MEMORY_CATEGORY_ALIASES.items():
+                rows = con.execute("SELECT DISTINCT scope_type, scope_id FROM memory_items WHERE category = ?",
+                                   (legacy,)).fetchall()
+                scopes.update((row["scope_type"], row["scope_id"]) for row in rows)
+                con.execute("UPDATE memory_items SET category = ? WHERE category = ?", (canonical, legacy))
+            con.execute("UPDATE memory_items SET category = 'note' WHERE category NOT IN (%s)"
+                        % ",".join("?" for _ in MEMORY_CATEGORIES), MEMORY_CATEGORIES)
+            for scope_type, scope_id in scopes:
+                actual = self._scope_revision(con, "memory", scope_type, scope_id)
+                self._bump_scope_revision(con, "memory", scope_type, scope_id, actual)
+            con.execute(
+                "INSERT INTO settings_migrations(migration_id, status, diagnostic, completed_at) "
+                "VALUES(?, 'completed', ?, ?) ON CONFLICT(migration_id) DO UPDATE SET "
+                "status = excluded.status, diagnostic = excluded.diagnostic, completed_at = excluded.completed_at",
+                (migration_id, f"scopes={len(scopes)}", utc_now()),
+            )
 
     def _migrate_profile_to_personality_v2(self) -> None:
         migration_id = "profile-to-personality-v2"
@@ -1407,8 +1480,8 @@ class ContextSettingsStore:
                 created_at, updated_at, priority, expires_at, related_files_json,
                 related_modules_json, schema_version, scope_type, scope_id,
                 revision, content_hash, deleted_at, tier, importance, pinned,
-                access_count, decay_rate
-            ) VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 4, ?, ?, 1, ?, NULL, ?, ?, ?, 0, ?)
+                access_count, decay_rate, search_stems, stems_version, norm_key, subject_key
+            ) VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 4, ?, ?, 1, ?, NULL, ?, ?, ?, 0, ?, ?, ?, ?, ?)
             """,
             (
                 item_id, content, item["category"], item["type"], item["title"],
@@ -1416,7 +1489,8 @@ class ContextSettingsStore:
                 item["priority"], item["expiresAt"], canonical_json(item["relatedFiles"]),
                 canonical_json(item["relatedModules"]), scope_type, scope_id, content_hash,
                 item["tier"], item["importance"], 1 if item["pinned"] else 0,
-                item["decayRate"],
+                item["decayRate"], *memory_search_fields(item["title"], content, item["tags"]),
+                classify(content)[1],
             ),
         )
         self._bump_scope_revision(con, "memory", scope_type, scope_id, actual)
@@ -1477,13 +1551,15 @@ class ContextSettingsStore:
             "UPDATE memory_items SET content = ?, category = ?, type = ?, title = ?, tags_json = ?, "
             "source = ?, updated_at = ?, priority = ?, expires_at = ?, related_files_json = ?, "
             "related_modules_json = ?, revision = ?, content_hash = ?, tier = ?, importance = ?, "
-            "pinned = ?, decay_rate = ?, enabled = ?, closed_at = ? WHERE id = ?",
+            "pinned = ?, decay_rate = ?, enabled = ?, closed_at = ?, search_stems = ?, stems_version = ?, "
+            "norm_key = ?, subject_key = ? WHERE id = ?",
             (
                 content, item["category"], item["type"], item["title"], canonical_json(item["tags"]),
                 item["source"], utc_now(), item["priority"], item["expiresAt"],
                 canonical_json(item["relatedFiles"]), canonical_json(item["relatedModules"]),
                 item_revision, content_hash, item["tier"], item["importance"],
-                1 if item["pinned"] else 0, item["decayRate"], 1 if enabled else 0, closed_at, item_id,
+                1 if item["pinned"] else 0, item["decayRate"], 1 if enabled else 0, closed_at,
+                *memory_search_fields(item["title"], content, item["tags"]), classify(content)[1], item_id,
             ),
         )
         self._bump_scope_revision(con, "memory", scope_type, scope_id, actual)
@@ -1513,8 +1589,21 @@ class ContextSettingsStore:
             "UPDATE memory_items SET deleted_at = ?, enabled = ?, updated_at = ?, revision = revision + 1 WHERE id = ?",
             (deleted_at, 0 if deleted else 1, utc_now(), item_id),
         )
+        restored = None
+        if deleted and payload.get("undo") is True and row["origin"] == "learned" and row["supersedes_id"]:
+            # «Отменить» under an answer: Oscar misread the person, so the
+            # version it replaced comes back instead of being forgotten too.
+            restored = row["supersedes_id"]
+            con.execute("UPDATE memory_items SET supersedes_id = NULL WHERE id = ?", (item_id,))
+            con.execute(
+                "UPDATE memory_items SET status = 'active', deleted_at = NULL, enabled = 1, updated_at = ?, "
+                "revision = revision + 1 WHERE id = ? AND status = 'superseded'",
+                (utc_now(), restored),
+            )
+        elif deleted:
+            forget_superseded_history(con, item_id)
         self._bump_scope_revision(con, "memory", scope_type, scope_id, actual)
-        return {"id": item_id, "deleted": deleted}
+        return {"id": item_id, "deleted": deleted, **({"restoredId": restored} if restored else {})}
 
     def _set_cross_chat_enabled(
         self,
@@ -1537,6 +1626,205 @@ class ContextSettingsStore:
         )
         self._bump_scope_revision(con, "memory", scope_type, scope_id, actual)
         return {"crossChatEnabled": enabled}
+
+    # ---------------------------------------------------------- Memory 4.1
+
+    def _remember_memory(self, con, scope_type, scope_id, expected_revision, payload) -> dict[str, Any]:
+        """«Запомни» from a chat: one record per meaning, the newest statement
+        about a subject replaces the older one (kept as history, not used)."""
+        actual = self._scope_revision(con, "memory", scope_type, scope_id)
+        assert_revision(expected_revision, actual)
+        text = normalize_statement(bounded_text(payload.get("text"), 4000, "Memory text"))
+        if not text:
+            raise ValueError("Memory text must contain 1 to 4000 characters.")
+        origin = str(payload.get("origin") or "owner")
+        if origin not in {"owner", "learned", "suggested"}:
+            raise ValueError("Memory origin is invalid.")
+        source = bounded_optional_text(payload.get("source"), 80) or "chat"
+        # A Coder note names its own section and kind and links the files it
+        # concerns; a chat «запомни» is classified from its words.
+        category = canonical_memory_category(payload["category"]) if payload.get("category") else None
+        entry_type = bounded_optional_text(payload.get("type"), 80) or None
+        related_files = bounded_string_list(payload.get("relatedFiles", []), 24, 500)
+        result = self._upsert_fact(con, scope_type, scope_id, text, origin, source, bool(payload.get("pinned")),
+                                   category=category, entry_type=entry_type, related_files=related_files)
+        if result["action"] != "unchanged":
+            self._bump_scope_revision(con, "memory", scope_type, scope_id, actual)
+        return result
+
+    def _upsert_fact(self, con, scope_type, scope_id, text, origin, source, pinned=False, *,
+                     category=None, entry_type=None, related_files=None) -> dict[str, Any]:
+        classified, subject = classify(text)
+        if scope_type != "chat":
+            # "Я живу в…" subjects describe a person, not a project.
+            subject = None
+        category = category or classified
+        key = norm_key(text)
+        same = con.execute(
+            "SELECT * FROM memory_items WHERE scope_type = ? AND scope_id = ? AND norm_key = ? "
+            "AND deleted_at IS NULL AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+            (scope_type, scope_id, key),
+        ).fetchone()
+        if same:
+            if origin == "owner" and (same["origin"] != "owner" or not same["enabled"] or same["closed_at"]):
+                # The person said it themselves: a suggestion becomes theirs.
+                con.execute("UPDATE memory_items SET origin = 'owner', enabled = 1, closed_at = NULL, "
+                            "updated_at = ?, revision = revision + 1 WHERE id = ?", (utc_now(), same["id"]))
+                self._supersede_subject(con, scope_type, scope_id, same["subject_key"], same["id"])
+                row = con.execute("SELECT * FROM memory_items WHERE id = ?", (same["id"],)).fetchone()
+                return {"record": self._memory_record(row), "action": "confirmed", "replaced": None}
+            return {"record": self._memory_record(same), "action": "unchanged", "replaced": None}
+        if origin != "owner" and con.execute(
+            "SELECT 1 FROM memory_items WHERE scope_type = ? AND scope_id = ? AND norm_key = ? AND status = 'dismissed'",
+            (scope_type, scope_id, key),
+        ).fetchone():
+            # The person already said no to exactly this.
+            return {"record": None, "action": "unchanged", "replaced": None}
+        previous = con.execute(
+            "SELECT * FROM memory_items WHERE scope_type = ? AND scope_id = ? AND subject_key = ? "
+            "AND deleted_at IS NULL AND status = 'active' AND origin IN ('owner', 'learned') "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (scope_type, scope_id, subject),
+        ).fetchone() if subject else None
+        now = utc_now()
+        item_id = uuid.uuid4().hex
+        item = normalize_memory_payload({"category": category, "source": source, "pinned": pinned,
+                                         **({"type": entry_type} if entry_type else {}),
+                                         "relatedFiles": related_files or []}, text)
+        content_hash = sha256_json({**item, "id": item_id, "scope": render_scope(scope_type, scope_id)})
+        con.execute(
+            """
+            INSERT INTO memory_items(
+                id, content, category, type, title, tags_json, enabled, source,
+                created_at, updated_at, priority, expires_at, related_files_json,
+                related_modules_json, schema_version, scope_type, scope_id,
+                revision, content_hash, deleted_at, tier, importance, pinned,
+                access_count, decay_rate, search_stems, stems_version, norm_key,
+                origin, status, subject_key, supersedes_id
+            ) VALUES(?, ?, ?, ?, ?, '[]', 1, ?, ?, ?, ?, NULL, ?, '[]', 4, ?, ?, 1, ?, NULL, ?, ?, ?, 0, ?,
+                     ?, ?, ?, ?, 'active', ?, ?)
+            """,
+            (
+                item_id, text, item["category"], item["type"], item["title"], item["source"], now, now,
+                item["priority"], canonical_json(item["relatedFiles"]), scope_type, scope_id, content_hash,
+                item["tier"], item["importance"],
+                1 if item["pinned"] else 0, item["decayRate"], *memory_search_fields(item["title"], text, []),
+                origin, subject, previous["id"] if previous else None,
+            ),
+        )
+        replaced = None
+        if previous and origin != "suggested":
+            self._supersede_subject(con, scope_type, scope_id, subject, item_id)
+            replaced = self._memory_record(previous)
+        row = con.execute("SELECT * FROM memory_items WHERE id = ?", (item_id,)).fetchone()
+        return {"record": self._memory_record(row), "action": "replaced" if replaced else "created",
+                "replaced": replaced}
+
+    def _supersede_subject(self, con, scope_type, scope_id, subject, keep_id) -> None:
+        if not subject:
+            return
+        con.execute(
+            "UPDATE memory_items SET status = 'superseded', updated_at = ?, revision = revision + 1 "
+            "WHERE scope_type = ? AND scope_id = ? AND subject_key = ? AND id != ? AND status = 'active' "
+            "AND deleted_at IS NULL AND origin IN ('owner', 'learned')",
+            (utc_now(), scope_type, scope_id, subject, keep_id),
+        )
+
+    def _forget_memory(self, con, scope_type, scope_id, expected_revision, payload) -> dict[str, Any]:
+        """«Забудь …»: the one record the words point at, restorable."""
+        actual = self._scope_revision(con, "memory", scope_type, scope_id)
+        assert_revision(expected_revision, actual)
+        query = bounded_text(payload.get("query"), 1000, "Forget query")
+        rows = con.execute(
+            "SELECT * FROM memory_items WHERE scope_type = ? AND scope_id = ? AND deleted_at IS NULL "
+            "AND status = 'active' AND origin IN ('owner', 'learned') ORDER BY updated_at DESC LIMIT 500",
+            (scope_type, scope_id),
+        ).fetchall()
+        target = None
+        subject = forget_subject(query)
+        if subject:
+            target = next((row for row in rows if row["subject_key"] == subject), None)
+        if target is None:
+            terms = forget_terms(query)
+            best = 0.0
+            for row in rows:
+                stems = set(str(row["search_stems"] or stem_text(row["content"])).split())
+                coverage = sum(1 for term in terms if term in stems) / len(terms) if terms else 0.0
+                if coverage > best:
+                    best, target = coverage, row
+            if best < 0.6:
+                target = None
+        if target is None:
+            return {"record": None}
+        con.execute("UPDATE memory_items SET deleted_at = ?, enabled = 0, updated_at = ?, revision = revision + 1 "
+                    "WHERE id = ?", (utc_now(), utc_now(), target["id"]))
+        forget_superseded_history(con, target["id"])
+        self._bump_scope_revision(con, "memory", scope_type, scope_id, actual)
+        return {"record": self._memory_record(target)}
+
+    def _settle_suggestion(self, con, scope_type, scope_id, expected_revision, payload, accept: bool) -> dict[str, Any]:
+        actual = self._scope_revision(con, "memory", scope_type, scope_id)
+        assert_revision(expected_revision, actual)
+        item_id = bounded_id(payload.get("id"), "Memory id")
+        row = con.execute(
+            "SELECT * FROM memory_items WHERE id = ? AND scope_type = ? AND scope_id = ? AND origin = 'suggested' "
+            "AND deleted_at IS NULL AND status = 'active'",
+            (item_id, scope_type, scope_id),
+        ).fetchone()
+        if not row:
+            raise SettingsItemNotFound(item_id)
+        now = utc_now()
+        if accept:
+            con.execute("UPDATE memory_items SET origin = 'owner', updated_at = ?, revision = revision + 1 WHERE id = ?",
+                        (now, item_id))
+            self._supersede_subject(con, scope_type, scope_id, row["subject_key"], item_id)
+        else:
+            con.execute("UPDATE memory_items SET status = 'dismissed', deleted_at = ?, enabled = 0, updated_at = ?, "
+                        "revision = revision + 1 WHERE id = ?", (now, now, item_id))
+        self._bump_scope_revision(con, "memory", scope_type, scope_id, actual)
+        return {"id": item_id, "accepted": accept}
+
+    def _set_learning_mode(self, con, scope_type, scope_id, expected_revision, payload) -> dict[str, Any]:
+        actual = self._scope_revision(con, "memory", scope_type, scope_id)
+        assert_revision(expected_revision, actual)
+        mode = payload.get("mode")
+        if mode not in {"auto", "suggest", "off"}:
+            raise ValueError("memory.learning.set requires mode auto, suggest or off.")
+        con.execute(
+            "INSERT INTO memory_scope_preferences(scope_type, scope_id, cross_chat_enabled, updated_at, learning_mode) "
+            "VALUES(?, ?, 1, ?, ?) ON CONFLICT(scope_type, scope_id) DO UPDATE SET "
+            "learning_mode = excluded.learning_mode, updated_at = excluded.updated_at",
+            (scope_type, scope_id, utc_now(), mode),
+        )
+        self._bump_scope_revision(con, "memory", scope_type, scope_id, actual)
+        return {"learningMode": mode}
+
+    def learn_from_message(self, scope: dict[str, str | None], user_text: str) -> list[dict[str, Any]]:
+        """What the person said about themselves in an ordinary chat turn.
+
+        Called only for a persistent Desktop turn that Memory indexed (the same
+        provenance gate as episodes). Never reads the model's reply."""
+        scope_type, scope_id = normalize_scope(scope)
+        facts = extract_learnable(user_text)
+        if not facts:
+            return []
+        with self._connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            preference = con.execute(
+                "SELECT learning_mode FROM memory_scope_preferences WHERE scope_type = ? AND scope_id = ?",
+                (scope_type, scope_id),
+            ).fetchone()
+            mode = str(preference["learning_mode"]) if preference else "auto"
+            if mode == "off":
+                return []
+            origin = "learned" if mode == "auto" else "suggested"
+            results = [self._upsert_fact(con, scope_type, scope_id, fact.text, origin, "chat-learned")
+                       for fact in facts]
+            changed = [result for result in results if result["action"] != "unchanged"]
+            if changed:
+                actual = self._scope_revision(con, "memory", scope_type, scope_id)
+                self._bump_scope_revision(con, "memory", scope_type, scope_id, actual)
+            return changed
 
     def _scope_revision(self, con: sqlite3.Connection, kind: str, scope_type: str, scope_id: str) -> int:
         row = con.execute(
@@ -1590,6 +1878,11 @@ class ContextSettingsStore:
             "scope": render_scope(row["scope_type"], row["scope_id"]),
             "revision": int(row["revision"]),
             "contentHash": row["content_hash"],
+            "origin": row["origin"],
+            "status": row["status"],
+            "subjectKey": row["subject_key"],
+            "supersedesId": row["supersedes_id"],
+            "lastUsedAt": row["last_used_at"],
         }
 
     @staticmethod
@@ -2102,12 +2395,58 @@ def merge_document(kind: str, base: dict[str, Any], patch: dict[str, Any]) -> di
     return result
 
 
+def forget_superseded_history(con: sqlite3.Connection, item_id: str | None = None) -> int:
+    """A deleted record takes the older versions it replaced with it.
+
+    "Я живу в Софии" replaced "Я живу в Варне"; forgetting where the person
+    lives must not leave the earlier city behind as unreachable history that
+    nothing ever removes. Without an id, every superseded row whose successor
+    is already deleted is swept (startup repair). Soft delete: the usual
+    30-day purge then removes the rows for good."""
+    now = utc_now()
+    total = 0
+    while True:
+        if item_id is not None:
+            cursor = con.execute(
+                "WITH RECURSIVE history(id) AS ("
+                " SELECT supersedes_id FROM memory_items WHERE id = ? AND supersedes_id IS NOT NULL"
+                " UNION SELECT m.supersedes_id FROM memory_items m JOIN history h ON m.id = h.id"
+                " WHERE m.supersedes_id IS NOT NULL) "
+                "UPDATE memory_items SET deleted_at = ?, enabled = 0 "
+                "WHERE id IN (SELECT id FROM history) AND status = 'superseded' AND deleted_at IS NULL",
+                (item_id, now),
+            )
+            return cursor.rowcount
+        cursor = con.execute(
+            "UPDATE memory_items SET deleted_at = ?, enabled = 0 WHERE status = 'superseded' AND deleted_at IS NULL "
+            "AND id IN (SELECT supersedes_id FROM memory_items WHERE deleted_at IS NOT NULL AND supersedes_id IS NOT NULL)",
+            (now,),
+        )
+        total += cursor.rowcount
+        if cursor.rowcount == 0:
+            return total
+
+
+def memory_search_fields(title: str, content: str, tags: list[str]) -> tuple[str, int, str]:
+    """search_stems, stems_version, norm_key for a memory row (Memory 4.1)."""
+    return stem_text(title, content, " ".join(tags)), STEMMER_VERSION, norm_key(content)
+
+
+# Memory 4.1: Обо мне, Предпочтения, Правила, Проекты, Заметки.
+MEMORY_CATEGORIES = ("about", "preference", "rule", "project", "note")
+MEMORY_CATEGORY_ALIASES = {"profile": "about", "instruction": "rule", "correction": "rule", "fact": "note", "other": "note"}
+
+
+def canonical_memory_category(value: Any) -> str:
+    category = str(value or "note").strip().lower()
+    category = MEMORY_CATEGORY_ALIASES.get(category, category)
+    return category if category in MEMORY_CATEGORIES else "note"
+
+
 def normalize_memory_payload(payload: dict[str, Any], content: str) -> dict[str, Any]:
-    category = str(payload.get("category") or "note").strip().lower()
-    if category not in {"fact", "preference", "project", "correction", "note", "other", "instruction", "profile"}:
-        category = "note"
+    category = canonical_memory_category(payload.get("category"))
     entry_type = str(payload.get("type") or "").strip() or (
-        "user_preference" if category in {"preference", "profile"} else "planning_note"
+        "user_preference" if category in {"preference", "about"} else "planning_note"
     )
     tier = str(payload.get("tier") or "long").strip()
     if tier not in {"working", "long", "permanent"}:

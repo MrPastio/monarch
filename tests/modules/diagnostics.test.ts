@@ -32,7 +32,7 @@ describe('Diagnostics Module', () => {
         capabilityId: 'diagnostics.project.report',
         input: {
           sources: {
-            'npm test': 'FAILED tests/modules/memory.test.ts\nTraceback: assertion error',
+            'npm test': 'FAILED tests/modules/oscar-routing.test.ts\nTraceback: assertion error',
             'git diff': 'TODO remove debug console.log before release',
           },
         },

@@ -38,7 +38,6 @@ from .memory import (
     ActionLinkedConversationError,
     ImmutableConversationMessageError,
     MemoryStore,
-    detect_memory_note,
     normalize_text,
     should_use_memory,
 )
@@ -99,11 +98,10 @@ from .schemas import (
     ConversationMessageCreate,
     ConversationMessageUpdate,
     ConversationUpdate,
-    MemoryItemCreate,
-    MemoryItemUpdate,
     MemoryContextRequestV1,
     MemoryContextValidityRequestV1,
     MemoryEpisodeIndexRequestV1,
+    MemoryLearnRequestV1,
     SettingsScopeV1,
     SettingsCommandRequestV1,
     SettingsReadRequestV1,
@@ -447,6 +445,7 @@ def health(
             "generated_dir": str(workspace.generated_dir),
         },
         "memory": memory.stats().model_dump(mode="json"),
+        "memoryError": memory_v4.init_error,
         "model": model_runtime.status().model_dump(mode="json"),
         "lifecycle": lifecycle,
     })
@@ -597,71 +596,6 @@ def backend_stop(
     return dict(_backend_stop_receipt)
 
 
-@app.get("/api/memory/stats", dependencies=[Depends(verify_token)])
-def memory_stats():
-    return memory.stats()
-
-
-@app.get("/api/memory/search", dependencies=[Depends(verify_token)])
-def memory_search(
-    q: str = Query(min_length=2, max_length=MAX_SEARCH_QUERY_CHARS),
-    limit: int = Query(default=6, ge=1, le=20),
-):
-    q = normalized_search_query_param(q, min_length=2)
-    hits = memory.search(q, limit=limit)
-    return memory.hits_to_sources(hits)
-
-
-@app.get("/api/memory/items", dependencies=[Depends(verify_token)])
-def memory_items(include_inactive: bool = True):
-    return {"items": memory.list_memory_items(include_inactive=include_inactive)}
-
-
-@app.post("/api/memory/items", dependencies=[Depends(verify_token)])
-def memory_item_create(request: MemoryItemCreate):
-    return memory.create_memory_item(
-        request.content,
-        category=request.category,
-        type=request.type,
-        title=request.title,
-        tags=request.tags,
-        priority=request.priority,
-        expires_at=request.expires_at.isoformat() if request.expires_at else None,
-        related_files=request.related_files,
-        related_modules=request.related_modules,
-    )
-
-
-@app.patch("/api/memory/items/{item_id}", dependencies=[Depends(verify_token)])
-def memory_item_update(item_id: str, request: MemoryItemUpdate):
-    item_id = normalized_resource_id_param(item_id, "item_id")
-    try:
-        return memory.update_memory_item(
-            item_id,
-            content=request.content,
-            category=request.category,
-            type=request.type,
-            title=request.title,
-            tags=request.tags,
-            priority=request.priority,
-            expires_at=request.expires_at.isoformat() if request.expires_at else None,
-            related_files=request.related_files,
-            related_modules=request.related_modules,
-            closed=request.closed,
-            enabled=request.enabled,
-        )
-    except KeyError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory item not found")
-
-
-@app.delete("/api/memory/items/{item_id}", dependencies=[Depends(verify_token)])
-def memory_item_delete(item_id: str):
-    item_id = normalized_resource_id_param(item_id, "item_id")
-    if not memory.delete_memory_item(item_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory item not found")
-    return {"ok": True, "deleted": item_id}
-
-
 @app.post("/api/settings/read", dependencies=[Depends(verify_token)])
 def settings_read(request: SettingsReadRequestV1):
     return context_settings.read(
@@ -673,7 +607,7 @@ def settings_read(request: SettingsReadRequestV1):
 @app.post("/api/settings/commands", dependencies=[Depends(verify_token)])
 def settings_command(request: SettingsCommandRequestV1):
     try:
-        return context_settings.execute(
+        receipt = context_settings.execute(
             client_request_id=request.client_request_id,
             command=request.command,
             scope=request.scope.model_dump(by_alias=True, exclude_none=True),
@@ -681,6 +615,10 @@ def settings_command(request: SettingsCommandRequestV1):
             payload=request.payload,
             policy_decision_hash=request.policy_decision_hash,
         )
+        if request.command.startswith("memory."):
+            # A new or edited record gets its vector within seconds.
+            memory_v4.notify_changed()
+        return receipt
     except SettingsRevisionConflict as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -708,15 +646,32 @@ def settings_command(request: SettingsCommandRequestV1):
         ) from exc
 
 
+@app.post("/api/memory/learn", dependencies=[Depends(verify_token)])
+def memory_learn(request: MemoryLearnRequestV1):
+    """What the person just said about themselves, read at the start of a
+    persistent Desktop turn so the answer can show «Запомнил сам». Only the
+    person's own words; the model's reply is never read."""
+    learned = context_settings.learn_from_message({"type": "chat"}, request.text)
+    if learned:
+        memory_v4.notify_changed()
+    return {"learned": [
+        {"id": entry["record"]["id"], "text": entry["record"]["text"], "action": entry["action"],
+         "origin": entry["record"]["origin"],
+         **({"replacedText": entry["replaced"]["text"]} if entry.get("replaced") else {})}
+        for entry in learned if entry.get("record")
+    ]}
+
+
 @app.post("/api/memory/episodes", dependencies=[Depends(verify_token)])
 def memory_episode_index(request: MemoryEpisodeIndexRequestV1):
     try:
         if request.source == "desktop":
-            return memory_v4.index_turn(
+            result = memory_v4.index_turn(
                 conversation_id=request.conversation_id,
                 turn_id=request.turn_id,
                 source=request.source,
             )
+            return result
         return memory_v4.index_coder_summary(
             project_id=request.scope.project_id or "",
             run_id=request.turn_id,
@@ -749,9 +704,9 @@ def memory_episodes_list(
 ):
     """What Memory V4 captured on its own from past turns, for the owner to review.
 
-    Explicit memories already have full CRUD under /api/memory/items; this and
-    the two delete endpoints below are the missing counterpart for episodes
-    and the capsules they compact into, so "Из памяти" is something an owner
+    Explicit memories are read and changed through the memory.* settings
+    commands; this and the two delete endpoints below cover episodes and the
+    capsules they compact into, so "Из памяти" is something an owner
     can open and act on instead of only being told it exists.
     """
     return memory_v4.list_derived_memory(_derived_memory_scope(scope_type, project_id))
@@ -4227,8 +4182,10 @@ async def prepare_sources(request: ChatRequest, planned_queries: list[str] | Non
         # The engines found nothing or refused: pages read earlier, with the
         # date they were saved; the answer opens with a notice saying so.
         web_sources = saved_page_sources(search_query, settings.retrieval_k)
-    merged = [*web_sources, *local_sources]
-    return [source.model_copy(update={"id": index}) for index, source in enumerate(merged[:12], start=1)]
+    # Web pages are capped on their own; memory has its own bounded block in
+    # the prompt and is no longer what falls off the end of the list.
+    merged = [*web_sources[:12], *local_sources]
+    return [source.model_copy(update={"id": index}) for index, source in enumerate(merged, start=1)]
 
 
 def with_origins(sources: list[ChatSource], results: list) -> list[ChatSource]:
@@ -4275,7 +4232,7 @@ def memory_context_sources(context: dict) -> list[ChatSource]:
         *(context.get("episodes") or []),
     ]
     sources: list[ChatSource] = []
-    for index, item in enumerate(items[:8], start=1):
+    for index, item in enumerate(items[:10], start=1):
         if not isinstance(item, dict):
             continue
         kind = str(item.get("kind") or "memory")
@@ -4284,18 +4241,22 @@ def memory_context_sources(context: dict) -> list[ChatSource]:
         reason = str(item.get("reason") or "retrieved")
         origin = item.get("origin") if isinstance(item.get("origin"), dict) else {}
         conversation_id = str(origin.get("conversationId") or "")
-        label = "явная запись" if kind == "explicit" else "прошлый чат" if kind == "episode" else "тематическая сводка"
-        detail = " · ".join(part for part in (label, created_at, reason) if part)
-        reference = (
-            f"memory://chat/{conversation_id}?item={item_id}"
-            if conversation_id else f"memory://{kind}/{item_id}"
-        )
+        profile = kind == "explicit" and reason.startswith("profile")
+        label = ("о тебе" if profile else "запись" if kind == "explicit"
+                 else "прошлый чат" if kind == "episode" else "тема")
+        if profile:
+            reference = f"memory://profile/{item_id}" + ("?rule" if reason == "profile:rule" else "")
+        elif conversation_id:
+            reference = f"memory://chat/{conversation_id}?item={item_id}"
+        else:
+            reference = f"memory://{kind}/{item_id}"
         sources.append(ChatSource(
             id=index,
-            title=f"Из памяти · {detail}",
+            title=f"Из памяти · {label}" + (f" · {created_at}" if created_at and not profile else ""),
             url=reference,
             excerpt=str(item.get("text") or "")[:600],
             score=float(item.get("score") or 0.0),
+            published=created_at if kind != "explicit" and created_at else None,
         ))
     return sources
 

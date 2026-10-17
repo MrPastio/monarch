@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Settings
-from .schemas import ChatSource, MemoryStats, WorkspaceToolResult
+from .schemas import ChatSource, MemoryStats
 
 
 LOGGER = logging.getLogger(__name__)
@@ -258,18 +258,6 @@ class MemoryStore:
             for column, definition in memory_column_defs.items():
                 if column not in memory_columns:
                     con.execute(f"ALTER TABLE memory_items ADD COLUMN {column} {definition}")
-            con.execute(
-                "UPDATE memory_items SET type = CASE "
-                "WHEN category = 'preference' THEN 'user_preference' "
-                "WHEN category = 'project' THEN 'architecture_note' "
-                "WHEN category = 'instruction' THEN 'project_decision' "
-                "WHEN category = 'profile' THEN 'user_preference' "
-                "ELSE type END "
-                "WHERE type IS NULL OR type = '' OR type = 'planning_note'"
-            )
-            con.execute(
-                "UPDATE memory_items SET title = substr(content, 1, 160) WHERE title IS NULL OR title = ''"
-            )
 
     def upsert_document(self, *, url: str | None, title: str, text: str, source: str = "web") -> int:
         cleaned = normalize_text(text)
@@ -314,92 +302,6 @@ class MemoryStore:
                 )
 
         return doc_id
-
-    def search(self, query: str, limit: int = 6, exclude_sources: list[str] | None = None) -> list[MemoryHit]:
-        fts_query = make_fts_query(query)
-        if not fts_query:
-            return []
-
-        query_terms = extract_query_terms(query)
-        min_overlap = min(self.settings.memory_min_overlap, len(query_terms))
-        memory_hits: list[MemoryHit] = []
-
-        with self._connection() as con:
-            if not exclude_sources or "user-note" not in exclude_sources:
-                memory_rows = con.execute(
-                    "SELECT id, content, category, type FROM memory_items "
-                    "WHERE enabled = 1 AND closed_at IS NULL AND (expires_at IS NULL OR expires_at > ?) "
-                    "ORDER BY updated_at DESC",
-                    (utc_now(),),
-                ).fetchall()
-                ranked_memories = sorted(
-                    (
-                        (lexical_overlap(query_terms, row["content"]), row)
-                        for row in memory_rows
-                    ),
-                    key=lambda item: item[0],
-                    reverse=True,
-                )
-                used_ids: list[str] = []
-                for overlap, row in ranked_memories:
-                    if not memory_item_matches(query_terms, row["content"], overlap, min_overlap):
-                        continue
-                    used_ids.append(row["id"])
-                    memory_hits.append(MemoryHit(
-                        chunk_id=-len(memory_hits) - 1,
-                        doc_id=-len(memory_hits) - 1,
-                        title=f"Память · {row['type'] or row['category']}",
-                        url=f"memory://{row['id']}",
-                        text=row["content"],
-                        score=float(-overlap),
-                        overlap=overlap,
-                    ))
-                    if len(memory_hits) >= limit:
-                        break
-                if used_ids:
-                    now = utc_now()
-                    con.executemany(
-                        "UPDATE memory_items SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?",
-                        [(now, item_id) for item_id in used_ids],
-                    )
-
-            if exclude_sources:
-                placeholders = ",".join("?" * len(exclude_sources))
-                query_sql = f"""
-                    SELECT f.chunk_id, f.doc_id, f.title, f.url, f.text, bm25(chunks_fts) AS score
-                    FROM chunks_fts f
-                    JOIN documents d ON f.doc_id = d.id
-                    WHERE chunks_fts MATCH ? AND d.source NOT IN ({placeholders})
-                    ORDER BY score
-                    LIMIT ?
-                """
-                params = [fts_query] + exclude_sources + [limit]
-            else:
-                query_sql = """
-                    SELECT chunk_id, doc_id, title, url, text, bm25(chunks_fts) AS score
-                    FROM chunks_fts
-                    WHERE chunks_fts MATCH ?
-                    ORDER BY score
-                    LIMIT ?
-                """
-                params = [fts_query, limit]
-                
-            rows = con.execute(query_sql, params).fetchall()
-
-        hits = [
-            MemoryHit(
-                chunk_id=int(row["chunk_id"]),
-                doc_id=int(row["doc_id"]),
-                title=row["title"] or "Untitled",
-                url=row["url"] or None,
-                text=row["text"],
-                score=float(row["score"]),
-                overlap=lexical_overlap(query_terms, row["text"]),
-            )
-            for row in rows
-        ]
-        document_hits = [hit for hit in hits if hit.overlap >= min_overlap]
-        return (memory_hits + document_hits)[:limit]
 
     def search_saved_pages(self, query: str, limit: int = 6) -> list[tuple[MemoryHit, str]]:
         """Web pages read earlier that match ``query``, each with the date it was saved."""
@@ -523,196 +425,6 @@ class MemoryStore:
             )
             for index, hit in enumerate(hits)
         ]
-
-    def remember_note(self, text: str) -> WorkspaceToolResult:
-        cleaned = normalize_text(text)
-        if not cleaned:
-            return WorkspaceToolResult(
-                ok=False,
-                kind="memory",
-                action="remember",
-                summary="Не вижу текст, который нужно запомнить.",
-                error="empty-memory-note",
-            )
-
-        self.create_memory_item(cleaned, category=infer_memory_category(cleaned))
-        return WorkspaceToolResult(
-            ok=True,
-            kind="memory",
-            action="remember",
-            summary="Запомнил заметку в локальной памяти.",
-            bytes=len(cleaned.encode("utf-8")),
-        )
-
-    def create_memory_item(
-        self,
-        content: str,
-        *,
-        category: str = "other",
-        source: str = "user",
-        type: str | None = None,
-        title: str | None = None,
-        tags: list[str] | None = None,
-        priority: float | None = None,
-        expires_at: str | None = None,
-        related_files: list[str] | None = None,
-        related_modules: list[str] | None = None,
-    ) -> dict:
-        cleaned = normalize_text(content)
-        if not cleaned:
-            raise ValueError("Memory content is empty")
-        now = utc_now()
-        entry_type = normalize_memory_type(type or category, cleaned)
-        legacy_category = normalize_memory_category(category, entry_type)
-        title = normalize_memory_title(title or cleaned)
-        tags_json = encode_json_string_list(tags)
-        priority_value = normalize_priority(priority, entry_type)
-        expires_at = normalize_optional_timestamp(expires_at)
-        related_files_json = encode_json_string_list(related_files)
-        related_modules_json = encode_json_string_list(related_modules)
-        with self._connection() as con:
-            existing = con.execute(
-                "SELECT id FROM memory_items WHERE lower(content) = lower(?) LIMIT 1",
-                (cleaned,),
-            ).fetchone()
-            if existing:
-                item_id = existing["id"]
-                con.execute(
-                    "UPDATE memory_items SET category = ?, type = ?, title = ?, tags_json = ?, enabled = 1, source = ?, "
-                    "updated_at = ?, priority = ?, expires_at = ?, related_files_json = ?, related_modules_json = ?, closed_at = NULL WHERE id = ?",
-                    (
-                        legacy_category,
-                        entry_type,
-                        title,
-                        tags_json,
-                        source,
-                        now,
-                        priority_value,
-                        expires_at,
-                        related_files_json,
-                        related_modules_json,
-                        item_id,
-                    ),
-                )
-            else:
-                item_id = uuid.uuid4().hex
-                con.execute(
-                    """
-                    INSERT INTO memory_items(
-                        id, content, category, type, title, tags_json, enabled, source,
-                        created_at, updated_at, priority, expires_at, related_files_json, related_modules_json
-                    ) VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        item_id,
-                        cleaned,
-                        legacy_category,
-                        entry_type,
-                        title,
-                        tags_json,
-                        source,
-                        now,
-                        now,
-                        priority_value,
-                        expires_at,
-                        related_files_json,
-                        related_modules_json,
-                    ),
-                )
-        return self.get_memory_item(item_id)
-
-    def list_memory_items(self, *, include_inactive: bool = True) -> list[dict]:
-        where = "" if include_inactive else "WHERE enabled = 1"
-        with self._connection() as con:
-            rows = con.execute(
-                f"SELECT * FROM memory_items {where} ORDER BY enabled DESC, updated_at DESC"
-            ).fetchall()
-        return [memory_item_row(row) for row in rows]
-
-    def get_memory_item(self, item_id: str) -> dict:
-        with self._connection() as con:
-            row = con.execute("SELECT * FROM memory_items WHERE id = ?", (item_id,)).fetchone()
-        if not row:
-            raise KeyError(item_id)
-        return memory_item_row(row)
-
-    def update_memory_item(
-        self,
-        item_id: str,
-        *,
-        content: str | None = None,
-        category: str | None = None,
-        type: str | None = None,
-        title: str | None = None,
-        tags: list[str] | None = None,
-        priority: float | None = None,
-        expires_at: str | None = None,
-        related_files: list[str] | None = None,
-        related_modules: list[str] | None = None,
-        closed: bool | None = None,
-        enabled: bool | None = None,
-    ) -> dict:
-        updates: list[str] = []
-        values: list[object] = []
-        if content is not None:
-            cleaned = normalize_text(content)
-            if not cleaned:
-                raise ValueError("Memory content is empty")
-            updates.append("content = ?")
-            values.append(cleaned)
-        if category is not None:
-            entry_type = normalize_memory_type(type or category, content or "")
-            updates.append("category = ?")
-            values.append(normalize_memory_category(category, entry_type))
-            updates.append("type = ?")
-            values.append(entry_type)
-        elif type is not None:
-            entry_type = normalize_memory_type(type, content or "")
-            updates.append("type = ?")
-            values.append(entry_type)
-            updates.append("category = ?")
-            values.append(normalize_memory_category("", entry_type))
-        if title is not None:
-            updates.append("title = ?")
-            values.append(normalize_memory_title(title or content or ""))
-        if tags is not None:
-            updates.append("tags_json = ?")
-            values.append(encode_json_string_list(tags))
-        if priority is not None:
-            updates.append("priority = ?")
-            values.append(normalize_priority(priority, type or category))
-        if expires_at is not None:
-            updates.append("expires_at = ?")
-            values.append(normalize_optional_timestamp(expires_at))
-        if related_files is not None:
-            updates.append("related_files_json = ?")
-            values.append(encode_json_string_list(related_files))
-        if related_modules is not None:
-            updates.append("related_modules_json = ?")
-            values.append(encode_json_string_list(related_modules))
-        if closed is not None:
-            updates.append("closed_at = ?")
-            values.append(utc_now() if closed else None)
-        if enabled is not None:
-            updates.append("enabled = ?")
-            values.append(1 if enabled else 0)
-        if updates:
-            updates.append("updated_at = ?")
-            values.append(utc_now())
-            values.append(item_id)
-            with self._connection() as con:
-                cursor = con.execute(
-                    f"UPDATE memory_items SET {', '.join(updates)} WHERE id = ?",
-                    values,
-                )
-                if cursor.rowcount == 0:
-                    raise KeyError(item_id)
-        return self.get_memory_item(item_id)
-
-    def delete_memory_item(self, item_id: str) -> bool:
-        with self._connection() as con:
-            cursor = con.execute("DELETE FROM memory_items WHERE id = ?", (item_id,))
-        return cursor.rowcount > 0
 
     def create_conversation(self, title: str = "Новый чат", *, conversation_id: str | None = None) -> dict:
         conversation_id = conversation_id or uuid.uuid4().hex
@@ -1267,6 +979,14 @@ def purge_orphan_derived_memory(con: sqlite3.Connection) -> dict[str, int]:
         identifiers = [str(row["id"]) for row in stale]
         con.execute(f"DELETE FROM memory_capsules WHERE id IN ({placeholders})", identifiers)
         con.execute(f"DELETE FROM memory_capsules_fts WHERE capsule_id IN ({placeholders})", identifiers)
+    # Surviving children of a dropped mixed-conversation capsule remain visible
+    # and independently searchable. Do not strand them in an absent container.
+    uncontained = "state = 'compacted' AND capsule_id NOT IN (SELECT id FROM memory_capsules)"
+    scopes.update(
+        (str(row["scope_type"]), str(row["scope_id"]))
+        for row in con.execute(f"SELECT DISTINCT scope_type, scope_id FROM memory_episodes WHERE {uncontained}").fetchall()
+    )
+    con.execute(f"UPDATE memory_episodes SET state = 'hot', capsule_id = NULL WHERE {uncontained}")
     now = utc_now()
     for scope_type, scope_id in sorted(scopes):
         # Retrieval caches and validity tokens are keyed by this revision.
@@ -1319,163 +1039,6 @@ def make_fts_query(query: str) -> str:
         if term not in seen:
             seen.append(term)
     return " OR ".join(f'"{term.replace(chr(34), chr(34) + chr(34))}"' for term in seen[:12])
-
-
-def detect_memory_note(text: str) -> str | None:
-    match = re.search(
-        r"^\s*(?:запомни|remember|save\s+to\s+memory)\s*[:\-]?\s*(?P<note>.+)$",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if not match:
-        return None
-    note = normalize_text(match.group("note"))
-    return note or None
-
-
-def infer_memory_category(text: str) -> str:
-    lowered = normalize_text(text).lower()
-    if re.search(r"(?:предпочитаю|люблю|не люблю|prefer|preference)", lowered):
-        return "preference"
-    if re.search(r"(?:меня зовут|я живу|я работаю|my name|i am)", lowered):
-        return "profile"
-    if re.search(r"(?:проект|репозитор|workspace|project)", lowered):
-        return "project"
-    if re.search(r"(?:всегда|никогда|отвечай|обращайся|always|never)", lowered):
-        return "instruction"
-    return "other"
-
-
-MEMORY_ENTRY_TYPES = {
-    "user_preference",
-    "project_decision",
-    "architecture_note",
-    "active_bug",
-    "fixed_bug",
-    "technical_debt",
-    "temporary_task",
-    "module_state",
-    "handoff_note",
-    "diagnostic_note",
-    "planning_note",
-}
-
-
-def normalize_memory_type(value: str | None, content: str = "") -> str:
-    cleaned = normalize_text(value or "").lower()
-    if cleaned in MEMORY_ENTRY_TYPES:
-        return cleaned
-    legacy_map = {
-        "preference": "user_preference",
-        "profile": "user_preference",
-        "project": "architecture_note",
-        "instruction": "project_decision",
-        "other": "",
-    }
-    if cleaned in legacy_map and legacy_map[cleaned]:
-        return legacy_map[cleaned]
-    lowered = normalize_text(content).lower()
-    if re.search(r"(?:prefer|preference|предпоч|люблю|стиль)", lowered):
-        return "user_preference"
-    if re.search(r"(?:decision|решени|договор)", lowered):
-        return "project_decision"
-    if re.search(r"(?:architecture|архитектур|contract|контракт)", lowered):
-        return "architecture_note"
-    if re.search(r"(?:bug|regression|ошибка|баг|регресс)", lowered):
-        return "active_bug"
-    if re.search(r"(?:debt|todo|техдолг|долг)", lowered):
-        return "technical_debt"
-    if re.search(r"(?:temporary|task|времен|задача)", lowered):
-        return "temporary_task"
-    if re.search(r"(?:diagnostic|диагност|health|провер)", lowered):
-        return "diagnostic_note"
-    return "planning_note"
-
-
-def normalize_memory_category(category: str | None, entry_type: str) -> str:
-    cleaned = normalize_text(category or "").lower()
-    if cleaned in {"preference", "profile", "project", "instruction", "other"}:
-        return cleaned
-    if entry_type == "user_preference":
-        return "preference"
-    if entry_type in {"project_decision", "architecture_note", "module_state", "handoff_note"}:
-        return "project"
-    if entry_type in {"active_bug", "fixed_bug"}:
-        return "other"
-    if entry_type in {"technical_debt", "temporary_task", "diagnostic_note", "planning_note"}:
-        return "other"
-    return "other"
-
-
-def normalize_memory_title(value: str) -> str:
-    cleaned = normalize_text(value)
-    if not cleaned:
-        return "Memory entry"
-    return cleaned[:160]
-
-
-def normalize_priority(value: float | None, entry_type: str | None) -> float:
-    if isinstance(value, (int, float)):
-        return max(0.0, min(float(value), 1.0))
-    defaults = {
-        "user_preference": 0.75,
-        "project_decision": 0.75,
-        "architecture_note": 0.75,
-        "active_bug": 0.7,
-        "technical_debt": 0.7,
-        "diagnostic_note": 0.7,
-        "temporary_task": 0.45,
-    }
-    return defaults.get(normalize_memory_type(entry_type), 0.55)
-
-
-def normalize_optional_timestamp(value: str | None) -> str | None:
-    cleaned = normalize_text(value or "")
-    return cleaned or None
-
-
-def encode_json_string_list(values: list[str] | None) -> str:
-    cleaned = []
-    seen = set()
-    for value in values or []:
-        item = normalize_text(value)
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        cleaned.append(item)
-    return json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
-
-
-def decode_json_string_list(raw: str | None) -> list[str]:
-    if not raw:
-        return []
-    try:
-        value = json.loads(raw)
-    except (TypeError, ValueError):
-        return []
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
-def memory_item_row(row: sqlite3.Row) -> dict:
-    result = dict(row)
-    result["enabled"] = bool(result["enabled"])
-    result["type"] = normalize_memory_type(result.get("type"), result.get("content") or "")
-    result["category"] = normalize_memory_category(result.get("category"), result["type"])
-    result["title"] = normalize_memory_title(result.get("title") or result.get("content") or "")
-    result["tags"] = decode_json_string_list(result.pop("tags_json", None))
-    result["priority"] = normalize_priority(result.get("priority"), result["type"])
-    result["related_files"] = decode_json_string_list(result.pop("related_files_json", None))
-    result["related_modules"] = decode_json_string_list(result.pop("related_modules_json", None))
-    result["status"] = "closed" if result.get("closed_at") else "active"
-    if result.get("expires_at"):
-        try:
-            if datetime.fromisoformat(str(result["expires_at"])) <= datetime.now(timezone.utc):
-                result["status"] = "expired"
-        except (TypeError, ValueError):
-            pass
-    return result
 
 
 def serialize_conversation_attachments(attachments: list) -> str | None:
@@ -1693,11 +1256,3 @@ def lexical_overlap(query_terms: list[str], text: str) -> int:
     return sum(1 for term in set(query_terms) if term in text_terms)
 
 
-def memory_item_matches(query_terms: list[str], text: str, overlap: int, min_overlap: int) -> bool:
-    if overlap >= min_overlap:
-        return True
-    if overlap != 1:
-        return False
-    text_terms = set(extract_query_terms(text))
-    shared = set(query_terms).intersection(text_terms)
-    return any(len(term) >= 6 or any(ch.isdigit() for ch in term) for term in shared)

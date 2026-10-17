@@ -1089,6 +1089,46 @@ export function computeInlineDiff(oldText, newText) {
   return diffHtml;
 }
 
+/** Memory that was recalled for this answer. The profile core (rules, "about
+ * me") comes with every answer, so it alone does not earn a chip. */
+export function recalledMemorySources(sources) {
+  return (Array.isArray(sources) ? sources : []).filter((source) => {
+    const url = String(source?.url || '');
+    return (source?.kind === 'memory' || url.startsWith('memory://')) && !url.startsWith('memory://profile/');
+  });
+}
+
+/** memory://explicit/<id>, memory://chat/<chat>?item=<id> → <id>. */
+export function memoryRecordId(url) {
+  const value = String(url || '');
+  const item = /[?&]item=([A-Za-z0-9._:-]+)/u.exec(value);
+  if (item) return item[1];
+  const tail = /^memory:\/\/[a-z]+\/([A-Za-z0-9._:-]+)/u.exec(value);
+  return tail ? tail[1] : '';
+}
+
+/** "Запомнил: …" under an answer whose message also asked to remember something. */
+export function renderOscarMemoryNote(note) {
+  if (!note || !['created', 'replaced', 'confirmed', 'unchanged', 'failed', 'learned', 'undone', 'undoing'].includes(note.action)) return '';
+  const clip = (value) => String(value || '').replace(/s+/g, ' ').trim().slice(0, 140);
+  const text = clip(note.text);
+  if (note.action === 'undone') {
+    const back = clip(note.replacedText);
+    return `<p class="oscar-memory-note"><span>Отменил:</span> «${escapeHtml(text)}»${back ? ` — помню прежнее «${escapeHtml(back)}»` : ''}</p>`;
+  }
+  // Oscar learned this from the person's words by itself; one click takes it back.
+  const learned = note.action === 'learned' || note.action === 'undoing';
+  const label = note.action === 'failed' ? 'Не удалось запомнить'
+    : note.action === 'unchanged' ? 'Уже помню' : learned ? 'Запомнил сам' : 'Запомнил';
+  const id = escapeHtml(note.recordId || '');
+  const open = note.recordId && note.action !== 'failed'
+    ? ` <button type="button" class="oscar-memory-note-open" data-source-open-memory="${id}">Открыть</button>` : '';
+  const undo = learned && note.recordId
+    ? ` <button type="button" class="oscar-memory-note-open" data-memory-undo="${id}"${note.action === 'undoing' ? ' disabled' : ''}>Отменить</button>` : '';
+  const more = learned && note.more > 0 ? ` и ещё ${Number(note.more)}` : '';
+  return `<p class="oscar-memory-note${note.action === 'failed' ? ' is-error' : ''}"><span>${label}:</span> «${escapeHtml(text)}»${more}${open}${undo}</p>`;
+}
+
 export function createOscarMessage(role, content, label, meta = {}) {
   return {
     id: typeof meta.id === 'string' && meta.id ? meta.id : Math.random().toString(36).slice(2),
@@ -1115,6 +1155,7 @@ export function createOscarMessage(role, content, label, meta = {}) {
     outcome: typeof meta.outcome === 'string' ? meta.outcome : '',
     integrityWarning: typeof meta.integrityWarning === 'string' ? meta.integrityWarning : '',
     taskReport: Array.isArray(meta.taskReport) ? meta.taskReport : [],
+    memoryNote: meta.memoryNote && typeof meta.memoryNote === 'object' ? { ...meta.memoryNote } : null,
     createdAt: typeof meta.createdAt === 'string' && meta.createdAt ? meta.createdAt : new Date().toISOString()
   };
 }
@@ -1312,11 +1353,12 @@ export function renderOscarMessage(message) {
 
     const visibleSources = Array.isArray(message.sources) ? message.sources.filter(source =>
       !(source?.kind === 'memory' || String(source?.url || '').startsWith('memory://'))) : [];
-    const hasMemorySource = Array.isArray(message.sources) && visibleSources.length < message.sources.length;
-    const sourcesHtml = visibleSources.length > 0 || hasMemorySource
-      ? renderOscarSources(visibleSources,
-        hasMemorySource ? '<button type="button" class="source-chip is-memory" data-source-open-memory title="Открыть память Oscar">Учтена память</button>' : '')
+    const recalled = recalledMemorySources(message.sources);
+    const memoryChip = recalled.length
+      ? `<button type="button" class="source-chip is-memory" data-source-open-memory="${escapeHtml(memoryRecordId(recalled[0].url))}" title="${escapeHtml(recalled.map((source) => source.detail || source.title || '').filter(Boolean).join(' · ') || 'Оскар опирался на твою память')}">Из памяти</button>`
       : '';
+    const sourcesHtml = visibleSources.length > 0 || memoryChip ? renderOscarSources(visibleSources, memoryChip) : '';
+    const memoryNoteHtml = renderOscarMemoryNote(message.memoryNote);
     const researchTraceHtml = renderOscarResearchTrace(message, visibleSources.length);
 
     const reasoningHtml = message.showTrace && message.reasoning && (!message.pending || showDetailedThinking)
@@ -1431,7 +1473,7 @@ export function renderOscarMessage(message) {
           ${modelNoteHtml}
           ${actionHtml}
           ${message.pending ? '' : renderOscarTaskReport(message.taskReport, escapeHtml)}
-          ${sourcesHtml}
+          ${memoryNoteHtml}${sourcesHtml}
           ${usageHtml}
           ${usageHtml ? '' : workTimerHtml}
         </div>

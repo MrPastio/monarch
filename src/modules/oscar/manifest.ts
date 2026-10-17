@@ -214,34 +214,6 @@ export const oscarManifest: MonarchModuleManifest = {
 
     },
     {
-      id: 'oscar.memory.manage',
-      moduleId: 'oscar',
-      title: 'Manage Oscar memories',
-      description: 'List, add, edit, enable, disable, or delete explicit long-term Oscar memories.',
-      risk: 'none',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          action: { type: 'string', enum: ['list', 'create', 'update', 'delete'] },
-          id: { type: 'string' },
-          content: { type: 'string' },
-          category: { type: 'string' },
-          type: { type: 'string' },
-          title: { type: 'string' },
-          tags: { type: 'array', items: { type: 'string' } },
-          priority: { type: 'number' },
-          expires_at: { type: 'string' },
-          related_files: { type: 'array', items: { type: 'string' } },
-          related_modules: { type: 'array', items: { type: 'string' } },
-          closed: { type: 'boolean' },
-          enabled: { type: 'boolean' },
-        },
-        required: ['action'],
-        additionalProperties: false,
-      },
-
-    },
-    {
       id: 'oscar.memory.derived.manage',
       moduleId: 'oscar',
       title: 'Manage automatically captured Oscar memory',
@@ -254,23 +226,6 @@ export const oscarManifest: MonarchModuleManifest = {
           id: { type: 'string' },
         },
         required: ['action'],
-        additionalProperties: false,
-      },
-
-    },
-    {
-      id: 'oscar.memory.search',
-      moduleId: 'oscar',
-      title: 'Search Oscar memory',
-      description: 'Search the existing Oscar SQLite memory through its local backend.',
-      risk: 'read',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: { type: 'string' },
-          limit: { type: 'number' },
-        },
-        required: ['query'],
         additionalProperties: false,
       },
 

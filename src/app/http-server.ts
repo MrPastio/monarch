@@ -645,6 +645,17 @@ async function handleRequest(
     return;
   }
 
+  // Coder Memory: what Coder knows about a project (map summary + notes).
+  const coderMemoryMatch = url.pathname.match(/^\/api\/coder\/projects\/([^/]+)\/memory$/);
+  if (coderMemoryMatch?.[1] && (request.method === 'GET' || request.method === 'POST')) {
+    if (request.method === 'POST') enforceMutationGuards(principal); else enforceReadApiToken(principal);
+    const memory = await getCoderController(app).projectMemory(decodeURIComponent(coderMemoryMatch[1]), {
+      refresh: request.method === 'POST',
+    });
+    sendJson(response, 200, { ok: true, memory });
+    return;
+  }
+
   const coderChangesMatch = url.pathname.match(/^\/api\/coder\/projects\/([^/]+)\/changes$/);
   if (request.method === 'GET' && coderChangesMatch?.[1]) {
     enforceReadApiToken(principal);

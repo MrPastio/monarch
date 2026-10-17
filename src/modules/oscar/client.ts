@@ -344,12 +344,14 @@ export class OscarClient {
     }
 
     try {
-      const [health, modelStatus, memoryStats, hardware] = await Promise.all([
+      const [health, modelStatus, hardware] = await Promise.all([
         this.getJson('/api/health'),
         this.getJson('/api/model/status'),
-        this.getJson('/api/memory/stats'),
         this.getJson('/api/hardware').catch(() => hostMemoryInfo()),
       ]);
+      const memoryStats = health && typeof health === 'object'
+        ? (health as Record<string, unknown>).memory
+        : undefined;
 
       return {
         connected: true,
@@ -600,60 +602,9 @@ export class OscarClient {
     );
   }
 
-  async searchMemory(query: string, limit: number): Promise<unknown> {
-    await this.ensureBackendAvailable();
-    const params = new URLSearchParams({
-      q: query,
-      limit: String(limit),
-    });
-    return this.getJson(`/api/memory/search?${params.toString()}`);
-  }
-
-  async listMemoryItems(includeInactive = true): Promise<unknown> {
-    await this.ensureBackendAvailable();
-    return this.getJson(`/api/memory/items?include_inactive=${includeInactive ? 'true' : 'false'}`);
-  }
-
-  async createMemoryItem(input: {
-    content: string;
-    category?: string;
-    type?: string;
-    title?: string;
-    tags?: string[];
-    priority?: number;
-    expires_at?: string;
-    related_files?: string[];
-    related_modules?: string[];
-  }): Promise<unknown> {
-    await this.ensureBackendAvailable();
-    return this.postJson('/api/memory/items', input);
-  }
-
-  async updateMemoryItem(itemId: string, input: {
-    content?: string;
-    category?: string;
-    type?: string;
-    title?: string;
-    tags?: string[];
-    priority?: number;
-    expires_at?: string;
-    related_files?: string[];
-    related_modules?: string[];
-    closed?: boolean;
-    enabled?: boolean;
-  }): Promise<unknown> {
-    await this.ensureBackendAvailable();
-    return this.patchJson(`/api/memory/items/${encodeURIComponent(itemId)}`, input);
-  }
-
-  async deleteMemoryItem(itemId: string): Promise<unknown> {
-    await this.ensureBackendAvailable();
-    return this.deleteJson(`/api/memory/items/${encodeURIComponent(itemId)}`);
-  }
-
   /** Episodes/capsules Memory V4 captured on its own from past turns — the
-   * automatic counterpart to listMemoryItems, which only covers explicit
-   * memory. Chat scope only: this backs the owner-facing "Из памяти" review,
+   * automatic counterpart to the explicit records the memory.* settings
+   * commands manage. Chat scope only: this backs the owner-facing "Из памяти" review,
    * not the coder-project corpus. */
   async listDerivedMemory(): Promise<unknown> {
     await this.ensureBackendAvailable();
@@ -694,6 +645,12 @@ export class OscarClient {
   ): Promise<MonarchSettingsWriteReceiptV1> {
     await this.ensureBackendAvailable();
     return this.postJson('/api/settings/commands', request) as Promise<MonarchSettingsWriteReceiptV1>;
+  }
+
+  /** Facts the person just stated about themselves (Memory 4.1 learning). */
+  async learnFromMessage(text: string): Promise<unknown> {
+    await this.ensureBackendAvailable();
+    return this.postJson('/api/memory/learn', { schemaVersion: 1, text });
   }
 
   async indexMemoryEpisode(request: OscarMemoryEpisodeIndexRequest): Promise<unknown> {

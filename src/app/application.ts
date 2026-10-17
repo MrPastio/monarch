@@ -4,6 +4,9 @@ import { OSCAR_DIRECT_TOOL_ACCESS_PRESET } from '../oscar-turn/direct-tool-acces
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { traceMonarchStartup } from '../core/startup-timing';
 import { createHash } from 'node:crypto';
+import { CoderModule, type CoderKnowledgeKind, type CoderMemoryPort } from '../modules/coder';
+import { projectBriefBudget, renderProjectBrief, type ProjectKnowledge } from '../modules/coder/project-map';
+import type { AstraAgentInitialEvidenceItem } from '../agent-v3/agent-task-profile';
 import { open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -278,6 +281,10 @@ interface CachedRuntimeState {
   modelRuntime: MonarchModelRuntimeReport;
 }
 
+const CODER_KNOWLEDGE_CATEGORY: Record<CoderKnowledgeKind, string> = {
+  decision: 'project', convention: 'rule', pitfall: 'note', command: 'project', component: 'project',
+};
+
 export class MonarchApplication {
   readonly sourceRoot: string;
   readonly workspaceRoot: string;
@@ -506,7 +513,9 @@ export class MonarchApplication {
       getOwnerUnrestrictedOverride: () => this.getOwnerUnrestrictedOverride(),
       getAstra: () => this.astraProductPilot?.bridge,
       reminders: this.reminderStore,
+      prepareCoderEvidence: (turn) => this.prepareCoderEvidence(turn),
     });
+    this.coderModule()?.attachMemory(this.coderMemoryPort());
     const telegramDispatcher: TelegramIntentDispatcher = async (request, signal) => {
       signal?.throwIfAborted();
       if (request.voiceNote && (request.approval || request.attachments?.length || request.astraRemote)) {
@@ -1048,32 +1057,113 @@ export class MonarchApplication {
     return this.imagePromptTranslator.translate(text, signal);
   }
 
-  async indexCoderMemoryEpisode(input: {
-    projectId: string;
-    runId: string;
-    projectName: string;
-    userText: string;
-    assistantText: string;
-    structuredSummary: Record<string, unknown>;
-  }): Promise<unknown> {
-    return this.contextClient.indexMemoryEpisode({
-      schemaVersion: 1,
-      source: 'coder',
-      scope: { type: 'coder-project', projectId: input.projectId },
-      conversationId: `coder:${input.runId}`,
-      turnId: input.runId,
-      projectName: input.projectName,
-      userText: input.userText,
-      assistantText: input.assistantText,
-      structuredSummary: input.structuredSummary,
-    });
+  private coderModule(): CoderModule | null {
+    const module = this.runtime.kernel.getModule('coder');
+    return module instanceof CoderModule ? module : null;
   }
 
-  async retrieveCoderMemoryContext(input: { projectId: string; query: string }): Promise<unknown> {
-    return this.contextClient.retrieveMemoryContext({
-      query: input.query,
-      scope: { type: 'coder-project', projectId: input.projectId },
+  /** Coder Memory, layer 2: durable project knowledge in Monarch Memory under
+   * the project's own scope. It is never searched from another project. */
+  private coderMemoryPort(): CoderMemoryPort {
+    const scopeOf = (projectId: string) => ({ type: 'coder-project' as const, projectId });
+    const records = async (projectId: string): Promise<Array<Record<string, unknown>>> => {
+      const dev = this.getOwnerDevSettings();
+      if (dev.zeroRetentionEnabled || dev.memoryEnabled === false) return [];
+      const context = await this.settingsCommandBus.read({ schemaVersion: 1, kind: 'memory', scope: scopeOf(projectId) }, 'desktop');
+      return (((context.value || {}) as { records?: Array<Record<string, unknown>> }).records || [])
+        .filter((record) => record.origin !== 'suggested');
+    };
+    const toKnowledge = (record: Record<string, unknown>): ProjectKnowledge => ({
+      id: String(record.id || ''),
+      text: String(record.text || ''),
+      category: String(record.category || 'note'),
+      ...(typeof record.type === 'string' ? { type: record.type } : {}),
+      relatedFiles: Array.isArray(record.relatedFiles) ? record.relatedFiles.map(String) : [],
     });
+    return {
+      recall: async (projectId, query) => {
+        const all = await records(projectId);
+        if (all.length <= 12) return all.map(toKnowledge);
+        // Rules always; the rest by relevance from the memory engine.
+        const recalled = await this.contextClient.retrieveMemoryContext({ query: query.slice(0, 2048), scope: scopeOf(projectId) })
+          .catch(() => null) as { explicitMemories?: Array<{ id?: string }> } | null;
+        const wanted = new Set((recalled?.explicitMemories || []).map((item) => String(item.id || '')));
+        return all.filter((record) => record.category === 'rule' || wanted.has(String(record.id))).slice(0, 14).map(toKnowledge);
+      },
+      note: async (projectId, input) => {
+        const dev = this.getOwnerDevSettings();
+        if (dev.zeroRetentionEnabled || dev.memoryEnabled === false) throw new Error('Memory is switched off.');
+        const category = CODER_KNOWLEDGE_CATEGORY[input.kind];
+        for (let attempt = 0; ; attempt += 1) {
+          const current = await this.settingsCommandBus.read({ schemaVersion: 1, kind: 'memory', scope: scopeOf(projectId) }, 'desktop');
+          try {
+            const receipt = await this.settingsCommandBus.execute({
+              schemaVersion: 1,
+              clientRequestId: `coder_note_${createHash('sha256').update(`${projectId}\0${input.kind}\0${input.text}`).digest('hex').slice(0, 40)}_${current.revision}`,
+              command: 'memory.remember',
+              scope: scopeOf(projectId),
+              expectedRevision: current.revision,
+              payload: { text: input.text, category, type: input.kind, relatedFiles: input.relatedFiles,
+                origin: input.origin, source: input.source },
+            }, 'desktop');
+            const result = (receipt.result || {}) as { action?: string; record?: { id?: string } | null };
+            return { id: String(result.record?.id || ''), action: String(result.action || 'created') };
+          } catch (error) {
+            // Another writer moved the revision between read and write.
+            if (attempt < 2 && /revision/iu.test(error instanceof Error ? error.message : String(error))) continue;
+            throw error;
+          }
+        }
+      },
+    };
+  }
+
+  /** The brief a Coder task starts from: map + project knowledge + rules,
+   * sized to the model's context. Untrusted data, never instructions. */
+  async prepareCoderEvidence(turn: OscarTurnV1): Promise<AstraAgentInitialEvidenceItem[]> {
+    const profile = turn.request.executionProfile;
+    const coder = this.coderModule();
+    if (!coder || profile?.kind !== 'coder-project') return [];
+    const map = await coder.ensureProjectMap(profile.projectId, { timeBudgetMs: 5_000 })
+      .catch(() => coder.readProjectMap(profile.projectId));
+    if (!map) return [];
+    const goal = String(turn.request.text || '');
+    const knowledge = await coder.recallProjectKnowledge(profile.projectId, goal).catch(() => []);
+    const text = renderProjectBrief(map, knowledge, goal, projectBriefBudget(String(turn.request.modifiers.requestedModel || '')));
+    if (!text) return [];
+    const payload = JSON.stringify({ kind: 'coder-project-memory', trust: 'untrusted-project-data', text });
+    return [{ ref: 'coder_project_memory', digest: 'sha256:' + createHash('sha256').update(payload).digest('hex'), text: payload }];
+  }
+
+  /** What a finished Coder task leaves for the next one in the same project. */
+  async learnFromCoderRun(run: { projectId: string; prompt: string; status: string; summary: {
+    modifiedFiles: string[]; tests: string[]; lastAssistantSummary: string; } }): Promise<void> {
+    const coder = this.coderModule();
+    if (!coder || run.status !== 'completed') return;
+    const notes: Array<{ kind: CoderKnowledgeKind; text: string; files: string[] }> = [];
+    if (run.summary.modifiedFiles.length) {
+      // The map is refreshed first so each linked file carries the hash it has
+      // now; a later edit then marks this note as possibly stale.
+      await coder.ensureProjectMap(run.projectId).catch(() => undefined);
+      const root = coder.projects.require(run.projectId).root;
+      const files = run.summary.modifiedFiles.slice(0, 12)
+        .map((file) => path.relative(root, path.resolve(root, file)).split(path.sep).join('/'))
+        .filter((file) => file && !file.startsWith('..'));
+      const outcome = run.summary.lastAssistantSummary.replace(/\s+/gu, ' ').trim().slice(0, 360);
+      notes.push({
+        kind: 'decision',
+        text: `Задача «${run.prompt.replace(/\s+/gu, ' ').trim().slice(0, 140)}»: ${outcome || 'выполнена'}`
+          + (files.length ? ` Файлы: ${files.slice(0, 6).join(', ')}.` : ''),
+        files,
+      });
+    }
+    for (const test of run.summary.tests) {
+      const passed = /^PASS:\s*(.+)$/u.exec(test);
+      if (passed) notes.push({ kind: 'command', text: `Проверка, которая проходит: ${passed[1]!.slice(0, 200)}`, files: [] });
+    }
+    for (const note of notes.slice(0, 4)) {
+      await coder.noteProjectKnowledge(run.projectId, { ...note, origin: 'learned', source: 'coder-run' }).catch(() => undefined);
+    }
   }
 
   async readPersonalityContext(scope: MonarchMemoryScopeV1): Promise<{

@@ -1056,7 +1056,7 @@ function previewStartupMotion(value) {
 
 function initMotionSystem() {
   const interactiveSelector = 'button, summary, a[href], [role="button"], .dropdown-item';
-  const enterSelector = '.oscar-message, .attachment-preview-item, .source-chip, .tool-result-panel, .sidebar-history:not([hidden]), .oscar-memory-panel:not([hidden]), .dropdown-popover:not(.hidden)';
+  const enterSelector = '.oscar-message, .attachment-preview-item, .source-chip, .tool-result-panel, .sidebar-history:not([hidden]), .dropdown-popover:not(.hidden)';
 
   document.addEventListener('pointerdown', (event) => {
     if (reducedMotionMedia?.matches || !(event.target instanceof Element)) return;

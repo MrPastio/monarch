@@ -4,7 +4,6 @@ import { artifactsModulePackage } from './artifacts';
 import { astraModulePackage } from './astra';
 import { diagnosticsModulePackage } from './diagnostics';
 import { knowledgeModulePackage } from './knowledge';
-import { memoryModulePackage } from './memory';
 import { modelsModulePackage } from './models';
 import { oscarModulePackage } from './oscar';
 import { profileModulePackage } from './profile';
@@ -30,7 +29,6 @@ export const builtInModulePackages: readonly MonarchModulePackage[] = [
   artifactsModulePackage,
   knowledgeModulePackage,
   profileModulePackage,
-  memoryModulePackage,
   astraModulePackage,
   diagnosticsModulePackage,
   pluginsModulePackage,

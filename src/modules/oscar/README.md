@@ -11,7 +11,6 @@ The first version keeps the local Oscar Python backend as an adapter inside the 
 - `oscar.backend.stop` - stop the local backend process tree when full memory release is needed.
 - `oscar.chat.local` - local chat without web search.
 - `oscar.chat.web` - chat with web search, confirmation-bound.
-- `oscar.memory.search` - search existing Oscar memory through the backend.
 - `oscar.search.ingest` - run Oscar search and ingest, confirmation-bound.
 
 ## Environment

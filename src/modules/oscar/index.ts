@@ -100,12 +100,8 @@ export class OscarModule implements MonarchModule {
       return this.runChatStream(request.input, context);
     case 'oscar.conversations.manage':
       return this.manageConversations(request.input, context);
-    case 'oscar.memory.manage':
-      return this.manageMemory(request.input, context);
     case 'oscar.memory.derived.manage':
       return this.manageDerivedMemory(request.input, context);
-    case 'oscar.memory.search':
-      return this.searchMemory(request.input);
     case 'oscar.search.ingest':
       return this.searchAndIngest(request.input, context);
     default:
@@ -369,33 +365,6 @@ export class OscarModule implements MonarchModule {
     }
   }
 
-  private async searchMemory(input: unknown): Promise<MonarchExecutionResult> {
-    const query = readStringInput(input, 'query');
-    if (!query) {
-      return {
-        ok: false,
-        summary: 'Oscar memory search requires query.',
-        error: 'missing-query',
-      };
-    }
-
-    try {
-      const limit = readNumberInput(input, 'limit', 6, 1, 20);
-      const results = await this.client.searchMemory(query, limit);
-      return {
-        ok: true,
-        summary: 'Oscar memory search completed through Monarch.',
-        output: {
-          query,
-          limit,
-          results,
-        },
-      };
-    } catch (error) {
-      return backendUnavailableResult(error);
-    }
-  }
-
   private async manageConversations(
     input: unknown,
     context: MonarchKernelContext
@@ -466,76 +435,6 @@ export class OscarModule implements MonarchModule {
       return {
         ok: true,
         summary: `Oscar conversation ${action} completed.`,
-        output,
-      };
-    } catch (error) {
-      return backendUnavailableResult(error);
-    }
-  }
-
-  private async manageMemory(
-    input: unknown,
-    context: MonarchKernelContext
-  ): Promise<MonarchExecutionResult> {
-    const action = readStringInput(input, 'action');
-    const itemId = readStringInput(input, 'id');
-    const content = readStringInput(input, 'content');
-    const category = readStringInput(input, 'category');
-    const type = readStringInput(input, 'type');
-    const title = readStringInput(input, 'title');
-    const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
-    const tags = readStringArray(record.tags);
-    const relatedFiles = readStringArray(record.related_files || record.relatedFiles);
-    const relatedModules = readStringArray(record.related_modules || record.relatedModules);
-    const priority = typeof record.priority === 'number' && Number.isFinite(record.priority) ? record.priority : undefined;
-    const expiresAt = readStringInput(input, 'expires_at') || readStringInput(input, 'expiresAt');
-
-    try {
-      let output: unknown;
-      if (action === 'list') {
-        output = await this.client.listMemoryItems(true);
-      } else if (action === 'create' && content) {
-        output = await this.client.createMemoryItem({
-          content,
-          ...(category ? { category } : {}),
-          ...(type ? { type } : {}),
-          ...(title ? { title } : {}),
-          ...(tags.length > 0 ? { tags } : {}),
-          ...(priority !== undefined ? { priority } : {}),
-          ...(expiresAt ? { expires_at: expiresAt } : {}),
-          ...(relatedFiles.length > 0 ? { related_files: relatedFiles } : {}),
-          ...(relatedModules.length > 0 ? { related_modules: relatedModules } : {}),
-        });
-      } else if (action === 'update' && itemId) {
-        output = await this.client.updateMemoryItem(itemId, {
-          ...(content ? { content } : {}),
-          ...(category ? { category } : {}),
-          ...(type ? { type } : {}),
-          ...(title ? { title } : {}),
-          ...(Array.isArray(record.tags) ? { tags } : {}),
-          ...(priority !== undefined ? { priority } : {}),
-          ...(expiresAt ? { expires_at: expiresAt } : {}),
-          ...(Array.isArray(record.related_files) || Array.isArray(record.relatedFiles) ? { related_files: relatedFiles } : {}),
-          ...(Array.isArray(record.related_modules) || Array.isArray(record.relatedModules) ? { related_modules: relatedModules } : {}),
-          ...(typeof record.closed === 'boolean' ? { closed: record.closed } : {}),
-          ...(typeof record.enabled === 'boolean' ? { enabled: record.enabled } : {}),
-        });
-      } else if (action === 'delete' && itemId) {
-        output = await this.client.deleteMemoryItem(itemId);
-      } else {
-        return {
-          ok: false,
-          summary: 'Oscar memory action is invalid or missing required data.',
-          error: 'invalid-memory-action',
-        };
-      }
-
-      if (action !== 'list') {
-        await context.emit('oscar.memory.changed', this.manifest.id, { action, itemId });
-      }
-      return {
-        ok: true,
-        summary: `Oscar memory ${action} completed.`,
         output,
       };
     } catch (error) {
@@ -805,15 +704,6 @@ function backendUnavailableResult(error: unknown): MonarchExecutionResult {
       adapter: 'oscar-http',
     },
   };
-}
-
-function readStringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value
-      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-      .map((item) => item.trim())
-      .slice(0, 24)
-    : [];
 }
 
 function readOptionalInteger(value: unknown, minimum: number, maximum: number): number | undefined {

@@ -471,7 +471,11 @@ export class MonarchAstraTaskFacade implements AstraTaskHttpSurface {
 
   submit(actor: AstraAuthenticatedHttpActor, request: AstraTaskHttpRequest, operation: Operation = 'read',
     initialEvidence?: AstraAgentInitialEvidenceItem[]): AstraTaskHttpTask {
-    check((request.attachmentIds?.length ?? 0) === (initialEvidence?.length ?? 0)
+    // Every attachment becomes exactly one evidence item. Host-prepared items
+    // (research results, the Coder project brief) carry their own refs and are
+    // not attachments, so only attachment items are matched to attachment ids.
+    const attachmentEvidence = (initialEvidence ?? []).filter(item => item.ref.startsWith('agent_attachment_')).length;
+    check((request.attachmentIds?.length ?? 0) === attachmentEvidence
       && (initialEvidence === undefined || operation === 'agent' && isAstraAgentInitialEvidence(initialEvidence)),
     400, 'astra-agent-attachment-evidence-mismatch');
     return this.submitOwned(actor, request, operation, undefined, undefined, initialEvidence);

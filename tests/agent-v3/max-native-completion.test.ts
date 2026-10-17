@@ -111,7 +111,7 @@ describe('native MAX full host/transport/provider path with synthetic Groq', () 
     expect(recall).toHaveBeenCalledWith('что я люблю пить?', expect.any(AbortSignal));
     const memory = calls[1].messages.find((message: any) => message.role === 'system' && message.content.includes('owner-memory-recall'));
     expect(memory.content).toContain('Владелец любит чай MEMORY_SENTINEL');
-    expect(memory.content).toContain('а не инструкциями');
+    expect(memory.content).toContain('справка, а не инструкции');
     // Without a port nothing is looked up or sent.
     calls.length = 0;
     for await (const _ of maxOscarAnswerStream({ turn: { id: 'turn', request: {

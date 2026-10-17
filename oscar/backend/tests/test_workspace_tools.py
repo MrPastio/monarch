@@ -12,7 +12,6 @@ from oscar_agent.memory import (
     ClientMessageConflictError,
     ImmutableConversationMessageError,
     MemoryStore,
-    detect_memory_note,
     should_use_memory,
 )
 from oscar_agent.workspace import (
@@ -634,79 +633,9 @@ def test_workspace_structure_detector_rootless_files(tmp_path: Path) -> None:
     assert (settings.workspace_root / "src" / "main.py").read_text(encoding="utf-8") == "print('ok')"
 
 
-def test_memory_filters_generic_and_low_overlap_queries(tmp_path: Path) -> None:
-    settings = make_settings(tmp_path)
-    store = MemoryStore(settings)
-    store.upsert_document(url="local://one", title="Router notes", text="Monarch router chooses modules and capabilities.")
-
+def test_memory_filters_generic_and_low_overlap_queries() -> None:
     assert not should_use_memory("привет")
-    assert store.search("Monarch router") != []
-    assert store.search("Monarch banana") == []
-
-
-def test_manual_memory_note_can_be_saved_and_found(tmp_path: Path) -> None:
-    settings = make_settings(tmp_path)
-    store = MemoryStore(settings)
-    note = detect_memory_note("запомни: Oscar умеет создавать папки и дописывать файлы")
-    assert note == "Oscar умеет создавать папки и дописывать файлы"
-
-    remembered = store.remember_note(note)
-    assert remembered.ok
-    hits = store.search("Oscar папки файлы")
-    assert hits
-
-
-def test_manual_memory_note_matches_specific_single_anchor_in_followup(tmp_path: Path) -> None:
-    store = MemoryStore(make_settings(tmp_path))
-    store.create_memory_item("Кодовое слово проекта: янтарь", category="project")
-
-    hits = store.search("помнишь что я называл янтарь")
-
-    assert hits
-    assert hits[0].url and hits[0].url.startswith("memory://")
-    assert "янтарь" in hits[0].text
-
-
-def test_memory_items_can_be_managed_and_disabled(tmp_path: Path) -> None:
-    store = MemoryStore(make_settings(tmp_path))
-    created = store.create_memory_item("Всегда отвечай на русском", category="instruction")
-
-    assert created["enabled"] is True
-    assert store.search("отвечай русском")
-
-    updated = store.update_memory_item(created["id"], enabled=False, content="Всегда отвечай кратко на русском")
-    assert updated["enabled"] is False
-    assert store.search("отвечай русском") == []
-
-    assert store.delete_memory_item(created["id"]) is True
-    assert store.list_memory_items() == []
-
-
-def test_memory_items_support_classified_taxonomy_fields(tmp_path: Path) -> None:
-    store = MemoryStore(make_settings(tmp_path))
-    created = store.create_memory_item(
-        "Architecture decision: planner reads classified memory before risky changes.",
-        category="architecture_note",
-        title="Planner classified memory",
-        tags=["planner", "memory"],
-        priority=0.82,
-        related_files=["src/core/planner.ts"],
-        related_modules=["planner", "memory"],
-    )
-
-    assert created["type"] == "architecture_note"
-    assert created["category"] == "project"
-    assert created["title"] == "Planner classified memory"
-    assert created["tags"] == ["planner", "memory"]
-    assert created["priority"] == 0.82
-    assert created["related_files"] == ["src/core/planner.ts"]
-    assert store.search("planner classified memory")
-
-    closed = store.update_memory_item(created["id"], closed=True)
-
-    assert closed["status"] == "closed"
-    assert store.search("planner classified memory") == []
-    assert store.list_memory_items()[0]["status"] == "closed"
+    assert should_use_memory("Monarch router modules")
 
 
 def test_conversation_history_persists_messages_and_supports_management(tmp_path: Path) -> None:

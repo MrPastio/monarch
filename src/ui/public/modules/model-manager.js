@@ -139,7 +139,7 @@ function renderModules() {
     <div class="module-list">
       ${modules.map((record) => {
         const manifest = record.manifest;
-        const isPluginSurface = ['plugins', 'memory', 'models', 'diagnostics'].includes(manifest.id);
+        const isPluginSurface = ['plugins', 'models', 'diagnostics'].includes(manifest.id);
         return `
           <article class="module-row ${isPluginSurface ? 'system-surface' : ''}">
             <div class="module-icon">${escapeHtml(initials(manifest.name))}</div>

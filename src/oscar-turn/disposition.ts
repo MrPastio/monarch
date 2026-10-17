@@ -73,7 +73,8 @@ export async function classifyOscarServerDisposition(
     };
   }
   const deterministic = classifyOscarRequestDisposition(text);
-  if (extractExplicitMemoryText(text)) {
+  const memoryCommand = parseExplicitMemoryCommand(text);
+  if (memoryCommand && !memoryCommand.rest) {
     return {
       lane: 'memory',
       kind: 'memory_remember',
@@ -234,12 +235,86 @@ function assistantRequestedMaterial(text: string): boolean {
     || /(?:готов\p{L}*\s+(?:посмотреть|изучить|проверить|прочитать)|ready\s+to\s+(?:review|look|inspect|read))/iu.test(text);
 }
 export function extractExplicitMemoryText(value: string): string | null {
-  const text = String(value || '').trim();
-  const match = text.match(
-    /^(?:запомни|сохрани\s+в\s+память|remember|save\s+to\s+memory)\s*[,;:\-—]?\s*(?<memory>[\s\S]+)$/iu,
-  );
-  const memory = String(match?.groups?.memory || '').trim();
-  return memory ? memory.slice(0, 4_000) : null;
+  return parseExplicitMemoryCommand(value)?.memory ?? null;
+}
+
+export interface OscarExplicitMemoryCommand {
+  /** What to remember, as the person said it. */
+  memory: string;
+  /** The rest of the message when it also asks something; '' for a pure command. */
+  rest: string;
+}
+
+const REMEMBER = String.raw`(?:запомни(?!\p{L})(?:\s+(?:это|себе)(?!\p{L}))?|сохрани\s+(?:это\s+)?в\s+памят[ьи](?!\p{L})|remember(?!\p{L})(?:\s+(?:this|that)(?!\p{L}))?|save\s+(?:this\s+)?to\s+memory(?!\p{L}))`;
+const LEADING_REMEMBER = new RegExp(String.raw`^(?:пожалуйста[,\s]+)?${REMEMBER}\s*[,;:\-—]?\s*(?<memory>[\s\S]+)$`, 'iu');
+const EMBEDDED_REMEMBER = new RegExp(String.raw`(?<lead>[,;.!?]\s*|\s+)(?:и\s+|а\s+|and\s+)?(?:ещё\s+|также\s+|also\s+)?${REMEMBER}(?:\s*[,:\-—]\s*|\s+)(?<memory>[^.!?\n]{3,})`, 'iu');
+const TRAILING_REMEMBER = new RegExp(String.raw`^(?<memory>[^\n]{3,}?)[\s,.!—\-]+(?:${REMEMBER})\s*[.!]*$`, 'iu');
+
+/** «Запомни …» anywhere in a message: at the start, after a question
+ * ("какая погода? и запомни, что я живу в Варне") or at the end
+ * ("я живу в Варне, запомни"). The memory part is the clause the command
+ * governs; a question elsewhere in the message is answered as usual. */
+export function parseExplicitMemoryCommand(value: string): OscarExplicitMemoryCommand | null {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  const finish = (memory: string, rest: string): OscarExplicitMemoryCommand | null => {
+    const cleaned = memory.trim().replace(/^[,;:\-—\s]+|[,;:\-—\s]+$/gu, '');
+    if (cleaned.replace(/[^\p{L}\p{N}]/gu, '').length < 2) return null;
+    if (/^(?:это|себе|this|that|it)$/iu.test(cleaned)) return null;
+    return { memory: cleaned.slice(0, 4_000), rest: substantiveRest(rest) };
+  };
+  const leading = text.match(LEADING_REMEMBER);
+  if (leading?.groups?.memory) {
+    // "запомни, что я живу в Варне. Какая там погода?" — the sentences up to
+    // the first question are the memory, the question is still a question.
+    // A numbered list ("Запомни: 1. … 2. …") stays one record.
+    const body = leading.groups.memory;
+    const sentences = body.split(/(?<=[.!?])\s+(?=\S)/u);
+    const question = sentences.findIndex((sentence, index) => index > 0 && /\?\s*$/u.test(sentence));
+    return question > 0
+      ? finish(sentences.slice(0, question).join(' ').replace(/[.!]+$/u, ''), sentences.slice(question).join(' '))
+      : finish(body, '');
+  }
+  const trailing = text.match(TRAILING_REMEMBER);
+  if (trailing?.groups?.memory) {
+    const body = trailing.groups.memory;
+    const lastSentence = body.split(/(?<=[.!?])\s+/u).pop() || body;
+    return finish(lastSentence, body.slice(0, body.length - lastSentence.length));
+  }
+  const embedded = text.match(EMBEDDED_REMEMBER);
+  if (embedded?.groups?.memory && embedded.index !== undefined) {
+    const before = text.slice(0, embedded.index + (embedded.groups.lead || '').length);
+    const after = text.slice(embedded.index + embedded[0].length);
+    return finish(embedded.groups.memory, `${before} ${after}`);
+  }
+  return null;
+}
+
+function substantiveRest(value: string): string {
+  const rest = value.replace(/\s+/g, ' ').trim()
+    .replace(/^(?:и|а|and|also|ещё|пожалуйста|please|спасибо|thanks)[,\s]+/iu, '')
+    .replace(/^[,;:\-—.!\s]+|[,;:\-—\s]+$/gu, '');
+  return rest.replace(/[^\p{L}\p{N}]/gu, '').length >= 3 ? rest : '';
+}
+
+const FORGET = /^(?:пожалуйста[,\s]+)?(?:забудь|удали\s+из\s+памяти|сотри\s+из\s+памяти|forget)\s*[,:]?\s*(?:(?:то,?\s+)?что|про|о|об|about|that)?\s*(?<what>.+)$/iu;
+const CONVERSATIONAL_FORGET = /^(?:предыдущ|последн|прошл\p{L}*\s+сообщ|(?:это|этот|эту|всё|все)(?!\p{L})|(?:что\s+)?я\s+(?:сказал|написал|спросил)|наш\p{L}*\s+(?:разговор|диалог)|(?:about\s+it|it|that\s+message|everything|what\s+i\s+(?:said|wrote))(?!\p{L}))/iu;
+
+/** «Забудь, где я живу» / «удали из памяти про кота». Conversational uses
+ * ("забудь предыдущее сообщение", "забудь всё") are not memory commands. */
+export function parseForgetMemoryCommand(value: string): string | null {
+  const text = String(value || '').replace(/\s+/g, ' ').trim().replace(/[.!]+$/u, '');
+  const what = text.match(FORGET)?.groups?.what?.trim();
+  if (!what || what.replace(/[^\p{L}\p{N}]/gu, '').length < 3 || CONVERSATIONAL_FORGET.test(what)) return null;
+  return what.slice(0, 1_000);
+}
+
+/** «Что ты обо мне знаешь?» — answered from the records themselves. */
+export function isMemoryOverviewRequest(value: string): boolean {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return /^(?:а\s+)?(?:скажи,?\s+)?что\s+ты\s+(?:уже\s+)?(?:(?:знаешь|помнишь|запомнил)\s+(?:обо\s+мне|про\s+меня)|(?:обо\s+мне|про\s+меня)\s+(?:знаешь|помнишь|запомнил))\s*[?.!]*$/iu.test(text)
+    || /^(?:покажи|открой)\s+(?:мою\s+|свою\s+)?память\s*[?.!]*$/iu.test(text)
+    || /^what\s+do\s+you\s+(?:know|remember)\s+about\s+me\s*[?.!]*$/iu.test(text);
 }
 
 export function isNonAuthoritativeConfirmationText(value: string): boolean {

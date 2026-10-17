@@ -64,19 +64,19 @@ describe('Bootstrap & Kernel Lifecycle', () => {
   });
 
   it('should select only enabled modules', async () => {
-    const memoryOnlyRuntime = createMonarchRuntime({
+    const profileOnlyRuntime = createMonarchRuntime({
       workspaceRoot: workspaceRoot(),
-      enabledModules: ['memory'],
+      enabledModules: ['profile'],
     });
-    const moduleIds = memoryOnlyRuntime.modules.map((module) => module.manifest.id);
-    const diagnosticsRecord = memoryOnlyRuntime.loadRecords.find((record) => record.packageId === 'diagnostics');
+    const moduleIds = profileOnlyRuntime.modules.map((module) => module.manifest.id);
+    const diagnosticsRecord = profileOnlyRuntime.loadRecords.find((record) => record.packageId === 'diagnostics');
 
-    expect(moduleIds).toEqual(['memory']);
+    expect(moduleIds).toEqual(['profile']);
     expect(diagnosticsRecord?.status).toBe('skipped');
 
-    await memoryOnlyRuntime.kernel.start();
-    const diagnosticsCapability = memoryOnlyRuntime.kernel.getCapability('diagnostics.modules.list');
-    await memoryOnlyRuntime.kernel.stop();
+    await profileOnlyRuntime.kernel.start();
+    const diagnosticsCapability = profileOnlyRuntime.kernel.getCapability('diagnostics.modules.list');
+    await profileOnlyRuntime.kernel.stop();
 
     expect(diagnosticsCapability).toBeUndefined();
   });

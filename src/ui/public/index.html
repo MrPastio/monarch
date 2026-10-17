@@ -565,7 +565,7 @@
                 <button class="topbar-icon-button" id="oscar-safe-encrypt" type="button" aria-label="Зашифровать чат в Monarch Safe" title="Зашифровать чат в Monarch Safe" aria-pressed="false">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path><path d="M12 14v2"></path></svg>
                 </button>
-                <button class="topbar-icon-button" id="oscar-memory-manager" type="button" aria-label="Память" title="Память" aria-controls="oscar-memory-panel" aria-expanded="false">
+                <button class="topbar-icon-button" id="oscar-memory-manager" type="button" aria-label="Что Оскар знает обо мне" title="Что Оскар знает обо мне">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="3"></rect><path d="M9 3v8l3-2 3 2V3M9 16h6"></path></svg>
                 </button>
                 <button class="topbar-icon-button" id="oscar-incognito-toggle" type="button" aria-label="Начать инкогнито-чат" title="Начать инкогнито-чат" aria-pressed="false">
@@ -578,32 +578,6 @@
             </div>
 
             <section id="coder-mode-root" aria-label="Monarch Coder" hidden></section>
-
-            <section id="oscar-memory-panel" class="oscar-memory-panel" hidden>
-              <div class="memory-panel-header">
-                <div>
-                  <strong>Долговременная память</strong>
-                  <span>Oscar использует только включённые записи, когда они относятся к запросу.</span>
-                </div>
-                <button type="button" class="sidebar-icon-btn" id="oscar-memory-close" aria-label="Закрыть память" title="Закрыть память">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
-                </button>
-              </div>
-              <form id="oscar-memory-form" class="memory-create-row">
-                <input id="oscar-memory-input" maxlength="4000" placeholder="Что Oscar должен помнить?" aria-label="Новая запись памяти">
-                <select id="oscar-memory-category" aria-label="Категория памяти">
-                  <option value="user_preference">Предпочтение</option>
-                  <option value="project_decision">Решение</option>
-                  <option value="architecture_note">Архитектура</option>
-                  <option value="active_bug">Активный баг</option>
-                  <option value="technical_debt">Техдолг</option>
-                  <option value="diagnostic_note">Диагностика</option>
-                  <option value="planning_note">Планирование</option>
-                </select>
-                <button type="submit" class="claude-primary-btn">Запомнить</button>
-              </form>
-              <div id="oscar-memory-items" class="memory-items"></div>
-            </section>
 
             <aside id="oscar-missions-panel" class="oscar-missions-panel" aria-label="Поручения Oscar" hidden>
               <header class="oscar-missions-header">
@@ -1837,76 +1811,74 @@
               <section class="settings-group settings-feature memory-control-center" data-settings-panel="memory" aria-labelledby="memory-settings-title">
                 <header class="memory-hero">
                   <div>
-                    <p class="section-kicker">Память Oscar</p>
-                    <h3 id="memory-settings-title">Что Oscar знает о тебе</h3>
-                    <p>Проверяй, откуда взялась каждая запись, быстро находи нужное и решай, что учитывать всегда.</p>
+                    <p class="section-kicker">Память</p>
+                    <h3 id="memory-settings-title">Что Оскар знает о тебе</h3>
+                    <p>Хранится только на этом компьютере. В чате можно сказать «запомни…», «забудь…» или «что ты обо мне знаешь?».</p>
                   </div>
                   <span class="settings-count memory-count-pill" id="memory-count">0 записей</span>
                 </header>
 
-                <div class="memory-overview" aria-label="Состояние памяти">
-                  <article class="memory-overview-card">
-                    <span>Область</span>
-                    <strong>Обычный чат</strong>
-                    <small>Не смешивается с Coder-проектами</small>
-                  </article>
-                  <article class="memory-overview-card">
-                    <span>Явные записи</span>
-                    <strong id="memory-explicit-count">0</strong>
-                    <small>Созданы тобой или командой «запомни»</small>
-                  </article>
-                  <label class="memory-cross-chat-card">
-                    <span>
-                      <small>Контекст прошлых чатов</small>
-                      <strong id="memory-cross-chat-label">Включён</strong>
-                      <em>До 4 релевантных эпизодов, локально</em>
-                    </span>
-                    <span class="control-switch" aria-hidden="true"></span>
-                    <input id="memory-cross-chat-enabled" type="checkbox" checked aria-label="Контекст прошлых чатов">
-                  </label>
+                <div class="memory-learning-row">
+                  <span class="memory-learning-copy">
+                    <strong id="memory-learning-title">Узнавать новое из разговоров</strong>
+                    <small id="memory-learning-hint">Когда ты говоришь о себе («я живу в…», «отвечай кратко»), Оскар запоминает это сам.</small>
+                  </span>
+                  <div class="style-segment memory-learning-segment" role="radiogroup" aria-labelledby="memory-learning-title">
+                    <button type="button" role="radio" data-memory-learning="auto" aria-checked="true" tabindex="0">Сам</button>
+                    <button type="button" role="radio" data-memory-learning="suggest" aria-checked="false" tabindex="-1">Спрашивать</button>
+                    <button type="button" role="radio" data-memory-learning="off" aria-checked="false" tabindex="-1">Нет</button>
+                  </div>
                 </div>
+
+                <section class="memory-suggestions" id="memory-suggestions" hidden aria-labelledby="memory-suggestions-title">
+                  <div class="memory-subheading">
+                    <span><strong id="memory-suggestions-title">Оскар предлагает запомнить</strong><small>Ничего из этого не учитывается, пока ты не согласишься.</small></span>
+                  </div>
+                  <div class="memory-settings-list" id="memory-suggestions-list"></div>
+                </section>
 
                 <div class="memory-toolbar">
                   <label class="memory-search-field">
                     <span class="sr-only">Поиск по памяти</span>
-                    <input id="memory-search" type="search" placeholder="Найти факт, правило или проект…" autocomplete="off">
+                    <input id="memory-search" type="search" placeholder="Найти в памяти…" autocomplete="off">
                   </label>
                   <label class="memory-filter-field">
-                    <span class="sr-only">Фильтр категории</span>
-                    <select id="memory-category-filter" aria-label="Фильтр категории памяти">
-                      <option value="all">Все категории</option>
+                    <span class="sr-only">Раздел</span>
+                    <select id="memory-category-filter" aria-label="Раздел памяти">
+                      <option value="all">Все разделы</option>
+                      <option value="about">Обо мне</option>
                       <option value="preference">Предпочтения</option>
+                      <option value="rule">Правила</option>
                       <option value="project">Проекты</option>
-                      <option value="fact">Факты</option>
-                      <option value="correction">Исправления</option>
                       <option value="note">Заметки</option>
                     </select>
                   </label>
-                  <button type="button" class="claude-primary-btn memory-compose-toggle" id="memory-compose-toggle" aria-expanded="false" aria-controls="memory-compose-panel">Новая запись</button>
+                  <button type="button" class="claude-primary-btn memory-compose-toggle" id="memory-compose-toggle" aria-expanded="false" aria-controls="memory-compose-panel">Добавить</button>
                 </div>
 
                 <section class="memory-compose-panel" id="memory-compose-panel" hidden aria-labelledby="memory-compose-title">
                   <div class="memory-subheading">
-                    <span><strong id="memory-compose-title">Добавить в постоянную память</strong><small>Запись начнёт влиять на следующие ответы только после подтверждённого сохранения.</small></span>
+                    <span><strong id="memory-compose-title">Новая запись</strong><small>Пиши так, как сказал бы Оскару: «Я живу в Варне», «Отвечай без смайликов».</small></span>
                     <button type="button" class="claude-ghost-btn" id="memory-compose-close">Закрыть</button>
                   </div>
                   <form id="memory-create-form" class="memory-create-form">
                     <label class="settings-field memory-input-field">
-                      <span>Что нужно помнить</span>
-                      <textarea id="memory-create-text" rows="4" maxlength="1200" required placeholder="Например: сначала показывай итог, затем детали."></textarea>
+                      <span>Что запомнить</span>
+                      <textarea id="memory-create-text" rows="3" maxlength="1200" required placeholder="Например: сначала показывай итог, затем детали."></textarea>
                     </label>
                     <div class="memory-create-options">
                       <label class="settings-field compact-field">
-                        <span>Категория</span>
+                        <span>Раздел</span>
                         <select id="memory-create-category">
-                          <option value="preference">Предпочтение</option>
-                          <option value="project">Проект</option>
-                          <option value="fact">Факт</option>
-                          <option value="correction">Исправление</option>
-                          <option value="note">Заметка</option>
+                          <option value="auto">Определить самому</option>
+                          <option value="about">Обо мне</option>
+                          <option value="preference">Предпочтения</option>
+                          <option value="rule">Правила</option>
+                          <option value="project">Проекты</option>
+                          <option value="note">Заметки</option>
                         </select>
                       </label>
-                      <label class="memory-pin-control"><input id="memory-create-pinned" type="checkbox" checked><span class="control-switch" aria-hidden="true"></span><span><strong>Всегда учитывать</strong><small>Повышает приоритет записи</small></span></label>
+                      <label class="memory-pin-control"><input id="memory-create-pinned" type="checkbox"><span class="control-switch" aria-hidden="true"></span><span><strong>Помнить всегда</strong><small>Учитывать в каждом ответе</small></span></label>
                       <button type="submit" class="claude-primary-btn">Запомнить</button>
                     </div>
                   </form>
@@ -1916,23 +1888,41 @@
 
                 <section class="memory-library" aria-labelledby="memory-library-title">
                   <div class="memory-subheading">
-                    <span><strong id="memory-library-title">Записи</strong><small id="memory-library-summary">Сортировка: сначала закреплённые</small></span>
+                    <span><strong id="memory-library-title">Записи</strong><small id="memory-library-summary">Сначала то, что Оскар помнит всегда</small></span>
                   </div>
                   <div class="memory-settings-list" id="memory-settings-list">
                     <div class="settings-loading memory-loading-state"><span></span><strong>Загружаю память</strong></div>
                   </div>
                 </section>
 
-                <section class="memory-library memory-derived-library" aria-labelledby="memory-derived-title">
-                  <div class="memory-subheading">
-                    <span><strong id="memory-derived-title">Запомнено автоматически</strong><small id="memory-derived-summary">То, что Oscar сам сохранил из прошлых разговоров</small></span>
-                    <button type="button" class="claude-ghost-btn danger-link" id="memory-derived-forget-all" hidden>Забыть всё автоматическое</button>
+                <details class="memory-library memory-derived-library memory-fold">
+                  <summary class="memory-subheading">
+                    <span><strong id="memory-derived-title">Из прошлых разговоров</strong><small id="memory-derived-summary">Оскар вспоминает их, когда это относится к вопросу</small></span>
+                  </summary>
+                  <div class="memory-fold-body">
+                    <div class="memory-fold-actions"><button type="button" class="claude-ghost-btn danger-link" id="memory-derived-forget-all" hidden>Забыть все разговоры</button></div>
+                    <p class="settings-feedback memory-feedback" id="memory-derived-feedback" aria-live="polite"></p>
+                    <div class="memory-settings-list memory-derived-list" id="memory-derived-list">
+                      <div class="settings-loading memory-loading-state"><span></span><strong>Загружаю память</strong></div>
+                    </div>
                   </div>
-                  <p class="settings-feedback memory-feedback" id="memory-derived-feedback" aria-live="polite"></p>
-                  <div class="memory-settings-list memory-derived-list" id="memory-derived-list">
-                    <div class="settings-loading memory-loading-state"><span></span><strong>Загружаю память</strong></div>
+                </details>
+
+                <details class="memory-library memory-fold memory-advanced">
+                  <summary class="memory-subheading">
+                    <span><strong>Расширенные параметры</strong><small>Редко нужно менять</small></span>
+                  </summary>
+                  <div class="memory-fold-body">
+                    <label class="memory-cross-chat-card">
+                      <span>
+                        <strong>Вспоминать прошлые разговоры</strong>
+                        <em id="memory-cross-chat-label">Включено: Оскар может опереться на похожий разговор из другого чата</em>
+                      </span>
+                      <span class="control-switch" aria-hidden="true"></span>
+                      <input id="memory-cross-chat-enabled" type="checkbox" checked aria-label="Вспоминать прошлые разговоры">
+                    </label>
                   </div>
-                </section>
+                </details>
               </section>
 
               <section class="settings-group settings-feature skills-settings" data-settings-panel="skills" aria-labelledby="skills-settings-title">

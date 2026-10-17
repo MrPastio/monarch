@@ -51,13 +51,21 @@ export const PERSONALITY_DIMENSIONS = Object.freeze({
 const STYLE_LEVELS = Object.freeze([15, 50, 85]);
 const STYLE_SAVE_DELAY_MS = 450;
 
+// Memory 4.1: five plain sections; older values are shown under their new name.
 const CATEGORY_LABELS = Object.freeze({
-  fact: 'Факт',
-  preference: 'Предпочтение',
-  project: 'Проект',
-  correction: 'Исправление',
-  note: 'Заметка',
+  about: 'Обо мне',
+  preference: 'Предпочтения',
+  rule: 'Правила',
+  project: 'Проекты',
+  note: 'Заметки',
 });
+const CATEGORY_ALIASES = Object.freeze({ profile: 'about', instruction: 'rule', correction: 'rule', fact: 'note', other: 'note' });
+
+export function memoryCategory(value) {
+  const category = String(value || 'note');
+  const canonical = CATEGORY_ALIASES[category] || category;
+  return CATEGORY_LABELS[canonical] ? canonical : 'note';
+}
 
 const SETTINGS_TABS = new Set(['style', 'voice', 'images', 'max', 'models', 'memory', 'skills', 'integrations', 'telegram', 'safe', 'access', 'system', 'dev']);
 const SETTINGS_HEADER_COMPACT_AT = 32;
@@ -79,6 +87,8 @@ let styleSaveTimer = 0;
 let styleSaveQueue = Promise.resolve();
 let memorySettingsRevision = 0;
 let memorySettingsRecords = [];
+let memorySuggestions = [];
+let pendingMemoryFocus = '';
 let currentSettingsTab = 'models';
 let telegramExpiresAt = '';
 let telegramTimer;
@@ -341,6 +351,33 @@ export function initSettingsPane() {
   });
   memoryComposeClose?.addEventListener('click', () => setMemoryComposerOpen(false));
   memoryCrossChat?.addEventListener('change', () => void setCrossChatMemory(memoryCrossChat));
+  const learningSegment = document.querySelector('.memory-learning-segment');
+  learningSegment?.addEventListener('click', (event) => {
+    const option = event.target.closest('[data-memory-learning]');
+    if (option && option.getAttribute('aria-checked') !== 'true') void setMemoryLearningMode(option.dataset.memoryLearning);
+  });
+  learningSegment?.addEventListener('keydown', (event) => {
+    const option = event.target.closest?.('[data-memory-learning]');
+    if (!option || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+    const options = [...learningSegment.querySelectorAll('[data-memory-learning]')];
+    const index = options.indexOf(option);
+    const next = event.key === 'Home' ? 0
+      : event.key === 'End' ? options.length - 1
+        : (index + (['ArrowLeft', 'ArrowUp'].includes(event.key) ? -1 : 1) + options.length) % options.length;
+    event.preventDefault();
+    options[next].focus();
+    options[next].click();
+  });
+  document.querySelector('#memory-suggestions-list')?.addEventListener('click', (event) => {
+    const accept = event.target.closest('[data-memory-suggestion-accept]');
+    const dismiss = event.target.closest('[data-memory-suggestion-dismiss]');
+    if (accept) void settleMemorySuggestion(accept.dataset.memorySuggestionAccept, true, accept);
+    if (dismiss) void settleMemorySuggestion(dismiss.dataset.memorySuggestionDismiss, false, dismiss);
+  });
+  document.querySelector('#memory-feedback')?.addEventListener('click', (event) => {
+    const restore = event.target.closest('[data-memory-restore]');
+    if (restore) void restoreMemoryRecord(restore.dataset.memoryRestore, restore);
+  });
   memoryList?.addEventListener('click', (event) => {
     const saveButton = event.target.closest('[data-memory-save]');
     const deleteButton = event.target.closest('[data-memory-delete]');
@@ -358,6 +395,11 @@ export function initSettingsPane() {
     if (retryButton) void loadDerivedMemory();
   });
   memoryDerivedForgetAll?.addEventListener('click', () => void forgetAllDerivedMemory());
+  // «Из памяти» in a chat opens the record it came from.
+  window.addEventListener('monarch:memory-focus', (event) => {
+    pendingMemoryFocus = String(event.detail?.id || '');
+    applyMemoryFocus();
+  });
   createCodeButton?.addEventListener('click', () => void rotateTelegramCode());
   copyCodeButton?.addEventListener('click', () => void copyTelegramCode());
   refreshTelegramButton?.addEventListener('click', () => void loadTelegramSettings());
@@ -1714,8 +1756,8 @@ async function loadDerivedMemory() {
     renderDerivedMemory(episodes, capsules);
     if (summary) {
       summary.textContent = episodes.length || capsules.length
-        ? `Прошлых ходов: ${episodes.length}, тематических сводок: ${capsules.length}`
-        : 'То, что Oscar сам сохранил из прошлых разговоров';
+        ? `Сохранено: ${episodes.length + capsules.length}. Оскар вспоминает их, когда это относится к вопросу`
+        : 'Оскар вспоминает их, когда это относится к вопросу';
     }
   } catch (error) {
     if (list) {
@@ -1735,14 +1777,14 @@ function renderDerivedMemory(episodes, capsules) {
   if (!list) return;
   if (forgetAllButton) forgetAllButton.hidden = episodes.length === 0 && capsules.length === 0;
   if (episodes.length === 0 && capsules.length === 0) {
-    list.innerHTML = '<div class="empty-state">Oscar пока ничего не запомнил сам из прошлых разговоров.</div>';
+    list.innerHTML = '<div class="empty-state">Пока здесь пусто: прошлые разговоры появятся после первых ответов.</div>';
     return;
   }
   const capsuleItems = capsules.map((capsule) => `
     <article class="memory-item memory-derived-item" data-memory-derived-capsule="${escapeHtml(capsule.id)}">
       <p class="memory-derived-text">${escapeHtml(capsule.summary || '')}</p>
       <div class="memory-item-footer">
-        <span>Тема · ${escapeHtml(capsule.topic || '')} · сводка ${capsule.childCount || 0} ходов</span>
+        <span>Тема «${escapeHtml(capsule.topic || '')}» · ${capsule.childCount || 0} вопросов</span>
         <button type="button" class="danger-link" data-memory-derived-forget-capsule="${escapeHtml(capsule.id)}">Забыть</button>
       </div>
     </article>
@@ -1757,6 +1799,20 @@ function renderDerivedMemory(episodes, capsules) {
     </article>
   `);
   list.innerHTML = capsuleItems.join('') + episodeItems.join('');
+  applyMemoryFocus();
+}
+
+function applyMemoryFocus() {
+  if (!pendingMemoryFocus) return;
+  const id = CSS.escape(pendingMemoryFocus);
+  const target = document.querySelector(`[data-memory-id="${id}"], [data-memory-derived-episode="${id}"], [data-memory-derived-capsule="${id}"]`);
+  if (!target) return;
+  pendingMemoryFocus = '';
+  target.closest('details')?.setAttribute('open', '');
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  target.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' });
+  target.classList.add('is-focused');
+  window.setTimeout(() => target.classList.remove('is-focused'), 1800);
 }
 
 /** Episodes are stored as "Запрос: …\nИтог: …". Show the request as the
@@ -1806,7 +1862,7 @@ async function forgetDerivedMemoryCapsule(id, button) {
 }
 
 async function forgetAllDerivedMemory() {
-  if (!await confirmAction('Забыть всё, что Oscar сам сохранил из прошлых разговоров? Явные записи из «Долговременной памяти» это не затронет.')) return;
+  if (!await confirmAction('Забыть все прошлые разговоры? Записи о тебе выше это не затронет.')) return;
   const button = document.querySelector('#memory-derived-forget-all');
   setBusy(button, true, 'Забываю…');
   try {
@@ -1816,7 +1872,7 @@ async function forgetAllDerivedMemory() {
     const feedback = document.querySelector('#memory-derived-feedback');
     if (feedback) feedback.textContent = readErrorMessage(error);
   } finally {
-    setBusy(button, false, 'Забыть всё автоматическое');
+    setBusy(button, false, 'Забыть все разговоры');
   }
 }
 
@@ -1824,16 +1880,122 @@ async function loadMemorySettings() {
   const list = document.querySelector('#memory-settings-list');
   try {
     const context = await readLocalSettings('memory');
-    memorySettingsRevision = Number(context?.revision) || 0;
-    const records = Array.isArray(context?.value?.records) ? context.value.records : [];
-    const crossChat = document.querySelector('#memory-cross-chat-enabled');
-    if (crossChat) crossChat.checked = context?.value?.crossChatEnabled !== false;
-    updateCrossChatMemoryLabel(context?.value?.crossChatEnabled !== false);
-    renderMemoryRecords(records);
+    applyMemoryContext(context);
   } catch (error) {
     memorySettingsRecords = [];
     renderMemoryUnavailable(list, readErrorMessage(error));
   }
+}
+
+/** One read-back shape for every memory write: records, suggestions, switches. */
+function applyMemoryContext(context) {
+  memorySettingsRevision = Number(context?.revision) || 0;
+  const records = Array.isArray(context?.value?.records) ? context.value.records : [];
+  memorySuggestions = records.filter((record) => record?.origin === 'suggested');
+  const crossChat = document.querySelector('#memory-cross-chat-enabled');
+  if (crossChat) crossChat.checked = context?.value?.crossChatEnabled !== false;
+  updateCrossChatMemoryLabel(context?.value?.crossChatEnabled !== false);
+  renderMemoryLearningMode(context?.value?.learningMode || 'auto');
+  renderMemorySuggestions();
+  renderMemoryRecords(records.filter((record) => record?.origin !== 'suggested'));
+}
+
+const MEMORY_LEARNING_HINTS = Object.freeze({
+  auto: 'Когда ты говоришь о себе («я живу в…», «отвечай кратко»), Оскар запоминает это сам.',
+  suggest: 'Оскар предложит запомнить то, что ты сказал о себе, и подождёт твоего согласия.',
+  off: 'Оскар запоминает только то, о чём ты прямо просишь: «запомни…».',
+});
+
+function renderMemoryLearningMode(mode) {
+  const value = MEMORY_LEARNING_HINTS[mode] ? mode : 'auto';
+  document.querySelectorAll('[data-memory-learning]').forEach((option) => {
+    const selected = option.dataset.memoryLearning === value;
+    option.setAttribute('aria-checked', String(selected));
+    option.tabIndex = selected ? 0 : -1;
+  });
+  const hint = document.querySelector('#memory-learning-hint');
+  if (hint) hint.textContent = MEMORY_LEARNING_HINTS[value];
+}
+
+async function setMemoryLearningMode(mode) {
+  const feedback = document.querySelector('#memory-feedback');
+  const previous = document.querySelector('[data-memory-learning][aria-checked="true"]')?.dataset.memoryLearning || 'auto';
+  renderMemoryLearningMode(mode);
+  try {
+    const saved = await writeLocalSettings('memory.learning.set', { mode }, { expectedRevision: memorySettingsRevision });
+    applyMemoryContext(saved.context);
+  } catch (error) {
+    renderMemoryLearningMode(previous);
+    setStatus(feedback, readErrorMessage(error), true);
+  }
+}
+
+function renderMemorySuggestions() {
+  const section = document.querySelector('#memory-suggestions');
+  const list = document.querySelector('#memory-suggestions-list');
+  if (!section || !list) return;
+  section.hidden = memorySuggestions.length === 0;
+  list.replaceChildren(...memorySuggestions.map((record) => {
+    const item = document.createElement('article');
+    item.className = 'memory-settings-item memory-suggestion-item';
+    item.dataset.memoryId = String(record.id || '');
+    const copy = document.createElement('p');
+    copy.className = 'memory-item-copy';
+    copy.textContent = String(record.text || '');
+    const actions = document.createElement('div');
+    actions.className = 'memory-suggestion-actions';
+    const accept = document.createElement('button');
+    accept.type = 'button';
+    accept.className = 'claude-primary-btn';
+    accept.dataset.memorySuggestionAccept = String(record.id || '');
+    accept.textContent = 'Запомнить';
+    const dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'claude-ghost-btn';
+    dismiss.dataset.memorySuggestionDismiss = String(record.id || '');
+    dismiss.textContent = 'Не надо';
+    actions.append(accept, dismiss);
+    item.append(copy, actions);
+    return item;
+  }));
+}
+
+async function settleMemorySuggestion(id, accept, button) {
+  setBusy(button, true, accept ? 'Запоминаю…' : 'Убираю…');
+  try {
+    const saved = await writeLocalSettings(accept ? 'memory.suggestion.accept' : 'memory.suggestion.dismiss', { id }, {
+      expectedRevision: memorySettingsRevision,
+    });
+    applyMemoryContext(saved.context);
+  } catch (error) {
+    setStatus(document.querySelector('#memory-feedback'), readErrorMessage(error), true);
+    setBusy(button, false, accept ? 'Запомнить' : 'Не надо');
+  }
+}
+
+async function restoreMemoryRecord(id, button) {
+  setBusy(button, true, 'Возвращаю…');
+  try {
+    const saved = await writeLocalSettings('memory.restore', { id }, { expectedRevision: memorySettingsRevision });
+    applyMemoryContext(saved.context);
+    setStatus(document.querySelector('#memory-feedback'), 'Запись вернулась');
+  } catch (error) {
+    setStatus(document.querySelector('#memory-feedback'), readErrorMessage(error), true);
+  }
+}
+
+function showMemoryUndo(record) {
+  const feedback = document.querySelector('#memory-feedback');
+  if (!feedback) return;
+  feedback.classList.remove('error-text');
+  const text = document.createElement('span');
+  text.textContent = `Удалено: «${String(record?.text || '').slice(0, 80)}». `;
+  const restore = document.createElement('button');
+  restore.type = 'button';
+  restore.className = 'claude-ghost-btn memory-undo-button';
+  restore.dataset.memoryRestore = String(record?.id || '');
+  restore.textContent = 'Вернуть';
+  feedback.replaceChildren(text, restore);
 }
 
 async function createMemoryRecord() {
@@ -1845,20 +2007,29 @@ async function createMemoryRecord() {
   setStatus(feedback, '');
   try {
     const pinned = Boolean(document.querySelector('#memory-create-pinned')?.checked);
-    const saved = await writeLocalSettings('memory.create', {
-      text,
-      source: 'settings-ui',
-      category: readValue('#memory-create-category') || 'preference',
-      tier: pinned ? 'permanent' : 'long',
-      importance: pinned ? 0.95 : 0.65,
-      pinned,
-    }, {
-      expectedRevision: memorySettingsRevision,
-    });
-    memorySettingsRevision = saved.context.revision;
+    const category = readValue('#memory-create-category') || 'auto';
+    // "Определить самому": the same path as «запомни» in the chat, so the
+    // same meaning is kept once and a newer fact replaces an older one.
+    const saved = category === 'auto'
+      ? await writeLocalSettings('memory.remember', { text, origin: 'owner', source: 'settings-ui', pinned }, {
+        expectedRevision: memorySettingsRevision,
+      })
+      : await writeLocalSettings('memory.create', {
+        text,
+        source: 'settings-ui',
+        category,
+        tier: pinned ? 'permanent' : 'long',
+        importance: pinned ? 0.95 : 0.65,
+        pinned,
+      }, {
+        expectedRevision: memorySettingsRevision,
+      });
+    applyMemoryContext(saved.context);
     setValue('#memory-create-text', '');
-    setStatus(feedback, 'Запись добавлена');
-    renderMemoryRecords(saved.context.value?.records || []);
+    const action = saved.receipt?.result?.action;
+    setStatus(feedback, action === 'unchanged' ? 'Это уже есть в памяти'
+      : action === 'replaced' ? `Запомнил. Прежнее «${String(saved.receipt.result.replaced?.text || '').slice(0, 60)}» больше не учитывается`
+        : 'Запомнил');
     setMemoryComposerOpen(false);
   } catch (error) {
     setStatus(feedback, readErrorMessage(error), true);
@@ -1883,8 +2054,7 @@ async function updateMemoryRecord(id, button) {
     }, {
       expectedRevision: memorySettingsRevision,
     });
-    memorySettingsRevision = saved.context.revision;
-    renderMemoryRecords(saved.context.value?.records || []);
+    applyMemoryContext(saved.context);
     setItemStatus(document.querySelector(`[data-memory-id="${CSS.escape(String(id))}"]`), 'Сохранено');
   } catch (error) {
     setItemStatus(item, readErrorMessage(error), true);
@@ -1894,15 +2064,16 @@ async function updateMemoryRecord(id, button) {
 }
 
 async function deleteMemoryRecord(id, button) {
-  if (!await confirmAction('Удалить эту запись из постоянной памяти?')) return;
+  // No confirmation: the deletion can be undone right here.
   const item = button.closest('.memory-settings-item');
+  const record = memorySettingsRecords.find((entry) => String(entry?.id) === String(id));
   setBusy(button, true, 'Удаляю…');
   try {
     const saved = await writeLocalSettings('memory.delete', { id }, {
       expectedRevision: memorySettingsRevision,
     });
-    memorySettingsRevision = saved.context.revision;
-    renderMemoryRecords(saved.context.value?.records || []);
+    applyMemoryContext(saved.context);
+    showMemoryUndo(record || { id });
   } catch (error) {
     setItemStatus(item, readErrorMessage(error), true);
     setBusy(button, false, 'Удалить');
@@ -1922,32 +2093,34 @@ function renderMemoryRecords(records = memorySettingsRecords) {
     const empty = document.createElement('div');
     empty.className = 'memory-empty-state';
     const strong = document.createElement('strong');
-    strong.textContent = memorySettingsRecords.length ? 'Ничего не найдено' : 'Память пока пустая';
+    strong.textContent = memorySettingsRecords.length ? 'Ничего не найдено' : 'Пока Оскар ничего о тебе не знает';
     const copy = document.createElement('span');
     copy.textContent = memorySettingsRecords.length
-      ? 'Измени запрос или выбери другую категорию.'
-      : 'Добавь факт, правило или предпочтение — Oscar подтвердит сохранение.';
+      ? 'Измени запрос или выбери другой раздел.'
+      : 'Скажи в чате «запомни, что…» или нажми «Добавить».';
     empty.append(strong, copy);
     list.append(empty);
   } else {
     visibleRecords.forEach((record) => list.append(createMemoryItem(record)));
   }
   updateMemoryCount();
+  applyMemoryFocus();
   const summary = document.querySelector('#memory-library-summary');
   if (summary) summary.textContent = memorySettingsRecords.length === visibleRecords.length
-    ? 'Сначала закреплённые, затем недавно изменённые'
+    ? 'Сначала то, что Оскар помнит всегда'
     : `Показано ${visibleRecords.length} из ${memorySettingsRecords.length}`;
 }
 
 export function filterMemoryRecords(records, query = '', category = 'all') {
   const needle = normalizeMemorySearch(query);
   return [...(Array.isArray(records) ? records : [])]
-    .filter((record) => category === 'all' || String(record?.category || 'note') === category)
+    .filter((record) => category === 'all' || String(record?.category || 'note') === category
+      || memoryCategory(record?.category) === category)
     .filter((record) => !needle || normalizeMemorySearch([
       record?.text,
       record?.title,
       record?.source,
-      CATEGORY_LABELS[record?.category],
+      CATEGORY_LABELS[memoryCategory(record?.category)],
     ].filter(Boolean).join(' ')).includes(needle))
     .sort((left, right) => {
       const pinnedDelta = Number(right?.pinned === true || right?.tier === 'permanent')
@@ -1998,14 +2171,22 @@ function createMemoryItem(record) {
   header.className = 'memory-item-heading';
   const categoryBadge = document.createElement('span');
   categoryBadge.className = 'memory-category-badge';
-  categoryBadge.dataset.category = String(record.category || 'note');
-  categoryBadge.textContent = CATEGORY_LABELS[record.category] || 'Заметка';
+  const recordCategory = memoryCategory(record.category);
+  categoryBadge.dataset.category = recordCategory;
+  categoryBadge.textContent = CATEGORY_LABELS[recordCategory];
   header.append(categoryBadge);
   if (record.pinned === true || record.tier === 'permanent') {
     const pinnedBadge = document.createElement('span');
     pinnedBadge.className = 'memory-pinned-badge';
     pinnedBadge.textContent = 'Всегда';
     header.append(pinnedBadge);
+  }
+  if (record.origin === 'learned') {
+    const learned = document.createElement('span');
+    learned.className = 'memory-learned-badge';
+    learned.textContent = 'Узнал сам';
+    learned.title = 'Оскар запомнил это из твоих слов в чате';
+    header.append(learned);
   }
 
   const content = document.createElement('p');
@@ -2015,13 +2196,13 @@ function createMemoryItem(record) {
   const metadata = document.createElement('div');
   metadata.className = 'memory-item-metadata';
   const source = document.createElement('span');
-  source.textContent = `Источник: ${formatMemorySource(record.source)}`;
+  source.textContent = formatMemorySource(record.source, record.origin);
   const updated = document.createElement('span');
   updated.textContent = record.updatedAt ? `Обновлено ${formatShortDate(record.updatedAt)}` : 'Дата не указана';
   metadata.append(source, updated);
   if (Number(record.accessCount) > 0) {
     const used = document.createElement('span');
-    used.textContent = `Учтено в ответах: ${Number(record.accessCount)}`;
+    used.textContent = `Пригодилось в ответах: ${Number(record.accessCount)}`;
     metadata.append(used);
   }
 
@@ -2048,7 +2229,7 @@ function createMemoryItem(record) {
     const option = document.createElement('option');
     option.value = value;
     option.textContent = label;
-    option.selected = value === record.category;
+    option.selected = value === recordCategory;
     category.append(option);
   });
   const pinLabel = document.createElement('label');
@@ -2060,7 +2241,7 @@ function createMemoryItem(record) {
   const pinSwitch = document.createElement('span');
   pinSwitch.className = 'control-switch';
   pinSwitch.setAttribute('aria-hidden', 'true');
-  pinLabel.append(pinned, pinSwitch, document.createTextNode(' Всегда учитывать'));
+  pinLabel.append(pinned, pinSwitch, document.createTextNode(' Помнить всегда'));
 
   const status = document.createElement('span');
   status.className = 'memory-item-status';
@@ -2082,13 +2263,14 @@ function createMemoryItem(record) {
   return item;
 }
 
-function formatMemorySource(value) {
+export function formatMemorySource(value, origin) {
   const source = String(value || '').trim();
-  if (source === 'settings-ui') return 'Monarch Control';
-  if (source === 'chat-command' || source === 'oscar-chat') return 'Команда в чате';
-  if (source === 'migration-profile-v1') return 'Перенос старого профиля';
-  if (source.startsWith('migration')) return 'Миграция данных';
-  return source ? source.replace(/[-_]+/g, ' ') : 'Oscar';
+  if (origin === 'learned' || source === 'chat-learned') return 'Из твоих слов в чате';
+  if (source === 'settings-ui') return 'Добавлено здесь';
+  if (['chat-command', 'oscar-chat', 'chat', 'user-explicit-chat-command'].includes(source)) return 'Ты попросил запомнить';
+  if (source === 'oscar-memory-panel') return 'Добавлено в чате';
+  if (source.startsWith('migration')) return 'Перенесено из прежней версии';
+  return 'Сохранено раньше';
 }
 
 function setSkillAuthoringOpen(open) {
@@ -2715,15 +2897,13 @@ async function setCrossChatMemory(control) {
   const feedback = document.querySelector('#memory-feedback');
   const enabled = control.checked === true;
   control.disabled = true;
-  setStatus(feedback, 'Сохраняю режим памяти…');
+  setStatus(feedback, 'Сохраняю…');
   try {
     const saved = await writeLocalSettings('memory.cross-chat.set', { enabled }, {
       expectedRevision: memorySettingsRevision,
     });
-    memorySettingsRevision = saved.context.revision;
-    control.checked = saved.context.value?.crossChatEnabled !== false;
-    updateCrossChatMemoryLabel(control.checked);
-    setStatus(feedback, control.checked ? 'Контекст прошлых чатов включён' : 'Контекст прошлых чатов выключен');
+    applyMemoryContext(saved.context);
+    setStatus(feedback, control.checked ? 'Прошлые разговоры снова учитываются' : 'Прошлые разговоры больше не учитываются');
   } catch (error) {
     control.checked = !enabled;
     updateCrossChatMemoryLabel(control.checked);
@@ -2735,7 +2915,9 @@ async function setCrossChatMemory(control) {
 
 function updateCrossChatMemoryLabel(enabled) {
   const label = document.querySelector('#memory-cross-chat-label');
-  if (label) label.textContent = enabled ? 'Включён' : 'Выключен';
+  if (label) label.textContent = enabled
+    ? 'Включено: Оскар может опереться на похожий разговор из другого чата'
+    : 'Выключено: каждый чат начинается без прошлых разговоров';
   document.querySelector('.memory-cross-chat-card')?.classList.toggle('is-disabled', !enabled);
 }
 

@@ -44,7 +44,7 @@ describe('profile-wide marker scan', () => {
     const scan = await runProfile(false);
     expect(scan.turnStoreSealed).toBe(false);
     expect(scan.hits).toEqual(expect.arrayContaining([path.join('runtime', 'oscar', 'turns.v1.json'),
-      path.join('data', 'local', 'memory.json'), path.join('data', 'local', 'profile.json')]));
+      path.join('data', 'local', 'profile.json')]));
   }, 30_000);
 });
 
@@ -77,7 +77,7 @@ async function runProfile(sealed: boolean) {
     });
     const app = new MonarchApplication({
       workspaceRoot: root,
-      enabledModules: ['workspace', 'security', 'memory', 'profile'],
+      enabledModules: ['workspace', 'security', 'profile'],
       enableLocalSystemRouter: false,
       oscarTurnCoordinator: coordinator,
       oscarAttachmentStore: attachments,
@@ -109,9 +109,6 @@ async function runProfile(sealed: boolean) {
       expect(turn?.status, JSON.stringify(turn).slice(0, 1500)).toBe('succeeded');
 
       const kernel = app.runtime.kernel;
-      const remembered = await executeTypedCapability(kernel, 'memory.remember',
-        { text: `Любимое слово ${marker}`, source: 'smoke' }, { confirmed: true });
-      expect(remembered.ok, `${remembered.error} ${remembered.summary}`).toBe(true);
       const profile = await executeTypedCapability(kernel, 'profile.update',
         { displayName: marker }, { confirmed: true });
       expect(profile.ok, `${profile.error} ${profile.summary}`).toBe(true);

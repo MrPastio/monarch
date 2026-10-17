@@ -219,39 +219,6 @@ class ChatRoutePreview(BaseModel):
     adaptive_context_applied: bool = False
 
 
-MemoryEntryType = Literal[
-    "user_preference",
-    "project_decision",
-    "architecture_note",
-    "active_bug",
-    "fixed_bug",
-    "technical_debt",
-    "temporary_task",
-    "module_state",
-    "handoff_note",
-    "diagnostic_note",
-    "planning_note",
-]
-MemoryCategory = Literal[
-    "preference",
-    "profile",
-    "project",
-    "instruction",
-    "other",
-    "user_preference",
-    "project_decision",
-    "architecture_note",
-    "active_bug",
-    "fixed_bug",
-    "technical_debt",
-    "temporary_task",
-    "module_state",
-    "handoff_note",
-    "diagnostic_note",
-    "planning_note",
-]
-
-
 class ConversationCreate(BaseModel):
     title: str = Field(default="Новый чат", max_length=160)
 
@@ -329,72 +296,6 @@ class ConversationMessageCreate(BaseModel):
         return cleaned
 
 
-class MemoryItemCreate(BaseModel):
-    content: str = Field(min_length=1, max_length=4000)
-    category: MemoryCategory = "other"
-    type: MemoryEntryType | None = None
-    title: str | None = Field(default=None, max_length=160)
-    tags: list[str] = Field(default_factory=list, max_length=12)
-    priority: float | None = Field(default=None, ge=0.0, le=1.0)
-    expires_at: datetime | None = None
-    related_files: list[str] = Field(default_factory=list, max_length=24)
-    related_modules: list[str] = Field(default_factory=list, max_length=16)
-
-    @field_validator("content")
-    @classmethod
-    def validate_content(cls, value: str) -> str:
-        return require_non_blank_text(value)
-
-    @field_validator("title")
-    @classmethod
-    def validate_title(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip()
-        return cleaned or None
-
-    @field_validator("tags", "related_files", "related_modules")
-    @classmethod
-    def validate_string_list(cls, value: list[str]) -> list[str]:
-        return [item.strip() for item in value if item.strip()]
-
-
-class MemoryItemUpdate(BaseModel):
-    content: str | None = Field(default=None, min_length=1, max_length=4000)
-    category: MemoryCategory | None = None
-    type: MemoryEntryType | None = None
-    title: str | None = Field(default=None, max_length=160)
-    tags: list[str] | None = Field(default=None, max_length=12)
-    priority: float | None = Field(default=None, ge=0.0, le=1.0)
-    expires_at: datetime | None = None
-    related_files: list[str] | None = Field(default=None, max_length=24)
-    related_modules: list[str] | None = Field(default=None, max_length=16)
-    closed: bool | None = None
-    enabled: bool | None = None
-
-    @field_validator("content")
-    @classmethod
-    def validate_content(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return require_non_blank_text(value)
-
-    @field_validator("title")
-    @classmethod
-    def validate_title(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip()
-        return cleaned or None
-
-    @field_validator("tags", "related_files", "related_modules")
-    @classmethod
-    def validate_optional_string_list(cls, value: list[str] | None) -> list[str] | None:
-        if value is None:
-            return None
-        return [item.strip() for item in value if item.strip()]
-
-
 SettingsKind = Literal["memory", "profile", "personality", "voice", "prompts"]
 SettingsCommand = Literal[
     "memory.create",
@@ -402,6 +303,11 @@ SettingsCommand = Literal[
     "memory.delete",
     "memory.restore",
     "memory.cross-chat.set",
+    "memory.remember",
+    "memory.forget",
+    "memory.suggestion.accept",
+    "memory.suggestion.dismiss",
+    "memory.learning.set",
     "profile.update",
     "personality.profile.create",
     "personality.profile.update",
@@ -466,6 +372,13 @@ class SettingsCommandRequestV1(BaseModel):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", cleaned):
             raise ValueError("clientRequestId contains unsupported characters")
         return cleaned
+
+
+class MemoryLearnRequestV1(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    schema_version: Literal[1] = Field(alias="schemaVersion")
+    text: str = Field(min_length=1, max_length=8000)
 
 
 class MemoryEpisodeIndexRequestV1(BaseModel):
